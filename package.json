@@ -1,6 +1,6 @@
 {
   "name": "browsermesh-primitives",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Shared primitives for browser mesh networking — wire format, identity (Ed25519), CRDTs, capabilities, trust model, and ACL engine",
   "type": "module",
   "main": "./src/index.mjs",
