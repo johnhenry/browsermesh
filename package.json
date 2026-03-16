@@ -1,0 +1,31 @@
+{
+  "name": "browsermesh-primitives",
+  "version": "0.1.0",
+  "description": "Shared primitives for browser mesh networking — wire format, identity (Ed25519), CRDTs, capabilities, trust model, and ACL engine",
+  "type": "module",
+  "main": "./src/index.mjs",
+  "exports": {
+    ".": "./src/index.mjs"
+  },
+  "files": [
+    "src",
+    "LICENSE",
+    "README.md"
+  ],
+  "keywords": [
+    "mesh",
+    "p2p",
+    "crdt",
+    "wire-format",
+    "identity",
+    "browser"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/johnhenry/browsermesh-primitives"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  }
+}
