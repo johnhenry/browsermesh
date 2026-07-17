@@ -129,19 +129,10 @@ export class InjectedPod extends Pod {
     this.emit('pod:message', msg)
   }
 
-  /** Emit helper for subclass/external use */
+  /** Emit helper for subclass/external use — dispatches through the same
+   *  listener registry that on()/off() populate. */
   emit(event, data) {
-    // Use the parent's on/off system by invoking listeners directly
-    // This is a public-facing emit that mirrors the internal #emit
-    const listeners = []
-    // Call registered listeners via a temporary capture
-    this._emitPublic(event, data)
-  }
-
-  /** @internal */
-  _emitPublic(event, data) {
-    // Pod base class has private #emit; we re-dispatch through on() listeners
-    // by using a workaround: store listeners we can call
+    this._emit(event, data)
   }
 
   /** @internal — access the global reference set during boot */

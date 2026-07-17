@@ -95,7 +95,7 @@ export class Pod {
 
     try {
       // Phase 0: Install Runtime
-      this.#emit('phase', { phase: 0, name: 'install-runtime' })
+      this._emit('phase', { phase: 0, name: 'install-runtime' })
       this.#identity = opts.identity || await PodIdentity.generate()
       this.#kind = detectPodKind(this.#g)
       this.#capabilities = detectCapabilities(this.#g)
@@ -107,30 +107,30 @@ export class Pod {
       }
 
       // Phase 1: Install Listeners
-      this.#emit('phase', { phase: 1, name: 'install-listeners' })
+      this._emit('phase', { phase: 1, name: 'install-listeners' })
       this.#installMessageHandler()
       this._onInstallListeners(this.#g)
 
       // Phase 2: Self-Classification
-      this.#emit('phase', { phase: 2, name: 'self-classification' })
+      this._emit('phase', { phase: 2, name: 'self-classification' })
 
       // Phase 3: Parent Handshake
-      this.#emit('phase', { phase: 3, name: 'parent-handshake' })
+      this._emit('phase', { phase: 3, name: 'parent-handshake' })
       await this.#parentHandshake(opts.handshakeTimeout ?? DEFAULT_HANDSHAKE_TIMEOUT)
 
       // Phase 4: Peer Discovery
-      this.#emit('phase', { phase: 4, name: 'peer-discovery' })
+      this._emit('phase', { phase: 4, name: 'peer-discovery' })
       await this.#peerDiscovery(opts)
 
       // Phase 5: Role Finalization
-      this.#emit('phase', { phase: 5, name: 'role-finalization' })
+      this._emit('phase', { phase: 5, name: 'role-finalization' })
       this.#finalizeRole()
       this.#state = 'ready'
       this._onReady()
-      this.#emit('ready', { podId: this.podId, kind: this.#kind, role: this.#role })
+      this._emit('ready', { podId: this.podId, kind: this.#kind, role: this.#role })
     } catch (err) {
       this.#state = 'idle'
-      this.#emit('error', { phase: 'boot', error: err })
+      this._emit('error', { phase: 'boot', error: err })
       throw err
     }
   }
@@ -171,7 +171,7 @@ export class Pod {
 
     this.#peers.clear()
     this.#state = 'shutdown'
-    this.#emit('shutdown', { podId: this.podId })
+    this._emit('shutdown', { podId: this.podId })
   }
 
   // ── Messaging ────────────────────────────────────────────────
@@ -390,7 +390,7 @@ export class Pod {
       case POD_RPC_RESPONSE: {
         if (data.to === this.podId || data.to === '*') {
           this._onMessage(data)
-          this.#emit('message', data)
+          this._emit('message', data)
         }
         break
       }
@@ -402,19 +402,22 @@ export class Pod {
     const isNew = !this.#peers.has(podId)
     this.#peers.set(podId, { ...info, podId, lastSeen: Date.now() })
     if (isNew) {
-      this.#emit('peer:found', { podId, ...info })
+      this._emit('peer:found', { podId, ...info })
     }
   }
 
   #removePeer(podId) {
     if (this.#peers.delete(podId)) {
-      this.#emit('peer:lost', { podId })
+      this._emit('peer:lost', { podId })
     }
   }
 
-  // ── Private: event emitter ───────────────────────────────────
+  // ── Protected: event emitter ─────────────────────────────────
+  // Underscore-prefixed by convention, not a JS #private field: subclasses
+  // (e.g. InjectedPod) need to dispatch events through the same listener
+  // registry that on()/off() populate.
 
-  #emit(event, data) {
+  _emit(event, data) {
     const list = this.#listeners.get(event)
     if (!list) return
     for (const fn of list) {
