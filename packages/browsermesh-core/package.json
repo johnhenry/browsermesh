@@ -1,0 +1,32 @@
+{
+  "name": "@johnhenry/browsermesh-core",
+  "version": "0.0.0",
+  "description": "Identity, crypto, peer management, and trust primitives for BrowserMesh",
+  "type": "module",
+  "main": "./src/index.mjs",
+  "exports": {
+    ".": "./src/index.mjs",
+    "./compat": "./src/compat.mjs"
+  },
+  "files": [
+    "src",
+    "LICENSE",
+    "README.md"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/johnhenry/browsermesh",
+    "directory": "packages/browsermesh-core"
+  },
+  "peerDependencies": {
+    "@johnhenry/browsermesh-primitives": ">=0.0.0"
+  },
+  "scripts": {
+    "test": "node --import ./test/_setup-globals.mjs --test test/*.test.mjs"
+  },
+  "homepage": "https://opensource.johnhenry.me/browsermesh/",
+  "engines": {
+    "node": ">=24.0.0"
+  }
+}

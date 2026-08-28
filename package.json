@@ -8,7 +8,7 @@
     "packages/*"
   ],
   "scripts": {
-    "test": "turbo run test",
+    "test": "turbo run test --concurrency=4",
     "changeset": "changeset",
     "version-packages": "changeset version",
     "release": "changeset publish",

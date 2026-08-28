@@ -1,0 +1,31 @@
+{
+  "name": "@johnhenry/browsermesh-sync",
+  "version": "0.0.0",
+  "description": "CRDT sync engine, delta sync, file transfer, and collaboration for BrowserMesh",
+  "type": "module",
+  "main": "./src/index.mjs",
+  "exports": {
+    ".": "./src/index.mjs"
+  },
+  "files": [
+    "src",
+    "LICENSE",
+    "README.md"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/johnhenry/browsermesh",
+    "directory": "packages/browsermesh-sync"
+  },
+  "peerDependencies": {
+    "@johnhenry/browsermesh-primitives": ">=0.0.0"
+  },
+  "scripts": {
+    "test": "node --import ./test/_setup-globals.mjs --test test/*.test.mjs"
+  },
+  "homepage": "https://opensource.johnhenry.me/browsermesh/",
+  "engines": {
+    "node": ">=24.0.0"
+  }
+}

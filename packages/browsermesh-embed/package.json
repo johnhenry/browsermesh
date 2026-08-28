@@ -1,0 +1,34 @@
+{
+  "name": "@johnhenry/browsermesh-embed",
+  "version": "0.0.0",
+  "description": "Embeddable browsermesh-pod-backed agent workspace widget — drop an interactive agent pod into any web app",
+  "type": "module",
+  "main": "./src/index.mjs",
+  "exports": {
+    ".": "./src/index.mjs"
+  },
+  "files": [
+    "src",
+    "LICENSE",
+    "README.md"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/johnhenry/browsermesh",
+    "directory": "packages/browsermesh-embed"
+  },
+  "peerDependencies": {
+    "@johnhenry/browsermesh-pod": ">=0.0.0"
+  },
+  "homepage": "https://opensource.johnhenry.me/browsermesh/",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "@johnhenry/browsermesh-pod": "^0.0.0"
+  }
+}

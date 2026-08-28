@@ -1,0 +1,36 @@
+{
+  "name": "@johnhenry/browsermesh-kernel",
+  "version": "0.0.0",
+  "description": "Capability-secure browser microkernel with resource handles, IPC, tracing, and chaos engineering",
+  "type": "module",
+  "main": "src/index.mjs",
+  "exports": {
+    ".": "./src/index.mjs"
+  },
+  "files": [
+    "src/",
+    "LICENSE",
+    "README.md"
+  ],
+  "keywords": [
+    "microkernel",
+    "capabilities",
+    "ipc",
+    "tracing",
+    "chaos",
+    "browser"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/johnhenry/browsermesh",
+    "directory": "packages/browsermesh-kernel"
+  },
+  "homepage": "https://opensource.johnhenry.me/browsermesh/",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  }
+}
