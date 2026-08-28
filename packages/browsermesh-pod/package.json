@@ -1,0 +1,40 @@
+{
+  "name": "browsermesh-pod",
+  "version": "0.2.1",
+  "description": "Pod base class for browser execution contexts with Ed25519 identity, BroadcastChannel discovery, and peer messaging",
+  "type": "module",
+  "main": "./src/index.mjs",
+  "exports": {
+    ".": "./src/index.mjs"
+  },
+  "files": [
+    "src",
+    "LICENSE",
+    "README.md"
+  ],
+  "keywords": [
+    "pod",
+    "mesh",
+    "p2p",
+    "identity",
+    "browser",
+    "webrtc"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/johnhenry/browsermesh-pod"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "peerDependencies": {
+    "browsermesh-primitives": ">=0.1.1"
+  },
+  "devDependencies": {
+    "browsermesh-primitives": "^0.1.1"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  }
+}
