@@ -11,10 +11,10 @@
  * When no adapters are provided, Pod auto-detects: BroadcastChannel in browsers,
  * NullTransport/NullDiscovery in Node.js.
  *
- * Zero Clawser imports — depends only on browsermesh-primitives for identity.
+ * Zero Clawser imports — depends only on @johnhenry/browsermesh-primitives for identity.
  */
 
-import { PodIdentity } from 'browsermesh-primitives'
+import { PodIdentity } from '@johnhenry/browsermesh-primitives'
 import { detectPodKind } from './detect-kind.mjs'
 import { detectCapabilities } from './capabilities.mjs'
 import {

@@ -2,17 +2,21 @@
 
 Virtual networking layer with BSD-socket-like abstractions for browser environments. Provides TCP-like streams, UDP-like datagrams, DNS resolution, and capability-based policy enforcement -- all running in-memory or proxied through a remote gateway server.
 
+## Provenance
+
+Previously published as `browsermesh-netway@0.1.1`. Imported into the `@johnhenry` npm scope as part of the browsermesh monorepo consolidation; the version restarts at `0.0.0` per family convention (a new address is a new era).
+
 ## Install
 
 ```bash
-npm install browsermesh-netway
+npm install @johnhenry/browsermesh-netway
 ```
 
 Or via CDN:
 
 ```html
 <script type="module">
-  import { VirtualNetwork } from 'https://esm.sh/browsermesh-netway';
+  import { VirtualNetwork } from 'https://esm.sh/@johnhenry/browsermesh-netway';
 </script>
 ```
 

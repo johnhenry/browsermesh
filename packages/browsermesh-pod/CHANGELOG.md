@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.0
+
+Imported into the `@johnhenry` npm scope as part of the browsermesh
+monorepo consolidation. Previously published unscoped as
+`browsermesh-pod@0.2.1`. Its `browsermesh-primitives` dependency now
+resolves via the monorepo's npm workspace instead of the public registry.
+Per family convention, the version restarts at 0.0.0 on scope import — see
+the README's Provenance section.
+
 ## 0.2.1 (2026-07-17)
 
 - Fixed: `Pod`'s internal event dispatcher was a true `#private` class field

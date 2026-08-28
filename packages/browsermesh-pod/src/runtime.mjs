@@ -12,7 +12,7 @@ import { Pod } from './pod.mjs'
  *
  * @param {object} [opts]
  * @param {typeof globalThis} [opts.context] - Global object to install on (default: globalThis)
- * @param {import('browsermesh-primitives').PodIdentity} [opts.identity] - Pre-existing identity
+ * @param {import('@johnhenry/browsermesh-primitives').PodIdentity} [opts.identity] - Pre-existing identity
  * @param {object} [opts.discovery] - Discovery options
  * @param {number} [opts.discoveryTimeout] - Discovery timeout in ms (default: 2000)
  * @param {number} [opts.handshakeTimeout] - Handshake timeout in ms (default: 2000)
@@ -52,7 +52,7 @@ export const createRuntime = installPodRuntime
  *
  * @param {object} [opts]
  * @param {typeof globalThis} [opts.context] - Global object
- * @param {import('browsermesh-primitives').PodIdentity} [opts.identity] - Pre-existing identity
+ * @param {import('@johnhenry/browsermesh-primitives').PodIdentity} [opts.identity] - Pre-existing identity
  * @param {number} [opts.discoveryTimeout] - Discovery timeout in ms (default: 500)
  * @returns {Promise<Pod>}
  */
@@ -81,7 +81,7 @@ export async function createClient(opts = {}) {
  *
  * @param {object} [opts]
  * @param {typeof globalThis} [opts.context] - Global object
- * @param {import('browsermesh-primitives').PodIdentity} [opts.identity] - Pre-existing identity
+ * @param {import('@johnhenry/browsermesh-primitives').PodIdentity} [opts.identity] - Pre-existing identity
  * @param {number} [opts.discoveryTimeout] - Discovery timeout in ms (default: 2000)
  * @returns {Promise<Pod>}
  */

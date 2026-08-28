@@ -1,7 +1,7 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { Pod } from '../src/pod.mjs'
-import { PodIdentity } from 'browsermesh-primitives'
+import { PodIdentity } from '@johnhenry/browsermesh-primitives'
 
 // Stub BroadcastChannel for Node
 class StubBroadcastChannel {

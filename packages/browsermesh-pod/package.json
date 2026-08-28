@@ -1,6 +1,6 @@
 {
-  "name": "browsermesh-pod",
-  "version": "0.2.1",
+  "name": "@johnhenry/browsermesh-pod",
+  "version": "0.0.0",
   "description": "Pod base class for browser execution contexts with Ed25519 identity, BroadcastChannel discovery, and peer messaging",
   "type": "module",
   "main": "./src/index.mjs",
@@ -23,16 +23,18 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/johnhenry/browsermesh-pod"
+    "url": "https://github.com/johnhenry/browsermesh",
+    "directory": "packages/browsermesh-pod"
   },
+  "homepage": "https://opensource.johnhenry.me/browsermesh/",
   "scripts": {
     "test": "node --test test/*.test.mjs"
   },
   "peerDependencies": {
-    "browsermesh-primitives": ">=0.1.1"
+    "@johnhenry/browsermesh-primitives": ">=0.0.0"
   },
   "devDependencies": {
-    "browsermesh-primitives": "^0.1.1"
+    "@johnhenry/browsermesh-primitives": "^0.0.0"
   },
   "engines": {
     "node": ">=24.0.0"

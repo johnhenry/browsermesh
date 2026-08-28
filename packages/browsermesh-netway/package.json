@@ -1,6 +1,6 @@
 {
-  "name": "browsermesh-netway",
-  "version": "0.1.1",
+  "name": "@johnhenry/browsermesh-netway",
+  "version": "0.0.0",
   "description": "Virtual networking layer with BSD-socket-like abstractions for browser environments",
   "type": "module",
   "main": "./src/index.mjs",
@@ -25,8 +25,10 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/johnhenry/browsermesh-netway"
+    "url": "https://github.com/johnhenry/browsermesh",
+    "directory": "packages/browsermesh-netway"
   },
+  "homepage": "https://opensource.johnhenry.me/browsermesh/",
   "engines": {
     "node": ">=24.0.0"
   }

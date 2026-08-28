@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.0.0
+
+Imported into the `@johnhenry` npm scope as part of the browsermesh
+monorepo consolidation. Previously published unscoped as
+`browsermesh-netway@0.1.1`. Per family convention, the version restarts at
+0.0.0 on scope import — see the README's Provenance section.
+
+## 0.1.1 (unreleased entry, retroactively documented)
+
+- Minimum Node.js bumped to 24.
+- Added CodeQL and dependency-review CI workflows.
+
 ## 0.1.0 (2026-03-15)
 
 Initial release.

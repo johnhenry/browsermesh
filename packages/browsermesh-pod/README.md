@@ -6,10 +6,14 @@ A Pod is any browser execution context (window, iframe, worker, service worker) 
 
 Pods automatically generate an Ed25519 cryptographic identity, detect their execution context, discover same-origin peers via BroadcastChannel, and establish roles (autonomous, child, peer).
 
+## Provenance
+
+Previously published as `browsermesh-pod@0.2.1`. Imported into the `@johnhenry` npm scope as part of the browsermesh monorepo consolidation; the version restarts at `0.0.0` per family convention (a new address is a new era).
+
 ## Install
 
 ```bash
-npm install browsermesh-pod browsermesh-primitives
+npm install @johnhenry/browsermesh-pod @johnhenry/browsermesh-primitives
 ```
 
 `browsermesh-primitives` is a peer dependency (provides Ed25519 identity generation).
@@ -188,7 +192,7 @@ console.log(pod.extractText())  // visible page text
 This package requires `browsermesh-primitives` as a peer dependency for Ed25519 identity generation (`PodIdentity`). Install it alongside:
 
 ```bash
-npm install browsermesh-pod browsermesh-primitives
+npm install @johnhenry/browsermesh-pod @johnhenry/browsermesh-primitives
 ```
 
 ## License

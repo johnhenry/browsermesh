@@ -1,6 +1,6 @@
 import { describe, it, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { PodIdentity } from 'browsermesh-primitives'
+import { PodIdentity } from '@johnhenry/browsermesh-primitives'
 import {
   installPodRuntime,
   createRuntime,

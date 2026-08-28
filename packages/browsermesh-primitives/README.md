@@ -2,17 +2,21 @@
 
 Shared primitives for browser mesh networking -- wire format, identity (Ed25519), CRDTs, capabilities, trust model, and ACL engine. Zero dependencies, pure ES modules, runs in browsers and Node.js.
 
+## Provenance
+
+Previously published as `browsermesh-primitives@0.1.1`. Imported into the `@johnhenry` npm scope as part of the browsermesh monorepo consolidation; the version restarts at `0.0.0` per family convention (a new address is a new era).
+
 ## Install
 
 ```bash
-npm install browsermesh-primitives
+npm install @johnhenry/browsermesh-primitives
 ```
 
 Or via CDN:
 
 ```html
 <script type="module">
-  import { PodIdentity, VectorClock, ACLEngine } from 'https://esm.sh/browsermesh-primitives'
+  import { PodIdentity, VectorClock, ACLEngine } from 'https://esm.sh/@johnhenry/browsermesh-primitives'
 </script>
 ```
 

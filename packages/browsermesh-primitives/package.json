@@ -1,6 +1,6 @@
 {
-  "name": "browsermesh-primitives",
-  "version": "0.1.1",
+  "name": "@johnhenry/browsermesh-primitives",
+  "version": "0.0.0",
   "description": "Shared primitives for browser mesh networking — wire format, identity (Ed25519), CRDTs, capabilities, trust model, and ACL engine",
   "type": "module",
   "main": "./src/index.mjs",
@@ -23,8 +23,10 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/johnhenry/browsermesh-primitives"
+    "url": "https://github.com/johnhenry/browsermesh",
+    "directory": "packages/browsermesh-primitives"
   },
+  "homepage": "https://opensource.johnhenry.me/browsermesh/",
   "scripts": {
     "test": "node --test test/*.test.mjs"
   },
