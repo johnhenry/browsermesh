@@ -1,0 +1,4 @@
+node_modules/
+.turbo/
+*.tgz
+.DS_Store

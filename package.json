@@ -1,0 +1,32 @@
+{
+  "name": "browsermesh-monorepo",
+  "version": "0.0.0",
+  "private": true,
+  "description": "BrowserMesh Monorepo — peer-to-peer mesh networking primitives, transport, sync, and app runtime for browser environments",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "test": "turbo run test",
+    "changeset": "changeset",
+    "version-packages": "changeset version",
+    "release": "changeset publish",
+    "release:staggered": "./scripts/staggered-publish.sh",
+    "release:staggered:dry-run": "./scripts/staggered-publish.sh --dry-run"
+  },
+  "devDependencies": {
+    "@changesets/cli": "^2.27.0",
+    "turbo": "^2.0.0"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "packageManager": "npm@10.0.0",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/johnhenry/browsermesh"
+  },
+  "homepage": "https://opensource.johnhenry.me/browsermesh/"
+}
