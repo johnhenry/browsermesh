@@ -31,7 +31,16 @@ source (`main`/`exports` point directly at `src/index.mjs`).
 ```bash
 npm install
 npm test          # turbo run test across all packages
+npm run examples  # run the runnable examples/ (see examples/README.md)
 ```
+
+## Examples
+
+[`examples/`](examples/) has 5 self-contained, runnable demonstrations
+covering the five foundational packages — real identity/signing, two Pods
+discovering and messaging each other, a virtual-network loopback stream,
+kernel capability enforcement, and CRDT sync convergence. Run with
+`npm run example:01` (etc.) or `npm run examples` for all of them.
 
 ## Provenance
 
