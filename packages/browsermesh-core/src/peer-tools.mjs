@@ -407,7 +407,7 @@ export class EscrowCreateTool extends BrowserTool {
     const mgr = peerToolsContext.getEscrowManager()
     if (!mgr) return { success: false, output: '', error: 'Escrow manager not initialized.' }
     try {
-      const contract = mgr.createEscrow(payer, payee, amount, { description, conditions })
+      const contract = mgr.create({ payerPodId: payer, payeePodId: payee, amount, description, conditions })
       return { success: true, output: `Escrow created: ${contract.id} (${amount} from ${payer} to ${payee})` }
     } catch (err) {
       return { success: false, output: '', error: err.message }
@@ -460,7 +460,7 @@ export class EscrowReleaseTool extends BrowserTool {
     const mgr = peerToolsContext.getEscrowManager()
     if (!mgr) return { success: false, output: '', error: 'Escrow manager not initialized.' }
     try {
-      mgr.releaseEscrow(contractId)
+      mgr.release(contractId)
       return { success: true, output: `Escrow ${contractId} released.` }
     } catch (err) {
       return { success: false, output: '', error: err.message }
@@ -743,7 +743,7 @@ export class TorrentSeedTool extends BrowserTool {
     const tm = peerToolsContext.getTorrentManager()
     if (!tm) return { success: false, output: '', error: 'Torrent manager not initialized.' }
     try {
-      const result = await tm.seed(name, data)
+      const result = await tm.seed(data, { name })
       return { success: true, output: `Seeding: ${result?.infoHash || name}` }
     } catch (err) {
       return { success: false, output: '', error: err.message }

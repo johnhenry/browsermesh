@@ -1,4 +1,4 @@
-import { describe, it, beforeEach } from 'node:test'
+import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 
 // Stub BrowserTool
@@ -195,6 +195,85 @@ describe('Tools graceful fallback when context is empty', () => {
     const result = await tool.execute()
     assert.equal(result.success, true)
     assert.ok(result.output.includes('not initialized'))
+  })
+})
+
+describe('EscrowCreateTool / EscrowReleaseTool — real manager API', () => {
+  // Regression test for a real bug: these tools called mgr.createEscrow()/
+  // mgr.releaseEscrow(), but EscrowManager's actual methods are create()/
+  // release() with an options-object signature. Registration-only tests
+  // (above) never caught this since they don't invoke execute(). Uses a
+  // duck-typed fake matching EscrowManager's real public API (peer-escrow.mjs),
+  // not a mock of the bug's assumed API.
+  afterEach(() => {
+    peerToolsContext.setEscrowManager(null)
+    peerToolsContext.setTorrentManager(null)
+  })
+
+  it('EscrowCreateTool calls the real create(opts) API, not createEscrow(...)', async () => {
+    const calls = []
+    const fakeMgr = {
+      create(opts) {
+        calls.push(opts)
+        return { id: 'escrow-1' }
+      },
+    }
+    peerToolsContext.setEscrowManager(fakeMgr)
+
+    const tool = new EscrowCreateTool()
+    const result = await tool.execute({
+      payer: 'pod-a', payee: 'pod-b', amount: 50,
+      description: 'test contract', conditions: [{ type: 'manual' }],
+    })
+
+    assert.equal(result.success, true)
+    assert.ok(result.output.includes('escrow-1'))
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].payerPodId, 'pod-a')
+    assert.equal(calls[0].payeePodId, 'pod-b')
+    assert.equal(calls[0].amount, 50)
+    assert.equal(calls[0].description, 'test contract')
+  })
+
+  it('EscrowReleaseTool calls the real release(contractId) API, not releaseEscrow(...)', async () => {
+    const calls = []
+    const fakeMgr = { release(contractId) { calls.push(contractId) } }
+    peerToolsContext.setEscrowManager(fakeMgr)
+
+    const tool = new EscrowReleaseTool()
+    const result = await tool.execute({ contractId: 'escrow-1' })
+
+    assert.equal(result.success, true)
+    assert.deepEqual(calls, ['escrow-1'])
+  })
+})
+
+describe('TorrentSeedTool — real manager API', () => {
+  // Regression test for a real bug: the tool called tm.seed(name, data) —
+  // TorrentManager.seed(data, opts) takes data FIRST, so the filename was
+  // being seeded as the actual torrent content.
+  afterEach(() => {
+    peerToolsContext.setTorrentManager(null)
+  })
+
+  it('TorrentSeedTool passes data first, name inside opts — not swapped', async () => {
+    const calls = []
+    const fakeMgr = {
+      async seed(data, opts) {
+        calls.push({ data, opts })
+        return { infoHash: 'abc123' }
+      },
+    }
+    peerToolsContext.setTorrentManager(fakeMgr)
+
+    const tool = new TorrentSeedTool()
+    const result = await tool.execute({ name: 'notes.txt', data: 'hello world' })
+
+    assert.equal(result.success, true)
+    assert.equal(calls.length, 1)
+    // The real file content must be the `data` positional arg, not the name.
+    assert.equal(calls[0].data, 'hello world')
+    assert.equal(calls[0].opts.name, 'notes.txt')
   })
 })
 
