@@ -1,6 +1,6 @@
 {
   "name": "@johnhenry/browsermesh-apps",
-  "version": "0.0.0",
+  "version": "0.0.1",
   "description": "Application layer: marketplace, chat, payments, compute, orchestration, and agent tools for BrowserMesh",
   "type": "module",
   "main": "./src/index.mjs",

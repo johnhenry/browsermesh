@@ -393,6 +393,284 @@ describe('PaymentChannel', () => {
 });
 
 // ---------------------------------------------------------------------------
+// PaymentChannel -- signed updates + mutual close (clawser #31 port)
+// ---------------------------------------------------------------------------
+//
+// A fake Ed25519-shaped signFn/verifyFn pair, matching the shape of
+// MeshIdentityManager.sign(podId, data) / .verify(pubKey, data, sig) from
+// @johnhenry/browsermesh-core -- see identity.mjs. Each fake "identity" has
+// its own keyed HMAC-ish digest so tamper/cross-identity detection is real,
+// not just a boolean stub.
+
+import crypto from 'node:crypto';
+
+function makeFakeIdentity(seed) {
+  const pubKey = new TextEncoder().encode(`pubkey:${seed}`);
+  const sign = async (data) => {
+    const h = crypto.createHmac('sha256', `secret:${seed}`).update(data).digest();
+    return new Uint8Array(h);
+  };
+  return { pubKey, sign };
+}
+
+// A single shared verify function: recomputes the HMAC using whichever
+// "secret" corresponds to the given public key (derived deterministically
+// here since this is a fake -- a real MeshIdentityManager.verify() does
+// actual asymmetric verification against publicKeyBytes).
+const KNOWN_SECRETS = new Map(); // pubKeyString -> secret seed
+function registerIdentity(seed) {
+  const identity = makeFakeIdentity(seed);
+  KNOWN_SECRETS.set(Buffer.from(identity.pubKey).toString('base64'), seed);
+  return identity;
+}
+
+async function fakeVerify(pubKey, data, signature) {
+  const seed = KNOWN_SECRETS.get(Buffer.from(pubKey).toString('base64'));
+  if (!seed) return false;
+  const expected = crypto.createHmac('sha256', `secret:${seed}`).update(data).digest();
+  return Buffer.compare(Buffer.from(signature), expected) === 0;
+}
+
+describe('PaymentChannel signing (opt-in, backward compatible)', () => {
+  it('pay() stays fully synchronous with signature: null when no signFn is injected', () => {
+    const ch = new PaymentChannel('pod-alice', 'pod-bob');
+    ch.open(100);
+    const update = ch.pay(10); // not awaited -- must not be a Promise
+    assert.equal(update.signature, null);
+    assert.equal(typeof update.then, 'undefined');
+  });
+
+  it('receive() stays fully synchronous and unconditional when no verifyFn is injected', () => {
+    const ch = new PaymentChannel('pod-alice', 'pod-bob');
+    ch.open(100);
+    const result = ch.receive({
+      channelId: ch.channelId, sequence: 1, amount: 10,
+      localBalance: 0, remoteBalance: 0, timestamp: Date.now(), signature: null,
+    });
+    assert.equal(typeof result, 'undefined');
+    assert.equal(ch.localBalance, 110);
+  });
+
+  it('close() stays unilateral and synchronous when no signFn is injected', () => {
+    const ch = new PaymentChannel('pod-alice', 'pod-bob');
+    ch.open(100);
+    const settlement = ch.close();
+    assert.equal(ch.state, 'closed');
+    assert.equal(settlement.finalLocalBalance, 100);
+  });
+
+  describe('signed round-trip', () => {
+    let alice, bob, chA, chB;
+
+    beforeEach(() => {
+      KNOWN_SECRETS.clear();
+      alice = registerIdentity('alice');
+      bob = registerIdentity('bob');
+      const sharedChannelId = 'ch_test-shared_00';
+      chA = new PaymentChannel('pod-alice', 'pod-bob', {
+        signFn: alice.sign, verifyFn: fakeVerify, remotePublicKey: bob.pubKey,
+        channelId: sharedChannelId,
+      });
+      chB = new PaymentChannel('pod-bob', 'pod-alice', {
+        signFn: bob.sign, verifyFn: fakeVerify, remotePublicKey: alice.pubKey,
+        channelId: sharedChannelId,
+      });
+      chA.open(200);
+      chB.open(200);
+    });
+
+    it('pay() returns a Promise resolving to a signed update', async () => {
+      const result = chA.pay(30);
+      assert.equal(typeof result.then, 'function');
+      const update = await result;
+      assert.ok(update.signature);
+      assert.equal(typeof update.signature, 'string');
+      assert.equal(update.amount, 30);
+      assert.ok(Object.isFrozen(update));
+    });
+
+    it('receive() accepts a validly signed update from the real counterparty', async () => {
+      const update = await chA.pay(30);
+      await chB.receive(update);
+      assert.equal(chB.localBalance, 230);
+      assert.equal(chB.remoteBalance, -30);
+    });
+
+    it('receive() rejects an update with no signature when verification is active', async () => {
+      await assert.rejects(
+        () => chB.receive({
+          channelId: chB.channelId, sequence: 1, amount: 30,
+          localBalance: 170, remoteBalance: 230, timestamp: Date.now(), signature: null,
+        }),
+        (err) => err.message.includes('missing or invalid signature')
+      );
+      // Balances must not have been mutated by the rejected update.
+      assert.equal(chB.localBalance, 200);
+    });
+
+    it('receive() rejects a tampered update (fields changed after signing)', async () => {
+      const update = await chA.pay(30);
+      const tampered = { ...update, amount: 9999 };
+      await assert.rejects(() => chB.receive(tampered));
+      assert.equal(chB.localBalance, 200);
+    });
+
+    it('receive() rejects a forged signature from an unregistered identity', async () => {
+      const mallory = makeFakeIdentity('mallory'); // never registered in KNOWN_SECRETS
+      const sigBytes = await mallory.sign(new TextEncoder().encode('irrelevant'));
+      const forged = {
+        channelId: chB.channelId, sequence: 1, amount: 30,
+        localBalance: 170, remoteBalance: 230, timestamp: Date.now(),
+        signature: Buffer.from(sigBytes).toString('base64'),
+      };
+      await assert.rejects(() => chB.receive(forged));
+      assert.equal(chB.localBalance, 200);
+    });
+
+    it('receive() rejects a signature valid for different fields (replay/mix-and-match)', async () => {
+      const u1 = await chA.pay(10);
+      const u2 = await chA.pay(20); // sequence 2, different fields, same signer
+      // Splice u2's signature onto u1's fields.
+      const frankensteined = { ...u1, signature: u2.signature };
+      await assert.rejects(() => chB.receive(frankensteined));
+    });
+  });
+
+  describe('two-phase mutual close', () => {
+    let alice, bob, chA, chB;
+
+    beforeEach(() => {
+      KNOWN_SECRETS.clear();
+      alice = registerIdentity('alice');
+      bob = registerIdentity('bob');
+      const sharedChannelId = 'ch_test-shared_01';
+      chA = new PaymentChannel('pod-alice', 'pod-bob', {
+        signFn: alice.sign, verifyFn: fakeVerify, remotePublicKey: bob.pubKey,
+        channelId: sharedChannelId,
+      });
+      chA.open(200);
+      // chB is Bob's view of the *same* logical channel. PaymentChannel's
+      // open() only ever informs the local side's own balance -- it has no
+      // way to notify the counterparty's `remoteBalance` of a deposit (the
+      // PAYMENT_OPEN wire message carries no deposit amount) -- so two
+      // independently-`.open()`'d instances can never satisfy a mirrored
+      // invariant. Build chB directly as the mirror image of chA's state
+      // (local <-> remote swapped) via fromJSON, exactly as if both parties
+      // had converged on the same channel through a real, fully-synced
+      // protocol. This mirroring is preserved by pay()/receive(), so it's a
+      // faithful stand-in for two properly-synced views.
+      chB = PaymentChannel.fromJSON({
+        localPodId: 'pod-bob', remotePodId: 'pod-alice',
+        channelId: sharedChannelId, capacity: chA.capacity, ttlMs: 3600000,
+        createdAt: Date.now(), state: 'open',
+        localBalance: chA.remoteBalance, remoteBalance: chA.localBalance,
+        sequence: chA.sequence,
+      }, { signFn: bob.sign, verifyFn: fakeVerify, remotePublicKey: alice.pubKey });
+    });
+
+    it('close() returns a Promise<CloseClaim> and moves to "closing", not "closed"', async () => {
+      const result = chA.close();
+      assert.equal(typeof result.then, 'function');
+      assert.equal(chA.state, 'closing');
+      const claim = await result;
+      assert.equal(claim.channelId, chA.channelId);
+      assert.equal(claim.finalLocalBalance, 200);
+      assert.equal(claim.finalRemoteBalance, 0);
+      assert.ok(claim.signature);
+      assert.ok(Object.isFrozen(claim));
+      // Still not closed -- only the initiator's half of the handshake.
+      assert.equal(chA.state, 'closing');
+    });
+
+    it('happy path: claim -> ack -> both sides reach closed with matching settlements', async () => {
+      const claim = await chA.close();
+      const handled = await chB.handleCloseMessage(claim);
+      assert.equal(handled.ok, true);
+      assert.equal(chB.state, 'closed');
+
+      const finalized = await chA.finalizeClose(handled.ack);
+      assert.equal(finalized.ok, true);
+      assert.equal(chA.state, 'closed');
+      assert.equal(finalized.settlement.finalLocalBalance, 200);
+      assert.equal(finalized.settlement.finalRemoteBalance, 0);
+    });
+
+    it('handleCloseMessage() raises a PaymentDispute on a forged claim signature', async () => {
+      const claim = await chA.close();
+      const forged = { ...claim, signature: 'not-a-real-signature' };
+      const result = await chB.handleCloseMessage(forged);
+      assert.equal(result.ok, false);
+      assert.equal(result.dispute.reason, 'invalid-signature');
+      assert.equal(chB.state, 'open'); // left inspectable, not silently closed
+      assert.deepEqual(chB.listDisputes(), [result.dispute]);
+    });
+
+    it('handleCloseMessage() raises a PaymentDispute when claimed balances disagree with local ledger', async () => {
+      // Alice claims she still has 200 locally, but Bob has independently
+      // already received a payment Alice's claim doesn't account for --
+      // simulate by having Bob's local view diverge before the claim lands.
+      const claim = await chA.close();
+      const inflatedClaim = { ...claim, finalRemoteBalance: 9999 };
+      // Re-sign so the signature itself is valid but the *content* lies.
+      const reSigned = { ...inflatedClaim, signature: (
+        await alice.sign(new TextEncoder().encode(JSON.stringify({
+          channelId: inflatedClaim.channelId,
+          finalLocalBalance: inflatedClaim.finalLocalBalance,
+          finalRemoteBalance: inflatedClaim.finalRemoteBalance,
+          entryCount: inflatedClaim.entryCount,
+          closedAt: inflatedClaim.closedAt,
+        })))
+      )};
+      const sigB64 = Buffer.from(reSigned.signature).toString('base64');
+      const result = await chB.handleCloseMessage({ ...reSigned, signature: sigB64 });
+      assert.equal(result.ok, false);
+      assert.equal(result.dispute.reason, 'balance-mismatch');
+      assert.equal(chB.state, 'open');
+    });
+
+    it('finalizeClose() raises a PaymentDispute on a forged ack', async () => {
+      const claim = await chA.close();
+      const handled = await chB.handleCloseMessage(claim);
+      const forgedAck = { ...handled.ack, signature: 'garbage' };
+      const result = await chA.finalizeClose(forgedAck);
+      assert.equal(result.ok, false);
+      assert.equal(result.dispute.reason, 'invalid-ack-signature');
+      assert.equal(chA.state, 'closing'); // never reached closed on a bad ack
+    });
+
+    it('finalizeClose() raises a PaymentDispute when the ack disagrees with the original claim', async () => {
+      const claim = await chA.close();
+      const handled = await chB.handleCloseMessage(claim);
+      // A validly-signed ack (by the real counterparty) but for different
+      // numbers than what was originally claimed -- e.g. Bob trying to
+      // slip in a different settlement than the one he actually verified.
+      const mismatchedFields = { ...handled.ack, finalLocalBalance: 1 };
+      const sigBytes = await bob.sign(new TextEncoder().encode(JSON.stringify({
+        channelId: mismatchedFields.channelId,
+        finalLocalBalance: mismatchedFields.finalLocalBalance,
+        finalRemoteBalance: mismatchedFields.finalRemoteBalance,
+        entryCount: mismatchedFields.entryCount,
+        closedAt: mismatchedFields.closedAt,
+      })));
+      const mismatchedAck = { ...mismatchedFields, signature: Buffer.from(sigBytes).toString('base64') };
+      const result = await chA.finalizeClose(mismatchedAck);
+      assert.equal(result.ok, false);
+      assert.equal(result.dispute.reason, 'ack-mismatch');
+    });
+
+    it('onPaymentDispute() / listDisputes() surface raised disputes', async () => {
+      const seen = [];
+      chB.onPaymentDispute((d) => seen.push(d));
+      const claim = await chA.close();
+      await chB.handleCloseMessage({ ...claim, signature: 'bogus' });
+      assert.equal(seen.length, 1);
+      assert.equal(chB.listDisputes().length, 1);
+      assert.equal(seen[0], chB.listDisputes()[0]);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // EscrowManager
 // ---------------------------------------------------------------------------
 
@@ -635,6 +913,114 @@ describe('PaymentRouter', () => {
     it('returns the same instance on multiple calls', () => {
       assert.equal(router.getEscrow(), router.getEscrow());
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PaymentRouter -- wired signed close over a simulated transport
+// ---------------------------------------------------------------------------
+//
+// Two in-memory buses standing in for the mesh transport, so the full
+// claim -> ack round trip (and the dispute path) exercises wireTransport()
+// itself, not just the underlying PaymentChannel primitives.
+
+function makeLinkedBuses() {
+  const handlersA = new Map();
+  const handlersB = new Map();
+  const busA = {
+    broadcast: (type, payload) => {
+      const h = handlersB.get(type);
+      if (h) h(payload, 'pod-alice');
+    },
+    subscribe: (type, handler) => handlersA.set(type, handler),
+  };
+  const busB = {
+    broadcast: (type, payload) => {
+      const h = handlersA.get(type);
+      if (h) h(payload, 'pod-bob');
+    },
+    subscribe: (type, handler) => handlersB.set(type, handler),
+  };
+  return { busA, busB };
+}
+
+describe('PaymentRouter wireTransport -- signed mutual close', () => {
+  it('closeChannel() over the wire completes the claim/ack handshake and removes the channel on both sides', async () => {
+    const { busA, busB } = makeLinkedBuses();
+    const alice = registerIdentity('router-alice');
+    const bob = registerIdentity('router-bob');
+
+    const routerA = new PaymentRouter('pod-alice');
+    const routerB = new PaymentRouter('pod-bob');
+    routerA.wireTransport(busA.broadcast, busA.subscribe);
+    routerB.wireTransport(busB.broadcast, busB.subscribe);
+
+    const sharedChannelId = 'ch_router-test-shared_00';
+    const chA = routerA.openChannel('pod-bob', 500, {
+      signFn: alice.sign, verifyFn: fakeVerify, remotePublicKey: bob.pubKey,
+      channelId: sharedChannelId,
+    });
+    const chB = routerB.openChannel('pod-alice', 500, {
+      signFn: bob.sign, verifyFn: fakeVerify, remotePublicKey: alice.pubKey,
+      channelId: sharedChannelId,
+    });
+
+    // open() only ever informs the *local* side's own balance (the
+    // PAYMENT_OPEN wire message carries no deposit amount), so two
+    // independently-`.open()`d channels can never end up agreeing on who
+    // holds what -- that's a pre-existing gap in the open/fund handshake,
+    // not something this security fix is meant to paper over. To reach a
+    // legitimately-agreeing state through the real public API (not a test
+    // shortcut), drain chA's own deposit straight back out via a real
+    // pay() so both sides converge on the exact same numbers: chA ends at
+    // (local=0, remote=1), matching a fresh chB's (local=1, remote=0).
+    chA.open(1);
+    await chA.pay(1);
+    chB.open(1);
+
+    await routerA.closeChannel('pod-bob');
+    // Let the claim -> ack -> finalize microtask chain settle.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    assert.equal(routerA.getChannel('pod-bob'), null);
+    assert.equal(routerB.getChannel('pod-alice'), null);
+    assert.equal(chA.state, 'closed');
+    assert.equal(chB.state, 'closed');
+  });
+
+  it('records a PaymentDispute via onPaymentDispute() when a peer sends a forged close claim', async () => {
+    const { busA, busB } = makeLinkedBuses();
+    const alice = registerIdentity('router-alice-2');
+    const bob = registerIdentity('router-bob-2');
+
+    const routerA = new PaymentRouter('pod-alice');
+    const routerB = new PaymentRouter('pod-bob');
+    routerA.wireTransport(busA.broadcast, busA.subscribe);
+    routerB.wireTransport(busB.broadcast, busB.subscribe);
+
+    routerA.openChannel('pod-bob', 500, {
+      signFn: alice.sign, verifyFn: fakeVerify, remotePublicKey: bob.pubKey,
+    });
+    const chB = routerB.openChannel('pod-alice', 500, {
+      signFn: bob.sign, verifyFn: fakeVerify, remotePublicKey: alice.pubKey,
+    });
+    chB.open(100);
+
+    const disputes = [];
+    routerB.onPaymentDispute((d) => disputes.push(d));
+
+    // Broadcast a forged claim directly onto the bus (bypassing chA.close()).
+    busA.broadcast(PAYMENT_CLOSE, { claim: {
+      channelId: chB.channelId, finalLocalBalance: 0, finalRemoteBalance: 0,
+      entryCount: 0, closedAt: Date.now(), signature: 'forged',
+    } });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    assert.equal(disputes.length, 1);
+    assert.equal(disputes[0].reason, 'invalid-signature');
+    assert.equal(routerB.listDisputes().length, 1);
+    // Channel is left open/inspectable rather than silently closed.
+    assert.equal(routerB.getChannel('pod-alice'), chB);
   });
 });
 
