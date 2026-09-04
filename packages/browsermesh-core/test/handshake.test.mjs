@@ -412,6 +412,108 @@ describe('DirectInputHandshake', () => {
     assert.equal(token.signalingUrl, undefined)
     assert.equal(token.iceServers, undefined)
   })
+
+  // -- Single-use enforcement (replay) --------------------------------------
+
+  it('validateToken rejects a token that has already been redeemed', async () => {
+    const token = await handshake.generateToken()
+    token.podId = 'pod-remote'
+
+    assert.deepEqual(handshake.validateToken(token), { valid: true })
+
+    const second = handshake.validateToken(token)
+    assert.equal(second.valid, false)
+    assert.ok(second.error.includes('already used'), `unexpected error: ${second.error}`)
+  })
+
+  it('validateToken rejects a token replayed from its encoded bytes', async () => {
+    // The attacker's actual capability: they hold the QR/clipboard string,
+    // not the object. Re-decoding must not launder it into a fresh token.
+    const token = await handshake.generateToken()
+    token.podId = 'pod-remote'
+    const encoded = handshake.encodeToken(token)
+
+    const results = []
+    for (let i = 0; i < 5; i++) {
+      results.push(handshake.validateToken(DirectInputHandshake.decodeToken(encoded)))
+    }
+
+    assert.equal(results[0].valid, true, 'first redemption should succeed')
+    for (let i = 1; i < results.length; i++) {
+      assert.equal(results[i].valid, false, `redemption ${i + 1} should be rejected`)
+      assert.ok(results[i].error.includes('already used'))
+    }
+  })
+
+  it('validateToken with consume:false leaves the token redeemable', async () => {
+    const token = await handshake.generateToken()
+    token.podId = 'pod-remote'
+
+    assert.deepEqual(handshake.validateToken(token, { consume: false }), { valid: true })
+    assert.equal(handshake.consumedTokenCount, 0)
+    // Still spendable, exactly once.
+    assert.deepEqual(handshake.validateToken(token), { valid: true })
+    assert.equal(handshake.validateToken(token).valid, false)
+  })
+
+  it('replay set is scoped per issuing pod, so distinct pods may reuse a nonce', async () => {
+    const a = await handshake.generateToken()
+    a.podId = 'pod-remote-a'
+    const b = { ...a, podId: 'pod-remote-b' }
+
+    assert.deepEqual(handshake.validateToken(a), { valid: true })
+    assert.deepEqual(handshake.validateToken(b), { valid: true })
+    assert.equal(handshake.validateToken(a).valid, false)
+  })
+
+  it('a token rejected for another reason is not recorded as consumed', async () => {
+    const expired = {
+      podId: 'pod-remote',
+      publicKey: 'abc',
+      nonce: 'nonce-expired',
+      timestamp: Date.now() - TOKEN_TTL_MS - 1000,
+    }
+    assert.equal(handshake.validateToken(expired).valid, false)
+    assert.equal(handshake.consumedTokenCount, 0)
+  })
+
+  it('consumed nonces age out once past the token TTL', async () => {
+    const token = await handshake.generateToken()
+    token.podId = 'pod-remote'
+    assert.deepEqual(handshake.validateToken(token), { valid: true })
+    assert.equal(handshake.consumedTokenCount, 1)
+
+    // Advance past the entry's expiry without waiting five real minutes.
+    const realNow = Date.now
+    try {
+      Date.now = () => realNow() + TOKEN_TTL_MS + 1
+      assert.equal(handshake.consumedTokenCount, 0)
+    } finally {
+      Date.now = realNow
+    }
+  })
+
+  it('replay set is bounded by maxConsumedNonces', async () => {
+    const capped = new DirectInputHandshake({
+      localPodId: 'pod-local',
+      getPublicKeyBytes: async () => fakePublicKey,
+      maxConsumedNonces: 4,
+    })
+    for (let i = 0; i < 50; i++) {
+      const t = { podId: 'pod-remote', publicKey: 'abc', nonce: `n${i}`, timestamp: Date.now() }
+      assert.equal(capped.validateToken(t).valid, true)
+    }
+    assert.ok(capped.consumedTokenCount <= 4, `set grew to ${capped.consumedTokenCount}`)
+  })
+
+  it('forgetConsumedTokens clears the replay set', async () => {
+    const token = await handshake.generateToken()
+    token.podId = 'pod-remote'
+    assert.equal(handshake.validateToken(token).valid, true)
+    assert.equal(handshake.validateToken(token).valid, false)
+    handshake.forgetConsumedTokens()
+    assert.equal(handshake.validateToken(token).valid, true)
+  })
 })
 
 // ---------------------------------------------------------------------------
