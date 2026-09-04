@@ -843,6 +843,33 @@ describe('HandshakeCoordinator', () => {
     )
   })
 
+  it('a token with no signalingUrl cannot connect — the exchange is key-only', async () => {
+    // Pins what the DirectInputHandshake docstring now says: the token
+    // carries identity, not an offer, so a signaling channel is still
+    // required. If a future change puts SDP in the token this test should
+    // fail and be rewritten, deliberately.
+    const handshake = new DirectInputHandshake({
+      localPodId: 'pod-local',
+      getPublicKeyBytes: async () => new Uint8Array(32).fill(7),
+    })
+    const token = await handshake.generateToken()
+    assert.deepEqual(
+      Object.keys(token).sort(),
+      ['nonce', 'podId', 'publicKey', 'timestamp'],
+      'token gained or lost a field; the docstring describes its contents',
+    )
+    assert.equal(token.sdp, undefined, 'no SDP offer in the token')
+
+    const coord = new HandshakeCoordinator({
+      localPodId: 'pod-other',
+      transportFactory: createMockTransportFactory(),
+    })
+    await assert.rejects(
+      () => coord.connectViaToken(token),
+      /No signaling channel available/,
+    )
+  })
+
   it('connectViaToken throws without transport factory', async () => {
     const coord = new HandshakeCoordinator({ localPodId: 'pod-local' })
     const token = { podId: 'pod-remote', publicKey: 'x', nonce: 'y', timestamp: Date.now() }

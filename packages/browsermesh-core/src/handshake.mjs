@@ -10,8 +10,10 @@ import { silentCatch } from './silent-catch.mjs'
  * signaler interface that WebRTCTransport expects (sendOffer, sendAnswer,
  * sendIceCandidate, onOffer, onAnswer, onIceCandidate).
  *
- * DirectInputHandshake handles manual key exchange for direct pairing
- * without a signaling server -- via clipboard paste or QR code.
+ * DirectInputHandshake handles manual exchange of a peer's identity and
+ * connection parameters -- via clipboard paste or QR code -- without a
+ * server. Note that this covers the KEY exchange only: the token carries
+ * no SDP, so establishing the connection still needs a signaling channel.
  *
  * HandshakeCoordinator orchestrates the full connection flow:
  * discovery -> transport selection -> handshake -> session.
@@ -321,12 +323,29 @@ export class SignalingClient {
 // ---------------------------------------------------------------------------
 
 /**
- * Manual key exchange for direct pairing without a signaling server.
+ * Out-of-band exchange of a peer's identity and connection parameters.
  *
- * Generates a connection token containing the local pod's identity
- * and connection parameters. The token can be shared via clipboard
- * paste or QR code. The receiving peer decodes and validates the
- * token to establish a connection.
+ * Generates a connection token containing the local pod's identity and
+ * connection parameters, shareable via clipboard paste or QR code. The
+ * receiving peer decodes and validates the token, then uses it to reach
+ * the issuer.
+ *
+ * **What this does and does not do.** The *key exchange* needs no server:
+ * the token travels over whatever out-of-band channel you like. The
+ * *connection* still does. A ConnectionToken carries podId, publicKey,
+ * nonce, timestamp and optionally signalingUrl/iceServers -- it carries no
+ * SDP offer. `HandshakeCoordinator.connectViaToken()` therefore requires
+ * either an existing signalingClient or a `token.signalingUrl`, and throws
+ * 'No signaling channel available' without one.
+ *
+ * Earlier revisions of this docstring said "direct pairing without a
+ * signaling server", which read as a promise of serverless pairing. It was
+ * never that. Putting an SDP offer with pre-gathered ICE candidates into
+ * the token would make it that -- see issue #5 -- and is the one design
+ * that needs no rendezvous, no STUN and no certificate for two peers on a
+ * LAN. It is not implemented here.
+ *
+ * Tokens are single use: see `validateToken()`.
  */
 export class DirectInputHandshake {
   /** @type {string} */
