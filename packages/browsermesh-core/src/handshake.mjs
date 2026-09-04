@@ -728,9 +728,18 @@ export class HandshakeCoordinator {
    * Parses the token, optionally creates a signaling client from the
    * token's signalingUrl, and negotiates a transport.
    *
+   * Note on lifetimes: `TransportFactory.negotiate()` returns a transport that
+   * has been *created but not yet connected* — no offer, answer or ICE
+   * candidate has crossed the wire when it resolves. A signaler this method
+   * created is therefore kept open past negotiate() and torn down on the
+   * transport's `close` event instead. When the transport exposes no
+   * `onClose()`, ownership passes to the caller via the returned `signaler`.
+   *
    * @param {ConnectionToken} token - Decoded connection token
    * @param {object} [transportFactory] - Override transport factory
-   * @returns {Promise<{ transport: object, sessionInfo: object }>}
+   * @returns {Promise<{ transport: object, sessionInfo: object, signaler: SignalingClient|null }>}
+   *   `signaler` is the client this call created and still owns, or null when
+   *   the coordinator's own signaling client was used.
    */
   async connectViaToken(token, transportFactory) {
     const factory = transportFactory || this.#transportFactory
@@ -781,12 +790,23 @@ export class HandshakeCoordinator {
       }
 
       this.#onLog(2, `Connected via token to ${remotePodId}`)
-      // Clean up signaler we created — transport is now established
+
+      // Do NOT disconnect here. negotiate() returns a created-but-unconnected
+      // transport; the signaling channel is about to carry the offer, the
+      // answer and every ICE candidate. Tear it down when the transport does.
       if (createdSignaler && signaler) {
-        signaler.disconnect()
+        if (typeof transport.onClose === 'function') {
+          transport.onClose(() => signaler.disconnect())
+        } else {
+          this.#onLog(
+            1,
+            'Transport exposes no onClose(); returning the signaling client for the caller to disconnect',
+          )
+        }
       }
+
       this.#fire('connected', { remotePodId, transport, sessionInfo })
-      return { transport, sessionInfo }
+      return { transport, sessionInfo, signaler: createdSignaler ? signaler : null }
     } catch (err) {
       // Clean up signaler we created on failure
       if (createdSignaler && signaler) {

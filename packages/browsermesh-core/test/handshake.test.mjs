@@ -692,6 +692,137 @@ describe('HandshakeCoordinator', () => {
     signaler.disconnect()
   })
 
+  // -- Signaler lifetime on the token path ----------------------------------
+  //
+  // connectViaToken() builds its own SignalingClient from token.signalingUrl
+  // via globalThis.WebSocket, so these swap the global for the duration.
+
+  /**
+   * Run fn with globalThis.WebSocket stubbed by MockWebSocket, capturing the
+   * sockets that get built. Restores the real global afterwards.
+   */
+  async function withMockGlobalWebSocket(fn) {
+    const real = globalThis.WebSocket
+    const sockets = []
+    globalThis.WebSocket = function (url) {
+      const ws = new MockWebSocket(url)
+      sockets.push(ws)
+      return ws
+    }
+    try {
+      return await fn(sockets)
+    } finally {
+      globalThis.WebSocket = real
+    }
+  }
+
+  /**
+   * A transport shaped like the real ones: created by negotiate() but NOT yet
+   * connected, so the signaling channel still has the whole offer/answer/ICE
+   * exchange left to carry. connect() is where it first needs the signaler.
+   */
+  function createUnconnectedTransport() {
+    const closeCbs = []
+    return {
+      type: 'webrtc',
+      signalerAtConnect: null,
+      signaler: null,
+      onClose(cb) { closeCbs.push(cb) },
+      close() { for (const cb of closeCbs) cb() },
+      async connect() {
+        this.signalerAtConnect = this.signaler ? this.signaler.connected : null
+        this.signaler.sendOffer('pod-remote', { type: 'offer', sdp: 'v=0' })
+      },
+    }
+  }
+
+  it('connectViaToken keeps its signaler open until the transport closes', async () => {
+    await withMockGlobalWebSocket(async () => {
+      const transport = createUnconnectedTransport()
+      const factory = {
+        async negotiate(localPodId, remotePodId, signaler) {
+          // Mirrors TransportFactory.negotiate: "returns the first
+          // successfully created (but not yet connected) transport".
+          transport.signaler = signaler
+          return transport
+        },
+        async create() { return transport },
+      }
+      const coord = new HandshakeCoordinator({ localPodId: 'pod-local', transportFactory: factory })
+      const token = {
+        podId: 'pod-remote',
+        publicKey: 'abc123',
+        nonce: 'deadbeef',
+        timestamp: Date.now(),
+        signalingUrl: 'wss://signal.test',
+      }
+
+      const result = await coord.connectViaToken(token)
+      assert.ok(result.signaler, 'a signaler this call created should be handed back')
+      assert.equal(result.signaler.connected, true, 'signaler must still be open after negotiate()')
+
+      // The offer is the first thing that actually needs the channel.
+      await transport.connect()
+      assert.equal(transport.signalerAtConnect, true, 'signaler was closed before the offer was sent')
+
+      // And it is torn down with the transport, not before it.
+      transport.close()
+      assert.equal(result.signaler.connected, false, 'signaler should be disconnected on transport close')
+    })
+  })
+
+  it('connectViaToken hands back the signaler when the transport has no onClose', async () => {
+    await withMockGlobalWebSocket(async () => {
+      const bare = { type: 'webrtc' } // no onClose hook
+      const factory = { async negotiate() { return bare }, async create() { return bare } }
+      const logs = []
+      const coord = new HandshakeCoordinator({
+        localPodId: 'pod-local',
+        transportFactory: factory,
+        onLog: (level, msg) => logs.push(msg),
+      })
+      const token = {
+        podId: 'pod-remote', publicKey: 'abc', nonce: 'n1',
+        timestamp: Date.now(), signalingUrl: 'wss://signal.test',
+      }
+
+      const result = await coord.connectViaToken(token)
+      assert.equal(result.signaler.connected, true)
+      assert.ok(logs.some(m => m.includes('no onClose')), `expected a warning, got: ${logs.join(' | ')}`)
+      result.signaler.disconnect()
+    })
+  })
+
+  it('connectViaToken does not disconnect a signaling client it did not create', async () => {
+    const signaler = new SignalingClient({
+      url: 'wss://signal.test',
+      localPodId: 'pod-local',
+      _WebSocket: MockWebSocket,
+    })
+    await signaler.connect()
+
+    const transport = createUnconnectedTransport()
+    const factory = {
+      async negotiate(l, r, s) { transport.signaler = s; return transport },
+      async create() { return transport },
+    }
+    const coord = new HandshakeCoordinator({
+      localPodId: 'pod-local',
+      signalingClient: signaler,
+      transportFactory: factory,
+    })
+    const token = { podId: 'pod-remote', publicKey: 'abc', nonce: 'n2', timestamp: Date.now() }
+
+    const result = await coord.connectViaToken(token)
+    assert.equal(result.signaler, null, 'a borrowed signaler is not ours to hand back')
+    assert.equal(signaler.connected, true)
+
+    // Closing the transport must not close a channel we do not own.
+    transport.close()
+    assert.equal(signaler.connected, true)
+    signaler.disconnect()
+  })
+
   it('connectToPeer throws without transport factory', async () => {
     const coord = new HandshakeCoordinator({ localPodId: 'pod-local' })
     await assert.rejects(
