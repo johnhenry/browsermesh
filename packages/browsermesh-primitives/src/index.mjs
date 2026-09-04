@@ -5,7 +5,7 @@ export { MESH_TYPE, MESH_ERROR } from "./constants.mjs";
 export { MeshError, MeshProtocolError, MeshCapabilityError } from "./errors.mjs";
 
 // Identity
-export { PodIdentity, derivePodId, encodeBase64url, decodeBase64url } from "./identity.mjs";
+export { PodIdentity, derivePodId, encodeBase64url, decodeBase64url, supportsEd25519, probeEd25519Support, _resetEd25519Probe } from "./identity.mjs";
 
 // Wire format
 export { messageTypeRegistry, encodeMeshMessage, decodeMeshMessage } from "./wire.mjs";

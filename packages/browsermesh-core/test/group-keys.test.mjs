@@ -9,6 +9,8 @@ import {
   GROUP_KEY_REQUEST,
   GROUP_KEY_ACK,
   supportsX25519,
+  probeX25519Support,
+  _resetX25519Probe,
   generateEncryptionKeyPair,
   wrapKeyForMember,
   unwrapKeyForMember,
@@ -423,9 +425,60 @@ describe('GroupKeyManager', () => {
 // Per-member envelope encryption (X25519 ECDH + AES-GCM key wrap)
 // ---------------------------------------------------------------------------
 
-describe('supportsX25519', () => {
-  it('returns true in Node (WebCrypto X25519 support)', () => {
-    assert.equal(supportsX25519(), true)
+/**
+ * Replace globalThis.crypto for a test. It is a getter-only property in Node,
+ * so it has to be redefined rather than assigned. Returns a restore function.
+ */
+function stubGlobalCrypto(replacement) {
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'crypto')
+  Object.defineProperty(globalThis, 'crypto', { value: replacement, configurable: true, writable: true })
+  return () => Object.defineProperty(globalThis, 'crypto', original)
+}
+
+describe('supportsX25519 / probeX25519Support', () => {
+  it('probe returns true in Node (WebCrypto X25519 support)', async () => {
+    _resetX25519Probe()
+    assert.equal(await probeX25519Support(), true)
+    assert.equal(supportsX25519(), true, 'sync form should read the cached probe')
+  })
+
+  it('reports false when WebCrypto has no X25519, not merely no crypto.subtle', async () => {
+    // The bug this replaces: the old check was `!!crypto.subtle`, which has
+    // been true in every browser since ~2015, so the metadata-only fallback
+    // could never fire on the browsers it was written for.
+    _resetX25519Probe()
+    const restore = stubGlobalCrypto({
+      // a WebCrypto that exists but implements nothing
+      subtle: { generateKey: async () => { throw new Error('NotSupportedError') } },
+    })
+    try {
+      assert.equal(await probeX25519Support(), false)
+      assert.equal(supportsX25519(), false)
+    } finally {
+      restore()
+      _resetX25519Probe()
+      await probeX25519Support()
+    }
+  })
+
+  it('reports false when crypto.subtle is absent entirely', async () => {
+    _resetX25519Probe()
+    const restore = stubGlobalCrypto({})
+    try {
+      assert.equal(await probeX25519Support(), false)
+    } finally {
+      restore()
+      _resetX25519Probe()
+      await probeX25519Support()
+    }
+  })
+
+  it('probes at most once', async () => {
+    _resetX25519Probe()
+    const a = probeX25519Support()
+    const b = probeX25519Support()
+    assert.equal(a, b, 'the in-flight probe should be shared, not re-run')
+    await a
   })
 })
 

@@ -905,9 +905,28 @@ const WORKER_SCRIPT = `
 `;
 
 /**
+ * Whether this environment provides SharedWorker.
+ *
+ * Notably false in **Android WebView**, which does not implement SharedWorker
+ * at any API level -- so SharedWorkerRelayStrategy is unavailable there, and
+ * on any platform embedding a WebView rather than a full browser. Safari has
+ * had it since 16.
+ *
+ * @returns {boolean}
+ */
+export function supportsSharedWorker() {
+  return typeof SharedWorker === 'function'
+}
+
+/**
  * Discovers peers within same-origin tabs using a SharedWorker as relay.
  * The SharedWorker maintains a peer registry and forwards messages
  * between connected ports.
+ *
+ * **Not available in Android WebView**, which ships no SharedWorker at all.
+ * Check `supportsSharedWorker()` before starting this strategy, or supply
+ * `createWorkerFn` to provide your own. `start()` throws a named error rather
+ * than a bare ReferenceError when the API is missing.
  */
 export class SharedWorkerRelayStrategy extends DiscoveryStrategy {
   /** @type {Function|null} */
@@ -938,6 +957,14 @@ export class SharedWorkerRelayStrategy extends DiscoveryStrategy {
    */
   async start() {
     if (this.active) return
+
+    if (!this.#createWorkerFn && !supportsSharedWorker()) {
+      throw new Error(
+        'SharedWorker is not available in this environment (Android WebView does not ' +
+        'implement it). Check supportsSharedWorker() before starting this strategy, ' +
+        'or pass createWorkerFn to supply your own.',
+      )
+    }
 
     const factory = this.#createWorkerFn ?? (() => {
       const blob = new Blob([WORKER_SCRIPT], { type: 'application/javascript' })
