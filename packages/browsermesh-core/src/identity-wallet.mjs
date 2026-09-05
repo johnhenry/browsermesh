@@ -114,8 +114,12 @@ export class IdentityWallet {
   /**
    * Export an identity as JWK, optionally encrypted with a passphrase.
    *
+   * With a passphrase this resolves to an encrypted envelope or it rejects —
+   * it never falls back to the raw private key. Without one it resolves to
+   * the raw private-key JWK by design.
+   *
    * @param {string} podId
-   * @param {string} [passphrase]
+   * @param {string} [passphrase] - Must be a non-empty string when given
    * @returns {Promise<object>}
    */
   async exportIdentity(podId, passphrase) {

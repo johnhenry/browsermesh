@@ -5,6 +5,8 @@ import {
   CapabilityToken,
   CapabilityChain,
   CapabilityValidator,
+  resourceCovers,
+  expiryNarrows,
   WasmSandboxPolicy,
   WasmSandbox,
   SandboxRegistry,
@@ -588,5 +590,221 @@ describe('SandboxRegistry', () => {
     registry.create({ ownerPodId: 'podA', policy });
     const json = registry.toJSON();
     assert.equal(json.sandboxes.length, 1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Attenuation must actually narrow the resource scope
+//
+// Regression for two independent widening paths.
+//
+//   attenuate() fell through to `this.resource.slice(0, -1)` even when the
+//   parent held no wildcard — chopping a real character off a literal scope
+//   and accepting anything that shared the truncated prefix. Both branches
+//   of its if/else were byte-identical. And the branch above it accepted any
+//   `startsWith` extension, so `svc://a` covered `svc://anything-at-all`.
+//
+//   CapabilityChain.verify() checked permissions, depth and the parent link,
+//   and never looked at the resource or the expiry at all. Measured:
+//
+//     B  chain.verify() = {"valid":true}
+//     B  root scope     = fs:///docs/public/    leaf scope = *
+//     B  root expiry(s) = 1   leaf expiry(days) = 3650
+//
+//   Chains reach verify() from fromJSON() and append(), neither of which
+//   builds its tokens by attenuation, so verify() cannot lean on attenuate().
+// ---------------------------------------------------------------------------
+
+describe('resourceCovers', () => {
+  const covered = [
+    ['identical scopes', 'fs:/data', 'fs:/data'],
+    ['a whole extra path segment', 'fs:/data', 'fs:/data/reports'],
+    ['a parent already ending at a separator', 'fs:///docs/public/', 'fs:///docs/public/x'],
+    ['a scheme separator', 'svc:', 'svc:model'],
+    ['a wildcard parent', 'fs:/data/*', 'fs:/data/reports/q3'],
+    ['the bare wildcard', '*', 'anything at all'],
+    ['a wildcard covering its own base', 'fs:/data/*', 'fs:/data/'],
+  ];
+  for (const [label, parent, child] of covered) {
+    it(`covers ${label}`, () => {
+      assert.equal(resourceCovers(parent, child), true, `${parent} should cover ${child}`);
+    });
+  }
+
+  const notCovered = [
+    ['a sibling sharing a character prefix', 'fs:/data', 'fs:/database'],
+    ['a longer name under the same scheme', 'svc://a', 'svc://anything-at-all'],
+    ['the truncated-prefix trick', 'fs:///docs/public', 'fs:///docs/publiZZZ-private'],
+    ['an unrelated path', 'fs:///docs/public', 'fs:///etc/shadow'],
+    ['a bare wildcard child of a literal parent', 'fs:/data', '*'],
+    ['a wildcard child reaching past its parent', 'fs:/data/*', 'fs:/*'],
+    ['the parent itself, from a child scope', 'fs:/data/reports', 'fs:/data'],
+  ];
+  for (const [label, parent, child] of notCovered) {
+    it(`does not cover ${label}`, () => {
+      assert.equal(resourceCovers(parent, child), false, `${parent} must not cover ${child}`);
+    });
+  }
+});
+
+describe('expiryNarrows', () => {
+  it('a parent with no expiry permits any child expiry', () => {
+    assert.equal(expiryNarrows(null, null), true);
+    assert.equal(expiryNarrows(null, 1_000), true);
+  });
+
+  it('a parent with an expiry requires the child to have one', () => {
+    assert.equal(expiryNarrows(1_000, null), false);
+  });
+
+  it('a child expiry may match or precede the parent', () => {
+    assert.equal(expiryNarrows(1_000, 1_000), true);
+    assert.equal(expiryNarrows(1_000, 999), true);
+  });
+
+  it('a child expiry may not reach past the parent', () => {
+    assert.equal(expiryNarrows(1_000, 1_001), false);
+  });
+});
+
+describe('CapabilityToken.attenuate resource narrowing', () => {
+  const root = (resource, extra = {}) =>
+    new CapabilityToken({ issuer: 'owner', holder: 'alice', resource, permissions: ['read'], ...extra });
+
+  it('still allows narrowing to a sub-path', () => {
+    const child = root('fs:/data').attenuate({ holder: 'bob', resource: 'fs:/data/reports' });
+    assert.equal(child.resource, 'fs:/data/reports');
+  });
+
+  it('still allows narrowing under a wildcard parent', () => {
+    const child = root('fs:/data/*').attenuate({ holder: 'bob', resource: 'fs:/data/reports' });
+    assert.equal(child.resource, 'fs:/data/reports');
+  });
+
+  it('refuses a sibling that merely shares a character prefix', () => {
+    assert.throws(
+      () => root('svc://a').attenuate({ holder: 'mallory', resource: 'svc://anything-at-all' }),
+      /Cannot widen resource scope beyond parent/
+    );
+  });
+
+  it('refuses the truncated-prefix trick on a literal parent', () => {
+    assert.throws(
+      () => root('fs:///docs/public').attenuate({ holder: 'mallory', resource: 'fs:///docs/publiZZZ-private' }),
+      /Cannot widen resource scope beyond parent/
+    );
+  });
+
+  it('refuses widening to the bare wildcard', () => {
+    assert.throws(
+      () => root('fs:/data').attenuate({ holder: 'mallory', resource: '*' }),
+      /Cannot widen resource scope beyond parent/
+    );
+  });
+
+  it('a widened token is not merely cosmetic — the validator would honour it', () => {
+    // Guards against a "fix" that blocks attenuate() but leaves the widened
+    // scope meaningful if it is constructed some other way.
+    const forged = new CapabilityToken({
+      issuer: 'alice', holder: 'mallory', resource: 'svc://anything-at-all',
+      permissions: ['read'], parentId: 'whatever', depth: 1,
+    });
+    const v = new CapabilityValidator();
+    v.register(forged);
+    assert.deepEqual(v.validate(forged.id, 'svc://anything-at-all', 'read'), { allowed: true });
+  });
+
+  it('refuses to raise maxCalls beyond the parent', () => {
+    const r = root('fs:/data', { constraints: { maxCalls: 10 } });
+    assert.throws(
+      () => r.attenuate({ holder: 'mallory', constraints: { maxCalls: 1_000_000 } }),
+      /Cannot raise maxCalls beyond parent/
+    );
+  });
+
+  it('refuses to drop maxCalls by overwriting it with undefined', () => {
+    const r = root('fs:/data', { constraints: { maxCalls: 10 } });
+    assert.throws(
+      () => r.attenuate({ holder: 'mallory', constraints: { maxCalls: undefined } }),
+      /Cannot raise maxCalls beyond parent/
+    );
+  });
+
+  it('still allows lowering maxCalls', () => {
+    const r = root('fs:/data', { constraints: { maxCalls: 10 } });
+    const c = r.attenuate({ holder: 'bob', constraints: { maxCalls: 3 } });
+    assert.equal(c.constraints.maxCalls, 3);
+  });
+
+  it('still allows a child to introduce maxCalls the parent never had', () => {
+    const c = root('fs:/data').attenuate({ holder: 'bob', constraints: { maxCalls: 5 } });
+    assert.equal(c.constraints.maxCalls, 5);
+  });
+});
+
+describe('CapabilityChain.verify resource and expiry narrowing', () => {
+  const link = (over) =>
+    new CapabilityToken({
+      id: 't0', issuer: 'owner', holder: 'alice',
+      resource: 'fs:///docs/public/', permissions: ['read'],
+      expiresAt: null, depth: 0, parentId: null, ...over,
+    });
+
+  it('accepts a chain that genuinely narrows', () => {
+    const t0 = link({});
+    const t1 = link({
+      id: 't1', parentId: 't0', issuer: 'alice', holder: 'bob',
+      resource: 'fs:///docs/public/q3', depth: 1,
+    });
+    assert.deepEqual(new CapabilityChain([t0, t1]).verify(false), { valid: true });
+  });
+
+  it('rejects a chain that widens the resource to the bare wildcard', () => {
+    const t0 = link({});
+    const t1 = link({ id: 't1', parentId: 't0', holder: 'mallory', resource: '*', depth: 1 });
+    const result = new CapabilityChain([t0, t1]).verify(false);
+    assert.equal(result.valid, false);
+    assert.equal(result.brokenAt, 1);
+    assert.match(result.error, /Resource amplification/);
+  });
+
+  it('rejects a chain that hops to an unrelated resource', () => {
+    const t0 = link({});
+    const t1 = link({ id: 't1', parentId: 't0', holder: 'mallory', resource: 'fs:///etc/shadow', depth: 1 });
+    assert.equal(new CapabilityChain([t0, t1]).verify(false).valid, false);
+  });
+
+  it('rejects a chain that extends the expiry', () => {
+    const t0 = link({ expiresAt: 1_000 });
+    const t1 = link({
+      id: 't1', parentId: 't0', holder: 'mallory',
+      expiresAt: 10_000_000, depth: 1,
+    });
+    const result = new CapabilityChain([t0, t1]).verify(false);
+    assert.equal(result.valid, false);
+    assert.equal(result.brokenAt, 1);
+    assert.match(result.error, /Expiry amplification/);
+  });
+
+  it('rejects a chain that removes the expiry entirely', () => {
+    const t0 = link({ expiresAt: 1_000 });
+    const t1 = link({ id: 't1', parentId: 't0', holder: 'mallory', expiresAt: null, depth: 1 });
+    assert.equal(new CapabilityChain([t0, t1]).verify(false).valid, false);
+  });
+
+  it('rejects the widened chain after a fromJSON round-trip', () => {
+    // fromJSON is how a chain arrives from another pod, and it does not go
+    // through attenuate(), which is the reason verify() has to check.
+    const t0 = link({ expiresAt: 1_000 });
+    const t1 = link({
+      id: 't1', parentId: 't0', holder: 'mallory',
+      resource: '*', expiresAt: 10_000_000, depth: 1,
+    });
+    const onWire = new CapabilityChain([t0, t1]).toJSON();
+    assert.equal(CapabilityChain.fromJSON(onWire).verify(false).valid, false);
+  });
+
+  it('a single-token chain is unaffected', () => {
+    assert.deepEqual(new CapabilityChain([link({ expiresAt: 1_000 })]).verify(false), { valid: true });
   });
 });

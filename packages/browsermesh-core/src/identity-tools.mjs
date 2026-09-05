@@ -173,10 +173,14 @@ export class IdentityExportTool extends BrowserTool {
       }
 
       const jwk = await mgr.identityManager.export(podId, passphrase);
-      const encrypted = jwk.encrypted ? ' (encrypted)' : '';
+      // Label both outcomes. An unlabelled blob that happens to be a raw
+      // private key is the one thing this output must never be.
+      const label = jwk.encrypted
+        ? ' (encrypted)'
+        : ' (UNENCRYPTED — this is the raw private key)';
       return {
         success: true,
-        output: `Identity exported${encrypted}:\n${JSON.stringify(jwk, null, 2)}`,
+        output: `Identity exported${label}:\n${JSON.stringify(jwk, null, 2)}`,
       };
     } catch (err) {
       return { success: false, output: '', error: `Export failed: ${err.message}` };

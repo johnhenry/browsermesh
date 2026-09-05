@@ -185,6 +185,33 @@ describe('Identity Tools', () => {
       const result = await tool.execute({ podId: 'nope' });
       assert.equal(result.success, false);
     });
+
+    it('labels a plaintext export as unencrypted', async () => {
+      // The output goes to a model and then to a human. A raw private key
+      // must never appear under an unqualified "Identity exported:".
+      const active = autoMgr.getActive();
+      const result = await tool.execute({ podId: active.podId });
+      assert.equal(result.success, true);
+      assert.match(result.output, /UNENCRYPTED/);
+      assert.ok(result.output.includes('"d"'), 'this really is the private key');
+    });
+
+    it('labels an encrypted export as encrypted and leaks no key material', async () => {
+      const active = autoMgr.getActive();
+      const result = await tool.execute({ podId: active.podId, passphrase: 'pw12345' });
+      assert.equal(result.success, true);
+      assert.match(result.output, /\(encrypted\)/);
+      assert.equal(result.output.includes('UNENCRYPTED'), false);
+      assert.equal(result.output.includes('"d"'), false, 'no private scalar in the output');
+    });
+
+    it('fails loudly on an empty passphrase rather than printing the raw key', async () => {
+      const active = autoMgr.getActive();
+      const result = await tool.execute({ podId: active.podId, passphrase: '' });
+      assert.equal(result.success, false);
+      assert.match(result.error, /passphrase must be a non-empty string/);
+      assert.equal(result.output, '');
+    });
   });
 
   // -- IdentityImportTool ------------------------------------------------
