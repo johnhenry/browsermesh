@@ -888,3 +888,191 @@ describe('IdentitySelector', () => {
     assert.equal(result, null);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Encrypted export must never degrade to plaintext
+//
+// Regression for two ways a private key could be written out in the clear
+// while the API reported success:
+//
+//   1. MeshIdentityManager.export(podId, passphrase) wrapped its whole
+//      encryption block in `try { … } catch { return jwk }`. Any failure —
+//      PBKDF2 unavailable, a hardened WebCrypto, a transient DOMException —
+//      returned the raw private-key JWK, unlabelled. The caller had asked
+//      for encryption and had no signal it had not happened.
+//   2. VaultIdentityStorage encrypted with whatever getPassphrase() returned,
+//      including '' and undefined. PBKDF2 accepts an empty key and
+//      TextEncoder renders undefined as the bytes `undefined`, so the record
+//      looked encrypted and was trivially readable.
+// ---------------------------------------------------------------------------
+
+describe('encrypted export never degrades to plaintext', () => {
+  /** Run `fn` with crypto.subtle.deriveKey broken, then restore it. */
+  const withBrokenDeriveKey = async (fn) => {
+    const real = crypto.subtle.deriveKey;
+    crypto.subtle.deriveKey = async () => {
+      throw new DOMException('PBKDF2 unavailable', 'NotSupportedError');
+    };
+    try {
+      return await fn();
+    } finally {
+      crypto.subtle.deriveKey = real;
+    }
+  };
+
+  it('returns a labelled envelope on the happy path', async () => {
+    const mgr = new MeshIdentityManager();
+    const s = await mgr.create('alice');
+    const out = await mgr.export(s.podId, 'correct horse battery staple');
+
+    assert.equal(out.encrypted, true);
+    assert.equal(out.kdf, 'PBKDF2-SHA256');
+    assert.equal(out.iterations, 310_000);
+    assert.ok(out.salt && out.iv && out.ciphertext);
+    assert.equal(out.d, undefined, 'no private scalar in the envelope');
+    assert.equal(
+      JSON.stringify(out).includes('"d"'),
+      false,
+      'no private key material anywhere in the envelope'
+    );
+  });
+
+  it('throws rather than returning the raw key when encryption fails', async () => {
+    const mgr = new MeshIdentityManager();
+    const s = await mgr.create('alice');
+
+    await withBrokenDeriveKey(async () => {
+      await assert.rejects(
+        () => mgr.export(s.podId, 'a passphrase'),
+        (err) => {
+          assert.match(err.message, /Encrypted export failed/);
+          assert.match(err.message, /private key was not exported/);
+          assert.equal(err.cause?.name, 'NotSupportedError');
+          return true;
+        }
+      );
+    });
+  });
+
+  it('still encrypts normally once WebCrypto recovers', async () => {
+    const mgr = new MeshIdentityManager();
+    const s = await mgr.create('alice');
+    await withBrokenDeriveKey(async () => {
+      await assert.rejects(() => mgr.export(s.podId, 'pw'));
+    });
+    const out = await mgr.export(s.podId, 'pw');
+    assert.equal(out.encrypted, true);
+  });
+
+  it('rejects an empty passphrase instead of exporting in the clear', async () => {
+    const mgr = new MeshIdentityManager();
+    const s = await mgr.create('alice');
+    await assert.rejects(
+      () => mgr.export(s.podId, ''),
+      /passphrase must be a non-empty string/
+    );
+  });
+
+  it('rejects a non-string passphrase', async () => {
+    const mgr = new MeshIdentityManager();
+    const s = await mgr.create('alice');
+    for (const bad of [123, {}, [], true]) {
+      await assert.rejects(
+        () => mgr.export(s.podId, bad),
+        /passphrase must be a non-empty string/,
+        `expected ${JSON.stringify(bad)} to be refused`
+      );
+    }
+  });
+
+  it('still exports in the clear when no passphrase is given at all', async () => {
+    const mgr = new MeshIdentityManager();
+    const s = await mgr.create('alice');
+    for (const omitted of [undefined, null]) {
+      const jwk = await mgr.export(s.podId, omitted);
+      assert.equal(jwk.kty, 'OKP');
+      assert.ok(jwk.d, 'the documented plaintext path still works');
+    }
+  });
+
+  describe('VaultIdentityStorage passphrase floor', () => {
+    const jwk = { kty: 'OKP', crv: 'Ed25519', d: 'SECRET', x: 'PUB' };
+
+    for (const [label, value] of [
+      ['an empty string', ''],
+      ['undefined', undefined],
+      ['null', null],
+      ['a number', 12345],
+    ]) {
+      it(`refuses to save when getPassphrase returns ${label}`, async () => {
+        const inner = new InMemoryIdentityStorage();
+        const vault = new VaultIdentityStorage(inner, { getPassphrase: async () => value });
+        await assert.rejects(
+          () => vault.save('pod1', { privateKeyJwk: jwk }),
+          /getPassphrase must return a non-empty string passphrase/
+        );
+        assert.equal(await inner.load('pod1'), null, 'nothing was written');
+      });
+    }
+
+    it('refuses to load an encrypted record without a real passphrase', async () => {
+      const inner = new InMemoryIdentityStorage();
+      await new VaultIdentityStorage(inner, { getPassphrase: async () => 'realpw' })
+        .save('pod1', { privateKeyJwk: jwk });
+
+      const empty = new VaultIdentityStorage(inner, { getPassphrase: async () => '' });
+      await assert.rejects(
+        () => empty.load('pod1'),
+        /getPassphrase must return a non-empty string passphrase/
+      );
+    });
+
+    it('leaves no plaintext private key at rest', async () => {
+      const inner = new InMemoryIdentityStorage();
+      const vault = new VaultIdentityStorage(inner, { getPassphrase: async () => 'realpw' });
+      await vault.save('pod1', { privateKeyJwk: jwk, label: 'alice' });
+
+      const atRest = JSON.stringify(await inner.load('pod1'));
+      assert.equal(atRest.includes('SECRET'), false, 'private scalar must not be at rest');
+      assert.equal(atRest.includes('alice'), true, 'metadata stays readable by design');
+    });
+
+    it('records its KDF parameters alongside the ciphertext', async () => {
+      const inner = new InMemoryIdentityStorage();
+      const vault = new VaultIdentityStorage(inner, { getPassphrase: async () => 'realpw' });
+      await vault.save('pod1', { privateKeyJwk: jwk });
+
+      const { encryptedPrivateKey } = await inner.load('pod1');
+      assert.equal(encryptedPrivateKey.kdf, 'PBKDF2-SHA256');
+      assert.equal(encryptedPrivateKey.iterations, 310_000);
+    });
+
+    it('opens a record written before the iteration count was recorded', async () => {
+      // Envelopes stored by the previous implementation carry no kdf and no
+      // iterations; they must still decrypt at the documented 310k default.
+      const inner = new InMemoryIdentityStorage();
+      const vault = new VaultIdentityStorage(inner, { getPassphrase: async () => 'realpw' });
+      await vault.save('pod1', { privateKeyJwk: jwk });
+
+      const record = await inner.load('pod1');
+      delete record.encryptedPrivateKey.kdf;
+      delete record.encryptedPrivateKey.iterations;
+      await inner.save('pod1', record);
+
+      const loaded = await vault.load('pod1');
+      assert.deepEqual(loaded.privateKeyJwk, jwk);
+    });
+
+    it('rejects an envelope claiming an unknown KDF', async () => {
+      const inner = new InMemoryIdentityStorage();
+      const vault = new VaultIdentityStorage(inner, { getPassphrase: async () => 'realpw' });
+      await vault.save('pod1', { privateKeyJwk: jwk });
+
+      const record = await inner.load('pod1');
+      record.encryptedPrivateKey.kdf = 'ROT13';
+      await inner.save('pod1', record);
+
+      await assert.rejects(() => vault.load('pod1'), /Unsupported key derivation function: ROT13/);
+    });
+  });
+});

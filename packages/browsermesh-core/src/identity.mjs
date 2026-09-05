@@ -30,6 +30,122 @@ export { PodIdentity, derivePodId, encodeBase64url, decodeBase64url };
 const VAULT_PBKDF2_ITERATIONS = 310_000;
 const VAULT_SALT_BYTES = 16;
 const VAULT_IV_BYTES = 12;
+const VAULT_KDF = 'PBKDF2-SHA256';
+
+/**
+ * Reject a passphrase that would not actually protect anything.
+ *
+ * PBKDF2 happily accepts an empty key, and `TextEncoder` turns `undefined`
+ * into the five bytes `undefined`, so a missing passphrase produces a
+ * well-formed ciphertext that anyone can derive the key for. Both cases have
+ * to be refused rather than encrypted.
+ *
+ * @param {*} passphrase
+ * @param {string} source - Where the passphrase came from, for the message
+ * @returns {string}
+ * @throws {TypeError}
+ */
+function requirePassphrase(passphrase, source) {
+  if (typeof passphrase !== 'string' || passphrase.length === 0) {
+    throw new TypeError(
+      `${source} must return a non-empty string passphrase, got ` +
+      `${passphrase === null ? 'null' : typeof passphrase}` +
+      `${typeof passphrase === 'string' ? ' of length 0' : ''}`
+    );
+  }
+  return passphrase;
+}
+
+/**
+ * PBKDF2(SHA-256) → AES-256-GCM over a UTF-8 string.
+ *
+ * The KDF name and iteration count travel with the ciphertext so a future
+ * change of parameters does not orphan envelopes written under the old ones.
+ *
+ * @param {string} plaintext
+ * @param {string} passphrase
+ * @returns {Promise<{ kdf: string, iterations: number, salt: string, iv: string, ciphertext: string }>}
+ */
+async function encryptWithPassphrase(plaintext, passphrase) {
+  const enc = new TextEncoder();
+  const salt = crypto.getRandomValues(new Uint8Array(VAULT_SALT_BYTES));
+  const iv = crypto.getRandomValues(new Uint8Array(VAULT_IV_BYTES));
+
+  const baseKey = await crypto.subtle.importKey(
+    'raw',
+    enc.encode(passphrase),
+    'PBKDF2',
+    false,
+    ['deriveKey']
+  );
+
+  const aesKey = await crypto.subtle.deriveKey(
+    { name: 'PBKDF2', salt, iterations: VAULT_PBKDF2_ITERATIONS, hash: 'SHA-256' },
+    baseKey,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt']
+  );
+
+  const ciphertext = new Uint8Array(
+    await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, aesKey, enc.encode(plaintext))
+  );
+
+  return {
+    kdf: VAULT_KDF,
+    iterations: VAULT_PBKDF2_ITERATIONS,
+    salt: encodeBase64url(salt),
+    iv: encodeBase64url(iv),
+    ciphertext: encodeBase64url(ciphertext),
+  };
+}
+
+/**
+ * Inverse of {@link encryptWithPassphrase}.
+ *
+ * `iterations` is read from the envelope so blobs written before the count
+ * was recorded (and before it was raised to match the documented 310k) still
+ * open.
+ *
+ * @param {{ kdf?: string, iterations?: number, salt: string, iv: string, ciphertext: string }} envelope
+ * @param {string} passphrase
+ * @returns {Promise<string>}
+ */
+async function decryptWithPassphrase(envelope, passphrase) {
+  const { kdf, iterations, salt, iv, ciphertext } = envelope;
+  if (kdf !== undefined && kdf !== VAULT_KDF) {
+    throw new Error(`Unsupported key derivation function: ${kdf}`);
+  }
+
+  const baseKey = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(passphrase),
+    'PBKDF2',
+    false,
+    ['deriveKey']
+  );
+
+  const aesKey = await crypto.subtle.deriveKey(
+    {
+      name: 'PBKDF2',
+      salt: decodeBase64url(salt),
+      iterations: iterations ?? VAULT_PBKDF2_ITERATIONS,
+      hash: 'SHA-256',
+    },
+    baseKey,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['decrypt']
+  );
+
+  const plaintext = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: decodeBase64url(iv) },
+    aesKey,
+    decodeBase64url(ciphertext)
+  );
+
+  return new TextDecoder().decode(plaintext);
+}
 
 // ---------------------------------------------------------------------------
 // base58btc encoding (Bitcoin alphabet) — used for W3C did:key
@@ -286,62 +402,54 @@ export class MeshIdentityManager {
   /**
    * Export an identity as a JWK.
    *
-   * When a passphrase is provided and PBKDF2 + AES-GCM are available, the
-   * JWK is encrypted. Otherwise the raw JWK is returned (suitable for tests
-   * or environments without PBKDF2).
+   * Called with no passphrase, this returns the **raw private key** — that
+   * is the documented plaintext-export path, and the caller is responsible
+   * for what happens to it next.
+   *
+   * Called with a passphrase, it returns an encrypted envelope
+   * (`{ encrypted: true, kdf, iterations, salt, iv, ciphertext }`) or it
+   * throws. It never quietly hands back the plaintext key instead: a caller
+   * who asked for encryption and got an unlabelled JWK would have no way to
+   * tell, and would go on to write, paste or QR-encode a private key it
+   * believed was protected.
    *
    * @param {string} podId
-   * @param {string} [passphrase] - Optional encryption passphrase
-   * @returns {Promise<object>} JWK (possibly encrypted)
+   * @param {string} [passphrase] - Encryption passphrase; must be a non-empty
+   *   string when given. Omit it to export in the clear.
+   * @returns {Promise<object>} The raw JWK, or an encrypted envelope
+   * @throws {TypeError} If `passphrase` is given but is not a non-empty string
+   * @throws {Error} If encryption was requested and could not be performed
    */
   async export(podId, passphrase) {
     const entry = this.#identities.get(podId);
     if (!entry) throw new Error(`Unknown identity: ${podId}`);
 
+    if (passphrase !== undefined && passphrase !== null) {
+      if (typeof passphrase !== 'string' || passphrase.length === 0) {
+        throw new TypeError(
+          'passphrase must be a non-empty string; omit it to export the key in the clear'
+        );
+      }
+    }
+
     const jwk = await crypto.subtle.exportKey('jwk', entry.identity.keyPair.privateKey);
 
-    if (!passphrase) return jwk;
+    if (passphrase === undefined || passphrase === null) return jwk;
 
-    // Attempt PBKDF2 + AES-GCM encryption
+    let envelope;
     try {
-      const enc = new TextEncoder();
-      const salt = crypto.getRandomValues(new Uint8Array(16));
-      const iv = crypto.getRandomValues(new Uint8Array(12));
-
-      const baseKey = await crypto.subtle.importKey(
-        'raw',
-        enc.encode(passphrase),
-        'PBKDF2',
-        false,
-        ['deriveKey']
+      envelope = await encryptWithPassphrase(JSON.stringify(jwk), passphrase);
+    } catch (err) {
+      // Deliberately not falling back to the plaintext JWK. Encryption was
+      // asked for; if it cannot be done, the caller has to know.
+      throw new Error(
+        `Encrypted export failed for ${podId}: ${err?.message || err}. ` +
+        'The private key was not exported.',
+        { cause: err }
       );
-
-      const aesKey = await crypto.subtle.deriveKey(
-        { name: 'PBKDF2', salt, iterations: 100_000, hash: 'SHA-256' },
-        baseKey,
-        { name: 'AES-GCM', length: 256 },
-        false,
-        ['encrypt']
-      );
-
-      const ciphertext = new Uint8Array(
-        await crypto.subtle.encrypt(
-          { name: 'AES-GCM', iv },
-          aesKey,
-          enc.encode(JSON.stringify(jwk))
-        )
-      );
-
-      return {
-        encrypted: true,
-        salt: encodeBase64url(salt),
-        iv: encodeBase64url(iv),
-        ciphertext: encodeBase64url(ciphertext),
-      };
-    } catch {
-      // PBKDF2 or AES-GCM not available -- return raw JWK
-      return jwk;
     }
+
+    return { encrypted: true, ...envelope };
   }
 
   // -- Lookup & Enumeration -----------------------------------------------
@@ -781,6 +889,11 @@ export class IndexedDBIdentityStorage {
  * Wraps another identity storage with passphrase-based encryption.
  * Only the privateKey field is encrypted; publicKey + metadata stored cleartext.
  * Uses PBKDF2(310k, SHA-256) → AES-256-GCM.
+ *
+ * `getPassphrase` must resolve to a non-empty string. An empty string or a
+ * missing value is refused rather than used: PBKDF2 accepts an empty key and
+ * `TextEncoder` renders `undefined` as the bytes `undefined`, either of which
+ * would write a record that looks encrypted and is trivially readable.
  */
 export class VaultIdentityStorage {
   /** @type {InMemoryIdentityStorage|IndexedDBIdentityStorage} */
@@ -813,44 +926,15 @@ export class VaultIdentityStorage {
       return this.#inner.save(podId, data);
     }
 
-    const passphrase = await this.#getPassphrase();
     const record = { ...data };
 
     if (record.privateKeyJwk) {
-      const enc = new TextEncoder();
-      const salt = crypto.getRandomValues(new Uint8Array(VAULT_SALT_BYTES));
-      const iv = crypto.getRandomValues(new Uint8Array(VAULT_IV_BYTES));
-
-      const baseKey = await crypto.subtle.importKey(
-        'raw',
-        enc.encode(passphrase),
-        'PBKDF2',
-        false,
-        ['deriveKey']
+      const passphrase = requirePassphrase(await this.#getPassphrase(), 'getPassphrase');
+      record.encryptedPrivateKey = await encryptWithPassphrase(
+        JSON.stringify(record.privateKeyJwk),
+        passphrase
       );
-
-      const aesKey = await crypto.subtle.deriveKey(
-        { name: 'PBKDF2', salt, iterations: VAULT_PBKDF2_ITERATIONS, hash: 'SHA-256' },
-        baseKey,
-        { name: 'AES-GCM', length: 256 },
-        false,
-        ['encrypt']
-      );
-
-      const ciphertext = new Uint8Array(
-        await crypto.subtle.encrypt(
-          { name: 'AES-GCM', iv },
-          aesKey,
-          enc.encode(JSON.stringify(record.privateKeyJwk))
-        )
-      );
-
       record.privateKeyJwk = null;
-      record.encryptedPrivateKey = {
-        salt: encodeBase64url(salt),
-        iv: encodeBase64url(iv),
-        ciphertext: encodeBase64url(ciphertext),
-      };
     }
 
     return this.#inner.save(podId, record);
@@ -869,33 +953,10 @@ export class VaultIdentityStorage {
     if (podId === '__meta__') return record;
 
     if (record.encryptedPrivateKey) {
-      const passphrase = await this.#getPassphrase();
-      const enc = new TextEncoder();
-      const { salt, iv, ciphertext } = record.encryptedPrivateKey;
-
-      const baseKey = await crypto.subtle.importKey(
-        'raw',
-        enc.encode(passphrase),
-        'PBKDF2',
-        false,
-        ['deriveKey']
+      const passphrase = requirePassphrase(await this.#getPassphrase(), 'getPassphrase');
+      record.privateKeyJwk = JSON.parse(
+        await decryptWithPassphrase(record.encryptedPrivateKey, passphrase)
       );
-
-      const aesKey = await crypto.subtle.deriveKey(
-        { name: 'PBKDF2', salt: decodeBase64url(salt), iterations: VAULT_PBKDF2_ITERATIONS, hash: 'SHA-256' },
-        baseKey,
-        { name: 'AES-GCM', length: 256 },
-        false,
-        ['decrypt']
-      );
-
-      const plaintext = await crypto.subtle.decrypt(
-        { name: 'AES-GCM', iv: decodeBase64url(iv) },
-        aesKey,
-        decodeBase64url(ciphertext)
-      );
-
-      record.privateKeyJwk = JSON.parse(new TextDecoder().decode(plaintext));
       delete record.encryptedPrivateKey;
     }
 
