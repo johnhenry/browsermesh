@@ -27,3 +27,16 @@ jobs:
 
       - name: Run tests
         run: npm test
+
+      # Real WebRTC peers, run on their own after the parallel suite has
+      # finished. These stall under machine load rather than failing: 0/40
+      # idle, 6/40 immediately after a heavy run, every stall the full 15s
+      # timeout. `turbo run test --concurrency=4` is exactly that loaded
+      # condition, so they are kept out of it and serialised against each
+      # other too (two of them running together failed 2 runs in 3). See #26.
+      - name: Run real-peer WebRTC tests (serialized)
+        # Fail rather than skip if the native binding is missing -- a skipped
+        # suite reports success, which would make this step decorative.
+        env:
+          REQUIRE_REAL_PEER: '1'
+        run: npm run test:real-peer

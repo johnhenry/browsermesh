@@ -304,7 +304,7 @@ export class WebRTCPeerConnection {
    * rejection terminates a Node process by default and raises an uncaught
    * error event in a browser, so one bad candidate from a peer could take the
    * process down. Verified against two real RTCPeerConnections; see
-   * `test/webrtc-real-peer.test.mjs`.
+   * `test/real-peer/webrtc.test.mjs`.
    *
    * A rejected candidate is not a connection failure: ICE is designed to try
    * many candidates and keep the ones that work. It is therefore logged and
@@ -515,7 +515,7 @@ export class WebRTCPeerConnection {
     // remote disconnect, and with a real WebRTC stack it also keeps the
     // process alive: a Node test that connected two real peers and let one
     // hang up would never exit. Verified against two real
-    // RTCPeerConnections; see test/webrtc-real-peer.test.mjs.
+    // RTCPeerConnections; see test/real-peer/webrtc.test.mjs.
     // Releasing the DataChannel fires its onclose, and onclose routes back
     // into close() -- that is how a remote hangup releases our peer
     // connection. Re-entering here before #setState('closed') has run means

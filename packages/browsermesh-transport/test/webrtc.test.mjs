@@ -844,7 +844,7 @@ describe('WebRTCTransportAdapter', () => {
 // ── issue #13: renegotiation, ICE restart, and transient disconnects ───
 //
 // The three behaviours these pin, all measured against two real peers in
-// test/webrtc-renegotiation-real-peer.test.mjs before being written here:
+// test/real-peer/renegotiation.test.mjs before being written here:
 //
 //   1. handleOffer() replaced the peer connection unconditionally, so the
 //      answer to an ICE-restart offer carried a fresh connection's ICE

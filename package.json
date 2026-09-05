@@ -9,6 +9,7 @@
   ],
   "scripts": {
     "test": "turbo run test --concurrency=4",
+    "test:real-peer": "npm run test:real-peer --workspace=@johnhenry/browsermesh-transport",
     "changeset": "changeset",
     "version-packages": "changeset version",
     "release": "changeset publish",
