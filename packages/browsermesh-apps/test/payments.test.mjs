@@ -1158,3 +1158,218 @@ describe('PaymentRouter escrow sweeper', () => {
     assert.ok(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// PAYMENT_OPEN carries the deposit and the channel id (issue #2)
+// ---------------------------------------------------------------------------
+//
+// Before this, `broadcastOpen()` put only `{ remotePodId, capacity }` on the
+// wire. Two independently-`.open()`d instances of the same logical channel
+// could therefore never agree on anything:
+//
+//   A: channelId=ch_pod-alice:pod-bob_..._1 state=open  local=250 remote=0
+//   B: channelId=ch_pod-alice:pod-bob_..._2 state=idle  local=0   remote=0
+//   B.receive(update) THREW: Cannot receive in state: idle
+//
+// Two separate defects, both invisible without a mirrored channel to compare
+// against: the receiver never learned the deposit, so its `remoteBalance`
+// started at 0 while the initiator's `localBalance` started at the deposit;
+// and it generated its own channelId, which every signed update and close
+// claim is keyed by.
+
+describe('PAYMENT_OPEN convergence', () => {
+  /** Two routers whose broadcasts land in each other's handlers. */
+  function linkRouters(localA = 'pod-alice', localB = 'pod-bob') {
+    const handlersA = new Map();
+    const handlersB = new Map();
+    const wire = [];
+    const routerA = new PaymentRouter(localA);
+    const routerB = new PaymentRouter(localB);
+    routerA.wireTransport(
+      (type, payload) => { wire.push({ from: localA, type, payload }); handlersB.get(type)?.(payload, localA); },
+      (type, handler) => handlersA.set(type, handler),
+    );
+    routerB.wireTransport(
+      (type, payload) => { wire.push({ from: localB, type, payload }); handlersA.get(type)?.(payload, localB); },
+      (type, handler) => handlersB.set(type, handler),
+    );
+    return { routerA, routerB, wire };
+  }
+
+  it('the wire message carries the deposit and the channel id', () => {
+    const { routerA, wire } = linkRouters();
+    const chA = routerA.openChannel('pod-bob', 500);
+    chA.open(250);
+    routerA.broadcastOpen('pod-bob', 500);
+
+    const msg = wire.find((m) => m.type === PAYMENT_OPEN);
+    assert.ok(msg, 'a PAYMENT_OPEN was broadcast');
+    assert.equal(msg.payload.remotePodId, 'pod-bob');
+    assert.equal(msg.payload.capacity, 500);
+    assert.equal(msg.payload.deposit, 250);
+    assert.equal(msg.payload.channelId, chA.channelId);
+  });
+
+  it('two independently-opened channels converge on the same starting balances', () => {
+    const { routerA, routerB } = linkRouters();
+    const chA = routerA.openChannel('pod-bob', 500);
+    chA.open(250);
+    routerA.broadcastOpen('pod-bob', 500);
+
+    const chB = routerB.getChannel('pod-alice');
+    assert.ok(chB, 'the receiver mirrored the channel');
+
+    // The invariant that could not previously hold: each side's view of the
+    // other is the other's view of itself.
+    assert.equal(chB.channelId, chA.channelId);
+    assert.equal(chB.state, 'open');
+    assert.equal(chB.remoteBalance, chA.localBalance);
+    assert.equal(chB.localBalance, chA.remoteBalance);
+    assert.equal(chB.capacity, chA.capacity);
+  });
+
+  it('a payment made after the open handshake is accepted by the mirror', () => {
+    // The consequence of the divergence, and the reason it is worth fixing:
+    // on main this threw 'Cannot receive in state: idle', and after opening
+    // the mirror by hand it would have thrown 'Channel ID mismatch'.
+    const { routerA, routerB } = linkRouters();
+    const chA = routerA.openChannel('pod-bob', 500);
+    chA.open(250);
+    routerA.broadcastOpen('pod-bob', 500);
+    const chB = routerB.getChannel('pod-alice');
+
+    const update = chA.pay(100);
+    chB.receive(update);
+
+    assert.equal(chA.localBalance, 150);
+    assert.equal(chA.remoteBalance, 100);
+    assert.equal(chB.localBalance, 100);
+    assert.equal(chB.remoteBalance, 150);
+    // Still mirrored after the payment.
+    assert.equal(chB.remoteBalance, chA.localBalance);
+    assert.equal(chB.localBalance, chA.remoteBalance);
+  });
+
+  it('the mirror is built from the wire message, not from local defaults', () => {
+    const { routerA, routerB } = linkRouters();
+    const chA = routerA.openChannel('pod-bob', 750);
+    chA.open(300);
+    // Explicit overrides take precedence over the local channel's values.
+    routerA.broadcastOpen('pod-bob', 750, { deposit: 42, channelId: 'ch_explicit' });
+
+    const chB = routerB.getChannel('pod-alice');
+    assert.equal(chB.channelId, 'ch_explicit');
+    assert.equal(chB.remoteBalance, 42);
+    assert.equal(chB.capacity, 750);
+  });
+
+  it('an old-format message with no deposit or channelId still opens a channel', () => {
+    // Wire compatibility: a peer running the previous code sends only
+    // { remotePodId, capacity }. That must behave exactly as it did before —
+    // a channel is created and left idle — rather than throwing.
+    const handlers = new Map();
+    const router = new PaymentRouter('pod-bob');
+    router.wireTransport(() => {}, (type, handler) => handlers.set(type, handler));
+
+    handlers.get(PAYMENT_OPEN)({ remotePodId: 'pod-bob', capacity: 500 }, 'pod-alice');
+
+    const ch = router.getChannel('pod-alice');
+    assert.ok(ch);
+    assert.equal(ch.state, 'idle');
+    assert.equal(ch.capacity, 500);
+    assert.equal(ch.localBalance, 0);
+    assert.equal(ch.remoteBalance, 0);
+  });
+
+  it('ignores a PAYMENT_OPEN addressed to somebody else', () => {
+    const handlers = new Map();
+    const router = new PaymentRouter('pod-bob');
+    router.wireTransport(() => {}, (type, handler) => handlers.set(type, handler));
+
+    handlers.get(PAYMENT_OPEN)(
+      { remotePodId: 'pod-carol', capacity: 500, deposit: 10, channelId: 'ch_x' },
+      'pod-alice',
+    );
+    assert.equal(router.getChannel('pod-alice'), null);
+  });
+
+  it('ignores a nonsensical deposit rather than opening a bad channel', () => {
+    for (const deposit of [-5, Number.NaN, Infinity, '100', null]) {
+      const handlers = new Map();
+      const router = new PaymentRouter('pod-bob');
+      router.wireTransport(() => {}, (type, handler) => handlers.set(type, handler));
+      handlers.get(PAYMENT_OPEN)(
+        { remotePodId: 'pod-bob', capacity: 500, deposit, channelId: 'ch_y' },
+        'pod-alice',
+      );
+      const ch = router.getChannel('pod-alice');
+      assert.ok(ch, `channel still created for deposit ${String(deposit)}`);
+      assert.equal(ch.state, 'idle', `left idle for deposit ${String(deposit)}`);
+      assert.equal(ch.remoteBalance, 0);
+    }
+  });
+
+  it('a deposit above capacity leaves the mirror idle rather than over-funded', () => {
+    const handlers = new Map();
+    const router = new PaymentRouter('pod-bob');
+    router.wireTransport(() => {}, (type, handler) => handlers.set(type, handler));
+    handlers.get(PAYMENT_OPEN)(
+      { remotePodId: 'pod-bob', capacity: 100, deposit: 500, channelId: 'ch_z' },
+      'pod-alice',
+    );
+    const ch = router.getChannel('pod-alice');
+    assert.equal(ch.state, 'idle');
+    assert.equal(ch.remoteBalance, 0);
+  });
+});
+
+describe('PaymentChannel.open — remoteDeposit', () => {
+  it('one-argument open() is unchanged', () => {
+    const ch = new PaymentChannel('pod-a', 'pod-b', { capacity: 500 });
+    ch.open(100);
+    assert.equal(ch.localBalance, 100);
+    assert.equal(ch.remoteBalance, 0);
+    assert.equal(ch.state, 'open');
+  });
+
+  it('still rejects a non-positive one-argument deposit with the same message', () => {
+    const ch = new PaymentChannel('pod-a', 'pod-b', { capacity: 500 });
+    assert.throws(() => ch.open(0), /Initial deposit must be positive/);
+    assert.throws(() => ch.open(-10), RangeError);
+    assert.throws(() => ch.open('100'), RangeError);
+    assert.throws(() => ch.open(Number.NaN), RangeError);
+    assert.equal(ch.state, 'idle');
+  });
+
+  it('credits the counterparty deposit to remoteBalance', () => {
+    const ch = new PaymentChannel('pod-b', 'pod-a', { capacity: 500 });
+    ch.open(0, 250);
+    assert.equal(ch.localBalance, 0);
+    assert.equal(ch.remoteBalance, 250);
+    assert.equal(ch.state, 'open');
+  });
+
+  it('supports both sides funding the channel', () => {
+    const ch = new PaymentChannel('pod-a', 'pod-b', { capacity: 500 });
+    ch.open(200, 150);
+    assert.equal(ch.localBalance, 200);
+    assert.equal(ch.remoteBalance, 150);
+  });
+
+  it('enforces capacity against the total, not just the local side', () => {
+    const ch = new PaymentChannel('pod-a', 'pod-b', { capacity: 500 });
+    assert.throws(() => ch.open(300, 300), /exceeds capacity 500/);
+    assert.equal(ch.state, 'idle');
+  });
+
+  it('rejects a negative remote deposit', () => {
+    const ch = new PaymentChannel('pod-a', 'pod-b', { capacity: 500 });
+    assert.throws(() => ch.open(100, -1), /Remote deposit must not be negative/);
+  });
+
+  it('a channel funded only by the remote side cannot pay out', () => {
+    const ch = new PaymentChannel('pod-b', 'pod-a', { capacity: 500 });
+    ch.open(0, 250);
+    assert.throws(() => ch.pay(1), /Insufficient channel balance/);
+  });
+});
