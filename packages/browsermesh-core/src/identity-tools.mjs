@@ -193,28 +193,38 @@ export class IdentityExportTool extends BrowserTool {
 export class IdentityImportTool extends BrowserTool {
   get name() { return 'identity_import'; }
   get description() {
-    return 'Import an identity from a JWK private key.';
+    return 'Import an identity from a JWK private key, or from an encrypted export.';
   }
   get parameters() {
     return {
       type: 'object',
       properties: {
-        keyData: { type: 'object', description: 'JWK private key object' },
+        keyData: {
+          type: 'object',
+          description: 'JWK private key object, or an encrypted export envelope',
+        },
         label: { type: 'string', description: 'Human-readable label' },
+        // identity_export takes a passphrase; without the matching parameter
+        // here, everything that tool encrypts is unimportable through the
+        // tool interface.
+        passphrase: {
+          type: 'string',
+          description: 'Passphrase, required when keyData is an encrypted export',
+        },
       },
       required: ['keyData'],
     };
   }
   get permission() { return 'approve'; }
 
-  async execute({ keyData, label }) {
+  async execute({ keyData, label, passphrase }) {
     try {
       const mgr = identityToolsContext.getAutoIdMgr();
       if (!mgr) {
         return { success: false, output: '', error: 'Identity manager not initialized.' };
       }
 
-      const summary = await mgr.identityManager.import(keyData, label || 'imported');
+      const summary = await mgr.identityManager.import(keyData, label || 'imported', { passphrase });
       await mgr.identityManager.save();
       return {
         success: true,

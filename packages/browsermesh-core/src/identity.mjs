@@ -332,20 +332,70 @@ export class MeshIdentityManager {
   }
 
   /**
-   * Import an identity from a JWK private key.
+   * Import an identity from a JWK private key, or from an encrypted export.
    *
-   * @param {object} privateKeyJwk - Ed25519 private key in JWK format
+   * Accepts either shape {@link MeshIdentityManager#export} produces: a raw
+   * JWK, or the `{ encrypted: true, ... }` envelope. Before this took the
+   * envelope, an encrypted export was write-only -- the safe thing to do with
+   * a backup produced a backup this library could not restore.
+   *
+   * The passphrase travels in `opts` rather than as a fourth positional,
+   * because `opts` is already the third parameter and `import(jwk, label,
+   * undefined, pw)` is not a signature anyone should have to write.
+   *
+   * @param {object} keyData - An Ed25519 private key JWK, or an encrypted
+   *   envelope from `export(podId, passphrase)`
    * @param {string} label - Human-readable name
    * @param {object} [opts]
+   * @param {string} [opts.passphrase] - Required when `keyData` is encrypted
    * @param {object} [opts.metadata]
    * @returns {Promise<IdentitySummary>}
+   * @throws {TypeError} If an encrypted envelope is given without a passphrase
+   * @throws {Error} If the passphrase is wrong or the envelope is damaged
    */
-  async import(privateKeyJwk, label, opts = {}) {
+  async import(keyData, label, opts = {}) {
     if (!label || typeof label !== 'string') {
       throw new Error('Label is required and must be a non-empty string');
     }
-    if (!privateKeyJwk || typeof privateKeyJwk !== 'object') {
+    if (!keyData || typeof keyData !== 'object') {
       throw new Error('privateKeyJwk must be a valid JWK object');
+    }
+
+    let privateKeyJwk = keyData;
+    if (keyData.encrypted) {
+      const passphrase = requirePassphrase(opts?.passphrase, 'opts.passphrase');
+      // One message for a wrong passphrase and for a damaged envelope alike.
+      // AES-GCM cannot tell them apart anyway, and reporting "decrypted but
+      // the contents were not a key" would confirm to someone guessing that
+      // a passphrase was correct.
+      const unreadable = (err) => new Error(
+        'Could not read the encrypted identity export: the passphrase is ' +
+        'wrong, or the export is damaged.',
+        { cause: err }
+      );
+      let plaintext;
+      try {
+        plaintext = await decryptWithPassphrase(keyData, passphrase);
+      } catch (err) {
+        throw unreadable(err);
+      }
+      try {
+        privateKeyJwk = JSON.parse(plaintext);
+      } catch (err) {
+        throw unreadable(err);
+      }
+      if (!privateKeyJwk || typeof privateKeyJwk !== 'object') {
+        throw unreadable(new Error('decrypted payload was not a JWK object'));
+      }
+    } else if (opts?.passphrase !== undefined && opts?.passphrase !== null) {
+      // A caller who supplied a passphrase believes this blob is encrypted.
+      // Importing it quietly would hand them an identity restored from a
+      // plaintext private key while they believed it had been protected --
+      // the same confusion #18 was about, arriving from the other direction.
+      throw new Error(
+        'A passphrase was supplied but this export is not encrypted. ' +
+        'Import it without a passphrase, or check you have the right file.'
+      );
     }
 
     // Import the private key
