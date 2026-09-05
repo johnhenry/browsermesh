@@ -34,6 +34,71 @@ export const CAP_DELEGATE = 0xDE;
 export const WASM_SANDBOX_CTRL = 0xDF;
 
 // ---------------------------------------------------------------------------
+// Attenuation invariants
+// ---------------------------------------------------------------------------
+
+/** Characters that end one segment of a resource identifier. */
+const RESOURCE_SEPARATORS = new Set(['/', ':']);
+
+/**
+ * Whether `childResource` falls entirely inside `parentResource`.
+ *
+ * Three ways a child can be covered:
+ * - it is the same resource;
+ * - the parent ends in `*` and the child extends what comes before it;
+ * - it extends the parent by whole segments — `fs:/data` covers
+ *   `fs:/data/reports`, because the extension begins at a separator.
+ *
+ * That last clause is where a bare `startsWith` goes wrong. `fs:/data`
+ * "starts with"-covers `fs:/database`, and `svc://a` covers
+ * `svc://anything-at-all`: both are unrelated resources that merely share
+ * a character prefix. Requiring the extension to start at a separator (or
+ * the parent to end at one) keeps the sub-path case and drops those.
+ *
+ * A literal parent with no wildcard also used to fall through to
+ * `parentResource.slice(0, -1)`, chopping a real character off the scope
+ * and accepting anything sharing the truncated prefix. Both branches of
+ * that `if/else` were byte-identical; only the wildcard one was ever meant
+ * to exist.
+ *
+ * Shared by {@link CapabilityToken#attenuate} and
+ * {@link CapabilityChain#verify} so the two cannot drift apart: a chain
+ * arriving over the wire has to satisfy the same rule attenuate() enforces
+ * locally.
+ *
+ * @param {string} parentResource
+ * @param {string} childResource
+ * @returns {boolean}
+ */
+export function resourceCovers(parentResource, childResource) {
+  if (childResource === parentResource) return true;
+
+  if (parentResource.endsWith('*')) {
+    return childResource.startsWith(parentResource.slice(0, -1));
+  }
+
+  if (!childResource.startsWith(parentResource)) return false;
+  if (RESOURCE_SEPARATORS.has(parentResource.at(-1))) return true;
+  return RESOURCE_SEPARATORS.has(childResource[parentResource.length]);
+}
+
+/**
+ * Whether `childExpiry` is no later than `parentExpiry`.
+ *
+ * `null` means "no expiry". A parent without one permits any child expiry;
+ * a parent with one requires the child to have an expiry that is not later.
+ *
+ * @param {number|null} parentExpiry
+ * @param {number|null} childExpiry
+ * @returns {boolean}
+ */
+export function expiryNarrows(parentExpiry, childExpiry) {
+  if (parentExpiry === null || parentExpiry === undefined) return true;
+  if (childExpiry === null || childExpiry === undefined) return false;
+  return childExpiry <= parentExpiry;
+}
+
+// ---------------------------------------------------------------------------
 // CapabilityToken
 // ---------------------------------------------------------------------------
 
@@ -152,19 +217,8 @@ export class CapabilityToken {
 
     // Resource must be same or narrower (prefix match)
     const childResource = resource || this.resource;
-    if (childResource !== this.resource && !childResource.startsWith(this.resource)) {
-      if (!this.resource.endsWith('*')) {
-        // Check if parent has wildcard
-        const parentBase = this.resource.slice(0, -1);
-        if (!childResource.startsWith(parentBase)) {
-          throw new Error('Cannot widen resource scope beyond parent');
-        }
-      } else {
-        const parentBase = this.resource.slice(0, -1);
-        if (!childResource.startsWith(parentBase)) {
-          throw new Error('Cannot widen resource scope beyond parent');
-        }
-      }
+    if (!resourceCovers(this.resource, childResource)) {
+      throw new Error('Cannot widen resource scope beyond parent');
     }
 
     // Expiry must be ≤ parent expiry
@@ -179,8 +233,20 @@ export class CapabilityToken {
       throw new Error('Cannot extend max depth beyond parent');
     }
 
-    // Merge constraints (child can only add, not remove)
+    // Merge constraints (child can only add, not remove).
+    //
+    // The spread lets a child overwrite a value it inherited, which is fine
+    // for constraints nothing enforces but not for maxCalls: that is the one
+    // CapabilityValidator.validate() actually checks, so raising it in a
+    // child is an amplification dressed up as a merge.
     const mergedConstraints = { ...this.constraints, ...constraints };
+    if (
+      this.constraints.maxCalls !== undefined &&
+      (mergedConstraints.maxCalls === undefined ||
+        mergedConstraints.maxCalls > this.constraints.maxCalls)
+    ) {
+      throw new Error('Cannot raise maxCalls beyond parent');
+    }
 
     return new CapabilityToken({
       issuer: this.holder,
@@ -277,8 +343,16 @@ export class CapabilityChain {
    * Verify chain integrity:
    * 1. Each token's parentId matches the previous token's id
    * 2. Permissions only narrow (never widen)
-   * 3. Depth increments correctly
-   * 4. No expired or revoked tokens (if checkValidity)
+   * 3. The resource scope only narrows (never widens)
+   * 4. The expiry only narrows (never extends)
+   * 5. Depth increments correctly
+   * 6. No expired or revoked tokens (if checkValidity)
+   *
+   * 3 and 4 are the reason this method cannot just trust `attenuate()`:
+   * a chain reaching this code came from {@link CapabilityChain.fromJSON}
+   * or from `append()`, neither of which builds its tokens by attenuation.
+   * Without these checks a chain could widen `fs:///docs/public/` to `*`
+   * and a one-second expiry to ten years and still verify.
    *
    * @param {boolean} [checkValidity=true]
    * @returns {{ valid: boolean, error?: string, brokenAt?: number }}
@@ -316,6 +390,24 @@ export class CapabilityChain {
           if (!prev.permissions.includes(perm)) {
             return { valid: false, error: `Permission amplification at index ${i}: "${perm}"`, brokenAt: i };
           }
+        }
+
+        // Resource scope must be covered by the parent's
+        if (!resourceCovers(prev.resource, token.resource)) {
+          return {
+            valid: false,
+            error: `Resource amplification at index ${i}: "${token.resource}" is not within "${prev.resource}"`,
+            brokenAt: i,
+          };
+        }
+
+        // Expiry must not reach past the parent's
+        if (!expiryNarrows(prev.expiresAt, token.expiresAt)) {
+          return {
+            valid: false,
+            error: `Expiry amplification at index ${i}: ${token.expiresAt} is later than parent ${prev.expiresAt}`,
+            brokenAt: i,
+          };
         }
       }
     }
