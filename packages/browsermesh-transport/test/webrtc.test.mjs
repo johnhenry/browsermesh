@@ -36,6 +36,8 @@ class MockRTCPeerConnection {
   ondatachannel = null
   onconnectionstatechange = null
   connectionState = 'new'
+  signalingState = 'stable'
+  closed = false
   _lastCandidate = null
 
   constructor(config) {
@@ -69,6 +71,11 @@ class MockRTCPeerConnection {
     this.#remoteDesc = desc
   }
 
+  /** The real API exposes the applied descriptions; renegotiation detection
+   * reads the remote one when an offer arrives without an explicit marker. */
+  get remoteDescription() { return this.#remoteDesc }
+  get localDescription() { return this.#localDesc }
+
   addIceCandidate(c) {
     this._lastCandidate = c
   }
@@ -83,7 +90,7 @@ class MockRTCPeerConnection {
     return new Map(this._mockStatsEntries.map((entry, i) => [`stat-${i}`, entry]))
   }
 
-  close() {}
+  close() { this.closed = true }
 }
 
 globalThis.RTCPeerConnection = MockRTCPeerConnection
@@ -93,6 +100,7 @@ globalThis.RTCPeerConnection = MockRTCPeerConnection
 // ---------------------------------------------------------------------------
 
 import {
+  sdpSessionId,
   supportsWebRTC,
   WebRTCPeerConnection,
   WebRTCMeshManager,
@@ -734,5 +742,286 @@ describe('WebRTCTransportAdapter', () => {
     assert.equal(json.type, 'webrtc')
     assert.equal(json.state, 'disconnected')
     assert.equal(json.latency, 0)
+  })
+})
+
+// ── issue #13: renegotiation, ICE restart, and transient disconnects ───
+//
+// The three behaviours these pin, all measured against two real peers in
+// test/webrtc-renegotiation-real-peer.test.mjs before being written here:
+//
+//   1. handleOffer() replaced the peer connection unconditionally, so the
+//      answer to an ICE-restart offer carried a fresh connection's ICE
+//      credentials and DTLS fingerprint and the restarting side rejected it.
+//   2. reconnect() moved the state to 'connecting' as its first act, so
+//      calling it on a healthy connection made isOpen false — and therefore
+//      broadcast() skip the peer — before anything had gone wrong.
+//   3. onError fired on 'disconnected', a transient state that usually
+//      recovers, and WebRTCMeshManager wires onError to its reconnect
+//      backoff. A network blip destroyed a connection that was healing.
+
+describe('sdpSessionId', () => {
+  it('reads the session id out of the SDP origin line', () => {
+    assert.equal(sdpSessionId('v=0\r\no=rtc 2701644247 0 IN IP4 127.0.0.1\r\ns=-\r\n'), '2701644247')
+  })
+
+  it('returns null for SDP without an origin line', () => {
+    assert.equal(sdpSessionId('mock-offer-sdp'), null)
+    assert.equal(sdpSessionId(''), null)
+    assert.equal(sdpSessionId(undefined), null)
+  })
+})
+
+/** Bring a connection all the way to 'connected' on the mock stack. */
+async function connectedConn(opts = {}) {
+  const conn = new WebRTCPeerConnection({ localPodId: 'a', remotePodId: 'b', ...opts })
+  await conn.createOffer()
+  _lastMockPC.connectionState = 'connected'
+  _lastMockDC.onopen()
+  return conn
+}
+
+describe('WebRTCPeerConnection reconnect on a healthy connection', () => {
+  it('does nothing and reports that it did nothing', async () => {
+    const conn = await connectedConn()
+    assert.equal(conn.isOpen, true)
+
+    assert.equal(await conn.reconnect(), null)
+
+    // The regression: this used to be 'connecting' / false.
+    assert.equal(conn.state, 'connected')
+    assert.equal(conn.isOpen, true)
+    assert.equal(_lastMockPC.lastCreateOfferOpts, null, 'no offer should have been created')
+  })
+
+  it('renegotiates a healthy connection when explicitly forced', async () => {
+    const conn = await connectedConn()
+    const offer = await conn.reconnect({ force: true })
+    assert.equal(offer.sdp, 'mock-restart-offer-sdp')
+    assert.equal(offer.renegotiation, true, 'the offer must be marked as a renegotiation')
+    assert.deepEqual(_lastMockPC.lastCreateOfferOpts, { iceRestart: true })
+    // Even forced, a renegotiation does not interrupt the data channel.
+    assert.equal(conn.state, 'connected')
+    assert.equal(conn.isOpen, true)
+  })
+
+  it('still repairs when the peer connection failed but the data channel has not noticed', async () => {
+    const conn = await connectedConn()
+    _lastMockPC.connectionState = 'failed'
+    assert.equal(conn.isOpen, true, 'the data channel is still open in this window')
+    const offer = await conn.reconnect()
+    assert.ok(offer, 'a failed peer connection is not healthy, whatever the channel says')
+    assert.equal(offer.renegotiation, true)
+  })
+
+  it('declines while a negotiation is already in flight', async () => {
+    const conn = await connectedConn()
+    _lastMockPC.connectionState = 'failed'
+    _lastMockPC.signalingState = 'have-local-offer'
+    assert.equal(await conn.reconnect(), null)
+    assert.equal(await conn.reconnect({ force: true }), null, 'force does not stack offers either')
+  })
+})
+
+describe('WebRTCPeerConnection handleOffer renegotiation', () => {
+  it('applies a renegotiation offer to the existing peer connection', async () => {
+    const conn = await connectedConn()
+    const pcBefore = _lastMockPC
+    const dcBefore = _lastMockDC
+
+    const answer = await conn.handleOffer({ type: 'offer', sdp: 'remote-restart-sdp', renegotiation: true })
+
+    assert.equal(answer.type, 'answer')
+    assert.equal(answer.renegotiation, true, 'the answer is marked too, for symmetry on the wire')
+    assert.equal(_lastMockPC, pcBefore, 'no new RTCPeerConnection may be constructed')
+    assert.equal(pcBefore.closed, false, 'the live connection must not be torn down')
+    assert.equal(pcBefore.remoteDescription.sdp, 'remote-restart-sdp')
+    assert.equal(_lastMockDC, dcBefore, 'the data channel survives')
+  })
+
+  it('leaves state, channel and callbacks intact across a renegotiation', async () => {
+    const conn = await connectedConn()
+    const received = []
+    conn.onMessage((m) => received.push(m))
+    let closes = 0
+    conn.onClose(() => { closes += 1 })
+
+    await conn.handleOffer({ type: 'offer', sdp: 'remote-restart-sdp', renegotiation: true })
+
+    assert.equal(conn.state, 'connected')
+    assert.equal(conn.isOpen, true)
+    assert.equal(closes, 0, 'a renegotiation is not a close')
+    _lastMockDC.onmessage({ data: '{"after":"renegotiation"}' })
+    assert.deepEqual(received, [{ after: 'renegotiation' }])
+  })
+
+  it('refuses a renegotiation offer when there is no connection to renegotiate', async () => {
+    const conn = new WebRTCPeerConnection({ localPodId: 'a', remotePodId: 'b' })
+    await assert.rejects(
+      () => conn.handleOffer({ type: 'offer', sdp: 'restart', renegotiation: true }),
+      /no existing connection/,
+    )
+  })
+
+  it('treats renegotiation: false as a fresh offer even on a live connection', async () => {
+    const conn = await connectedConn()
+    const pcBefore = _lastMockPC
+    await conn.handleOffer({ type: 'offer', sdp: 'fresh-sdp', renegotiation: false })
+    assert.notEqual(_lastMockPC, pcBefore, 'an explicit false must build a new connection')
+  })
+
+  it('releases the superseded peer connection without reporting a close', async () => {
+    // A peer that restarted sends a fresh offer on a connection we still hold.
+    // The old RTCPeerConnection used to be overwritten and leaked; releasing
+    // it must not fire onClose, or WebRTCMeshManager deletes the connection
+    // we are in the middle of re-establishing.
+    const conn = await connectedConn()
+    const pcBefore = _lastMockPC
+    const dcBefore = _lastMockDC
+    let closes = 0
+    conn.onClose(() => { closes += 1 })
+
+    await conn.handleOffer({ type: 'offer', sdp: 'fresh-offer-sdp' })
+
+    assert.notEqual(_lastMockPC, pcBefore)
+    assert.equal(pcBefore.closed, true, 'the superseded peer connection must be released')
+    assert.equal(dcBefore.readyState, 'closed')
+    assert.equal(closes, 0, 'releasing it is not a connection close')
+    assert.equal(conn.state, 'connecting', 'we are negotiating a new session')
+  })
+})
+
+describe('WebRTCPeerConnection disconnected grace period', () => {
+  it('does not report a transient disconnect that recovers', async () => {
+    const conn = await connectedConn({ disconnectedGraceMs: 60 })
+    const errors = []
+    conn.onError((e) => errors.push(e))
+
+    _lastMockPC.connectionState = 'disconnected'
+    _lastMockPC.onconnectionstatechange()
+    await new Promise((r) => setTimeout(r, 20))
+    _lastMockPC.connectionState = 'connected'
+    _lastMockPC.onconnectionstatechange()
+
+    await new Promise((r) => setTimeout(r, 80))
+    assert.deepEqual(errors, [], 'a blip that healed is not an error')
+  })
+
+  it('reports a disconnect that outlasts the grace period', async () => {
+    const conn = await connectedConn({ disconnectedGraceMs: 20 })
+    const errors = []
+    conn.onError((e) => errors.push(e))
+
+    _lastMockPC.connectionState = 'disconnected'
+    _lastMockPC.onconnectionstatechange()
+    assert.deepEqual(errors, [], 'not immediately')
+
+    await new Promise((r) => setTimeout(r, 70))
+    assert.equal(errors.length, 1)
+    assert.match(errors[0].message, /disconnected/)
+  })
+
+  it('reports failed immediately, without waiting out the grace period', async () => {
+    const conn = await connectedConn({ disconnectedGraceMs: 10_000 })
+    const errors = []
+    conn.onError((e) => errors.push(e))
+    _lastMockPC.connectionState = 'failed'
+    _lastMockPC.onconnectionstatechange()
+    assert.equal(errors.length, 1)
+    assert.match(errors[0].message, /failed/)
+  })
+
+  it('cancels a pending disconnect report when the connection is closed', async () => {
+    const conn = await connectedConn({ disconnectedGraceMs: 20 })
+    const errors = []
+    conn.onError((e) => errors.push(e))
+    _lastMockPC.connectionState = 'disconnected'
+    _lastMockPC.onconnectionstatechange()
+    conn.close()
+    await new Promise((r) => setTimeout(r, 70))
+    assert.deepEqual(errors, [])
+  })
+
+  it('does not stack grace timers across repeated disconnected events', async () => {
+    const conn = await connectedConn({ disconnectedGraceMs: 20 })
+    const errors = []
+    conn.onError((e) => errors.push(e))
+    _lastMockPC.connectionState = 'disconnected'
+    for (let i = 0; i < 5; i++) _lastMockPC.onconnectionstatechange()
+    await new Promise((r) => setTimeout(r, 70))
+    assert.equal(errors.length, 1)
+  })
+})
+
+describe('WebRTCMeshManager and transient disconnects', () => {
+  it('does not schedule a reconnect for a disconnect that recovers', async () => {
+    const mgr = new WebRTCMeshManager({
+      localPodId: 'node-1', reconnectBaseDelayMs: 5, disconnectedGraceMs: 60,
+    })
+    const conn = await mgr.connectToPeer('node-2')
+    await conn.createOffer()
+    const pc = _lastMockPC
+    const offers = []
+    mgr.onReconnectOffer((offer) => offers.push(offer))
+
+    pc.connectionState = 'disconnected'
+    pc.onconnectionstatechange()
+    await new Promise((r) => setTimeout(r, 20))
+    pc.connectionState = 'connected'
+    pc.onconnectionstatechange()
+
+    await new Promise((r) => setTimeout(r, 90))
+    assert.deepEqual(offers, [], 'the connection was healing; leave it alone')
+  })
+
+  it('schedules one for a disconnect that persists', async () => {
+    const mgr = new WebRTCMeshManager({
+      localPodId: 'node-1', reconnectBaseDelayMs: 5, disconnectedGraceMs: 20,
+    })
+    const conn = await mgr.connectToPeer('node-2')
+    await conn.createOffer()
+    const pc = _lastMockPC
+    const offers = []
+    mgr.onReconnectOffer((offer) => offers.push(offer))
+
+    pc.connectionState = 'disconnected'
+    pc.onconnectionstatechange()
+
+    await new Promise((r) => setTimeout(r, 90))
+    assert.equal(offers.length, 1)
+    assert.equal(offers[0].renegotiation, true, 'the peer must be told to renegotiate, not reconnect')
+  })
+
+  it('marks every auto-reconnect offer as a renegotiation', async () => {
+    const mgr = new WebRTCMeshManager({ localPodId: 'node-1', reconnectBaseDelayMs: 5 })
+    const conn = await mgr.connectToPeer('node-2')
+    await conn.createOffer()
+    const pc = _lastMockPC
+    const offers = []
+    mgr.onReconnectOffer((offer) => offers.push(offer))
+    pc.connectionState = 'failed'
+    pc.onconnectionstatechange()
+    await new Promise((r) => setTimeout(r, 30))
+    assert.ok(offers.length >= 1)
+    assert.equal(offers[0].renegotiation, true)
+  })
+
+  it('reconnectPeer() leaves a healthy connection alone unless forced', async () => {
+    const mgr = new WebRTCMeshManager({ localPodId: 'node-1' })
+    const conn = await mgr.connectToPeer('node-2')
+    await conn.createOffer()
+    _lastMockPC.connectionState = 'connected'
+    _lastMockDC.onopen()
+
+    const offers = []
+    mgr.onReconnectOffer((offer) => offers.push(offer))
+
+    assert.equal(await mgr.reconnectPeer('node-2'), null)
+    assert.deepEqual(offers, [], 'and it notifies nobody')
+    assert.equal(conn.isOpen, true)
+
+    const forced = await mgr.reconnectPeer('node-2', { force: true })
+    assert.equal(forced.renegotiation, true)
+    assert.equal(offers.length, 1)
   })
 })
