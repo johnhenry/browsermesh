@@ -1158,3 +1158,178 @@ describe('PaymentRouter escrow sweeper', () => {
     assert.ok(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// receive() must validate the amount it is handed
+//
+// Regression for the asymmetry between pay() and receive(). pay() checked
+// `typeof amount !== 'number' || amount <= 0` and refused to overspend;
+// receive() checked the channel id and the sequence number and then ran
+// `localBalance += amount; remoteBalance -= amount` on whatever arrived.
+//
+// A signature over the update does not help: it proves the counterparty
+// wrote the value, not that the value is sane. Measured against a channel
+// with a real Ed25519 verifyFn and a correctly signed update:
+//
+//   start:              local=500 remote=0
+//   after amount=-400:  local=100 remote=400   <-- the receiver paid
+//   after amount=-1e9:  local=-999999900 remote=1000000400
+//   after amount="5":   local='5005' remote=-5
+//   after amount=NaN:   local=NaN remote=NaN
+//
+// PaymentRouter's PAYMENT_UPDATE handler feeds the wire payload straight
+// into receive(), so `amount` is fully counterparty-controlled.
+// ---------------------------------------------------------------------------
+
+describe('PaymentChannel.receive amount validation', () => {
+  const makeUpdate = (ch, over = {}) => ({
+    channelId: ch.channelId,
+    sequence: 1,
+    amount: 10,
+    localBalance: 0,
+    remoteBalance: 0,
+    timestamp: Date.now(),
+    signature: null,
+    ...over,
+  });
+
+  let ch;
+  beforeEach(() => {
+    ch = new PaymentChannel('pod-alice', 'pod-bob', { capacity: 1000 });
+    ch.open(100);
+  });
+
+  it('still applies an ordinary positive amount', () => {
+    ch.receive(makeUpdate(ch, { amount: 40 }));
+    assert.equal(ch.localBalance, 140);
+    assert.equal(ch.sequence, 1);
+  });
+
+  it('rejects a negative amount instead of paying the sender', () => {
+    assert.throws(
+      () => ch.receive(makeUpdate(ch, { amount: -400 })),
+      /amount must be a finite number greater than zero, got -400/
+    );
+    assert.equal(ch.localBalance, 100, 'balance untouched');
+    assert.equal(ch.remoteBalance, 0);
+    assert.equal(ch.sequence, 0, 'sequence not advanced');
+  });
+
+  it('rejects zero', () => {
+    assert.throws(() => ch.receive(makeUpdate(ch, { amount: 0 })), RangeError);
+    assert.equal(ch.localBalance, 100);
+  });
+
+  it('rejects a string amount instead of concatenating it onto the balance', () => {
+    assert.throws(
+      () => ch.receive(makeUpdate(ch, { amount: '5' })),
+      /amount must be a finite number greater than zero, got string/
+    );
+    assert.equal(ch.localBalance, 100);
+    assert.equal(typeof ch.localBalance, 'number');
+  });
+
+  it('rejects NaN instead of poisoning both balances', () => {
+    assert.throws(() => ch.receive(makeUpdate(ch, { amount: NaN })), RangeError);
+    assert.equal(Number.isNaN(ch.localBalance), false);
+    assert.equal(Number.isNaN(ch.remoteBalance), false);
+  });
+
+  it('rejects Infinity', () => {
+    assert.throws(() => ch.receive(makeUpdate(ch, { amount: Infinity })), RangeError);
+    assert.equal(Number.isFinite(ch.localBalance), true);
+  });
+
+  for (const [label, amount] of [
+    ['undefined', undefined],
+    ['null', null],
+    ['an object', {}],
+    ['an array', [10]],
+    ['a bigint-ish string', '1e9'],
+    ['true', true],
+  ]) {
+    it(`rejects ${label}`, () => {
+      assert.throws(() => ch.receive(makeUpdate(ch, { amount })), RangeError);
+      assert.equal(ch.localBalance, 100);
+      assert.equal(ch.sequence, 0);
+    });
+  }
+
+  it('rejects a correctly signed negative amount', async () => {
+    // The whole point: the signature is valid. Only the value is not.
+    const mallory = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']);
+    const malloryPub = new Uint8Array(await crypto.subtle.exportKey('raw', mallory.publicKey));
+
+    const victim = new PaymentChannel('pod-alice', 'pod-mallory', {
+      channelId: 'ch-signed',
+      capacity: 1000,
+      remotePublicKey: malloryPub,
+      verifyFn: async (pub, data, sig) => {
+        const key = await crypto.subtle.importKey('raw', pub, { name: 'Ed25519' }, false, ['verify']);
+        return crypto.subtle.verify('Ed25519', key, sig, data);
+      },
+    });
+    victim.open(500);
+
+    const fields = {
+      channelId: 'ch-signed',
+      sequence: 1,
+      amount: -400,
+      localBalance: 0,
+      remoteBalance: 0,
+      timestamp: Date.now(),
+    };
+    const sigBytes = new Uint8Array(
+      await crypto.subtle.sign(
+        'Ed25519',
+        mallory.privateKey,
+        new TextEncoder().encode(JSON.stringify(fields))
+      )
+    );
+    const signature = Buffer.from(sigBytes).toString('base64');
+
+    // Prove the signature really is good before asserting the rejection, so
+    // this test cannot pass for the wrong reason.
+    const verified = await crypto.subtle.verify(
+      'Ed25519',
+      mallory.publicKey,
+      sigBytes,
+      new TextEncoder().encode(JSON.stringify(fields))
+    );
+    assert.equal(verified, true, 'the crafted signature is genuinely valid');
+
+    assert.throws(
+      () => victim.receive({ ...fields, signature }),
+      /amount must be a finite number greater than zero/
+    );
+    assert.equal(victim.localBalance, 500, 'not drained');
+    assert.equal(victim.remoteBalance, 0);
+  });
+
+  it('PaymentRouter drops a hostile PAYMENT_UPDATE off the wire', () => {
+    const handlers = new Map();
+    const router = new PaymentRouter('pod-alice');
+    router.wireTransport(
+      () => {},
+      (type, fn) => handlers.set(type, fn)
+    );
+    const channel = router.openChannel('pod-mallory', 1000);
+    channel.open(500);
+
+    handlers.get(PAYMENT_UPDATE)(
+      {
+        channelId: channel.channelId,
+        sequence: 1,
+        amount: -400,
+        localBalance: 0,
+        remoteBalance: 0,
+        timestamp: Date.now(),
+        signature: null,
+      },
+      'pod-mallory'
+    );
+
+    assert.equal(channel.localBalance, 500, 'wire payload must not drain the channel');
+    assert.equal(channel.remoteBalance, 0);
+  });
+});

@@ -570,6 +570,11 @@ export class PaymentChannel {
    * updates are rejected (this method returns a rejected Promise). Without
    * a verifyFn, behavior is unchanged: synchronous, unconditional apply.
    *
+   * `amount` is checked the same way `pay()` checks it — a finite number
+   * greater than zero. A signature proves the counterparty wrote the value,
+   * not that the value is sane, and this update arrives straight off the
+   * wire via `PaymentRouter`'s PAYMENT_UPDATE handler.
+   *
    * @param {PaymentUpdate} update
    * @returns {void|Promise<void>}
    */
@@ -583,6 +588,19 @@ export class PaymentChannel {
     if (update.sequence <= this.#sequence) {
       throw new Error(
         `Stale sequence: got ${update.sequence}, expected > ${this.#sequence}`
+      );
+    }
+    // A negative amount runs #applyReceive backwards and moves credits from
+    // the receiver to the sender; a string turns `localBalance += amount`
+    // into concatenation; NaN or Infinity poisons both balances for the life
+    // of the channel. None of these are reachable through pay(), so they can
+    // only arrive from the counterparty.
+    if (typeof update.amount !== 'number' || !Number.isFinite(update.amount) || update.amount <= 0) {
+      throw new RangeError(
+        `Rejected payment update seq ${update.sequence}: ` +
+        `amount must be a finite number greater than zero, got ${
+          typeof update.amount === 'number' ? update.amount : typeof update.amount
+        }`
       );
     }
     if (!this.#verifyFn) {
