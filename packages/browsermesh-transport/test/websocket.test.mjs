@@ -1,6 +1,7 @@
 // Run with: node --import ./test/_setup-globals.mjs --test test/websocket.test.mjs
 import { describe, it, beforeEach, afterEach, after, mock } from 'node:test';
 import assert from 'node:assert/strict';
+import { waitFor, settle } from './_wait.mjs';
 
 import {
   WebSocketTransport,
@@ -481,9 +482,7 @@ describe('WebSocketTransport', () => {
     // Simulate unexpected close (not user-initiated)
     lastMockWs._fire('close', { code: 1006, reason: 'abnormal' });
 
-    // Wait for reconnect attempt
-    await new Promise(r => setTimeout(r, 50));
-    assert.ok(reconnectCount >= 1, 'reconnect event should have fired');
+    await waitFor(() => reconnectCount >= 1, { label: 'a reconnect event' });
   });
 
   it('reconnect increments reconnectAttempts', async () => {
@@ -498,8 +497,7 @@ describe('WebSocketTransport', () => {
 
     // Simulate unexpected close
     lastMockWs._fire('close', { code: 1006, reason: 'abnormal' });
-    await new Promise(r => setTimeout(r, 50));
-    assert.ok(ws.reconnectAttempts >= 1);
+    await waitFor(() => ws.reconnectAttempts >= 1, { label: 'reconnectAttempts to increment' });
   });
 
   it('reconnect stops after maxReconnectAttempts', async () => {
@@ -528,9 +526,10 @@ describe('WebSocketTransport', () => {
 
     // Force unexpected close
     lastMockWs._fire('close', { code: 1006, reason: 'abnormal' });
-    await new Promise(r => setTimeout(r, 200));
+    // An upper bound needs time to be violated, not a condition to be met, so
+    // this waits for the attempt count to stop moving rather than for a value.
+    await settle(() => connectCount);
 
-    // Should have tried to connect plus at most 2 reconnects
     assert.ok(connectCount <= 4, `expected <= 4 total connect attempts, got ${connectCount}`);
   });
 
@@ -554,7 +553,8 @@ describe('WebSocketTransport', () => {
     await p;
 
     await ws.close();
-    await new Promise(r => setTimeout(r, 50));
+    // Asserting something does NOT happen: wait for quiescence, then check.
+    await settle(() => connectCount);
     assert.equal(connectCount, 1, 'should not reconnect after user close');
   });
 
@@ -566,11 +566,11 @@ describe('WebSocketTransport', () => {
     lastMockWs._open();
     await p;
 
-    await new Promise(r => setTimeout(r, 80));
-    // Should have sent some ping messages
-    const pings = lastMockWs._sent.filter(
+    const pingsSent = () => lastMockWs._sent.filter(
       m => typeof m === 'string' && m.includes('"type":"ping"')
     );
+    await waitFor(() => pingsSent().length > 0, { label: 'at least one ping' });
+    const pings = pingsSent();
     assert.ok(pings.length >= 1, `expected at least 1 ping, got ${pings.length}`);
     await ws.close();
   });
@@ -583,7 +583,7 @@ describe('WebSocketTransport', () => {
 
     await ws.close();
     const sentBefore = lastMockWs._sent.length;
-    await new Promise(r => setTimeout(r, 60));
+    await settle(() => lastMockWs._sent.length);
     assert.equal(lastMockWs._sent.length, sentBefore, 'no more pings after close');
   });
 
@@ -1135,9 +1135,15 @@ describe('NATTraversal', () => {
 
   // -- Constructor ---
 
-  it('default STUN servers include google', () => {
+  it('defaults to no STUN servers, so nothing is contacted unless asked', () => {
     const servers = nat.getIceServers();
-    assert.ok(servers.some(s => s.urls && s.urls.includes('stun:stun.l.google.com:19302')));
+    assert.deepEqual(servers, [], `expected no default ICE servers, got ${JSON.stringify(servers)}`);
+  });
+
+  it('names no third-party host by default', () => {
+    const servers = new NATTraversal().getIceServers();
+    const urls = JSON.stringify(servers);
+    assert.ok(!urls.includes('google'), `default config reaches a third party: ${urls}`);
   });
 
   it('accepts custom STUN servers', () => {
@@ -1161,10 +1167,17 @@ describe('NATTraversal', () => {
   // -- getIceServers() ---
 
   it('getIceServers returns array of RTCIceServer objects', () => {
-    const servers = nat.getIceServers();
+    // The default is empty (nothing is contacted unless asked), so configure
+    // servers to exercise the shape of what it produces.
+    const configured = new NATTraversal({
+      stunServers: ['stun:stun.example.com:3478'],
+      turnServers: [{ urls: 'turn:relay.example.com', username: 'u', credential: 'p' }],
+    });
+    const servers = configured.getIceServers();
     assert.ok(Array.isArray(servers));
-    assert.ok(servers.length > 0);
+    assert.equal(servers.length, 2);
     assert.ok(servers[0].urls);
+    assert.equal(nat.getIceServers().length, 0, 'unconfigured NATTraversal should list nothing');
   });
 
   // -- getNATType() ---

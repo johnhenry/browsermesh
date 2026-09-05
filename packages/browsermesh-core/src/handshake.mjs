@@ -10,8 +10,10 @@ import { silentCatch } from './silent-catch.mjs'
  * signaler interface that WebRTCTransport expects (sendOffer, sendAnswer,
  * sendIceCandidate, onOffer, onAnswer, onIceCandidate).
  *
- * DirectInputHandshake handles manual key exchange for direct pairing
- * without a signaling server -- via clipboard paste or QR code.
+ * DirectInputHandshake handles manual exchange of a peer's identity and
+ * connection parameters -- via clipboard paste or QR code -- without a
+ * server. Note that this covers the KEY exchange only: the token carries
+ * no SDP, so establishing the connection still needs a signaling channel.
  *
  * HandshakeCoordinator orchestrates the full connection flow:
  * discovery -> transport selection -> handshake -> session.
@@ -125,6 +127,14 @@ export const MAX_ENCODED_TOKEN_LENGTH = 128 * 1024
 
 /** Token TTL in milliseconds (5 minutes). */
 const TOKEN_TTL_MS = 5 * 60 * 1000
+
+/**
+ * Default cap on the number of consumed nonces a DirectInputHandshake will
+ * remember. Entries normally age out with the token TTL well before this
+ * matters; the cap exists so that a peer flooding distinct tokens cannot
+ * grow the set without bound.
+ */
+const DEFAULT_MAX_CONSUMED_NONCES = 10_000
 
 /** Default connection timeout in milliseconds. */
 const DEFAULT_TIMEOUT_MS = 30_000
@@ -373,12 +383,29 @@ export class SignalingClient {
 // ---------------------------------------------------------------------------
 
 /**
- * Manual key exchange for direct pairing without a signaling server.
+ * Out-of-band exchange of a peer's identity and connection parameters.
  *
- * Generates a connection token containing the local pod's identity
- * and connection parameters. The token can be shared via clipboard
- * paste or QR code. The receiving peer decodes and validates the
- * token to establish a connection.
+ * Generates a connection token containing the local pod's identity and
+ * connection parameters, shareable via clipboard paste or QR code. The
+ * receiving peer decodes and validates the token, then uses it to reach
+ * the issuer.
+ *
+ * **What this does and does not do.** The *key exchange* needs no server:
+ * the token travels over whatever out-of-band channel you like. The
+ * *connection* still does. A ConnectionToken carries podId, publicKey,
+ * nonce, timestamp and optionally signalingUrl/iceServers -- it carries no
+ * SDP offer. `HandshakeCoordinator.connectViaToken()` therefore requires
+ * either an existing signalingClient or a `token.signalingUrl`, and throws
+ * 'No signaling channel available' without one.
+ *
+ * Earlier revisions of this docstring said "direct pairing without a
+ * signaling server", which read as a promise of serverless pairing. It was
+ * never that. Putting an SDP offer with pre-gathered ICE candidates into
+ * the token would make it that -- see issue #5 -- and is the one design
+ * that needs no rendezvous, no STUN and no certificate for two peers on a
+ * LAN. It is not implemented here.
+ *
+ * Tokens are single use: see `validateToken()`.
  */
 export class DirectInputHandshake {
   /** @type {string} */
@@ -397,14 +424,27 @@ export class DirectInputHandshake {
   #onLog
 
   /**
+   * Nonces of tokens this instance has already accepted, mapped to the
+   * timestamp at which they may be forgotten. Enforces single use.
+   * @type {Map<string, number>}
+   */
+  #consumedNonces = new Map()
+
+  /** @type {number} */
+  #maxConsumedNonces
+
+  /**
    * @param {object} opts
    * @param {string} opts.localPodId - Local pod identifier
    * @param {Function} opts.getPublicKeyBytes - async () => Uint8Array, returns public key bytes
    * @param {string} [opts.signalingUrl] - Optional signaling server URL to include in token
    * @param {object[]} [opts.iceServers] - Optional ICE server configs to include in token
    * @param {Function} [opts.onLog] - Logging callback (level, msg)
+   * @param {number} [opts.maxConsumedNonces=10000] - Cap on the replay set. Entries
+   *   normally age out with the token TTL; this cap bounds memory if a peer floods
+   *   distinct tokens faster than they expire.
    */
-  constructor({ localPodId, getPublicKeyBytes, signalingUrl, iceServers, onLog } = {}) {
+  constructor({ localPodId, getPublicKeyBytes, signalingUrl, iceServers, onLog, maxConsumedNonces = DEFAULT_MAX_CONSUMED_NONCES } = {}) {
     if (!localPodId || typeof localPodId !== 'string') {
       throw new Error('localPodId is required and must be a non-empty string')
     }
@@ -416,6 +456,56 @@ export class DirectInputHandshake {
     this.#signalingUrl = signalingUrl || null
     this.#iceServers = iceServers || null
     this.#onLog = onLog || (() => {})
+    this.#maxConsumedNonces = Number.isInteger(maxConsumedNonces) && maxConsumedNonces > 0
+      ? maxConsumedNonces
+      : DEFAULT_MAX_CONSUMED_NONCES
+  }
+
+  /**
+   * Number of tokens currently held in the replay set. Entries age out
+   * once they are past the token TTL. Exposed for observability and tests.
+   * @returns {number}
+   */
+  get consumedTokenCount() {
+    this.#pruneConsumedNonces()
+    return this.#consumedNonces.size
+  }
+
+  /**
+   * Forget every consumed nonce, so previously used tokens validate again.
+   *
+   * Only for tests and for deliberately resetting a pairing session. Calling
+   * this in production re-opens the replay window for any token still inside
+   * its TTL.
+   */
+  forgetConsumedTokens() {
+    this.#consumedNonces.clear()
+  }
+
+  /**
+   * Drop replay-set entries that are past their expiry, and enforce the cap.
+   * @param {number} [now]
+   */
+  #pruneConsumedNonces(now = Date.now()) {
+    for (const [key, expiresAt] of this.#consumedNonces) {
+      if (expiresAt <= now) this.#consumedNonces.delete(key)
+    }
+    // Map iterates in insertion order, so the front is the oldest.
+    while (this.#consumedNonces.size > this.#maxConsumedNonces) {
+      const oldest = this.#consumedNonces.keys().next()
+      if (oldest.done) break
+      this.#consumedNonces.delete(oldest.value)
+    }
+  }
+
+  /**
+   * Replay-set key for a token. A nonce is only meaningful relative to the
+   * pod that issued it, so both are part of the key.
+   * @param {ConnectionToken} token
+   * @returns {string}
+   */
+  #nonceKey(token) {
+    return `${token.podId} ${token.nonce}`
   }
 
   /**
@@ -520,12 +610,26 @@ export class DirectInputHandshake {
   /**
    * Validate a received connection token.
    *
-   * Checks: has podId, has publicKey, has nonce, not self, not expired (5min TTL).
+   * Checks: has podId, has publicKey, has nonce, not self, not expired
+   * (5min TTL), not more than 30s in the future, and **not previously used**.
+   *
+   * Tokens are single use. On success the token's nonce is recorded, and any
+   * later token carrying the same podId+nonce is rejected with
+   * `'Token already used'`. This is what makes a token shared over an
+   * observable channel — a QR code on a screen, a clipboard, a screenshot —
+   * safe to show: capturing it buys one pairing at most, not five minutes of
+   * unlimited pairings.
+   *
+   * Pass `{ consume: false }` to check a token without spending it (e.g. to
+   * show the user what they scanned before they confirm). The token is then
+   * still redeemable, so a consuming call must follow before it is acted on.
    *
    * @param {ConnectionToken} token
+   * @param {object} [opts]
+   * @param {boolean} [opts.consume=true] - Record the nonce on success
    * @returns {{ valid: boolean, error?: string }}
    */
-  validateToken(token) {
+  validateToken(token, { consume = true } = {}) {
     if (!token || typeof token !== 'object') {
       return { valid: false, error: 'Token is not an object' }
     }
@@ -544,7 +648,8 @@ export class DirectInputHandshake {
     if (typeof token.timestamp !== 'number') {
       return { valid: false, error: 'Token missing timestamp' }
     }
-    const age = Date.now() - token.timestamp
+    const now = Date.now()
+    const age = now - token.timestamp
     if (age > TOKEN_TTL_MS) {
       return { valid: false, error: 'Token expired' }
     }
@@ -552,6 +657,19 @@ export class DirectInputHandshake {
     if (age < -30_000) {
       return { valid: false, error: 'Token timestamp is in the future' }
     }
+
+    // Single use. Age out entries first so the set stays bounded by the TTL.
+    this.#pruneConsumedNonces(now)
+    const key = this.#nonceKey(token)
+    if (this.#consumedNonces.has(key)) {
+      this.#onLog(1, `Rejected replayed connection token from pod ${token.podId}`)
+      return { valid: false, error: 'Token already used' }
+    }
+    if (consume) {
+      // Remember it for as long as it could still be presented.
+      this.#consumedNonces.set(key, token.timestamp + TOKEN_TTL_MS)
+    }
+
     return { valid: true }
   }
 
@@ -738,9 +856,18 @@ export class HandshakeCoordinator {
    * Parses the token, optionally creates a signaling client from the
    * token's signalingUrl, and negotiates a transport.
    *
+   * Note on lifetimes: `TransportFactory.negotiate()` returns a transport that
+   * has been *created but not yet connected* — no offer, answer or ICE
+   * candidate has crossed the wire when it resolves. A signaler this method
+   * created is therefore kept open past negotiate() and torn down on the
+   * transport's `close` event instead. When the transport exposes no
+   * `onClose()`, ownership passes to the caller via the returned `signaler`.
+   *
    * @param {ConnectionToken} token - Decoded connection token
    * @param {object} [transportFactory] - Override transport factory
-   * @returns {Promise<{ transport: object, sessionInfo: object }>}
+   * @returns {Promise<{ transport: object, sessionInfo: object, signaler: SignalingClient|null }>}
+   *   `signaler` is the client this call created and still owns, or null when
+   *   the coordinator's own signaling client was used.
    */
   async connectViaToken(token, transportFactory) {
     const factory = transportFactory || this.#transportFactory
@@ -791,12 +918,23 @@ export class HandshakeCoordinator {
       }
 
       this.#onLog(2, `Connected via token to ${remotePodId}`)
-      // Clean up signaler we created — transport is now established
+
+      // Do NOT disconnect here. negotiate() returns a created-but-unconnected
+      // transport; the signaling channel is about to carry the offer, the
+      // answer and every ICE candidate. Tear it down when the transport does.
       if (createdSignaler && signaler) {
-        signaler.disconnect()
+        if (typeof transport.onClose === 'function') {
+          transport.onClose(() => signaler.disconnect())
+        } else {
+          this.#onLog(
+            1,
+            'Transport exposes no onClose(); returning the signaling client for the caller to disconnect',
+          )
+        }
       }
+
       this.#fire('connected', { remotePodId, transport, sessionInfo })
-      return { transport, sessionInfo }
+      return { transport, sessionInfo, signaler: createdSignaler ? signaler : null }
     } catch (err) {
       // Clean up signaler we created on failure
       if (createdSignaler && signaler) {

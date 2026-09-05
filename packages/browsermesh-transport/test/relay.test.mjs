@@ -1,6 +1,7 @@
 // Run with: node --import ./test/_setup-globals.mjs --test test/relay.test.mjs
 import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { waitFor } from './_wait.mjs';
 
 import {
   MeshRelayClient,
@@ -784,11 +785,12 @@ describe('MeshRelayClient — real WebSocket path', () => {
     });
     c.onError((e) => errs.push(e));
     await assert.rejects(() => c.connect(), /refused/);
-    // Allow reconnect attempts (5ms + 10ms backoff) to exhaust.
-    await new Promise(r => setTimeout(r, 100));
-    assert.ok(
-      errs.some(e => /reconnect failed after 2 attempts/.test(e.message)),
-      `expected exhaustion error among: ${errs.map(e => e.message).join(' / ')}`,
+    // The chain is a 5ms timer, a 10ms timer and three connect attempts. A
+    // fixed sleep is a bet that all of it lands inside the guess; CI took that
+    // bet and saw two errors instead of four.
+    await waitFor(
+      () => errs.some(e => /reconnect failed after 2 attempts/.test(e.message)),
+      { label: () => `exhaustion error among: ${errs.map(e => e.message).join(' / ')}` },
     );
   });
 });
