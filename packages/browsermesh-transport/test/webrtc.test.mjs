@@ -506,6 +506,49 @@ describe('WebRTCPeerConnection reconnect', () => {
     conn.close() // second call is a no-op guarded before #setState — no duplicate 'closed'
     assert.deepEqual(transitions, ['connecting', 'closed'])
   })
+
+  it('close() does not recurse when the DataChannel closes synchronously', async () => {
+    // Two changes that are each correct alone: close() releases the underlying
+    // objects *before* setting the state (so a remote-closed connection still
+    // gets released), and dc.onclose routes back through close() (so a remote
+    // hangup releases our peer connection too). Together they recursed ~2200
+    // frames until the stack overflowed, and the release try/catch swallowed
+    // the RangeError -- so the symptom was not a crash but an intermittently
+    // missing 'closed', failing this file roughly half the time.
+    const conn = new WebRTCPeerConnection({ localPodId: 'a', remotePodId: 'b' })
+    const transitions = []
+    conn.onStateChange((s) => transitions.push(s))
+    await conn.createOffer()
+
+    const pc = _lastMockPC
+    const dc = _lastMockDC
+    let dcCloseCalls = 0
+    const release = dc.close.bind(dc)
+    dc.close = () => { dcCloseCalls += 1; release() }
+
+    conn.close()
+
+    assert.equal(dcCloseCalls, 1, 'the DataChannel is released once, not recursively')
+    assert.deepEqual(transitions, ['connecting', 'closed'])
+    assert.equal(pc.closed, true, 'the peer connection is still released')
+  })
+
+  it('a remote hangup releases the peer connection', async () => {
+    // The reason dc.onclose goes through close() at all: before it did, a
+    // connection closed by the remote peer flipped state without releasing
+    // anything, leaking one RTCPeerConnection per remote disconnect.
+    const conn = new WebRTCPeerConnection({ localPodId: 'a', remotePodId: 'b' })
+    const transitions = []
+    conn.onStateChange((s) => transitions.push(s))
+    await conn.createOffer()
+    const pc = _lastMockPC
+
+    _lastMockDC.onclose() // the remote hung up; nobody called close() locally
+
+    assert.equal(pc.closed, true, 'the peer connection is released, not leaked')
+    assert.equal(conn.state, 'closed')
+    assert.deepEqual(transitions, ['connecting', 'closed'])
+  })
 })
 
 // ── getConnectionStats / getAllConnectionStats (mesh health metrics) ──

@@ -124,6 +124,7 @@ export class WebRTCPeerConnection {
   #iceServers
   #onLog
   #state = 'new'   // new | connecting | connected | closed
+  #closing = false // reentrancy guard for close(); see close()
   #iceCandidateCbs = []
   #messageCbs = []
   #closeCbs = []
@@ -515,13 +516,30 @@ export class WebRTCPeerConnection {
     // process alive: a Node test that connected two real peers and let one
     // hang up would never exit. Verified against two real
     // RTCPeerConnections; see test/webrtc-real-peer.test.mjs.
-    if (this.#dataChannel) {
-      try { this.#dataChannel.close() } catch (e) { silentCatch('clawser-mesh-webrtc', 'this', e) }
-      this.#dataChannel = null
-    }
-    if (this.#pc) {
-      try { this.#pc.close() } catch (e) { silentCatch('clawser-mesh-webrtc', 'this', e) }
-      this.#pc = null
+    // Releasing the DataChannel fires its onclose, and onclose routes back
+    // into close() -- that is how a remote hangup releases our peer
+    // connection. Re-entering here before #setState('closed') has run means
+    // the guard in onclose still sees a live state, so close() calls itself
+    // until the stack runs out. The RangeError is then swallowed by the
+    // release try/catch below, so the symptom is not a crash but a *missing*
+    // 'closed' transition, appearing only on whichever runs exhaust the stack
+    // inside #setState's callback loop. Measured at 2227 frames deep.
+    //
+    // Browsers dispatch onclose asynchronously, which is why this hides in a
+    // real browser and surfaces against a synchronous mock or binding.
+    if (this.#closing) return
+    this.#closing = true
+    try {
+      if (this.#dataChannel) {
+        try { this.#dataChannel.close() } catch (e) { silentCatch('clawser-mesh-webrtc', 'this', e) }
+        this.#dataChannel = null
+      }
+      if (this.#pc) {
+        try { this.#pc.close() } catch (e) { silentCatch('clawser-mesh-webrtc', 'this', e) }
+        this.#pc = null
+      }
+    } finally {
+      this.#closing = false
     }
 
     // The state transition and the close callbacks fire exactly once, so a
