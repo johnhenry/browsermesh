@@ -106,7 +106,11 @@ export class KeyLink {
 
 /**
  * A KeyLink with cryptographic Ed25519 signatures from both parent and child.
- * The signed payload is: `parent|child|relation|timestamp` encoded as UTF-8.
+ *
+ * The signed payload is canonical JSON over every asserted field —
+ * `parent`, `child`, `relation`, `scope`, `expires` and `created` — so a
+ * signature that verifies vouches for the delegation's limits, not just for
+ * who linked to whom. See {@link SignedKeyLink#signedPayload}.
  */
 export class SignedKeyLink extends KeyLink {
   /** @type {Uint8Array|null} */
@@ -128,11 +132,81 @@ export class SignedKeyLink extends KeyLink {
 
   /**
    * Get the canonical signed payload bytes.
+   *
+   * Version 2. Covers **every** field the link asserts, including `scope`
+   * and `expires`. Version 1 (`parent|child|relation|created`) left those
+   * two out, which meant a holder of a signed link could widen its scope
+   * and push out its expiry without invalidating either signature — see
+   * {@link legacySignedPayload}.
+   *
+   * JSON is used rather than a delimiter-joined string because `scope`
+   * holds caller-supplied strings: `['a|b']` and `['a', 'b']` must not
+   * canonicalise to the same bytes. Key order is fixed by the literal, so
+   * the encoding is deterministic.
+   *
    * @returns {Uint8Array}
    */
   get signedPayload() {
+    return new TextEncoder().encode(JSON.stringify({
+      v: 2,
+      parent: this.parent,
+      child: this.child,
+      relation: this.relation,
+      scope: this.scope,
+      expires: this.expires,
+      created: this.created,
+    }));
+  }
+
+  /**
+   * The version-1 payload bytes, kept only so links signed before `scope`
+   * and `expires` were covered still verify.
+   *
+   * A v1 signature is accepted **only** when the link carries no scope and
+   * no expiry — i.e. when there is nothing v1 failed to cover. A link that
+   * has either field must carry a v2 signature over it.
+   *
+   * @returns {Uint8Array}
+   */
+  get legacySignedPayload() {
     const str = `${this.parent}|${this.child}|${this.relation}|${this.created}`;
     return new TextEncoder().encode(str);
+  }
+
+  /**
+   * True when a v1 signature may stand in for a v2 one: the link asserts
+   * nothing that the v1 payload left unsigned.
+   *
+   * @returns {boolean}
+   */
+  get #legacyAcceptable() {
+    return this.scope === null && this.expires === null;
+  }
+
+  /**
+   * Verify one signature against the canonical payload, falling back to the
+   * legacy payload only for links with nothing outside its coverage.
+   *
+   * @param {CryptoKey} publicKey
+   * @param {Uint8Array|null} signature
+   * @returns {Promise<boolean>}
+   */
+  async #verifyOne(publicKey, signature) {
+    if (!signature) return false;
+    const current = await crypto.subtle.verify(
+      'Ed25519',
+      publicKey,
+      signature,
+      this.signedPayload
+    );
+    if (current) return true;
+    if (!this.#legacyAcceptable) return false;
+    return crypto.subtle.verify(
+      'Ed25519',
+      publicKey,
+      signature,
+      this.legacySignedPayload
+    );
   }
 
   /**
@@ -171,13 +245,7 @@ export class SignedKeyLink extends KeyLink {
    * @returns {Promise<boolean>}
    */
   async verifyParent(publicKey) {
-    if (!this.parentSignature) return false;
-    return crypto.subtle.verify(
-      'Ed25519',
-      publicKey,
-      this.parentSignature,
-      this.signedPayload
-    );
+    return this.#verifyOne(publicKey, this.parentSignature);
   }
 
   /**
@@ -186,13 +254,7 @@ export class SignedKeyLink extends KeyLink {
    * @returns {Promise<boolean>}
    */
   async verifyChild(publicKey) {
-    if (!this.childSignature) return false;
-    return crypto.subtle.verify(
-      'Ed25519',
-      publicKey,
-      this.childSignature,
-      this.signedPayload
-    );
+    return this.#verifyOne(publicKey, this.childSignature);
   }
 
   /**
