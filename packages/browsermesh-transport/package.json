@@ -21,6 +21,9 @@
   "peerDependencies": {
     "@johnhenry/browsermesh-primitives": ">=0.0.0"
   },
+  "devDependencies": {
+    "node-datachannel": "^0.33.2"
+  },
   "scripts": {
     "test": "node --import ./test/_setup-globals.mjs --test test/*.test.mjs"
   },
