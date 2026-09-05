@@ -17,6 +17,7 @@ import {
   RelayStrategy,
   ManualStrategy,
   SharedWorkerRelayStrategy,
+  supportsSharedWorker,
   DiscoveryManager,
   ServiceEndpoint,
   ServiceDirectory,
@@ -1022,6 +1023,41 @@ describe('SharedWorkerRelayStrategy', () => {
 
   it('constructor sets type to shared-worker', () => {
     assert.equal(strategy.type, 'shared-worker');
+  });
+
+  it('supportsSharedWorker reflects whether the global exists', () => {
+    const had = 'SharedWorker' in globalThis;
+    if (!had) assert.equal(supportsSharedWorker(), false);
+    globalThis.SharedWorker = function () {};
+    try {
+      assert.equal(supportsSharedWorker(), true);
+    } finally {
+      if (!had) delete globalThis.SharedWorker;
+    }
+  });
+
+  it('start() without SharedWorker throws a named error, not a bare ReferenceError', async () => {
+    // Android WebView implements no SharedWorker at any API level. Node has
+    // none either, so this environment reproduces that platform faithfully.
+    assert.equal(typeof globalThis.SharedWorker, 'undefined', 'test assumes no SharedWorker global');
+    const unguarded = new SharedWorkerRelayStrategy();
+    await assert.rejects(
+      () => unguarded.start(),
+      (err) => {
+        assert.ok(!(err instanceof ReferenceError), `got a bare ReferenceError: ${err.message}`);
+        assert.match(err.message, /SharedWorker is not available/);
+        assert.match(err.message, /Android WebView/);
+        return true;
+      },
+    );
+    assert.equal(unguarded.active, false, 'a failed start must not leave the strategy active');
+  });
+
+  it('an injected createWorkerFn works even where SharedWorker is absent', async () => {
+    assert.equal(typeof globalThis.SharedWorker, 'undefined');
+    await strategy.start();
+    assert.equal(strategy.active, true);
+    await strategy.stop();
   });
 
   it('start activates the strategy', async () => {

@@ -107,6 +107,8 @@ import {
   WebRTCTransportAdapter,
   WebRTCAdapterFactory,
   mergeIceServers,
+  DEFAULT_ICE_SERVERS,
+  PUBLIC_STUN_SERVERS,
 } from '../src/webrtc.mjs'
 
 // ── supportsWebRTC ─────────────────────────────────────────────────────
@@ -402,6 +404,57 @@ describe('mergeIceServers', () => {
   it('returns just the defaults when no user servers are given', () => {
     assert.deepEqual(mergeIceServers(undefined, [{ urls: 'stun:x' }]), [{ urls: 'stun:x' }])
     assert.deepEqual(mergeIceServers(null, [{ urls: 'stun:x' }]), [{ urls: 'stun:x' }])
+  })
+
+  it('honours an explicit empty array as "no ICE servers"', () => {
+    // [] is how a caller says "contact nobody". It must not be read as
+    // "unspecified, use the defaults".
+    assert.deepEqual(mergeIceServers([], [{ urls: 'stun:x' }]), [])
+    assert.deepEqual(mergeIceServers([]), [])
+  })
+
+  it('contacts no third party by default', () => {
+    assert.deepEqual(mergeIceServers(), [])
+    assert.deepEqual(DEFAULT_ICE_SERVERS, [])
+    const serialized = JSON.stringify(mergeIceServers())
+    assert.ok(!serialized.includes('google'), `default ICE config reaches Google: ${serialized}`)
+  })
+
+  it('PUBLIC_STUN_SERVERS is available for callers who opt in', () => {
+    const merged = mergeIceServers(
+      [{ urls: 'turn:relay.example.com', username: 'u', credential: 'p' }],
+      PUBLIC_STUN_SERVERS,
+    )
+    assert.deepEqual(merged, [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'turn:relay.example.com', username: 'u', credential: 'p' },
+    ])
+  })
+})
+
+// ── default ICE configuration reaches the connection classes ─────────
+
+describe('default ICE configuration', () => {
+  it('WebRTCPeerConnection built with no iceServers configures none', async () => {
+    let seenConfig = null
+    class SpyPC {
+      constructor(config) { seenConfig = config }
+      createDataChannel() { return { addEventListener() {}, readyState: 'connecting' } }
+      addEventListener() {}
+      async createOffer() { return { type: 'offer', sdp: 'x' } }
+      async setLocalDescription() {}
+      close() {}
+    }
+    const prev = globalThis.RTCPeerConnection
+    globalThis.RTCPeerConnection = SpyPC
+    try {
+      const conn = new WebRTCPeerConnection({ localPodId: 'a', remotePodId: 'b' })
+      await conn.createOffer()
+    } finally {
+      globalThis.RTCPeerConnection = prev
+    }
+    assert.ok(seenConfig, 'RTCPeerConnection was never constructed')
+    assert.deepEqual(seenConfig.iceServers, [], `leaked ICE servers: ${JSON.stringify(seenConfig.iceServers)}`)
   })
 })
 

@@ -884,11 +884,17 @@ export class NATTraversal {
 
   /**
    * @param {object} [opts]
-   * @param {string[]} [opts.stunServers] - STUN server URLs
+   * @param {string[]} [opts.stunServers] - STUN server URLs. Defaults to none:
+   *   host candidates suffice on a LAN, and contacting a public STUN server
+   *   discloses this device's public IP to a third party.
    * @param {object[]} [opts.turnServers] - TURN server configs with urls, username, credential
    */
   constructor(opts = {}) {
-    this.#stunServers = opts.stunServers || ['stun:stun.l.google.com:19302'];
+    // Default to no STUN. Host candidates alone connect two peers on the same
+    // LAN, and a STUN binding request discloses this device's public IP to
+    // whoever runs the server. Callers who need reflexive candidates pass
+    // stunServers explicitly.
+    this.#stunServers = opts.stunServers || [];
     this.#turnServers = opts.turnServers || [];
   }
 

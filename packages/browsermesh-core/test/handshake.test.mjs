@@ -412,6 +412,108 @@ describe('DirectInputHandshake', () => {
     assert.equal(token.signalingUrl, undefined)
     assert.equal(token.iceServers, undefined)
   })
+
+  // -- Single-use enforcement (replay) --------------------------------------
+
+  it('validateToken rejects a token that has already been redeemed', async () => {
+    const token = await handshake.generateToken()
+    token.podId = 'pod-remote'
+
+    assert.deepEqual(handshake.validateToken(token), { valid: true })
+
+    const second = handshake.validateToken(token)
+    assert.equal(second.valid, false)
+    assert.ok(second.error.includes('already used'), `unexpected error: ${second.error}`)
+  })
+
+  it('validateToken rejects a token replayed from its encoded bytes', async () => {
+    // The attacker's actual capability: they hold the QR/clipboard string,
+    // not the object. Re-decoding must not launder it into a fresh token.
+    const token = await handshake.generateToken()
+    token.podId = 'pod-remote'
+    const encoded = handshake.encodeToken(token)
+
+    const results = []
+    for (let i = 0; i < 5; i++) {
+      results.push(handshake.validateToken(DirectInputHandshake.decodeToken(encoded)))
+    }
+
+    assert.equal(results[0].valid, true, 'first redemption should succeed')
+    for (let i = 1; i < results.length; i++) {
+      assert.equal(results[i].valid, false, `redemption ${i + 1} should be rejected`)
+      assert.ok(results[i].error.includes('already used'))
+    }
+  })
+
+  it('validateToken with consume:false leaves the token redeemable', async () => {
+    const token = await handshake.generateToken()
+    token.podId = 'pod-remote'
+
+    assert.deepEqual(handshake.validateToken(token, { consume: false }), { valid: true })
+    assert.equal(handshake.consumedTokenCount, 0)
+    // Still spendable, exactly once.
+    assert.deepEqual(handshake.validateToken(token), { valid: true })
+    assert.equal(handshake.validateToken(token).valid, false)
+  })
+
+  it('replay set is scoped per issuing pod, so distinct pods may reuse a nonce', async () => {
+    const a = await handshake.generateToken()
+    a.podId = 'pod-remote-a'
+    const b = { ...a, podId: 'pod-remote-b' }
+
+    assert.deepEqual(handshake.validateToken(a), { valid: true })
+    assert.deepEqual(handshake.validateToken(b), { valid: true })
+    assert.equal(handshake.validateToken(a).valid, false)
+  })
+
+  it('a token rejected for another reason is not recorded as consumed', async () => {
+    const expired = {
+      podId: 'pod-remote',
+      publicKey: 'abc',
+      nonce: 'nonce-expired',
+      timestamp: Date.now() - TOKEN_TTL_MS - 1000,
+    }
+    assert.equal(handshake.validateToken(expired).valid, false)
+    assert.equal(handshake.consumedTokenCount, 0)
+  })
+
+  it('consumed nonces age out once past the token TTL', async () => {
+    const token = await handshake.generateToken()
+    token.podId = 'pod-remote'
+    assert.deepEqual(handshake.validateToken(token), { valid: true })
+    assert.equal(handshake.consumedTokenCount, 1)
+
+    // Advance past the entry's expiry without waiting five real minutes.
+    const realNow = Date.now
+    try {
+      Date.now = () => realNow() + TOKEN_TTL_MS + 1
+      assert.equal(handshake.consumedTokenCount, 0)
+    } finally {
+      Date.now = realNow
+    }
+  })
+
+  it('replay set is bounded by maxConsumedNonces', async () => {
+    const capped = new DirectInputHandshake({
+      localPodId: 'pod-local',
+      getPublicKeyBytes: async () => fakePublicKey,
+      maxConsumedNonces: 4,
+    })
+    for (let i = 0; i < 50; i++) {
+      const t = { podId: 'pod-remote', publicKey: 'abc', nonce: `n${i}`, timestamp: Date.now() }
+      assert.equal(capped.validateToken(t).valid, true)
+    }
+    assert.ok(capped.consumedTokenCount <= 4, `set grew to ${capped.consumedTokenCount}`)
+  })
+
+  it('forgetConsumedTokens clears the replay set', async () => {
+    const token = await handshake.generateToken()
+    token.podId = 'pod-remote'
+    assert.equal(handshake.validateToken(token).valid, true)
+    assert.equal(handshake.validateToken(token).valid, false)
+    handshake.forgetConsumedTokens()
+    assert.equal(handshake.validateToken(token).valid, true)
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -590,6 +692,137 @@ describe('HandshakeCoordinator', () => {
     signaler.disconnect()
   })
 
+  // -- Signaler lifetime on the token path ----------------------------------
+  //
+  // connectViaToken() builds its own SignalingClient from token.signalingUrl
+  // via globalThis.WebSocket, so these swap the global for the duration.
+
+  /**
+   * Run fn with globalThis.WebSocket stubbed by MockWebSocket, capturing the
+   * sockets that get built. Restores the real global afterwards.
+   */
+  async function withMockGlobalWebSocket(fn) {
+    const real = globalThis.WebSocket
+    const sockets = []
+    globalThis.WebSocket = function (url) {
+      const ws = new MockWebSocket(url)
+      sockets.push(ws)
+      return ws
+    }
+    try {
+      return await fn(sockets)
+    } finally {
+      globalThis.WebSocket = real
+    }
+  }
+
+  /**
+   * A transport shaped like the real ones: created by negotiate() but NOT yet
+   * connected, so the signaling channel still has the whole offer/answer/ICE
+   * exchange left to carry. connect() is where it first needs the signaler.
+   */
+  function createUnconnectedTransport() {
+    const closeCbs = []
+    return {
+      type: 'webrtc',
+      signalerAtConnect: null,
+      signaler: null,
+      onClose(cb) { closeCbs.push(cb) },
+      close() { for (const cb of closeCbs) cb() },
+      async connect() {
+        this.signalerAtConnect = this.signaler ? this.signaler.connected : null
+        this.signaler.sendOffer('pod-remote', { type: 'offer', sdp: 'v=0' })
+      },
+    }
+  }
+
+  it('connectViaToken keeps its signaler open until the transport closes', async () => {
+    await withMockGlobalWebSocket(async () => {
+      const transport = createUnconnectedTransport()
+      const factory = {
+        async negotiate(localPodId, remotePodId, signaler) {
+          // Mirrors TransportFactory.negotiate: "returns the first
+          // successfully created (but not yet connected) transport".
+          transport.signaler = signaler
+          return transport
+        },
+        async create() { return transport },
+      }
+      const coord = new HandshakeCoordinator({ localPodId: 'pod-local', transportFactory: factory })
+      const token = {
+        podId: 'pod-remote',
+        publicKey: 'abc123',
+        nonce: 'deadbeef',
+        timestamp: Date.now(),
+        signalingUrl: 'wss://signal.test',
+      }
+
+      const result = await coord.connectViaToken(token)
+      assert.ok(result.signaler, 'a signaler this call created should be handed back')
+      assert.equal(result.signaler.connected, true, 'signaler must still be open after negotiate()')
+
+      // The offer is the first thing that actually needs the channel.
+      await transport.connect()
+      assert.equal(transport.signalerAtConnect, true, 'signaler was closed before the offer was sent')
+
+      // And it is torn down with the transport, not before it.
+      transport.close()
+      assert.equal(result.signaler.connected, false, 'signaler should be disconnected on transport close')
+    })
+  })
+
+  it('connectViaToken hands back the signaler when the transport has no onClose', async () => {
+    await withMockGlobalWebSocket(async () => {
+      const bare = { type: 'webrtc' } // no onClose hook
+      const factory = { async negotiate() { return bare }, async create() { return bare } }
+      const logs = []
+      const coord = new HandshakeCoordinator({
+        localPodId: 'pod-local',
+        transportFactory: factory,
+        onLog: (level, msg) => logs.push(msg),
+      })
+      const token = {
+        podId: 'pod-remote', publicKey: 'abc', nonce: 'n1',
+        timestamp: Date.now(), signalingUrl: 'wss://signal.test',
+      }
+
+      const result = await coord.connectViaToken(token)
+      assert.equal(result.signaler.connected, true)
+      assert.ok(logs.some(m => m.includes('no onClose')), `expected a warning, got: ${logs.join(' | ')}`)
+      result.signaler.disconnect()
+    })
+  })
+
+  it('connectViaToken does not disconnect a signaling client it did not create', async () => {
+    const signaler = new SignalingClient({
+      url: 'wss://signal.test',
+      localPodId: 'pod-local',
+      _WebSocket: MockWebSocket,
+    })
+    await signaler.connect()
+
+    const transport = createUnconnectedTransport()
+    const factory = {
+      async negotiate(l, r, s) { transport.signaler = s; return transport },
+      async create() { return transport },
+    }
+    const coord = new HandshakeCoordinator({
+      localPodId: 'pod-local',
+      signalingClient: signaler,
+      transportFactory: factory,
+    })
+    const token = { podId: 'pod-remote', publicKey: 'abc', nonce: 'n2', timestamp: Date.now() }
+
+    const result = await coord.connectViaToken(token)
+    assert.equal(result.signaler, null, 'a borrowed signaler is not ours to hand back')
+    assert.equal(signaler.connected, true)
+
+    // Closing the transport must not close a channel we do not own.
+    transport.close()
+    assert.equal(signaler.connected, true)
+    signaler.disconnect()
+  })
+
   it('connectToPeer throws without transport factory', async () => {
     const coord = new HandshakeCoordinator({ localPodId: 'pod-local' })
     await assert.rejects(
@@ -607,6 +840,33 @@ describe('HandshakeCoordinator', () => {
     assert.rejects(
       () => coord.connectToPeer('pod-remote'),
       /SignalingClient is required/,
+    )
+  })
+
+  it('a token with no signalingUrl cannot connect — the exchange is key-only', async () => {
+    // Pins what the DirectInputHandshake docstring now says: the token
+    // carries identity, not an offer, so a signaling channel is still
+    // required. If a future change puts SDP in the token this test should
+    // fail and be rewritten, deliberately.
+    const handshake = new DirectInputHandshake({
+      localPodId: 'pod-local',
+      getPublicKeyBytes: async () => new Uint8Array(32).fill(7),
+    })
+    const token = await handshake.generateToken()
+    assert.deepEqual(
+      Object.keys(token).sort(),
+      ['nonce', 'podId', 'publicKey', 'timestamp'],
+      'token gained or lost a field; the docstring describes its contents',
+    )
+    assert.equal(token.sdp, undefined, 'no SDP offer in the token')
+
+    const coord = new HandshakeCoordinator({
+      localPodId: 'pod-other',
+      transportFactory: createMockTransportFactory(),
+    })
+    await assert.rejects(
+      () => coord.connectViaToken(token),
+      /No signaling channel available/,
     )
   })
 

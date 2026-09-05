@@ -31,10 +31,63 @@ export const GROUP_KEY_ACK = 0x83
  * per-member envelope encryption. Older browsers only support P-256/P-384
  * ECDH — group key distribution falls back to metadata-only (current
  * behavior) when this is false.
- * @returns {boolean}
+ *
+ * Determining this requires attempting the operation: WebCrypto exposes no
+ * algorithm registry, so the presence of `crypto.subtle` says nothing about
+ * which curves it implements. The probe runs once and the answer is cached.
+ *
+ * The synchronous form returns the cached answer, and `null` when the probe
+ * has not resolved yet — treat `null` as "unknown, assume unsupported" or
+ * await `probeX25519Support()` first.
+ *
+ * @returns {boolean|null}
  */
 export function supportsX25519() {
-  return typeof crypto !== 'undefined' && !!crypto.subtle
+  if (_x25519Supported === null) {
+    // Kick off the probe so a later synchronous call can answer.
+    probeX25519Support()
+  }
+  return _x25519Supported
+}
+
+/** @type {boolean|null} Cached probe result; null until the probe resolves. */
+let _x25519Supported = null
+
+/** @type {Promise<boolean>|null} In-flight probe, so it runs at most once. */
+let _x25519Probe = null
+
+/**
+ * Probe for real X25519 support by asking WebCrypto to generate a key.
+ * Resolves true or false; never throws. The result is cached.
+ *
+ * @returns {Promise<boolean>}
+ */
+export function probeX25519Support() {
+  if (_x25519Probe) return _x25519Probe
+  _x25519Probe = (async () => {
+    if (typeof crypto === 'undefined' || !crypto.subtle ||
+        typeof crypto.subtle.generateKey !== 'function') {
+      return false
+    }
+    try {
+      await crypto.subtle.generateKey({ name: 'X25519' }, false, ['deriveBits'])
+      return true
+    } catch {
+      return false
+    }
+  })().then((ok) => {
+    _x25519Supported = ok
+    return ok
+  })
+  return _x25519Probe
+}
+
+/**
+ * Reset the cached X25519 probe. Tests only.
+ */
+export function _resetX25519Probe() {
+  _x25519Supported = null
+  _x25519Probe = null
 }
 
 function bytesToB64(bytes) {
@@ -241,7 +294,7 @@ export class GroupKeyManager {
    *   X25519 is unsupported in this environment.
    */
   async initEncryption() {
-    if (!supportsX25519()) {
+    if (!(await probeX25519Support())) {
       this.#encryptionKeyPair = null
       return null
     }
@@ -525,7 +578,10 @@ export class GroupKeyManager {
     const state = this.getCurrentState()
     if (!state) return
 
-    const canEnvelope = supportsX25519() && !!this.#encryptionKeyPair
+    // A local encryption keypair only exists when initEncryption() probed
+    // X25519 successfully, so its presence IS the support check -- no need to
+    // re-probe, and re-probing here would suspend before the broadcast.
+    const canEnvelope = !!this.#encryptionKeyPair
     let envelopes
     if (canEnvelope) {
       const targets = state.members.filter(m => m !== this.#localPodId && this.#memberPublicKeys.has(m))

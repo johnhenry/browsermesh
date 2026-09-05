@@ -53,22 +53,50 @@ export function sdpSessionId(sdp) {
 // ICE defaults
 // ---------------------------------------------------------------------------
 
-/** @type {RTCIceServer[]} */
-const DEFAULT_ICE_SERVERS = Object.freeze([
+/**
+ * Default ICE configuration: none.
+ *
+ * With no ICE servers a peer gathers host candidates only, which is all two
+ * devices on the same LAN need and involves no third party. Contacting a
+ * public STUN server discloses the client's public IP, and the fact that it
+ * is pairing, to whoever runs it — so that is opt-in, not the default. See
+ * PUBLIC_STUN_SERVERS to opt in, or supply your own STUN/TURN.
+ *
+ * @type {RTCIceServer[]}
+ */
+export const DEFAULT_ICE_SERVERS = Object.freeze([])
+
+/**
+ * A public STUN server, for callers who need reflexive candidates to traverse
+ * NAT and have decided that the disclosure is acceptable.
+ *
+ * Using this sends a STUN binding request to Google from every peer that
+ * gathers candidates, revealing the device's public IP address and the timing
+ * of the pairing attempt. Prefer a STUN server you control.
+ *
+ * @type {RTCIceServer[]}
+ */
+export const PUBLIC_STUN_SERVERS = Object.freeze([
   { urls: 'stun:stun.l.google.com:19302' },
 ])
 
 /**
  * Merge user-configured ICE servers (typically TURN, for NAT traversal
- * when direct/STUN connectivity fails) with the STUN defaults. Silently
+ * when direct/STUN connectivity fails) with the defaults. Silently
  * ignores malformed entries rather than throwing, since this is usually
  * fed by user-editable settings.
+ *
+ * An explicit empty array means "no ICE servers" and is honoured as given:
+ * `mergeIceServers([])` returns `[]`, never the defaults. Omitting the
+ * argument (or passing null) is what asks for the defaults.
  *
  * @param {RTCIceServer[]} [userServers] - e.g. [{urls: 'turn:relay.example.com', username, credential}]
  * @param {RTCIceServer[]} [defaults=DEFAULT_ICE_SERVERS]
  * @returns {RTCIceServer[]}
  */
 export function mergeIceServers(userServers, defaults = DEFAULT_ICE_SERVERS) {
+  // An explicit [] is a decision, not an absence. Respect it.
+  if (Array.isArray(userServers) && userServers.length === 0) return []
   const valid = (Array.isArray(userServers) ? userServers : [])
     .filter(s => s && typeof s === 'object' && typeof s.urls === 'string' && s.urls.length > 0)
   return [...defaults, ...valid]

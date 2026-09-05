@@ -5,7 +5,67 @@ import {
   decodeBase64url,
   derivePodId,
   PodIdentity,
+  supportsEd25519,
+  probeEd25519Support,
+  _resetEd25519Probe,
 } from '../src/identity.mjs';
+
+/**
+ * Replace globalThis.crypto for a test. It is a getter-only property in Node,
+ * so it has to be redefined rather than assigned. Returns a restore function.
+ */
+function stubGlobalCrypto(replacement) {
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'crypto');
+  Object.defineProperty(globalThis, 'crypto', { value: replacement, configurable: true, writable: true });
+  return () => Object.defineProperty(globalThis, 'crypto', original);
+}
+
+describe('Ed25519 support probe', () => {
+  it('reports true where WebCrypto really implements Ed25519', async () => {
+    _resetEd25519Probe();
+    assert.equal(await probeEd25519Support(), true);
+    assert.equal(supportsEd25519(), true, 'sync form should read the cached probe');
+  });
+
+  it('reports false when WebCrypto exists but Ed25519 does not', async () => {
+    // The iOS 16 / Chromium <137 case. crypto.subtle is present; the
+    // algorithm is not.
+    _resetEd25519Probe();
+    const restore = stubGlobalCrypto({
+      subtle: { generateKey: async () => { throw new Error('NotSupportedError'); } },
+    });
+    try {
+      assert.equal(await probeEd25519Support(), false);
+      assert.equal(supportsEd25519(), false);
+    } finally {
+      restore();
+      _resetEd25519Probe();
+      await probeEd25519Support();
+    }
+  });
+
+  it('PodIdentity.generate names the requirement instead of throwing NotSupportedError', async () => {
+    const restore = stubGlobalCrypto({
+      subtle: { generateKey: async () => { throw new Error('NotSupportedError'); } },
+    });
+    try {
+      await assert.rejects(
+        () => PodIdentity.generate(),
+        /Safari 17\+ or Chromium 137\+/,
+      );
+    } finally {
+      restore();
+    }
+  });
+
+  it('probes at most once', async () => {
+    _resetEd25519Probe();
+    const a = probeEd25519Support();
+    const b = probeEd25519Support();
+    assert.equal(a, b, 'the in-flight probe should be shared, not re-run');
+    await a;
+  });
+});
 
 describe('encodeBase64url', () => {
   it('encodes empty bytes', () => {
