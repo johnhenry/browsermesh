@@ -30,12 +30,37 @@ import { silentCatch } from './silent-catch.mjs'
 // ---------------------------------------------------------------------------
 
 /**
+ * Largest number of bytes handed to `String.fromCharCode` at a time.
+ *
+ * The spread form -- `String.fromCharCode(...bytes)` -- turns every byte into
+ * a separate argument, and V8 caps an argument list at roughly 124k entries,
+ * so it throws `RangeError: Maximum call stack size exceeded` on inputs above
+ * that. The exact ceiling moves with the stack depth of the caller, which is
+ * worse than a fixed limit: the same input can encode from one call site and
+ * throw from another. Chunking removes the ceiling entirely.
+ */
+const FROM_CHAR_CODE_CHUNK = 0x8000
+
+/**
  * Convert a Uint8Array to a base64url string (no padding).
+ *
+ * Handles inputs of any length. See FROM_CHAR_CODE_CHUNK for why this is a
+ * chunked loop rather than the shorter spread form.
+ *
  * @param {Uint8Array} bytes
  * @returns {string}
  */
 function toBase64Url(bytes) {
-  const bin = String.fromCharCode(...bytes)
+  // subarray() is zero-copy but TypedArray-only; callers outside this module
+  // may hand us a plain array of byte values, which the old spread accepted.
+  const view = ArrayBuffer.isView(bytes) ? bytes : Uint8Array.from(bytes)
+  let bin = ''
+  for (let i = 0; i < view.length; i += FROM_CHAR_CODE_CHUNK) {
+    bin += String.fromCharCode.apply(
+      null,
+      view.subarray(i, i + FROM_CHAR_CODE_CHUNK),
+    )
+  }
   const b64 = btoa(bin)
   return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 }
@@ -64,6 +89,41 @@ function randomHex(byteLen = 16) {
   crypto.getRandomValues(bytes)
   return [...bytes].map(b => b.toString(16).padStart(2, '0')).join('')
 }
+
+/**
+ * Thrown by `DirectInputHandshake.decodeToken()` for any malformed token.
+ *
+ * One error type for the whole decode path, so a caller wiring up a QR
+ * scanner catches this instead of guessing which of `DOMException`,
+ * `SyntaxError` or `TypeError` the platform will produce. The originating
+ * platform error, when there is one, is kept as `cause`.
+ */
+export class TokenDecodeError extends Error {
+  /**
+   * @param {string} message
+   * @param {object} [opts]
+   * @param {unknown} [opts.cause]
+   */
+  constructor(message, opts) {
+    super(message, opts)
+    this.name = 'TokenDecodeError'
+  }
+}
+
+/**
+ * Longest encoded token `decodeToken()` will look at, in characters.
+ *
+ * A ConnectionToken is a few hundred bytes; the densest QR code holds 2,953
+ * bytes, so anything a camera can actually read is two orders of magnitude
+ * below this. The cap exists only to bound what a hostile string can make the
+ * process allocate -- it is deliberately generous rather than tight.
+ *
+ * Note the asymmetry: `encodeToken()` is uncapped, because a caller encoding
+ * their own token is not the untrusted side. A token built from a very large
+ * `iceServers` list can therefore encode to more than this and fail to decode.
+ * Pass `{ maxLength }` if that is genuinely your case.
+ */
+export const MAX_ENCODED_TOKEN_LENGTH = 128 * 1024
 
 /** Token TTL in milliseconds (5 minutes). */
 const TOKEN_TTL_MS = 5 * 60 * 1000
@@ -489,13 +549,62 @@ export class DirectInputHandshake {
   /**
    * Decode a base64url-encoded token string back into a ConnectionToken.
    *
+   * This is the first thing in the library that touches a scanned QR code or
+   * a pasted clipboard string -- the least trustworthy input it handles -- so
+   * it reports failure in one way instead of leaking whatever the platform
+   * happened to throw. Previously a malformed string surfaced a raw
+   * `DOMException` from `atob` or a `SyntaxError` from `JSON.parse`, neither
+   * of which the signature mentioned and neither of which says anything
+   * useful to the person holding the phone.
+   *
+   * Every failure is now a {@link TokenDecodeError} whose `cause` is the
+   * original platform error, and input longer than `maxLength` is refused
+   * before any allocation, so a hostile QR cannot ask for arbitrary memory.
+   *
    * @param {string} encoded - base64url-encoded JSON string
+   * @param {object} [opts]
+   * @param {number} [opts.maxLength=MAX_ENCODED_TOKEN_LENGTH] - Reject input
+   *   longer than this many characters without decoding it.
    * @returns {ConnectionToken}
+   * @throws {TokenDecodeError} On non-string, oversized, non-base64url,
+   *   non-JSON, or non-object input.
    */
-  static decodeToken(encoded) {
-    const bytes = fromBase64Url(encoded)
-    const json = new TextDecoder().decode(bytes)
-    return JSON.parse(json)
+  static decodeToken(encoded, { maxLength = MAX_ENCODED_TOKEN_LENGTH } = {}) {
+    if (typeof encoded !== 'string') {
+      throw new TokenDecodeError(`Token must be a string, got ${typeof encoded}`)
+    }
+    if (encoded.length === 0) {
+      throw new TokenDecodeError('Token is empty')
+    }
+    if (encoded.length > maxLength) {
+      throw new TokenDecodeError(
+        `Token is too long: ${encoded.length} characters, limit is ${maxLength}`,
+      )
+    }
+
+    let bytes
+    try {
+      bytes = fromBase64Url(encoded)
+    } catch (cause) {
+      throw new TokenDecodeError('Token is not valid base64url', { cause })
+    }
+
+    let parsed
+    try {
+      parsed = JSON.parse(new TextDecoder().decode(bytes))
+    } catch (cause) {
+      throw new TokenDecodeError('Token is not valid JSON', { cause })
+    }
+
+    // JSON.parse happily returns 123, null or "str". The declared return type
+    // is an object, and validateToken() would only reject those later with a
+    // vaguer message, so reject here.
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new TokenDecodeError(
+        `Token JSON is not an object (got ${Array.isArray(parsed) ? 'array' : parsed === null ? 'null' : typeof parsed})`,
+      )
+    }
+    return parsed
   }
 
   /**

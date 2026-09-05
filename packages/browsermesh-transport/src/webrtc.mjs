@@ -124,6 +124,7 @@ export class WebRTCPeerConnection {
   #iceServers
   #onLog
   #state = 'new'   // new | connecting | connected | closed
+  #closing = false // reentrancy guard for close(); see close()
   #iceCandidateCbs = []
   #messageCbs = []
   #closeCbs = []
@@ -294,11 +295,37 @@ export class WebRTCPeerConnection {
   /**
    * Add a remote ICE candidate received through signaling.
    *
+   * `RTCPeerConnection.addIceCandidate()` is asynchronous and rejects on a
+   * malformed candidate, on a candidate for an m-line that does not exist,
+   * and on any candidate that arrives before the remote description is set.
+   * All three are ordinary events on a real signaling channel -- candidates
+   * race the answer, and the string on the wire came from another machine --
+   * and this method used to drop that promise on the floor. An unhandled
+   * rejection terminates a Node process by default and raises an uncaught
+   * error event in a browser, so one bad candidate from a peer could take the
+   * process down. Verified against two real RTCPeerConnections; see
+   * `test/webrtc-real-peer.test.mjs`.
+   *
+   * A rejected candidate is not a connection failure: ICE is designed to try
+   * many candidates and keep the ones that work. It is therefore logged and
+   * swallowed rather than routed to `onError()`, which WebRTCMeshManager wires
+   * to its reconnect backoff -- a peer sending junk candidates should not be
+   * able to force ICE restarts.
+   *
    * @param {RTCIceCandidate|object} candidate
+   * @returns {Promise<boolean>} Resolves true if the candidate was accepted,
+   *   false if it was rejected. Never rejects.
+   * @throws {Error} Synchronously, if there is no peer connection yet.
    */
   addIceCandidate(candidate) {
     if (!this.#pc) throw new Error('No peer connection')
-    this.#pc.addIceCandidate(candidate)
+    return Promise.resolve(this.#pc.addIceCandidate(candidate)).then(
+      () => true,
+      (err) => {
+        this.#log(`Ignored ICE candidate from ${this.#remotePodId}: ${err?.message || err}`)
+        return false
+      },
+    )
   }
 
   /**
@@ -478,16 +505,47 @@ export class WebRTCPeerConnection {
    * Close the connection and clean up all resources.
    */
   close() {
-    if (this.#state === 'closed') return
+    const alreadyClosed = this.#state === 'closed'
+
+    // Release the underlying objects unconditionally, even when the state is
+    // already 'closed'. It used to return early on that check, which meant a
+    // connection closed *by the remote peer* -- where the DataChannel's
+    // onclose set the state before anyone released anything -- kept its
+    // RTCPeerConnection forever. That is one leaked peer connection per
+    // remote disconnect, and with a real WebRTC stack it also keeps the
+    // process alive: a Node test that connected two real peers and let one
+    // hang up would never exit. Verified against two real
+    // RTCPeerConnections; see test/webrtc-real-peer.test.mjs.
+    // Releasing the DataChannel fires its onclose, and onclose routes back
+    // into close() -- that is how a remote hangup releases our peer
+    // connection. Re-entering here before #setState('closed') has run means
+    // the guard in onclose still sees a live state, so close() calls itself
+    // until the stack runs out. The RangeError is then swallowed by the
+    // release try/catch below, so the symptom is not a crash but a *missing*
+    // 'closed' transition, appearing only on whichever runs exhaust the stack
+    // inside #setState's callback loop. Measured at 2227 frames deep.
+    //
+    // Browsers dispatch onclose asynchronously, which is why this hides in a
+    // real browser and surfaces against a synchronous mock or binding.
+    if (this.#closing) return
+    this.#closing = true
+    try {
+      if (this.#dataChannel) {
+        try { this.#dataChannel.close() } catch (e) { silentCatch('clawser-mesh-webrtc', 'this', e) }
+        this.#dataChannel = null
+      }
+      if (this.#pc) {
+        try { this.#pc.close() } catch (e) { silentCatch('clawser-mesh-webrtc', 'this', e) }
+        this.#pc = null
+      }
+    } finally {
+      this.#closing = false
+    }
+
+    // The state transition and the close callbacks fire exactly once, so a
+    // second close() -- or a close() following a remote hangup -- is silent.
+    if (alreadyClosed) return
     this.#setState('closed')
-    if (this.#dataChannel) {
-      try { this.#dataChannel.close() } catch (e) { silentCatch('clawser-mesh-webrtc', 'this', e) }
-      this.#dataChannel = null
-    }
-    if (this.#pc) {
-      try { this.#pc.close() } catch (e) { silentCatch('clawser-mesh-webrtc', 'this', e) }
-      this.#pc = null
-    }
     this.#fireClose()
     this.#log(`Connection closed with ${this.#remotePodId}`)
   }
@@ -647,10 +705,9 @@ export class WebRTCPeerConnection {
       }
     }
     dc.onclose = () => {
-      if (this.#state !== 'closed') {
-        this.#setState('closed')
-        this.#fireClose()
-      }
+      // The remote hung up. Go through close() rather than just flipping the
+      // state, so our own RTCPeerConnection is released too.
+      if (this.#state !== 'closed') this.close()
     }
     dc.onerror = (event) => {
       this.#fireError(event?.error || new Error('DataChannel error'))

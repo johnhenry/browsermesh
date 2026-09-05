@@ -493,22 +493,48 @@ export class PaymentChannel {
   /**
    * Open the channel with an initial deposit.
    *
+   * `remoteDeposit` is what the *counterparty* funded the channel with, as
+   * reported by their PAYMENT_OPEN message. It exists because a channel has
+   * two sides and only one of them runs this method with first-hand
+   * knowledge: without it, the receiving side of an open handshake starts at
+   * `remoteBalance = 0` while the initiator sits at `localBalance = deposit`,
+   * and the two views can never converge -- every subsequent update is
+   * computed from a starting point they disagree about. See
+   * `PaymentRouter.broadcastOpen()` for the wire side of this.
+   *
+   * One-sided funding stays the default: `open(100)` behaves exactly as
+   * before, including throwing on a non-positive amount. A pure counterparty
+   * mirror is `open(0, 100)` -- zero of your own credits, 100 of theirs --
+   * which is why the positivity check is on the *total*, not on the local
+   * side alone.
+   *
    * @param {number} initialDeposit - Amount to deposit into local balance
+   * @param {number} [remoteDeposit=0] - Amount the counterparty deposited,
+   *   credited to `remoteBalance`
    */
-  open(initialDeposit) {
+  open(initialDeposit, remoteDeposit = 0) {
     if (this.#state !== 'idle') {
       throw new Error(`Cannot open channel in state: ${this.#state}`);
     }
-    if (typeof initialDeposit !== 'number' || initialDeposit <= 0) {
+    if (typeof initialDeposit !== 'number' || Number.isNaN(initialDeposit) || initialDeposit < 0) {
       throw new RangeError('Initial deposit must be positive');
     }
-    if (initialDeposit > this.#capacity) {
+    if (typeof remoteDeposit !== 'number' || Number.isNaN(remoteDeposit) || remoteDeposit < 0) {
+      throw new RangeError('Remote deposit must not be negative');
+    }
+    if (initialDeposit + remoteDeposit <= 0) {
+      // Preserves the pre-existing message for the one-argument form, which
+      // is the only way this is reachable without an explicit remoteDeposit.
+      throw new RangeError('Initial deposit must be positive');
+    }
+    if (initialDeposit + remoteDeposit > this.#capacity) {
       throw new RangeError(
-        `Deposit ${initialDeposit} exceeds capacity ${this.#capacity}`
+        `Deposit ${initialDeposit + remoteDeposit} exceeds capacity ${this.#capacity}`
       );
     }
     this.#state = 'opening';
     this.#localBalance = initialDeposit;
+    this.#remoteBalance = remoteDeposit;
     this.#state = 'open';
   }
 
@@ -1164,11 +1190,14 @@ export class PaymentRouter {
    *
    * @param {string} remotePodId
    * @param {number} [capacity]
-   * @param {object} [signingOpts] - Forwarded to PaymentChannel to enable
-   *   signed updates and mutual close. Omit for unchanged, unsigned behavior.
+   * @param {object} [signingOpts] - Forwarded to PaymentChannel. Enables
+   *   signed updates and mutual close, and carries `channelId` when both
+   *   sides must agree on one (see broadcastOpen()). Omit for unchanged,
+   *   unsigned behavior with a locally-generated id.
    * @param {Function} [signingOpts.signFn]
    * @param {Function} [signingOpts.verifyFn]
    * @param {Uint8Array} [signingOpts.remotePublicKey]
+   * @param {string} [signingOpts.channelId]
    * @returns {PaymentChannel}
    */
   openChannel(remotePodId, capacity, signingOpts) {
@@ -1323,10 +1352,26 @@ export class PaymentRouter {
     // Inbound: channel open request
     subscribeFn(PAYMENT_OPEN, (payload, fromPodId) => {
       try {
-        const { remotePodId, capacity } = payload;
-        if (remotePodId === this.#localPodId) {
-          // Remote peer wants to open a channel with us
-          this.openChannel(fromPodId, capacity);
+        const { remotePodId, capacity, channelId, deposit } = payload;
+        if (remotePodId !== this.#localPodId) return;
+
+        // Adopt the initiator's channelId when they sent one. Signed updates
+        // and close claims are keyed by channelId, so a locally-generated one
+        // would make every message from the initiator fail the
+        // 'Channel ID mismatch' check in receive().
+        const ch = this.openChannel(
+          fromPodId,
+          capacity,
+          typeof channelId === 'string' && channelId ? { channelId } : undefined,
+        );
+
+        // Adopt the initiator's deposit as our view of *their* balance, so
+        // both sides start from the same numbers. Senders that predate this
+        // field send no deposit; the channel is then left idle exactly as
+        // before, which is the old (non-converging) behaviour rather than a
+        // new failure.
+        if (typeof deposit === 'number' && Number.isFinite(deposit) && deposit > 0) {
+          ch.open(0, deposit);
         }
       } catch (e) { silentCatch('clawser-mesh-payments', 'ignore-duplicate-or-invalid-opens', e) }
     });
@@ -1402,13 +1447,42 @@ export class PaymentRouter {
   /**
    * Broadcast a channel open over the transport.
    *
+   * The message carries the channel's id and this side's deposit as well as
+   * its capacity. Both are what let the counterparty build a mirror that
+   * agrees with ours: the id because signed updates and close claims are
+   * keyed by it, the deposit because otherwise the receiver's `remoteBalance`
+   * starts at 0 while ours starts at the deposit, and no later message ever
+   * reconciles the difference.
+   *
+   * Defaults are read from the local channel to `remotePodId` when one
+   * exists, so the normal sequence -- `openChannel()`, `open(deposit)`,
+   * `broadcastOpen()` -- needs no extra arguments. Call this *after*
+   * `open()`, or the deposit on the wire is 0.
+   *
+   * Wire compatibility: `channelId` and `deposit` are additional fields. A
+   * peer running the older code ignores them and behaves as it did before;
+   * this side ignores their absence in an incoming message the same way. Only
+   * when both ends send them do the two views actually converge.
+   *
    * @param {string} remotePodId
-   * @param {number} [capacity]
+   * @param {number} [capacity] - Defaults to the local channel's capacity
+   * @param {object} [opts]
+   * @param {string} [opts.channelId] - Defaults to the local channel's id
+   * @param {number} [opts.deposit] - Defaults to the local channel's current
+   *   localBalance
    */
-  broadcastOpen(remotePodId, capacity) {
-    if (this.#broadcastFn) {
-      this.#broadcastFn(PAYMENT_OPEN, { remotePodId, capacity });
-    }
+  broadcastOpen(remotePodId, capacity, opts = {}) {
+    if (!this.#broadcastFn) return;
+    const ch = this.#channels.get(remotePodId);
+    const payload = {
+      remotePodId,
+      capacity: capacity != null ? capacity : ch?.capacity,
+    };
+    const channelId = opts.channelId != null ? opts.channelId : ch?.channelId;
+    if (channelId != null) payload.channelId = channelId;
+    const deposit = opts.deposit != null ? opts.deposit : ch?.localBalance;
+    if (deposit != null) payload.deposit = deposit;
+    this.#broadcastFn(PAYMENT_OPEN, payload);
   }
 
   /**
