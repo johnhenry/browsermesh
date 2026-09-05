@@ -505,7 +505,7 @@ export class DirectInputHandshake {
    * @returns {string}
    */
   #nonceKey(token) {
-    return `${token.podId} ${token.nonce}`
+    return `${token.podId}\u0000${token.nonce}`
   }
 
   /**
