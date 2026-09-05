@@ -15,7 +15,7 @@
 //           Invalid ICE settings from remote SDP
 //   final: a.isOpen = false b.isOpen = false
 //
-// Same harness shape as webrtc-real-peer.test.mjs: `node-datachannel` is an
+// Same harness shape as ./webrtc.test.mjs: `node-datachannel` is an
 // optional devDependency, `iceServers: []` means host candidates on loopback
 // only, and the whole signaling "server" is two function calls in pair().
 
@@ -29,6 +29,18 @@ try {
   ndcMain = await import('node-datachannel')
 } catch {
   // Optional dependency absent -- the suite below skips.
+}
+
+// A skipped suite reports success. That is right for a contributor who has
+// not built the native binding, and wrong for CI, where a silently-absent
+// dependency would turn this whole file into decoration while the run stays
+// green. REQUIRE_REAL_PEER=1 (set by the CI step) makes the absence fatal.
+if (!ndc && process.env.REQUIRE_REAL_PEER) {
+  throw new Error(
+    'REQUIRE_REAL_PEER is set but `node-datachannel` did not load, so the ' +
+    'real-peer suite would have skipped and reported success. Install the ' +
+    'devDependency, or unset REQUIRE_REAL_PEER to allow the skip.'
+  )
 }
 
 if (!ndc) {
@@ -57,7 +69,7 @@ describeIfReal('WebRTC renegotiation against real peers', () => {
       RTCIceCandidate: ndc.RTCIceCandidate,
       RTCSessionDescription: ndc.RTCSessionDescription,
     })
-    webrtc = await import('../src/webrtc.mjs')
+    webrtc = await import('../../src/webrtc.mjs')
   })
 
   after(() => {
