@@ -234,6 +234,45 @@ describe('Identity Tools', () => {
       assert.equal(result.success, true);
       assert.ok(result.output.includes('re-imported'));
     });
+
+    it('imports an encrypted export, which identity_export can produce', async () => {
+      // identity_export takes a passphrase. Without the matching parameter
+      // here, everything that tool encrypts was unimportable through the
+      // tool interface -- a backup the UI invites you to make and cannot
+      // restore.
+      const s = await idMgr.create('encrypt-me');
+      const envelope = await new IdentityExportTool().execute({
+        podId: s.podId,
+        passphrase: 'a strong passphrase',
+      });
+      assert.equal(envelope.success, true);
+      const keyData = JSON.parse(envelope.output.slice(envelope.output.indexOf('{')));
+      assert.equal(keyData.encrypted, true);
+
+      const podId = s.podId;
+      idMgr.delete(podId);
+
+      const result = await tool.execute({
+        keyData,
+        label: 'restored-from-encrypted',
+        passphrase: 'a strong passphrase',
+      });
+      assert.equal(result.success, true, result.error);
+      assert.ok(result.output.includes(podId), 'the same identity came back');
+    });
+
+    it('reports a wrong passphrase as a failure rather than throwing', async () => {
+      const s = await idMgr.create('encrypt-me-too');
+      const keyData = await idMgr.export(s.podId, 'the right passphrase');
+
+      const result = await tool.execute({
+        keyData,
+        label: 'nope',
+        passphrase: 'the wrong passphrase',
+      });
+      assert.equal(result.success, false);
+      assert.match(result.error, /passphrase is wrong, or the export is damaged/);
+    });
   });
 
   // -- IdentityDeleteTool ------------------------------------------------

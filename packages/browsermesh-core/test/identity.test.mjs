@@ -1076,3 +1076,127 @@ describe('encrypted export never degrades to plaintext', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// An encrypted export must be importable
+//
+// export(podId, passphrase) produced `{ encrypted: true, kdf, iterations,
+// salt, iv, ciphertext }`, and import() handed its first argument straight to
+// crypto.subtle.importKey('jwk', …). Nothing in the package decrypted the
+// envelope, so the encrypted export was write-only: doing the safe thing with
+// a backup produced a backup this library could not restore. The round-trip
+// below is the assertion whose absence let that ship.
+// ---------------------------------------------------------------------------
+
+describe('encrypted export round-trips through import', () => {
+  const PW = 'correct horse battery staple';
+
+  it('restores the same identity, and it can still sign', async () => {
+    const source = new MeshIdentityManager();
+    const created = await source.create('alice');
+    const envelope = await source.export(created.podId, PW);
+    assert.equal(envelope.encrypted, true, 'precondition: an encrypted export');
+
+    const target = new MeshIdentityManager();
+    const restored = await target.import(envelope, 'restored', { passphrase: PW });
+
+    // Same key, not merely a well-formed one: podId is derived from the
+    // public key, so an equal podId means the private scalar survived.
+    assert.equal(restored.podId, created.podId);
+
+    // And the restored key actually works. A key that imports but cannot
+    // sign is the failure this whole path is about. Verified against the
+    // *source* manager's public key, so this proves the restored private key
+    // matches the original rather than merely being self-consistent.
+    const message = new TextEncoder().encode('a message to sign');
+    const signature = await target.sign(restored.podId, message);
+    const sourcePublicKey = await source.getPublicKeyBytes(created.podId);
+    assert.equal(await source.verify(sourcePublicKey, message, signature), true);
+  });
+
+  it('a plaintext export still imports, with no passphrase', async () => {
+    const source = new MeshIdentityManager();
+    const created = await source.create('alice');
+    const jwk = await source.export(created.podId);
+
+    const target = new MeshIdentityManager();
+    const restored = await target.import(jwk, 'restored');
+    assert.equal(restored.podId, created.podId);
+  });
+
+  it('refuses an encrypted export with no passphrase', async () => {
+    const source = new MeshIdentityManager();
+    const created = await source.create('alice');
+    const envelope = await source.export(created.podId, PW);
+
+    const target = new MeshIdentityManager();
+    await assert.rejects(
+      () => target.import(envelope, 'restored'),
+      (err) => {
+        assert.equal(err instanceof TypeError, true);
+        assert.match(err.message, /opts\.passphrase/);
+        return true;
+      }
+    );
+  });
+
+  it('reports a wrong passphrase without confirming the ciphertext was otherwise sound', async () => {
+    const source = new MeshIdentityManager();
+    const created = await source.create('alice');
+    const envelope = await source.export(created.podId, PW);
+
+    const target = new MeshIdentityManager();
+
+    let wrongPassphraseMessage;
+    await assert.rejects(
+      () => target.import(envelope, 'restored', { passphrase: 'not the passphrase' }),
+      (err) => {
+        wrongPassphraseMessage = err.message;
+        assert.match(err.message, /passphrase is wrong, or the export is damaged/);
+        return true;
+      }
+    );
+
+    // The same envelope with the ciphertext corrupted, opened with the RIGHT
+    // passphrase, must be indistinguishable from the wrong-passphrase case.
+    // Any difference tells someone guessing that they had just found the
+    // passphrase.
+    const damaged = { ...envelope, ciphertext: envelope.ciphertext.slice(0, -4) + 'AAAA' };
+    await assert.rejects(
+      () => target.import(damaged, 'restored', { passphrase: PW }),
+      (err) => {
+        assert.equal(err.message, wrongPassphraseMessage,
+          'a damaged envelope and a wrong passphrase report identically');
+        return true;
+      }
+    );
+  });
+
+  it('refuses a passphrase for an export that is not encrypted', async () => {
+    // The other direction of #18's confusion: silently ignoring the
+    // passphrase would restore an identity from a plaintext private key
+    // while the caller believed it had been protected.
+    const source = new MeshIdentityManager();
+    const created = await source.create('alice');
+    const jwk = await source.export(created.podId);
+
+    const target = new MeshIdentityManager();
+    await assert.rejects(
+      () => target.import(jwk, 'restored', { passphrase: PW }),
+      /not encrypted/
+    );
+  });
+
+  it('opens an envelope written before `iterations` was recorded', async () => {
+    // decryptWithPassphrase() defaults the count, so older backups still open.
+    const source = new MeshIdentityManager();
+    const created = await source.create('alice');
+    const envelope = await source.export(created.podId, PW);
+    const { iterations, ...legacy } = envelope;
+    assert.equal(iterations, 310_000, 'precondition: the field is normally present');
+
+    const target = new MeshIdentityManager();
+    const restored = await target.import(legacy, 'restored', { passphrase: PW });
+    assert.equal(restored.podId, created.podId);
+  });
+});
