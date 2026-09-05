@@ -678,9 +678,9 @@ describe('MeshKeyring', () => {
       const parent = await PodIdentity.generate();
       const child = await PodIdentity.generate();
 
-      const link = await SignedKeyLink.create(parent, child, 'device');
-      // Force expiration
-      link.expires = 1;
+      // The expiry has to be present when the link is signed. Bolting it on
+      // afterwards no longer verifies — see 'SignedKeyLink signature coverage'.
+      const link = await SignedKeyLink.create(parent, child, 'device', { expires: 1 });
       await kr.addVerifiedLink(link, parent.keyPair.publicKey, child.keyPair.publicKey);
 
       const keyMap = new Map([
@@ -746,15 +746,54 @@ describe('SignedKeyLink', () => {
     assert.equal(link.childSignature, null);
   });
 
-  it('signedPayload generates canonical bytes', () => {
+  it('signedPayload generates canonical bytes covering every asserted field', () => {
     const link = new SignedKeyLink({
       parent: 'PARENT',
       child: 'CHILD',
       relation: 'device',
       created: 12345,
     });
-    const payload = link.signedPayload;
-    const str = new TextDecoder().decode(payload);
+    const str = new TextDecoder().decode(link.signedPayload);
+    assert.equal(
+      str,
+      '{"v":2,"parent":"PARENT","child":"CHILD","relation":"device","scope":null,"expires":null,"created":12345}'
+    );
+  });
+
+  it('signedPayload changes when scope or expires changes', () => {
+    const base = {
+      parent: 'PARENT',
+      child: 'CHILD',
+      relation: 'delegate',
+      created: 12345,
+    };
+    const decode = (l) => new TextDecoder().decode(l.signedPayload);
+
+    const plain = decode(new SignedKeyLink({ ...base }));
+    const scoped = decode(new SignedKeyLink({ ...base, scope: ['read'] }));
+    const wider = decode(new SignedKeyLink({ ...base, scope: ['read', 'admin'] }));
+    const dated = decode(new SignedKeyLink({ ...base, expires: 999 }));
+
+    assert.notEqual(plain, scoped);
+    assert.notEqual(scoped, wider);
+    assert.notEqual(plain, dated);
+  });
+
+  it('signedPayload does not confuse a scope entry containing the legacy delimiter', () => {
+    const base = { parent: 'P', child: 'C', relation: 'delegate', created: 1 };
+    const joined = new SignedKeyLink({ ...base, scope: ['a|b'] });
+    const split = new SignedKeyLink({ ...base, scope: ['a', 'b'] });
+    assert.notDeepEqual(joined.signedPayload, split.signedPayload);
+  });
+
+  it('legacySignedPayload keeps the v1 form for links signed before v2', () => {
+    const link = new SignedKeyLink({
+      parent: 'PARENT',
+      child: 'CHILD',
+      relation: 'device',
+      created: 12345,
+    });
+    const str = new TextDecoder().decode(link.legacySignedPayload);
     assert.equal(str, 'PARENT|CHILD|device|12345');
   });
 
@@ -1085,5 +1124,230 @@ describe('MeshKeyring Succession', () => {
 
     // Policy should be removed after execution
     assert.equal(kr.removeSuccessor('primary'), false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Signature coverage: scope and expiry must be signed
+//
+// Regression for the case where SignedKeyLink signed only
+// `parent|child|relation|created`. Everything the delegation actually limits
+// — its scope and its expiry — sat outside the signature, so any holder of a
+// link could widen it and push the expiry out without breaking either
+// signature, and MeshKeyring.addVerifiedLink() would accept the result.
+// ---------------------------------------------------------------------------
+
+describe('SignedKeyLink signature coverage', () => {
+  /** Round-trip a link through the wire form, mutating it on the way. */
+  const tamperOnTheWire = (link, changes) =>
+    SignedKeyLink.fromJSON({ ...link.toJSON(), ...changes });
+
+  it('rejects a link whose scope was widened after signing', async () => {
+    const parent = await PodIdentity.generate();
+    const child = await PodIdentity.generate();
+    const link = await SignedKeyLink.create(parent, child, 'delegate', {
+      scope: ['read'],
+    });
+    assert.equal(
+      await link.verifyBoth(parent.keyPair.publicKey, child.keyPair.publicKey),
+      true,
+      'the link as issued must verify'
+    );
+
+    const forged = tamperOnTheWire(link, { scope: ['read', 'write', 'admin'] });
+    assert.deepEqual(forged.scope, ['read', 'write', 'admin']);
+    assert.equal(await forged.verifyParent(parent.keyPair.publicKey), false);
+    assert.equal(await forged.verifyChild(child.keyPair.publicKey), false);
+    assert.equal(
+      await forged.verifyBoth(parent.keyPair.publicKey, child.keyPair.publicKey),
+      false
+    );
+  });
+
+  it('rejects a link whose scope was removed after signing', async () => {
+    const parent = await PodIdentity.generate();
+    const child = await PodIdentity.generate();
+    const link = await SignedKeyLink.create(parent, child, 'delegate', {
+      scope: ['read'],
+    });
+
+    // Dropping the scope entirely is the widest widening there is: it also
+    // makes the link look like one that never had a scope, which is exactly
+    // the shape the legacy fallback accepts.
+    const forged = tamperOnTheWire(link, { scope: null });
+    assert.equal(
+      await forged.verifyBoth(parent.keyPair.publicKey, child.keyPair.publicKey),
+      false
+    );
+  });
+
+  it('rejects an expired link whose expiry was pushed out after signing', async () => {
+    const parent = await PodIdentity.generate();
+    const child = await PodIdentity.generate();
+    const link = await SignedKeyLink.create(parent, child, 'delegate', {
+      expires: Date.now() - 1000,
+    });
+    assert.equal(link.isExpired(), true);
+
+    const forged = tamperOnTheWire(link, { expires: Date.now() + 86_400_000 });
+    assert.equal(forged.isExpired(), false, 'the tampered link looks live');
+    assert.equal(
+      await forged.verifyBoth(parent.keyPair.publicKey, child.keyPair.publicKey),
+      false,
+      'but it must not verify'
+    );
+  });
+
+  it('rejects a link given an expiry it never had', async () => {
+    const parent = await PodIdentity.generate();
+    const child = await PodIdentity.generate();
+    const link = await SignedKeyLink.create(parent, child, 'device');
+
+    const forged = tamperOnTheWire(link, { expires: Date.now() + 86_400_000 });
+    assert.equal(
+      await forged.verifyBoth(parent.keyPair.publicKey, child.keyPair.publicKey),
+      false
+    );
+  });
+
+  it('MeshKeyring.addVerifiedLink refuses a widened link', async () => {
+    const parent = await PodIdentity.generate();
+    const child = await PodIdentity.generate();
+    const link = await SignedKeyLink.create(parent, child, 'delegate', {
+      scope: ['read'],
+      expires: Date.now() - 1000,
+    });
+
+    const forged = tamperOnTheWire(link, {
+      scope: ['read', 'write', 'admin'],
+      expires: Date.now() + 86_400_000,
+    });
+
+    const kr = new MeshKeyring();
+    await assert.rejects(
+      () => kr.addVerifiedLink(forged, parent.keyPair.publicKey, child.keyPair.publicKey),
+      /Signature verification failed/
+    );
+  });
+
+  it('verifyCryptoChain refuses a chain containing a widened link', async () => {
+    const parent = await PodIdentity.generate();
+    const child = await PodIdentity.generate();
+    const link = await SignedKeyLink.create(parent, child, 'delegate', {
+      scope: ['read'],
+    });
+    const forged = tamperOnTheWire(link, { scope: ['admin'] });
+
+    const kr = new MeshKeyring();
+    // Reach past addVerifiedLink so the chain walker is what is under test.
+    await kr.addVerifiedLink(link, parent.keyPair.publicKey, child.keyPair.publicKey);
+    kr.unlink(parent.podId, child.podId);
+    await assert.rejects(
+      () => kr.addVerifiedLink(forged, parent.keyPair.publicKey, child.keyPair.publicKey),
+      /Signature verification failed/
+    );
+
+    // And if a forged link is smuggled in by some other route, the chain
+    // walker must still catch it.
+    const getPublicKey = async (id) =>
+      id === parent.podId ? parent.keyPair.publicKey : child.keyPair.publicKey;
+    await kr.addVerifiedLink(link, parent.keyPair.publicKey, child.keyPair.publicKey);
+    link.scope = ['admin'];
+    const res = await kr.verifyCryptoChain(child.podId, parent.podId, getPublicKey);
+    assert.equal(res.valid, false);
+    assert.equal(res.brokenAt, child.podId);
+  });
+
+  describe('legacy v1 signatures', () => {
+    /** Sign the v1 payload the way pre-v2 code did. */
+    const signLegacy = async (link, parentIdentity, childIdentity) => {
+      const payload = link.legacySignedPayload;
+      link.parentSignature = await parentIdentity.sign(payload);
+      link.childSignature = await childIdentity.sign(payload);
+      return link;
+    };
+
+    it('still verifies when the link has no scope and no expiry', async () => {
+      const parent = await PodIdentity.generate();
+      const child = await PodIdentity.generate();
+      const link = await signLegacy(
+        new SignedKeyLink({
+          parent: parent.podId,
+          child: child.podId,
+          relation: 'device',
+          created: 1_700_000_000_000,
+        }),
+        parent,
+        child
+      );
+
+      assert.equal(
+        await link.verifyBoth(parent.keyPair.publicKey, child.keyPair.publicKey),
+        true
+      );
+    });
+
+    it('does not let the legacy fallback launder a scope onto a v1 link', async () => {
+      const parent = await PodIdentity.generate();
+      const child = await PodIdentity.generate();
+      const link = await signLegacy(
+        new SignedKeyLink({
+          parent: parent.podId,
+          child: child.podId,
+          relation: 'delegate',
+          created: 1_700_000_000_000,
+        }),
+        parent,
+        child
+      );
+
+      const forged = tamperOnTheWire(link, { scope: ['admin'] });
+      assert.equal(
+        await forged.verifyBoth(parent.keyPair.publicKey, child.keyPair.publicKey),
+        false
+      );
+    });
+
+    it('does not let the legacy fallback launder an expiry onto a v1 link', async () => {
+      const parent = await PodIdentity.generate();
+      const child = await PodIdentity.generate();
+      const link = await signLegacy(
+        new SignedKeyLink({
+          parent: parent.podId,
+          child: child.podId,
+          relation: 'delegate',
+          created: 1_700_000_000_000,
+        }),
+        parent,
+        child
+      );
+
+      const forged = tamperOnTheWire(link, { expires: Date.now() + 86_400_000 });
+      assert.equal(
+        await forged.verifyBoth(parent.keyPair.publicKey, child.keyPair.publicKey),
+        false
+      );
+    });
+
+    it('still rejects a v1 link whose relation was swapped', async () => {
+      const parent = await PodIdentity.generate();
+      const child = await PodIdentity.generate();
+      const link = await signLegacy(
+        new SignedKeyLink({
+          parent: parent.podId,
+          child: child.podId,
+          relation: 'alias',
+          created: 1_700_000_000_000,
+        }),
+        parent,
+        child
+      );
+
+      const forged = tamperOnTheWire(link, { relation: 'org' });
+      assert.equal(
+        await forged.verifyBoth(parent.keyPair.publicKey, child.keyPair.publicKey),
+        false
+      );
+    });
   });
 });
