@@ -653,6 +653,11 @@ export class WasmSandboxPolicy {
 // WasmSandbox
 // ---------------------------------------------------------------------------
 
+/** Monotonic clock where available; Date.now() is a fine fallback here. */
+function _now() {
+  return globalThis.performance?.now?.() ?? Date.now();
+}
+
 /** @type {readonly string[]} */
 const SANDBOX_STATES = Object.freeze([
   'idle',
@@ -665,7 +670,15 @@ const SANDBOX_STATES = Object.freeze([
 ]);
 
 /**
- * Manages a single WASM module instance within policy constraints.
+ * Tracks one WASM module's resource usage against a policy budget.
+ *
+ * NOT an isolation boundary. This class does no instantiation and cannot
+ * preempt running code -- a JS caller cannot interrupt a WASM call by CPU time
+ * without running it in a worker and terminating that. What it does is
+ * account: it holds the policy, records memory and CPU against it, refuses
+ * allocations and executions that would exceed it, and drives the state
+ * machine. Actually running the module is the caller's job, supplied as the
+ * `invoke` argument to load(); everything here measures that.
  */
 export class WasmSandbox {
   /** @type {string} */
@@ -682,6 +695,8 @@ export class WasmSandbox {
   #stateListeners = [];
   /** @type {string|null} */
   #moduleHash = null;
+  /** @type {Function|null} caller-supplied executor for the loaded module */
+  #invoke = null;
   /** @type {number} */
   #createdAt;
   /** @type {string[]} */
@@ -716,24 +731,42 @@ export class WasmSandbox {
   get logs() { return [...this.#logs]; }
 
   /**
-   * Load a WASM module (simulated — stores hash).
+   * Load a WASM module.
+   *
+   * The hash is recorded for identification. Pass `invoke` to make execute()
+   * actually run something: without it the sandbox has no module to call and
+   * execute() reports `executed: false` rather than inventing an outcome.
+   *
    * @param {string} moduleHash
+   * @param {Function} [invoke] - async (functionName, args) => result, or
+   *   `{ result, cpuMs }` when the caller can measure CPU properly (a worker
+   *   can; wall-clock here cannot distinguish CPU from waiting).
    */
-  async load(moduleHash) {
+  async load(moduleHash, invoke) {
     if (this.#state !== 'idle') {
       throw new Error(`Cannot load in state "${this.#state}"`);
     }
+    if (invoke !== undefined && typeof invoke !== 'function') {
+      throw new Error('invoke must be a function');
+    }
     this._setState('loading');
     this.#moduleHash = moduleHash;
-    this._log(`Module loaded: ${moduleHash}`);
+    this.#invoke = invoke || null;
+    this._log(`Module loaded: ${moduleHash}${invoke ? '' : ' (no invoke: execute() will run nothing)'}`);
     this._setState('ready');
   }
 
   /**
-   * Execute within the sandbox.
+   * Execute within the sandbox, charging what it costs against the policy.
+   *
+   * `cpuMs` is measured, never invented. It is whatever the executor reports,
+   * or elapsed wall-clock around the call -- which is an upper bound on CPU,
+   * not CPU itself. With no executor loaded, nothing runs, nothing is charged,
+   * and `executed` is false.
+   *
    * @param {string} functionName
    * @param {*[]} [args]
-   * @returns {Promise<{ result: *, cpuMs: number }>}
+   * @returns {Promise<{ result: *, cpuMs: number, executed: boolean }>}
    */
   async execute(functionName, args = []) {
     if (this.#state !== 'ready' && this.#state !== 'running') {
@@ -741,8 +774,30 @@ export class WasmSandbox {
     }
     this._setState('running');
 
-    // Simulate execution with usage tracking
-    const cpuMs = Math.random() * 10;
+    let result = null;
+    let executed = false;
+    let cpuMs = 0;
+
+    if (this.#invoke) {
+      const startedAt = _now();
+      let out;
+      try {
+        out = await this.#invoke(functionName, args);
+      } catch (err) {
+        this._setState('error');
+        this._log(`Execution failed: ${functionName} — ${err.message}`);
+        throw err;
+      }
+      executed = true;
+      if (out && typeof out === 'object' && typeof out.cpuMs === 'number') {
+        result = out.result ?? null;
+        cpuMs = out.cpuMs;
+      } else {
+        result = out ?? null;
+        cpuMs = _now() - startedAt;
+      }
+    }
+
     this.#usage.cpuMs += cpuMs;
 
     // Check policy limits
@@ -752,9 +807,13 @@ export class WasmSandbox {
       throw new Error(`Policy violation: ${violations.join(', ')}`);
     }
 
-    this._log(`Executed: ${functionName}(${args.length} args) in ${cpuMs.toFixed(1)}ms`);
+    this._log(
+      executed
+        ? `Executed: ${functionName}(${args.length} args) in ${cpuMs.toFixed(1)}ms`
+        : `Executed nothing for ${functionName}: no invoke was supplied to load()`,
+    );
     this._setState('ready');
-    return { result: null, cpuMs };
+    return { result, cpuMs, executed };
   }
 
   /** Pause execution. */

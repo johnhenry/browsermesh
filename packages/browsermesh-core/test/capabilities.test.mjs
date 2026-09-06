@@ -461,10 +461,67 @@ describe('WasmSandbox', () => {
     await assert.rejects(() => sandbox.execute('fn'), /Cannot execute/);
   });
 
-  it('execute() tracks usage', async () => {
+  // The previous version of this test was `assert.ok(sandbox.usage.cpuMs > 0)`
+  // against `const cpuMs = Math.random() * 10` inside execute() -- an assertion
+  // that Math.random() returns a positive number, which held whether or not
+  // anything ran. Nothing did: load() only stored a hash. (#38)
+
+  it('execute() runs nothing, and says so, when no invoke was loaded', async () => {
     await sandbox.load('mod1');
-    await sandbox.execute('compute', [1, 2, 3]);
-    assert.ok(sandbox.usage.cpuMs > 0);
+    const out = await sandbox.execute('compute', [1, 2, 3]);
+
+    assert.equal(out.executed, false, 'there is no module to call');
+    assert.equal(out.cpuMs, 0, 'work that did not happen costs nothing');
+    assert.equal(sandbox.usage.cpuMs, 0, 'and is charged nothing');
+    assert.match(sandbox.logs.at(-1), /Executed nothing/);
+  });
+
+  it('execute() calls the loaded invoke and returns its result', async () => {
+    const calls = [];
+    await sandbox.load('mod1', async (fn, args) => {
+      calls.push({ fn, args });
+      return 42;
+    });
+
+    const out = await sandbox.execute('compute', [1, 2, 3]);
+
+    assert.deepEqual(calls, [{ fn: 'compute', args: [1, 2, 3] }]);
+    assert.equal(out.executed, true);
+    assert.equal(out.result, 42);
+  });
+
+  it('execute() charges the cpuMs the executor reports', async () => {
+    await sandbox.load('mod1', async () => ({ result: 'ok', cpuMs: 120 }));
+
+    const out = await sandbox.execute('compute');
+    assert.equal(out.cpuMs, 120);
+    assert.equal(out.result, 'ok');
+    assert.equal(sandbox.usage.cpuMs, 120);
+
+    await sandbox.execute('compute');
+    assert.equal(sandbox.usage.cpuMs, 240, 'usage accumulates across calls');
+  });
+
+  it('execute() enforces the CPU budget', async () => {
+    const policy = new WasmSandboxPolicy({ name: 'tight', maxCpuMs: 100 });
+    const tight = new WasmSandbox({ ownerPodId: 'pod-1', policy });
+    await tight.load('mod1', async () => ({ result: null, cpuMs: 60 }));
+
+    await tight.execute('compute');
+    assert.equal(tight.usage.cpuMs, 60);
+
+    await assert.rejects(() => tight.execute('compute'), /Policy violation: cpu: 120ms > 100ms/);
+    assert.equal(tight.state, 'error');
+  });
+
+  it('execute() surfaces an executor throw and moves to error', async () => {
+    await sandbox.load('mod1', async () => { throw new Error('trap: unreachable'); });
+    await assert.rejects(() => sandbox.execute('compute'), /trap: unreachable/);
+    assert.equal(sandbox.state, 'error');
+  });
+
+  it('load() rejects a non-function invoke', async () => {
+    await assert.rejects(() => sandbox.load('mod1', 'not-a-function'), /invoke must be a function/);
   });
 
   it('pause() and resume()', async () => {
