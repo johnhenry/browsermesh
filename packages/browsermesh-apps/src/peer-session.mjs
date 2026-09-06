@@ -443,14 +443,34 @@ export class PeerSession {
         return
       }
 
-      // Set timeout for pong response
-      if (this.#heartbeatTimer) clearTimeout(this.#heartbeatTimer)
-      this.#heartbeatTimer = setTimeout(() => {
-        if (this.#state === 'active') {
-          this.#onLog(1, `Heartbeat timeout for session ${this.#sessionId}, suspending`)
-          this.suspend()
-        }
-      }, this.#heartbeatTimeoutMs)
+      /*
+       * Arm a pong deadline, and DO NOT disturb one already outstanding.
+       *
+       * This used to `clearTimeout` unconditionally before re-arming, which
+       * made the detector incapable of firing under its own defaults: the
+       * interval is 15s and the timeout 60s, so each ping cancelled the
+       * deadline three times over before it could elapse. `#handlePong()`
+       * already clears it on a reply -- that is the only thing that should.
+       *
+       * Measured against a transport that accepts sends and never pongs, at
+       * the shipped 1:4 ratio scaled down: 21 pings, state still `active`.
+       * The only configuration in which it worked was the inverted one,
+       * interval longer than timeout.
+       *
+       * The surviving escape was `send()` throwing, which a buffering or
+       * half-open transport will not do -- so a peer whose tab closed kept a
+       * session `active` forever, `send()` kept succeeding into a dead pipe,
+       * and no 'session:suspend' ever fired.
+       */
+      if (this.#heartbeatTimer === null) {
+        this.#heartbeatTimer = setTimeout(() => {
+          this.#heartbeatTimer = null
+          if (this.#state === 'active') {
+            this.#onLog(1, `Heartbeat timeout for session ${this.#sessionId}, suspending`)
+            this.suspend()
+          }
+        }, this.#heartbeatTimeoutMs)
+      }
     }, intervalMs)
   }
 
