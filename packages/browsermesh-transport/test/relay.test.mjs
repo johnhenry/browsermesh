@@ -794,3 +794,96 @@ describe('MeshRelayClient — real WebSocket path', () => {
     );
   });
 });
+
+
+// ---------------------------------------------------------------------------
+// Auto-reconnect and presence (#37)
+//
+// The only pre-existing reconnect test injects a socket that never opens, so
+// no test had ever inspected relay state after a SUCCESSFUL reconnect. These
+// use FakeRelayServer, which keeps announcements per connection (ws._caps) the
+// way a real relay does -- unlike MockRelayServer, which reads capabilities
+// off the client object and so cannot lose an announcement at all.
+// ---------------------------------------------------------------------------
+
+describe('MeshRelayClient — presence across a reconnect', () => {
+  it('re-announces capabilities after the socket drops and reconnects', async () => {
+    const server = new FakeRelayServer();
+    const makeWs = (fp) => function () { return server.createConnection(fp); };
+
+    const alice = new MeshRelayClient({
+      relayUrl: 'wss://t', identity: { fingerprint: 'alice' },
+      WebSocket: makeWs('alice'), autoReconnect: false,
+    });
+    const bob = new MeshRelayClient({
+      relayUrl: 'wss://t', identity: { fingerprint: 'bob' },
+      WebSocket: makeWs('bob'),
+      autoReconnect: true, reconnectDelayMs: 5, maxReconnectAttempts: 3,
+    });
+    await alice.connect();
+    await bob.connect();
+    bob.announcePresence(['chat', 'tools']);
+
+    assert.deepEqual(
+      (await alice.findPeers()).map((p) => p.capabilities),
+      [['chat', 'tools']],
+      'precondition: the relay knows what bob advertised',
+    );
+
+    // Drop bob's socket the way a proxy idle timeout or a relay redeploy
+    // would -- not through disconnect(), which is consumer-initiated and
+    // deliberately clears the announcement.
+    server.clients.get('bob').close();
+    await new Promise((r) => setTimeout(r, 120));
+
+    assert.equal(bob.connected, true, 'precondition: bob reconnected');
+    assert.deepEqual(bob.toJSON().capabilities, ['chat', 'tools']);
+
+    const seen = await alice.findPeers();
+    assert.equal(seen.length, 1);
+    assert.deepEqual(
+      seen[0].capabilities, ['chat', 'tools'],
+      'the relay must know bob\'s capabilities again, or bob is undiscoverable ' +
+      'while still reporting connected:true with capabilities of his own',
+    );
+  });
+
+  it('does not announce on a first connect', async () => {
+    const server = new FakeRelayServer();
+    const sent = [];
+    const client = new MeshRelayClient({
+      relayUrl: 'wss://t', identity: { fingerprint: 'solo' },
+      autoReconnect: false,
+      WebSocket: function () {
+        const ws = server.createConnection('solo');
+        const send = ws.send.bind(ws);
+        ws.send = (raw) => { sent.push(JSON.parse(raw).type); return send(raw); };
+        return ws;
+      },
+    });
+    await client.connect();
+    assert.deepEqual(sent, ['register'], 'nothing announced yet, so nothing to re-announce');
+  });
+
+  it('still sends an empty announce when capabilities are deliberately cleared', async () => {
+    const server = new FakeRelayServer();
+    const sent = [];
+    const client = new MeshRelayClient({
+      relayUrl: 'wss://t', identity: { fingerprint: 'solo' },
+      autoReconnect: false,
+      WebSocket: function () {
+        const ws = server.createConnection('solo');
+        const send = ws.send.bind(ws);
+        ws.send = (raw) => { sent.push(JSON.parse(raw)); return send(raw); };
+        return ws;
+      },
+    });
+    await client.connect();
+    client.announcePresence(['chat']);
+    client.announcePresence([]);
+
+    const announces = sent.filter((m) => m.type === 'announce');
+    assert.equal(announces.length, 2, 'clearing capabilities must reach the relay');
+    assert.deepEqual(announces[1].capabilities, []);
+  });
+});
