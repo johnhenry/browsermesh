@@ -1351,3 +1351,51 @@ describe('SignedKeyLink signature coverage', () => {
     });
   });
 });
+
+/* ── A restored keyring still has to prove itself (#33) ──────────────── */
+
+describe('MeshKeyring.fromJSON preserves signed links', () => {
+  /*
+   * `fromJSON` revived every link through `KeyLink.fromJSON`, which returns a
+   * plain KeyLink. `verifyCryptoChain` only checks a signature
+   * `if (link instanceof SignedKeyLink)`, so after a round trip that branch
+   * never ran: the function returned `valid: true` having called
+   * `getPublicKey` zero times.
+   *
+   * The signatures survived serialisation the whole time. Only the class was
+   * lost, and the class is what the check keys on -- so a keyring that had
+   * been persisted, sent to a peer, or reloaded verified without any
+   * cryptography whatsoever.
+   */
+  it('revives a signed link as a SignedKeyLink, not a bare KeyLink', () => {
+    const signed = new SignedKeyLink({
+      parent: 'root', child: 'mid', relation: 'org',
+      parentSignature: new Uint8Array([1, 2, 3]),
+      childSignature: new Uint8Array([4, 5, 6]),
+    });
+
+    const revived = MeshKeyring.fromJSON([signed.toJSON()]);
+    const links = revived.toJSON();
+    assert.equal(links.length, 1, 'the link survived the round trip');
+    assert.ok(links[0].parentSignature, 'and kept its signatures');
+  });
+
+  it('actually checks signatures on a restored chain', async () => {
+    const signed = new SignedKeyLink({
+      parent: 'root', child: 'mid', relation: 'org',
+      parentSignature: new Uint8Array([1, 2, 3]),
+      childSignature: new Uint8Array([4, 5, 6]),
+    });
+    const revived = MeshKeyring.fromJSON([signed.toJSON()]);
+
+    let publicKeyLookups = 0;
+    const result = await revived.verifyCryptoChain('mid', 'root', async () => {
+      publicKeyLookups += 1;
+      return new Uint8Array(32);
+    });
+
+    // The measurement that mattered: this was 0, and the verdict was `true`.
+    assert.ok(publicKeyLookups > 0, 'a restored chain consults the public keys');
+    assert.equal(result.valid, false, 'and refuses signatures that do not verify');
+  });
+});

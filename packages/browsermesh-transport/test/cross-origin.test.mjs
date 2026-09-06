@@ -300,6 +300,36 @@ describe('CrossOriginBridge handleMessage', () => {
     assert.equal(responseTarget.sent.length, 0)
   })
 
+  it('refuses a request that names no sender, instead of exempting it', () => {
+    /*
+     * Every check here was written `if (peer && ...)`, and `peer` is null
+     * whenever `fromPodId` is absent or names an unregistered pod -- so
+     * omitting the field skipped origin validation, the ISOLATED block and
+     * the method allowlist together, and execution carried on into the
+     * handler. Naming an ISOLATED peer was blocked; naming nobody was not.
+     *
+     * The reply compounded it: #sendResponse fell back to
+     * `postMessage(msg, '*')` when there was no peer, so the result went to
+     * any origin at all.
+     *
+     * The existing origin test cannot see this: it supplies a REGISTERED
+     * fromPodId, so it only ever exercises the peer-found path.
+     */
+    let invoked = 0
+    bridge.setMethodHandler('ping', () => { invoked += 1; return 'pong' })
+
+    for (const identity of [{}, { fromPodId: 'never-registered' }]) {
+      bridge.handleMessage(makeEvent(
+        { type: XO_REQUEST, requestId: 'anon', method: 'ping', params: {}, ...identity },
+        'https://evil.com',
+        responseTarget,
+      ))
+    }
+
+    assert.equal(invoked, 0, 'an unidentified sender does not reach the handler')
+    assert.equal(responseTarget.sent.length, 0, 'and gets no reply, to any origin')
+  })
+
   it('enforces method allowlist for VERIFIED peers', () => {
     bridge.removePeer('pod-remote')
     bridge.registerPeer('pod-remote', {

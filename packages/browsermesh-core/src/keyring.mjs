@@ -796,7 +796,23 @@ export class MeshKeyring {
   static fromJSON(data) {
     const kr = new MeshKeyring();
     for (const d of data) {
-      kr.#links.push(KeyLink.fromJSON(d));
+      /*
+       * Dispatch on the serialised shape. Reviving everything through
+       * `KeyLink.fromJSON` returned a plain KeyLink for signed links too, and
+       * `verifyCryptoChain` only checks a signature `if (link instanceof
+       * SignedKeyLink)` -- so every restored keyring reported `valid: true`
+       * having called `getPublicKey` zero times.
+       *
+       * The signatures were never lost; they survive serialisation intact.
+       * Only the CLASS was, and the class is what the check keys on. So a
+       * keyring that had been persisted, sent to a peer, or reloaded from
+       * disk verified without any cryptography at all.
+       */
+      kr.#links.push(
+        d && (d.parentSignature || d.childSignature || d.signed)
+          ? SignedKeyLink.fromJSON(d)
+          : KeyLink.fromJSON(d)
+      );
     }
     return kr;
   }
