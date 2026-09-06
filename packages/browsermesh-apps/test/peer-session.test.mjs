@@ -656,3 +656,81 @@ describe('SessionManager', () => {
     })
   })
 })
+
+
+/* ── The heartbeat has to be able to fire (#32) ──────────────────────── */
+
+describe('heartbeat detects a peer that stops answering', () => {
+  /*
+   * The detector could not fire under its own defaults. `startHeartbeat`
+   * pings every 15s and arms a 60s pong deadline, then cleared that deadline
+   * on every ping -- so it was cancelled three times over before it could
+   * elapse. The only escape left was `send()` throwing, which a buffering or
+   * half-open transport will not do.
+   *
+   * No test could see it. This file's own afterEach said "No timers to clean
+   * up in these tests since we don't start heartbeats", and the mock
+   * transport is a peer that cannot die: `get connected() { return true }` is
+   * a literal and `send()` always succeeds. Deleting the timeout logic
+   * outright left every assertion here passing.
+   *
+   * The ratio below is the shipped one, scaled: interval shorter than
+   * timeout, which is the case that used to be broken.
+   */
+  function deadPeerTransport() {
+    let sent = 0
+    let deliver = null
+    return {
+      get connected() { return true },
+      get sentCount() { return sent },
+      send() { sent += 1 },
+      // The session's inbound handler is private; it arrives here. Capturing
+      // it is the only way a test can play a peer that answers.
+      onMessage(cb) { deliver = cb },
+      deliver(envelope) { deliver?.(envelope) },
+      close() {},
+    }
+  }
+
+  it('suspends a session whose peer never pongs', async () => {
+    const transport = deadPeerTransport()
+    const session = new PeerSession({
+      sessionId: 's-dead',
+      localIdentity: { podId: 'a' },
+      remoteIdentity: { podId: 'b' },
+      transport,
+      heartbeatTimeoutMs: 40,
+    })
+
+    session.startHeartbeat(10)
+    await new Promise((resolve) => setTimeout(resolve, 240))
+    session.stopHeartbeat()
+
+    assert.ok(transport.sentCount > 1, `pings were actually sent (${transport.sentCount})`)
+    assert.equal(session.state, 'suspended', 'an unanswered peer is detected')
+  })
+
+  it('does not suspend a peer that answers', async () => {
+    // The other direction: a live peer must survive indefinitely, or the fix
+    // would be a detector that fires on everything.
+    const transport = deadPeerTransport()
+    const session = new PeerSession({
+      sessionId: 's-live',
+      localIdentity: { podId: 'a' },
+      remoteIdentity: { podId: 'b' },
+      transport,
+      heartbeatTimeoutMs: 40,
+    })
+    // Answer every ping promptly.
+    const answering = setInterval(() => {
+      transport.deliver(createEnvelope(SESSION_MSG_TYPES.PONG, null, 's-live', 'b'))
+    }, 5)
+
+    session.startHeartbeat(10)
+    await new Promise((resolve) => setTimeout(resolve, 240))
+    clearInterval(answering)
+    session.stopHeartbeat()
+
+    assert.equal(session.state, 'active', 'a peer that answers stays active')
+  })
+})
