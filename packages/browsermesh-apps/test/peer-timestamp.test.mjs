@@ -411,3 +411,161 @@ describe('TimestampProof', () => {
     }
   })
 })
+
+// ---------------------------------------------------------------------------
+// Tests — signature verification (#36)
+//
+// verify(verifyFn) used to accept verifyFn, document it, and never call it,
+// so any structurally well-formed proof reported { valid: true } with the
+// confidence it asserted about itself. These tests fail against that version.
+// ---------------------------------------------------------------------------
+
+/** A proof whose fields are all well-formed and whose signatures are garbage. */
+function createForgedProof() {
+  return new TimestampProof({
+    eventHash: 'deadbeef',
+    canonicalTimestamp: 1700000000000,
+    witnesses: [
+      { podId: 'pod-a', localTimestamp: 1700000000000, signature: 'bm90LWEtc2ln' },
+      { podId: 'pod-b', localTimestamp: 1700000000001, signature: 'bm90LWEtc2ln' },
+    ],
+    issuedBy: 'pod-attacker',
+    issuedAt: 1700000000000,
+    confidence: 1,
+    signature: 'bm90LWEtc2ln',
+  })
+}
+
+describe('TimestampProof.verify — signatures', () => {
+  it('a forged proof passes the structural check but fails verification', async () => {
+    const forged = createForgedProof()
+    const identity = createMockIdentity('pod-local')
+
+    // Structure alone cannot tell a forgery from a real proof, and says so.
+    const structural = await forged.verify()
+    assert.equal(structural.valid, true)
+    assert.equal(structural.checked, 'structure')
+    assert.equal(structural.confidence, 1, 'confidence is the forgery’s own claim')
+
+    // With a real check, it is rejected.
+    const checked = await forged.verify(identity.verify)
+    assert.equal(checked.valid, false)
+    assert.equal(checked.checked, 'signatures')
+    assert.equal(checked.confidence, 0, 'a proof that failed verification asserts nothing')
+    assert.match(checked.reason, /authority signature/)
+  })
+
+  it('calls verifyFn for the authority signature and every witness', async () => {
+    const identity = createMockIdentity('pod-local')
+    const sessions = createMockSessions(['pod-a', 'pod-b'])
+    const authority = new TimestampAuthority({ sessions, identity })
+    const now = Date.now()
+    const proof = await authority.stamp('abc123', new Map([['pod-a', now], ['pod-b', now]]))
+
+    const seen = []
+    const result = await proof.verify(async (signature, data, signerPodId) => {
+      seen.push({ data, signerPodId, bytes: signature instanceof Uint8Array })
+      return identity.verify(signature, data, signerPodId)
+    })
+
+    assert.equal(result.valid, true)
+    assert.equal(result.checked, 'signatures')
+    assert.equal(seen.length, 1 + proof.witnesses.length, 'authority signature plus each witness')
+    assert.ok(seen.every((c) => c.bytes), 'verifyFn receives bytes, not the base64 string')
+    assert.ok(
+      seen.every((c) => c.signerPodId === 'pod-local'),
+      'every entry is signed by the issuing authority, so that is the key to resolve',
+    )
+    assert.equal(seen[0].data, `${proof.eventHash}:${proof.canonicalTimestamp}`)
+  })
+
+  it('rejects a proof whose witness timestamp was edited after signing', async () => {
+    const identity = createMockIdentity('pod-local')
+    const sessions = createMockSessions(['pod-a', 'pod-b'])
+    const authority = new TimestampAuthority({ sessions, identity })
+    const now = Date.now()
+    const proof = await authority.stamp('abc123', new Map([['pod-a', now], ['pod-b', now]]))
+
+    const json = proof.toJSON()
+    const tampered = TimestampProof.fromJSON({
+      ...json,
+      witnesses: json.witnesses.map((w, i) => (i === 0 ? { ...w, localTimestamp: w.localTimestamp + 60_000 } : w)),
+    })
+
+    const result = await tampered.verify(identity.verify)
+    assert.equal(result.valid, false)
+    assert.match(result.reason, /witness entry/)
+  })
+
+  it('treats a verifyFn that throws as a failure, not a crash', async () => {
+    const proof = createForgedProof()
+    const result = await proof.verify(async () => { throw new Error('key unavailable') })
+    assert.equal(result.valid, false)
+    assert.match(result.reason, /key unavailable/)
+  })
+
+  it('rejects a proof carrying no authority signature once signatures are checked', async () => {
+    const proof = new TimestampProof({
+      eventHash: 'abc',
+      canonicalTimestamp: 1700000000000,
+      witnesses: [{ podId: 'pod-a', localTimestamp: 1, signature: 'AAA=' }],
+      issuedBy: 'pod-a',
+      confidence: 1,
+    })
+    assert.equal((await proof.verify()).valid, true)
+    const result = await proof.verify(async () => true)
+    assert.equal(result.valid, false)
+    assert.match(result.reason, /no authority signature/)
+  })
+})
+
+describe('TimestampAuthority.verify — proofs issued by another pod', () => {
+  it('verifies a proof issued by a different authority', async () => {
+    const alice = createMockIdentity('pod-alice')
+    const proof = await new TimestampAuthority({
+      sessions: createMockSessions(['pod-a']),
+      identity: alice,
+    }).stamp('abc123', new Map([['pod-a', Date.now()]]))
+
+    // Bob has his own signing key, and a verify() that resolves by podId.
+    const bob = new TimestampAuthority({
+      sessions: createMockSessions([]),
+      identity: createMockIdentity('pod-bob'),
+    })
+
+    const result = await bob.verify(proof)
+    assert.equal(result.valid, true, "Alice's proof must verify under Bob's authority")
+    assert.equal(result.checked, 'signatures')
+  })
+
+  it('rejects a foreign proof forged in Bob’s name', async () => {
+    const bob = new TimestampAuthority({
+      sessions: createMockSessions([]),
+      identity: createMockIdentity('pod-bob'),
+    })
+    const result = await bob.verify(createForgedProof())
+    assert.equal(result.valid, false)
+  })
+
+  it('says it cannot check a foreign proof when the identity has no verify()', async () => {
+    const signOnly = {
+      podId: 'pod-bob',
+      async sign(data) { return new TextEncoder().encode(`sig:pod-bob:${data}`) },
+    }
+    const bob = new TimestampAuthority({ sessions: createMockSessions([]), identity: signOnly })
+
+    const alice = createMockIdentity('pod-alice')
+    const proof = await new TimestampAuthority({
+      sessions: createMockSessions(['pod-a']),
+      identity: alice,
+    }).stamp('abc123', new Map([['pod-a', Date.now()]]))
+
+    const result = await bob.verify(proof)
+    assert.equal(result.valid, false)
+    assert.equal(result.checked, 'none')
+    // The old code re-signed with Bob's key and blamed tampering for what is
+    // really "I have no way to check this".
+    assert.match(result.reason, /no verify\(\)/)
+    assert.doesNotMatch(result.reason, /tampered/)
+  })
+})
