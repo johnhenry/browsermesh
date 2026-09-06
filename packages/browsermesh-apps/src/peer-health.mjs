@@ -108,8 +108,15 @@ export class MigrationResult {
   /** @type {string} */
   toPod
 
-  /** @type {string|null} */
+  /**
+   * What was actually redeployed to `toPod`, or null when nothing was.
+   * Never a summary word like 'all' -- see `deployed` for the itemised list.
+   * @type {string|null}
+   */
   workload
+
+  /** @type {string[]} names of the skills deployed to toPod (may be empty) */
+  deployed
 
   /** @type {number} */
   durationMs
@@ -123,6 +130,7 @@ export class MigrationResult {
    * @param {string} opts.fromPod
    * @param {string} opts.toPod
    * @param {string} [opts.workload=null]
+   * @param {string[]} [opts.deployed=[]]
    * @param {number} [opts.durationMs=0]
    * @param {string} [opts.error=null]
    */
@@ -131,6 +139,7 @@ export class MigrationResult {
     fromPod,
     toPod,
     workload = null,
+    deployed = [],
     durationMs = 0,
     error = null,
   }) {
@@ -138,6 +147,7 @@ export class MigrationResult {
     this.fromPod = fromPod
     this.toPod = toPod
     this.workload = workload
+    this.deployed = deployed
     this.durationMs = durationMs
     this.error = error
   }
@@ -152,6 +162,7 @@ export class MigrationResult {
       fromPod: this.fromPod,
       toPod: this.toPod,
       workload: this.workload,
+      deployed: [...this.deployed],
       durationMs: this.durationMs,
       error: this.error,
     }
@@ -518,21 +529,38 @@ export class AutoMigrator {
   /** @type {Map<string, Set<Function>>} event -> listeners */
   #listeners = new Map()
 
+  /** @type {Function|null} resolves the workload to redeploy on the target */
+  #resolveWorkload = null
+
   /**
    * @param {object} opts
    * @param {HealthMonitor} opts.healthMonitor - Health monitor to listen to
    * @param {object} opts.orchestrator - Object with drainPod(podId), listPods(), deploySkill(podId, skill)
+   * @param {Function} [opts.resolveWorkload] - `(fromPodId, { services }) => Promise<Array<{name, content}>>`
+   *   Supplies the skills to deploy on the target. A failed peer cannot be asked
+   *   what it was running, so the workload has to come from the caller -- a
+   *   registry, a manifest, whatever the application uses as its source of
+   *   truth. Without it the migrator can drain the dead pod but cannot start
+   *   anything in its place, and says so in the result rather than reporting a
+   *   migration that did not happen.
    * @param {Function} [opts.onLog] - Logging callback (level, msg)
    */
-  constructor({ healthMonitor, orchestrator, onLog }) {
+  constructor({ healthMonitor, orchestrator, resolveWorkload, onLog }) {
     if (!healthMonitor) {
       throw new Error('healthMonitor is required')
     }
     if (!orchestrator || typeof orchestrator.drainPod !== 'function') {
       throw new Error('orchestrator with drainPod() method is required')
     }
+    if (resolveWorkload !== undefined && typeof resolveWorkload !== 'function') {
+      throw new Error('resolveWorkload must be a function')
+    }
+    if (resolveWorkload && typeof orchestrator.deploySkill !== 'function') {
+      throw new Error('orchestrator with deploySkill() method is required when resolveWorkload is given')
+    }
     this.#healthMonitor = healthMonitor
     this.#orchestrator = orchestrator
+    this.#resolveWorkload = resolveWorkload || null
     this.#onLog = onLog || (() => {})
   }
 
@@ -602,29 +630,64 @@ export class AutoMigrator {
     this.#onLog(2, `Migrating workload from ${fromPodId} to ${target}`)
 
     try {
-      await this.#orchestrator.drainPod(fromPodId)
+      // drainPod reports failure for exactly the case this path exists to
+      // handle -- a pod that has already dropped out of the peer table -- so
+      // its verdict decides the migration. An orchestrator that returns
+      // nothing is giving no verdict, which is not the same as failing.
+      const drain = await this.#orchestrator.drainPod(fromPodId)
+      if (drain && drain.success === false) {
+        const reason = drain.error || `drainPod("${fromPodId}") reported failure`
+        return this.#fail(fromPodId, target, reason, startTime)
+      }
+
+      // Move the workload. Nothing below runs on a peer until deploySkill has
+      // said it succeeded, and `deployed` records what actually landed.
+      const workload = await this.#workloadFor(fromPodId)
+      const deployed = []
+
+      for (const item of workload) {
+        const name = item?.name || 'unnamed skill'
+        let outcome
+        try {
+          outcome = await this.#orchestrator.deploySkill(target, item?.content)
+        } catch (err) {
+          return this.#fail(
+            fromPodId, target,
+            `deploying "${name}" to ${target} threw: ${err.message}`,
+            startTime, deployed,
+          )
+        }
+        if (!outcome || outcome.success === false) {
+          const why = outcome?.error || 'deploySkill reported failure'
+          return this.#fail(
+            fromPodId, target,
+            `deploying "${name}" to ${target} failed: ${why}`,
+            startTime, deployed,
+          )
+        }
+        deployed.push(name)
+      }
 
       const result = new MigrationResult({
         success: true,
         fromPod: fromPodId,
         toPod: target,
-        workload: 'all',
+        // Only ever names what was really deployed. This used to read 'all'
+        // unconditionally, while nothing at all was started on the target.
+        workload: deployed.length ? deployed.join(', ') : null,
+        deployed,
         durationMs: Date.now() - startTime,
       })
       this.#emit('migrated', result)
-      this.#onLog(2, `Migration complete: ${fromPodId} -> ${target} (${result.durationMs}ms)`)
+      this.#onLog(
+        2,
+        deployed.length
+          ? `Migration complete: ${fromPodId} -> ${target}, deployed ${deployed.length} (${result.durationMs}ms)`
+          : `Drained ${fromPodId}; NO workload was deployed to ${target} (${result.durationMs}ms)`,
+      )
       return result
     } catch (err) {
-      const result = new MigrationResult({
-        success: false,
-        fromPod: fromPodId,
-        toPod: target,
-        error: err.message,
-        durationMs: Date.now() - startTime,
-      })
-      this.#emit('migration-failed', result)
-      this.#onLog(0, `Migration failed: ${fromPodId} -> ${target}: ${err.message}`)
-      return result
+      return this.#fail(fromPodId, target, err.message, startTime)
     }
   }
 
@@ -656,6 +719,52 @@ export class AutoMigrator {
   }
 
   // -- Internal -------------------------------------------------------------
+
+  /**
+   * Build a failed MigrationResult, emit it, and log it.
+   *
+   * @param {string} fromPodId
+   * @param {string} target
+   * @param {string} error - Why the migration failed
+   * @param {number} startTime
+   * @param {string[]} [deployed=[]] - Skills that did land before the failure
+   * @returns {MigrationResult}
+   */
+  #fail(fromPodId, target, error, startTime, deployed = []) {
+    const result = new MigrationResult({
+      success: false,
+      fromPod: fromPodId,
+      toPod: target,
+      workload: deployed.length ? deployed.join(', ') : null,
+      deployed,
+      error,
+      durationMs: Date.now() - startTime,
+    })
+    this.#emit('migration-failed', result)
+    this.#onLog(0, `Migration failed: ${fromPodId} -> ${target}: ${error}`)
+    return result
+  }
+
+  /**
+   * Resolve the workload to deploy on the target, normalised to a list.
+   *
+   * @param {string} fromPodId - Pod whose workload is being moved
+   * @returns {Promise<Array<{name: string, content: *}>>}
+   */
+  async #workloadFor(fromPodId) {
+    if (!this.#resolveWorkload) {
+      // Loud, because the alternative is a self-healing component that heals
+      // nothing while reporting success.
+      this.#onLog(
+        1,
+        `No resolveWorkload configured: ${fromPodId}'s workload will NOT be redeployed`,
+      )
+      return []
+    }
+    const resolved = await this.#resolveWorkload(fromPodId, { services: this.#services })
+    if (!resolved) return []
+    return Array.isArray(resolved) ? resolved : [resolved]
+  }
 
   /**
    * Select the best target pod for migration.

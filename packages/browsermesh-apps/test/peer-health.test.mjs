@@ -35,12 +35,25 @@ function createMockSessions() {
   }
 }
 
-function createMockOrchestrator() {
+/**
+ * The real orchestrator's drainPod returns { success, migrated } and reports
+ * failure for a pod already gone from the peer table; deploySkill returns
+ * { success, error? }. A mock that returns undefined from both cannot express
+ * either failure, so both are modelled here and both are overridable.
+ */
+function createMockOrchestrator(opts = {}) {
   const calls = []
   return {
-    async drainPod(podId) { calls.push({ action: 'drain', podId }) },
+    async drainPod(podId) {
+      calls.push({ action: 'drain', podId })
+      return opts.drainResult ?? { success: true, migrated: 0 }
+    },
     listPods() { return ['peer-a', 'peer-b', 'peer-c'] },
-    async deploySkill(podId, skill) { calls.push({ action: 'deploy', podId, skill }) },
+    async deploySkill(podId, skill) {
+      calls.push({ action: 'deploy', podId, skill })
+      if (opts.deployThrows) throw new Error(opts.deployThrows)
+      return opts.deployResult ?? { success: true }
+    },
     get calls() { return calls },
   }
 }
@@ -376,6 +389,137 @@ describe('AutoMigrator', () => {
     assert.equal(orchestrator.calls.length, 1)
     assert.equal(orchestrator.calls[0].action, 'drain')
     assert.equal(orchestrator.calls[0].podId, 'peer-a')
+
+    // This migrator has no resolveWorkload, so nothing could be moved. The
+    // result must not imply otherwise -- it used to say workload: 'all'.
+    assert.equal(result.workload, null)
+    assert.deepEqual(result.deployed, [])
+  })
+
+  // -- The drain verdict decides the migration --------------------------------
+
+  it('reports failure when drainPod reports failure', async () => {
+    monitor.recordHeartbeat('peer-b', 50)
+    const failing = createMockOrchestrator({ drainResult: { success: false, migrated: 0 } })
+    const m = new AutoMigrator({ healthMonitor: monitor, orchestrator: failing })
+
+    const events = []
+    m.on('migrated', (ev) => events.push({ type: 'migrated', ...ev.toJSON() }))
+    m.on('migration-failed', (ev) => events.push({ type: 'migration-failed', ...ev.toJSON() }))
+
+    const result = await m.migrateNow('peer-a', 'peer-b')
+
+    assert.equal(result.success, false, 'a drain that failed is not a migration')
+    assert.match(result.error, /drainPod/)
+    assert.equal(events.length, 1)
+    assert.equal(events[0].type, 'migration-failed')
+  })
+
+  it('treats an orchestrator that returns nothing from drainPod as no verdict', async () => {
+    monitor.recordHeartbeat('peer-b', 50)
+    const silent = { async drainPod() {}, listPods() { return [] } }
+    const m = new AutoMigrator({ healthMonitor: monitor, orchestrator: silent })
+
+    const result = await m.migrateNow('peer-a', 'peer-b')
+    assert.equal(result.success, true)
+  })
+
+  // -- The workload is actually deployed --------------------------------------
+
+  it('deploys the resolved workload to the target and names what landed', async () => {
+    monitor.recordHeartbeat('peer-b', 50)
+    const m = new AutoMigrator({
+      healthMonitor: monitor,
+      orchestrator,
+      resolveWorkload: async (fromPodId) => {
+        assert.equal(fromPodId, 'peer-a')
+        return [
+          { name: 'indexer', content: '# indexer' },
+          { name: 'thumbnailer', content: '# thumbnailer' },
+        ]
+      },
+    })
+
+    const result = await m.migrateNow('peer-a', 'peer-b')
+
+    assert.equal(result.success, true)
+    assert.deepEqual(result.deployed, ['indexer', 'thumbnailer'])
+    assert.equal(result.workload, 'indexer, thumbnailer')
+
+    const deploys = orchestrator.calls.filter((c) => c.action === 'deploy')
+    assert.equal(deploys.length, 2, 'both skills must reach the target')
+    assert.ok(deploys.every((c) => c.podId === 'peer-b'))
+    assert.deepEqual(deploys.map((c) => c.skill), ['# indexer', '# thumbnailer'])
+  })
+
+  it('reports failure when a deploy fails, naming the skill', async () => {
+    monitor.recordHeartbeat('peer-b', 50)
+    const refusing = createMockOrchestrator({
+      deployResult: { success: false, error: 'target does not advertise deployment support' },
+    })
+    const m = new AutoMigrator({
+      healthMonitor: monitor,
+      orchestrator: refusing,
+      resolveWorkload: async () => [{ name: 'indexer', content: '# indexer' }],
+    })
+
+    const result = await m.migrateNow('peer-a', 'peer-b')
+
+    assert.equal(result.success, false, 'the workload is not running anywhere')
+    assert.match(result.error, /indexer/)
+    assert.match(result.error, /deployment support/)
+    assert.deepEqual(result.deployed, [])
+  })
+
+  it('reports failure when a deploy throws', async () => {
+    monitor.recordHeartbeat('peer-b', 50)
+    const throwing = createMockOrchestrator({ deployThrows: 'session refused' })
+    const m = new AutoMigrator({
+      healthMonitor: monitor,
+      orchestrator: throwing,
+      resolveWorkload: async () => [{ name: 'indexer', content: '# indexer' }],
+    })
+
+    const result = await m.migrateNow('peer-a', 'peer-b')
+    assert.equal(result.success, false)
+    assert.match(result.error, /session refused/)
+  })
+
+  it('records the skills that landed before a later one failed', async () => {
+    monitor.recordHeartbeat('peer-b', 50)
+    let n = 0
+    const flaky = {
+      async drainPod() { return { success: true, migrated: 0 } },
+      listPods() { return [] },
+      async deploySkill() {
+        n += 1
+        return n === 1 ? { success: true } : { success: false, error: 'out of quota' }
+      },
+    }
+    const m = new AutoMigrator({
+      healthMonitor: monitor,
+      orchestrator: flaky,
+      resolveWorkload: async () => [
+        { name: 'indexer', content: 'a' },
+        { name: 'thumbnailer', content: 'b' },
+      ],
+    })
+
+    const result = await m.migrateNow('peer-a', 'peer-b')
+    assert.equal(result.success, false)
+    assert.deepEqual(result.deployed, ['indexer'], 'the partial move must stay visible')
+    assert.match(result.error, /thumbnailer/)
+  })
+
+  it('rejects a resolveWorkload without a deploySkill to use it', () => {
+    assert.throws(
+      () => new AutoMigrator({
+        healthMonitor: monitor,
+        orchestrator: { async drainPod() {} },
+        resolveWorkload: async () => [],
+      }),
+      /deploySkill/,
+    )
   })
 
   // -- Test 13: Auto-select picks healthiest target ---------------------------
