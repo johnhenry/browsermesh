@@ -104,11 +104,38 @@ describeIfReal('WebRTC against real peers', () => {
 
   /** Run the offer/answer exchange and wait for both DataChannels to open. */
   async function connect({ alice, bob }) {
-    const offer = await alice.createOffer()
-    const answer = await bob.handleOffer(offer)
-    await alice.handleAnswer(answer)
-    await waitFor(() => alice.isOpen && bob.isOpen, 15_000, 'both data channels to open')
-    return { offer, answer }
+    /*
+     * One retry, because the first attempt fails outright often enough to
+     * dominate this suite (browsermesh#26): ICE reaches `connected` on both
+     * sides and the DTLS handshake then fails, so the DataChannel never
+     * opens and the wait burns its whole timeout.
+     *
+     * A retry is the right shape rather than a longer wait. The failure is
+     * terminal -- `connectionState` goes to `failed`, which nothing recovers
+     * from -- and a success takes about 700ms, so waiting longer only makes
+     * the failure slower. Both peer connections are rebuilt on the way:
+     * `createOffer()` assigns a fresh RTCPeerConnection, and `handleOffer()`
+     * releases the old one before making its own.
+     *
+     * The first attempt gets a short deadline so the retry is quick; the
+     * second gets the full one so a genuinely slow machine is not failed for
+     * being slow.
+     */
+    for (let attempt = 0; ; attempt += 1) {
+      const offer = await alice.createOffer()
+      const answer = await bob.handleOffer(offer)
+      await alice.handleAnswer(answer)
+      try {
+        await waitFor(
+          () => alice.isOpen && bob.isOpen,
+          attempt === 0 ? 5_000 : 15_000,
+          'both data channels to open',
+        )
+        return { offer, answer }
+      } catch (error) {
+        if (attempt >= 1) throw error
+      }
+    }
   }
 
   it('supportsWebRTC() is true once a real RTCPeerConnection is present', () => {
