@@ -344,6 +344,29 @@ export class CrossOriginBridge {
     const fromPeerId = data.fromPodId
     const peer = fromPeerId ? this.#peers.get(fromPeerId) : null
 
+    /*
+     * An unknown sender is REFUSED, not exempted.
+     *
+     * Every check below used to be written `if (peer && ...)`, and `peer` is
+     * null whenever `fromPodId` is absent or names a pod that was never
+     * registered. So omitting the field skipped origin validation, the
+     * ISOLATED block and the method allowlist in one go, and execution
+     * carried on into the handler. Identifying yourself as an ISOLATED peer
+     * was blocked; identifying yourself as nobody was not, which made the
+     * anonymous caller the privileged one.
+     *
+     * The reply made it worse: `#sendResponse` fell back to
+     * `postMessage(msg, '*')` with no peer, so the result went to any origin.
+     *
+     * Scoped to XO_REQUEST: a RESPONSE legitimately carries no `fromPodId` --
+     * it is correlated by `requestId` against a request this side sent -- so
+     * refusing peerless messages outright breaks every reply.
+     */
+    if (!peer && data.type === XO_REQUEST) {
+      this.#log(`Blocked request from unregistered sender: ${fromPeerId ?? '(no fromPodId)'}`)
+      return
+    }
+
     // Origin validation -- reject if the event origin doesn't match the registered origin
     if (peer && event.origin && event.origin !== peer.origin) {
       this.#log(`Origin mismatch for ${fromPeerId}: expected ${peer.origin}, got ${event.origin}`)
@@ -372,13 +395,13 @@ export class CrossOriginBridge {
     const { requestId, method, params, fromPodId } = data
 
     // ISOLATED peers cannot invoke anything
-    if (peer && peer.trust === TRUST_LEVELS.ISOLATED) {
+    if (peer.trust === TRUST_LEVELS.ISOLATED) {
       this.#log(`Blocked request from isolated peer ${fromPodId}`)
       return
     }
 
     // For VERIFIED peers, enforce the method allowlist
-    if (peer && peer.trust === TRUST_LEVELS.VERIFIED && peer.allowedMethods.size > 0) {
+    if (peer.trust === TRUST_LEVELS.VERIFIED && peer.allowedMethods.size > 0) {
       if (!peer.allowedMethods.has(method)) {
         this.#sendResponse(source, peer, requestId, null, `Method "${method}" not allowed`)
         return
