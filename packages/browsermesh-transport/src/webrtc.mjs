@@ -661,6 +661,38 @@ export class WebRTCPeerConnection {
         this.#startDisconnectedGrace()
         return
       }
+      /*
+       * `closed` arriving here means the STACK closed the connection, not us:
+       * our own close() nulls `#pc` first, so this handler cannot see it.
+       *
+       * It was falling through to the line below and doing nothing, which
+       * left a dead connection looking alive. Measured by corrupting one hex
+       * pair of the DTLS fingerprint in the answer -- an answer that cannot
+       * verify, which is what a corrupted or hostile one looks like:
+       *
+       *     t=   0ms  pc0[ice=checking conn=connecting]
+       *     t=  52ms  pc0[ice=closed   conn=closed]      <- stack gave up
+       *     t=12013ms  state=connecting  error=none      <- we never said so
+       *
+       * Twelve seconds after both peer connections had closed themselves,
+       * `state` was still `connecting`, no error had fired, and no close
+       * callback had run. A caller waiting on `isOpen` waits forever, and
+       * WebRTCMeshManager -- which reconnects on `onError` -- never hears
+       * anything to reconnect from.
+       *
+       * The DataChannel's own close path cannot cover this: the channel never
+       * opened, so `dc.onclose` never fires.
+       *
+       * Reported as an error and then closed, which is the order `dc.onerror`
+       * already uses, so a caller listening only for errors still learns the
+       * cause before the terminal close.
+       */
+      if (pcState === 'closed' && this.#state !== 'closed') {
+        this.#clearDisconnectedGrace()
+        this.#fireError(new Error('PeerConnection closed before the DataChannel opened'))
+        this.close()
+        return
+      }
       this.#clearDisconnectedGrace()
     }
   }
