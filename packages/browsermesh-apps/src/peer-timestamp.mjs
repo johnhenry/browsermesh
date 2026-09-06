@@ -82,24 +82,81 @@ export class TimestampProof {
   }
 
   /**
-   * Verify internal consistency of this proof.
+   * Verify this proof.
    *
-   * @param {Function} [verifyFn] - Optional async (signature, data, podId) => boolean
-   * @returns {{ valid: boolean, confidence: number }}
+   * Without `verifyFn` this checks STRUCTURE ONLY -- that three fields have
+   * plausible types -- and says so in `checked`. A structurally valid proof is
+   * not an authentic one: `confidence` is a number the proof asserts about
+   * itself, and a forgery can assert it too.
+   *
+   * With `verifyFn` every signature in the proof is checked. Both the
+   * authority signature and the witness entries are signed by `issuedBy` --
+   * the authority attests to what each peer reported, peers do not sign for
+   * themselves -- so `issuedBy` is the pod whose key `verifyFn` must resolve,
+   * for witness entries as much as for the proof itself.
+   *
+   * @param {Function} [verifyFn] - async (signature: Uint8Array, data: string, signerPodId: string) => boolean
+   * @returns {Promise<{ valid: boolean, confidence: number, checked: 'structure'|'signatures', reason?: string }>}
    */
-  verify(verifyFn) {
+  async verify(verifyFn) {
     // Basic structural checks
     if (!this.eventHash || typeof this.eventHash !== 'string') {
-      return { valid: false, confidence: 0 }
+      return { valid: false, confidence: 0, checked: 'structure', reason: 'eventHash missing or not a string' }
     }
     if (typeof this.canonicalTimestamp !== 'number' || this.canonicalTimestamp <= 0) {
-      return { valid: false, confidence: 0 }
+      return { valid: false, confidence: 0, checked: 'structure', reason: 'canonicalTimestamp missing or not a positive number' }
     }
     if (!Array.isArray(this.witnesses) || this.witnesses.length === 0) {
-      return { valid: false, confidence: 0 }
+      return { valid: false, confidence: 0, checked: 'structure', reason: 'witnesses missing or empty' }
     }
 
-    return { valid: true, confidence: this.confidence }
+    if (typeof verifyFn !== 'function') {
+      return { valid: true, confidence: this.confidence, checked: 'structure' }
+    }
+
+    if (!this.signature) {
+      return { valid: false, confidence: 0, checked: 'signatures', reason: 'proof carries no authority signature' }
+    }
+
+    const check = async (signature, data, what) => {
+      let ok
+      try {
+        ok = await verifyFn(fromBase64(signature), data, this.issuedBy)
+      } catch (err) {
+        return `verifying ${what} threw: ${err.message}`
+      }
+      return ok === true ? null : `${what} failed verification`
+    }
+
+    const authorityFailure = await check(
+      this.signature,
+      `${this.eventHash}:${this.canonicalTimestamp}`,
+      `authority signature from ${this.issuedBy}`,
+    )
+    if (authorityFailure) {
+      return { valid: false, confidence: 0, checked: 'signatures', reason: authorityFailure }
+    }
+
+    for (const witness of this.witnesses) {
+      if (!witness || !witness.signature) {
+        return {
+          valid: false,
+          confidence: 0,
+          checked: 'signatures',
+          reason: `witness ${witness?.podId ?? '(unnamed)'} carries no signature`,
+        }
+      }
+      const witnessFailure = await check(
+        witness.signature,
+        `${this.eventHash}:${witness.podId}:${witness.localTimestamp}`,
+        `witness entry for ${witness.podId}`,
+      )
+      if (witnessFailure) {
+        return { valid: false, confidence: 0, checked: 'signatures', reason: witnessFailure }
+      }
+    }
+
+    return { valid: true, confidence: this.confidence, checked: 'signatures' }
   }
 
   /**
@@ -152,6 +209,25 @@ function toBase64(bytes) {
     return Buffer.from(bytes).toString('base64')
   }
   return btoa(String.fromCharCode(...bytes))
+}
+
+/**
+ * Decode a base64 string back to a Uint8Array.
+ * Signatures travel through toJSON as base64; a verify callback expects the
+ * bytes it was given at signing time, so passing the string through would
+ * compare characters against byte values and never match.
+ *
+ * @param {string} b64
+ * @returns {Uint8Array}
+ */
+function fromBase64(b64) {
+  if (typeof Buffer !== 'undefined') {
+    return new Uint8Array(Buffer.from(b64, 'base64'))
+  }
+  const binary = atob(b64)
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+  return bytes
 }
 
 // ---------------------------------------------------------------------------
@@ -271,45 +347,61 @@ export class TimestampAuthority {
   /**
    * Verify a TimestampProof.
    *
-   * Checks that the authority signature matches the eventHash +
-   * canonicalTimestamp, and validates witness signatures.
+   * Checks every signature in the proof against the key of the pod that
+   * issued it. This requires `identity.verify(signature, data, signerPodId)`.
+   * Without it the only check available is re-signing with THIS authority's
+   * own key, which answers a different question -- "did I issue this?" -- and
+   * is reported as such rather than as authenticity.
    *
    * @param {TimestampProof} proof
-   * @returns {Promise<{ valid: boolean, reason?: string }>}
+   * @returns {Promise<{ valid: boolean, checked?: string, reason?: string }>}
    */
   async verify(proof) {
     if (!(proof instanceof TimestampProof)) {
       return { valid: false, reason: 'Not a TimestampProof instance' }
     }
 
-    // Check basic structure
-    const structural = proof.verify()
-    if (!structural.valid) {
-      return { valid: false, reason: 'Structural validation failed' }
-    }
-
-    // Verify authority signature matches eventHash + canonicalTimestamp
-    const expectedData = `${proof.eventHash}:${proof.canonicalTimestamp}`
-    const expectedSig = await this.#identity.sign(expectedData)
-    const expectedB64 = toBase64(expectedSig)
-
-    if (proof.signature !== expectedB64) {
-      return { valid: false, reason: 'Authority signature mismatch — eventHash or timestamp was tampered' }
-    }
-
-    // Verify witness signatures
     if (this.#identity.verify) {
-      for (const witness of proof.witnesses) {
-        const witnessData = `${proof.eventHash}:${witness.podId}:${witness.localTimestamp}`
-        const witnessSig = await this.#identity.sign(witnessData)
-        const witnessSigB64 = toBase64(witnessSig)
-        if (witness.signature !== witnessSigB64) {
-          return { valid: false, reason: `Witness signature mismatch for ${witness.podId}` }
-        }
+      const result = await proof.verify(
+        (signature, data, signerPodId) => this.#identity.verify(signature, data, signerPodId),
+      )
+      if (!result.valid) {
+        return { valid: false, checked: result.checked, reason: result.reason }
+      }
+      return { valid: true, checked: 'signatures' }
+    }
+
+    // No verify() on the identity: we can only re-sign and compare, which
+    // works solely for proofs this authority issued itself. Saying anything
+    // about a foreign proof here would be a guess.
+    if (proof.issuedBy !== this.#identity.podId) {
+      return {
+        valid: false,
+        checked: 'none',
+        reason: `Cannot verify a proof issued by ${proof.issuedBy}: identity has no verify() to check another pod's key`,
       }
     }
 
-    return { valid: true }
+    const structural = await proof.verify()
+    if (!structural.valid) {
+      return { valid: false, checked: 'structure', reason: structural.reason || 'Structural validation failed' }
+    }
+
+    const expectedData = `${proof.eventHash}:${proof.canonicalTimestamp}`
+    const expectedB64 = toBase64(await this.#identity.sign(expectedData))
+    if (proof.signature !== expectedB64) {
+      return { valid: false, checked: 'self', reason: 'Authority signature mismatch — eventHash or timestamp was tampered' }
+    }
+
+    for (const witness of proof.witnesses) {
+      const witnessData = `${proof.eventHash}:${witness.podId}:${witness.localTimestamp}`
+      const witnessSigB64 = toBase64(await this.#identity.sign(witnessData))
+      if (witness.signature !== witnessSigB64) {
+        return { valid: false, checked: 'self', reason: `Witness signature mismatch for ${witness.podId}` }
+      }
+    }
+
+    return { valid: true, checked: 'self' }
   }
 
   /**
