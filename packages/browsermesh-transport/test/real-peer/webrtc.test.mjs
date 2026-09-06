@@ -231,6 +231,64 @@ describeIfReal('WebRTC against real peers', () => {
     }
   })
 
+  it('reports a connection the stack gave up on, instead of waiting forever', async () => {
+    /*
+     * A DETERMINISTIC handshake failure, which the flaky one (#26) is not.
+     *
+     * Flipping one hex pair of the DTLS fingerprint in the answer produces an
+     * answer that cannot verify -- what a corrupted or hostile one looks like.
+     * ICE still succeeds; DTLS then cannot, and libdatachannel closes both
+     * peer connections about 50ms in.
+     *
+     * Before this was handled, that was completely silent. `onconnectionstatechange`
+     * acted on `failed` and `disconnected` and let `closed` fall through, so
+     * twelve seconds later `state` was still `connecting`, no error had fired,
+     * and no close callback had run:
+     *
+     *     t=   0ms  pc0[ice=checking conn=connecting]
+     *     t=  52ms  pc0[ice=closed   conn=closed]
+     *     t=12013ms  state=connecting  error=none
+     *
+     * A caller waiting on `isOpen` waited forever, and WebRTCMeshManager --
+     * which reconnects on `onError` -- never heard anything to reconnect from.
+     * The DataChannel's close path cannot cover it: the channel never opened,
+     * so `dc.onclose` never fires.
+     *
+     * This is a real-peer test because a mock cannot fail a certificate
+     * check. That is the whole point: the mock suite passed throughout.
+     */
+    const peers = pair()
+    try {
+      const errors = []
+      peers.alice.onError((error) => errors.push(error.message))
+
+      const offer = await peers.alice.createOffer()
+      const answer = await peers.bob.handleOffer(offer)
+
+      const corrupted = answer.sdp.replace(
+        /^(a=fingerprint:sha-256 )([0-9A-Fa-f:]+)$/m,
+        (_, head, fingerprint) => {
+          const bytes = fingerprint.split(':')
+          bytes[0] = bytes[0] === 'AA' ? 'BB' : 'AA'
+          return head + bytes.join(':')
+        },
+      )
+      assert.notEqual(corrupted, answer.sdp, 'the fingerprint was actually corrupted')
+
+      await peers.alice.handleAnswer({ ...answer, sdp: corrupted })
+
+      // Promptly, not eventually. The stack gives up in about 50ms; the
+      // generous deadline here is about tolerating a slow machine, not about
+      // waiting for something slow to happen.
+      await waitFor(() => errors.length > 0, 8_000, 'an error to be reported')
+
+      assert.equal(peers.alice.state, 'closed', 'a dead connection does not stay "connecting"')
+      assert.equal(peers.alice.isOpen, false)
+    } finally {
+      peers.alice.close(); peers.bob.close()
+    }
+  })
+
   it('addIceCandidate still throws synchronously before there is a connection', () => {
     const conn = new webrtc.WebRTCPeerConnection({
       localPodId: 'a', remotePodId: 'b', iceServers: [],
