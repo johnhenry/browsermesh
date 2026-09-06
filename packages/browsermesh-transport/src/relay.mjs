@@ -347,6 +347,13 @@ export class MeshRelayClient {
       const onOpen = () => {
         // Send register immediately on open. Server may or may not ack.
         this.#sendWs({ type: 'register', fingerprint: this.#fingerprint });
+        // Re-announce what we advertised before the socket dropped. A relay
+        // keeps presence per connection, so a reconnect starts with an empty
+        // record for us -- while this client goes on reporting connected:true
+        // and the old capabilities, leaving the peer undiscoverable with
+        // nothing on either side saying so. Empty on a first connect, so the
+        // initial handshake is unchanged.
+        if (this._announcedCapabilities.length > 0) this.#sendAnnounceWs();
         if (!settled) { settled = true; resolve(); }
       };
       const onMessage = (ev) => this.#handleWsMessage(ev);
@@ -456,12 +463,22 @@ export class MeshRelayClient {
     if (this.#server) {
       this.#server.broadcastPresence(this.#fingerprint, capabilities);
     } else if (this.#ws) {
-      this.#sendWs({
-        type: 'announce',
-        fingerprint: this.#fingerprint,
-        capabilities: [...capabilities],
-      });
+      this.#sendAnnounceWs();
     }
+  }
+
+  /**
+   * Send the announce message for the capabilities currently on record.
+   * Always sends -- announcePresence([]) is a deliberate "I advertise
+   * nothing" and must reach the relay. The reconnect path guards on empty
+   * itself, so a first connect stays a bare register.
+   */
+  #sendAnnounceWs() {
+    this.#sendWs({
+      type: 'announce',
+      fingerprint: this.#fingerprint,
+      capabilities: [...this._announcedCapabilities],
+    });
   }
 
   /**
