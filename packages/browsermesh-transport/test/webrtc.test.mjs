@@ -76,8 +76,12 @@ class MockRTCPeerConnection {
   get remoteDescription() { return this.#remoteDesc }
   get localDescription() { return this.#localDesc }
 
+  /** Every candidate, in order -- buffering is about which ones ARRIVE. */
+  _candidates = []
+
   addIceCandidate(c) {
     this._lastCandidate = c
+    this._candidates.push(c)
   }
 
   /** Test hook: set to an array of stat objects to control getStats() output. */
@@ -472,6 +476,104 @@ describe('default ICE configuration', () => {
 // 'connecting'. A caller polling `state` or `isOpen` therefore waited forever
 // on a dead connection in every browser; libdatachannel happens to also send
 // `closed` most of the time, which hid it in the Node tests.
+
+// ── Remote candidates that beat the answer ────────────────────────────
+//
+// addIceCandidate's docblock calls "candidates race the answer" ordinary on a
+// real signaling channel, and the code then discarded every candidate that
+// won that race. A peer gathers in 1-2ms while an answer crosses a signaling
+// server, so on a real network that is ALL of them, leaving only
+// peer-reflexive discovery -- one inferred pair rather than every signalled
+// one. Measured on two real peers: 0 of 5 accepted with the answer delayed,
+// 5 of 5 with it immediate.
+
+describe('WebRTCPeerConnection early ICE candidates', () => {
+  it('holds a candidate that arrives before the remote description', async () => {
+    const conn = new WebRTCPeerConnection({ localPodId: 'a', remotePodId: 'b' })
+    await conn.createOffer()
+    const pc = _lastMockPC
+
+    const accepted = await conn.addIceCandidate({ candidate: 'early-1' })
+
+    assert.equal(accepted, true, 'held, not rejected')
+    assert.deepEqual(pc._candidates, [], 'and not handed to the stack yet')
+  })
+
+  it('applies held candidates once the answer sets the remote description', async () => {
+    const conn = new WebRTCPeerConnection({ localPodId: 'a', remotePodId: 'b' })
+    await conn.createOffer()
+    const pc = _lastMockPC
+
+    await conn.addIceCandidate({ candidate: 'early-1' })
+    await conn.addIceCandidate({ candidate: 'early-2' })
+    assert.deepEqual(pc._candidates, [])
+
+    await conn.handleAnswer({ type: 'answer', sdp: 'mock-answer-sdp' })
+
+    assert.deepEqual(
+      pc._candidates.map((c) => c.candidate), ['early-1', 'early-2'],
+      'in arrival order, and none lost',
+    )
+  })
+
+  it('passes a candidate straight through once the description is set', async () => {
+    const conn = new WebRTCPeerConnection({ localPodId: 'a', remotePodId: 'b' })
+    await conn.createOffer()
+    const pc = _lastMockPC
+    await conn.handleAnswer({ type: 'answer', sdp: 'mock-answer-sdp' })
+
+    await conn.addIceCandidate({ candidate: 'late-1' })
+
+    assert.deepEqual(pc._candidates.map((c) => c.candidate), ['late-1'])
+  })
+
+  it('bounds the hold, so a peer that never answers cannot grow it without limit', async () => {
+    const conn = new WebRTCPeerConnection({ localPodId: 'a', remotePodId: 'b' })
+    await conn.createOffer()
+    const pc = _lastMockPC
+
+    const results = []
+    for (let i = 0; i < 70; i++) {
+      results.push(await conn.addIceCandidate({ candidate: `flood-${i}` }))
+    }
+    assert.equal(results.filter(Boolean).length, 64, 'held exactly the cap')
+    assert.equal(results.filter((r) => r === false).length, 6, 'and refused the rest')
+
+    await conn.handleAnswer({ type: 'answer', sdp: 'mock-answer-sdp' })
+    assert.equal(pc._candidates.length, 64)
+  })
+
+  it('holds when remoteDescription is a truthy empty object, as the real binding returns', async () => {
+    // The mock returns null before setRemoteDescription, which is what the
+    // spec says and what browsers do. node-datachannel's polyfill returns a
+    // truthy `{ sdp: '' }` instead. A `!remoteDescription` guard is therefore
+    // DEAD CODE under the binding while passing every test here -- which is
+    // exactly how this fix was written the first time, and the unit suite had
+    // nothing to say about it. This pins the binding's shape.
+    const conn = new WebRTCPeerConnection({ localPodId: 'a', remotePodId: 'b' })
+    await conn.createOffer()
+    const pc = _lastMockPC
+    Object.defineProperty(pc, 'remoteDescription', {
+      get: () => ({ sdp: '' }), configurable: true,
+    })
+
+    const accepted = await conn.addIceCandidate({ candidate: 'early-1' })
+
+    assert.equal(accepted, true, 'an empty sdp is not a remote description')
+    assert.deepEqual(pc._candidates, [], 'so the candidate is held, not discarded')
+  })
+
+  it('does not hold a candidate the answerer receives, since it already has the offer', async () => {
+    // handleOffer sets the remote description before any candidate can arrive,
+    // so the answerer never buffers -- only the offerer is exposed to the race.
+    const conn = new WebRTCPeerConnection({ localPodId: 'b', remotePodId: 'a' })
+    await conn.handleOffer({ type: 'offer', sdp: 'mock-offer-sdp' })
+    const pc = _lastMockPC
+
+    await conn.addIceCandidate({ candidate: 'after-offer' })
+    assert.deepEqual(pc._candidates.map((c) => c.candidate), ['after-offer'])
+  })
+})
 
 describe('WebRTCPeerConnection failed state', () => {
   it('reports a terminally failed connection as failed, not connecting', async () => {
