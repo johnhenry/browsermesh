@@ -102,6 +102,14 @@ export function mergeIceServers(userServers, defaults = DEFAULT_ICE_SERVERS) {
   return [...defaults, ...valid]
 }
 
+/**
+ * How many remote ICE candidates to hold while waiting for the remote
+ * description. A handful of interfaces gather a handful of candidates each;
+ * generous for that, and still bounded against a peer that floods candidates
+ * and never answers.
+ */
+const MAX_PENDING_REMOTE_CANDIDATES = 64
+
 // ---------------------------------------------------------------------------
 // WebRTCPeerConnection
 // ---------------------------------------------------------------------------
@@ -124,6 +132,13 @@ export class WebRTCPeerConnection {
   #iceServers
   #onLog
   #state = 'new'   // new | connecting | connected | failed | closed
+
+  /**
+   * Remote candidates that arrived before the remote description existed.
+   * Flushed by #flushPendingCandidates() once it is set.
+   * @type {Array<RTCIceCandidate|object>}
+   */
+  #pendingRemoteCandidates = []
   #closing = false // reentrancy guard for close(); see close()
   #iceCandidateCbs = []
   #messageCbs = []
@@ -250,6 +265,7 @@ export class WebRTCPeerConnection {
       // is nominated -- that is what makes an ICE restart a repair rather
       // than a reconnection.
       await this.#pc.setRemoteDescription({ type: 'offer', sdp: offer.sdp })
+      await this.#flushPendingCandidates()
       const answer = await this.#pc.createAnswer()
       await this.#pc.setLocalDescription(answer)
       this.#log(`Created renegotiation answer for ${this.#remotePodId}`)
@@ -271,6 +287,7 @@ export class WebRTCPeerConnection {
     }
 
     await this.#pc.setRemoteDescription({ type: 'offer', sdp: offer.sdp })
+    await this.#flushPendingCandidates()
     const answer = await this.#pc.createAnswer()
     await this.#pc.setLocalDescription(answer)
     this.#setState('connecting')
@@ -287,6 +304,7 @@ export class WebRTCPeerConnection {
     if (!this.#pc) throw new Error('No peer connection — call createOffer() first')
     if (!answer || !answer.sdp) throw new Error('Invalid answer: missing sdp')
     await this.#pc.setRemoteDescription({ type: 'answer', sdp: answer.sdp })
+    await this.#flushPendingCandidates()
     this.#log(`Applied answer from ${this.#remotePodId}`)
   }
 
@@ -319,6 +337,40 @@ export class WebRTCPeerConnection {
    */
   addIceCandidate(candidate) {
     if (!this.#pc) throw new Error('No peer connection')
+
+    // "Candidates race the answer" is stated above as an ordinary event, and
+    // it was then handled by discarding them. That is not a test artifact: a
+    // peer gathers in 1-2ms while an answer crosses a signaling server, so on
+    // any real network the candidates arrive FIRST and every one was thrown
+    // away. What survives is peer-reflexive discovery from the other side's
+    // binding requests -- one inferred pair instead of every signalled one,
+    // with no redundancy if it fails.
+    //
+    // Measured on two real peers: with the answer delayed, 0 of 5 of the
+    // remote's candidates were accepted and the selected pair was `prflx`;
+    // with no delay, 5 of 5 were accepted and the pair was `host`.
+    //
+    // So hold them and apply them when the description lands, which is the
+    // standard trickle-ICE pattern.
+    // Not `!remoteDescription`. The spec says it is null until set, but
+    // node-datachannel's polyfill returns a truthy `{ sdp: '' }`, so that
+    // test silently never fires there -- measured, after writing it that way
+    // first. Checking the sdp works on both.
+    const remote = this.#pc.remoteDescription
+    if (!remote || !remote.sdp) {
+      if (this.#pendingRemoteCandidates.length >= MAX_PENDING_REMOTE_CANDIDATES) {
+        // Bounded: a peer that floods candidates before answering must not be
+        // able to grow this without limit.
+        this.#log(
+          `Dropped an early ICE candidate from ${this.#remotePodId}: ` +
+          `already holding ${MAX_PENDING_REMOTE_CANDIDATES}`,
+        )
+        return Promise.resolve(false)
+      }
+      this.#pendingRemoteCandidates.push(candidate)
+      return Promise.resolve(true)
+    }
+
     return Promise.resolve(this.#pc.addIceCandidate(candidate)).then(
       () => true,
       (err) => {
@@ -611,6 +663,27 @@ export class WebRTCPeerConnection {
     if (pc) {
       pc.onicecandidate = null; pc.ondatachannel = null; pc.onconnectionstatechange = null
       try { pc.close() } catch (e) { silentCatch('clawser-mesh-webrtc', 'release-pc', e) }
+    }
+  }
+
+  /**
+   * Apply the candidates held while there was no remote description.
+   *
+   * Failures are logged and dropped exactly as on the live path -- ICE tries
+   * many candidates and keeps the ones that work.
+   */
+  async #flushPendingCandidates() {
+    if (this.#pendingRemoteCandidates.length === 0) return
+    const held = this.#pendingRemoteCandidates
+    this.#pendingRemoteCandidates = []
+    this.#log(`Applying ${held.length} ICE candidate(s) held for ${this.#remotePodId}`)
+    for (const candidate of held) {
+      if (!this.#pc) return
+      try {
+        await this.#pc.addIceCandidate(candidate)
+      } catch (err) {
+        this.#log(`Ignored held ICE candidate from ${this.#remotePodId}: ${err?.message || err}`)
+      }
     }
   }
 

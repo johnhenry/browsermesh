@@ -494,7 +494,15 @@ export class WebRTCTransport {
     // Set up signaler listeners for remote ICE candidates
     this.#signaler.onIceCandidate((candidate) => {
       if (this.#pc) {
-        this.#pc.addIceCandidate(candidate);
+        // The promise must not be dropped. addIceCandidate rejects on a
+        // malformed candidate and on one that arrives before the remote
+        // description -- both ordinary on a real signaling channel -- and an
+        // unhandled rejection ends a Node process by default. webrtc.mjs's
+        // addIceCandidate docblock records this being fixed there; this path
+        // still had it.
+        Promise.resolve(this.#pc.addIceCandidate(candidate)).catch((e) => {
+          silentCatch('clawser-mesh-websocket', 'ignore-rejected-ice-candidate', e);
+        });
       }
     });
 
