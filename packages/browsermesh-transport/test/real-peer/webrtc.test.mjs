@@ -281,16 +281,26 @@ describeIfReal('WebRTC against real peers', () => {
       // generous deadline here is about tolerating a slow machine, not about
       // waiting for something slow to happen.
       //
-      // Wait for the STATE, not merely for an error. `failed` and `closed`
-      // are separate transitions and `failed` deliberately reports an error
-      // WITHOUT closing, so that WebRTCMeshManager can reconnect from it.
-      // This corrupted-fingerprint connection usually passes through `failed`
-      // on its way to `closed`, so waiting on `errors.length > 0` returned on
-      // the `failed` error and then asserted a close that had not happened
-      // yet -- measured at 4 of 45 runs.
-      await waitFor(() => peers.alice.state === 'closed', 8_000, 'the connection to be reported closed')
+      // Wait for a TERMINAL state, and accept either one, because which one
+      // arrives is a property of the stack rather than of this code:
+      //
+      //   - a browser reports `failed` and never `closed` (measured against
+      //     native WebRTC: failed at ~51ms, still failed 20s later). Per spec
+      //     connectionState `closed` means the LOCAL object was closed, so a
+      //     remote DTLS failure cannot produce it.
+      //   - libdatachannel usually sends `closed` as well, which is why this
+      //     test used to pass while asserting `closed` -- and flaked at ~9%
+      //     on the runs where it behaved like a browser.
+      //
+      // What must hold on every stack is that the connection stops claiming
+      // to be connecting and `isOpen` goes false.
+      await waitFor(
+        () => peers.alice.state === 'failed' || peers.alice.state === 'closed',
+        8_000,
+        'the connection to reach a terminal state',
+      )
 
-      assert.equal(peers.alice.state, 'closed', 'a dead connection does not stay "connecting"')
+      assert.notEqual(peers.alice.state, 'connecting', 'a dead connection does not stay "connecting"')
       assert.equal(peers.alice.isOpen, false)
       assert.ok(errors.length > 0, 'and the caller is told, rather than left waiting on isOpen')
     } finally {

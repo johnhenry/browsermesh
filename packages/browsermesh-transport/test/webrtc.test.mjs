@@ -460,6 +460,83 @@ describe('default ICE configuration', () => {
 
 // ── WebRTCPeerConnection.reconnect / onStateChange ─────────────────────
 
+// ── A terminally failed connection says so (#26) ──────────────────────
+//
+// `failed` is the ONLY terminal signal a browser gives for a handshake that
+// dies remotely. Measured against native WebRTC with a corrupted DTLS
+// fingerprint in the answer: connectionState goes to `failed` at ~51ms and
+// stays there -- `closed` never arrives, and per spec it never will, because
+// connectionState `closed` means the LOCAL object was closed.
+//
+// The handler used to fire an error on `failed` and leave `state` at
+// 'connecting'. A caller polling `state` or `isOpen` therefore waited forever
+// on a dead connection in every browser; libdatachannel happens to also send
+// `closed` most of the time, which hid it in the Node tests.
+
+describe('WebRTCPeerConnection failed state', () => {
+  it('reports a terminally failed connection as failed, not connecting', async () => {
+    const conn = new WebRTCPeerConnection({ localPodId: 'a', remotePodId: 'b' })
+    await conn.createOffer()
+    const pc = _lastMockPC
+    const errors = []
+    conn.onError((e) => errors.push(e.message))
+
+    assert.equal(conn.state, 'connecting')
+    pc.connectionState = 'failed'
+    pc.onconnectionstatechange()
+
+    assert.equal(conn.state, 'failed', 'a dead connection must not still claim "connecting"')
+    assert.equal(conn.isOpen, false)
+    assert.ok(errors.some((m) => /failed/.test(m)), 'and the error is still reported')
+  })
+
+  it('sets the state before firing the error, so an onError handler sees it', async () => {
+    // WebRTCMeshManager reconnects from onError. A handler that inspects
+    // state must not observe 'connecting' on a connection that has failed.
+    const conn = new WebRTCPeerConnection({ localPodId: 'a', remotePodId: 'b' })
+    await conn.createOffer()
+    const pc = _lastMockPC
+    const seen = []
+    conn.onError(() => seen.push(conn.state))
+
+    pc.connectionState = 'failed'
+    pc.onconnectionstatechange()
+
+    assert.deepEqual(seen, ['failed'])
+  })
+
+  it('does not close on failure, so ICE restart can still recover it', async () => {
+    // Closing on `failed` was tried and broke auto-reconnect. The connection
+    // stays usable for a restart; only the reported state changes.
+    const conn = new WebRTCPeerConnection({ localPodId: 'a', remotePodId: 'b' })
+    await conn.createOffer()
+    const pc = _lastMockPC
+    const closes = []
+    conn.onClose(() => closes.push(true))
+
+    pc.connectionState = 'failed'
+    pc.onconnectionstatechange()
+    assert.equal(closes.length, 0, 'failure is not a close')
+
+    // The DataChannel coming back up is a real recovery.
+    _lastMockDC.onopen()
+    assert.equal(conn.state, 'connected', 'failed must not be a dead end')
+  })
+
+  it('close() on a failed connection still reaches closed', async () => {
+    const conn = new WebRTCPeerConnection({ localPodId: 'a', remotePodId: 'b' })
+    await conn.createOffer()
+    const pc = _lastMockPC
+    pc.connectionState = 'failed'
+    pc.onconnectionstatechange()
+    assert.equal(conn.state, 'failed')
+
+    conn.close()
+    assert.equal(conn.state, 'closed')
+    assert.equal(conn.isOpen, false)
+  })
+})
+
 describe('WebRTCPeerConnection reconnect', () => {
   it('reconnect() requests an ICE restart and returns a fresh offer', async () => {
     const conn = new WebRTCPeerConnection({ localPodId: 'a', remotePodId: 'b' })
