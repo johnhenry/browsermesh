@@ -123,7 +123,7 @@ export class WebRTCPeerConnection {
   #dataChannel = null
   #iceServers
   #onLog
-  #state = 'new'   // new | connecting | connected | closed
+  #state = 'new'   // new | connecting | connected | failed | closed
   #closing = false // reentrancy guard for close(); see close()
   #iceCandidateCbs = []
   #messageCbs = []
@@ -654,6 +654,35 @@ export class WebRTCPeerConnection {
       const pcState = this.#pc?.connectionState
       if (pcState === 'failed') {
         this.#clearDisconnectedGrace()
+        /*
+         * `failed` is terminal, and it is the ONLY terminal signal a browser
+         * gives for a handshake that dies remotely.
+         *
+         * Measured against native WebRTC (two RTCPeerConnections, corrupted
+         * DTLS fingerprint in the answer):
+         *
+         *     t=51ms  connectionState = failed
+         *     ...20s later, connectionState = failed
+         *
+         * `closed` never arrives, and the spec agrees: connectionState
+         * `closed` means the local object was closed, i.e. someone called
+         * close(). So the `closed` branch below cannot fire in a browser for
+         * this case -- libdatachannel merely happens to send `closed` as
+         * well most of the time, which is why the Node tests mostly pass and
+         * flake at ~9%.
+         *
+         * The state therefore has to move here. It does NOT close: closing
+         * on `failed` was tried and broke auto-reconnect, and ICE restart can
+         * still recover this connection (the DataChannel reopening sets
+         * 'connected' again). What changes is that `state` stops claiming
+         * 'connecting' and `isOpen` is false, so a caller polling either one
+         * learns the truth instead of waiting forever.
+         *
+         * State before the error, deliberately: WebRTCMeshManager reconnects
+         * from onError, and a handler that inspects state must not see
+         * 'connecting' on a connection that has terminally failed.
+         */
+        if (this.#state !== 'closed') this.#setState('failed')
         this.#fireError(new Error('PeerConnection state: failed'))
         return
       }
