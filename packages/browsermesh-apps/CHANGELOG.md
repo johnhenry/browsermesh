@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.0
+
+### Minor Changes
+
+- TimestampProof.verify() is now async. It accepted a verifyFn, documented it, and never called it, so any structurally well-formed proof verified with the confidence the proof asserted about itself. It now checks the authority signature and every witness entry and reports which was checked. Callers must await it.
+
+  TimestampAuthority.verify() verifies through the issuing pod key rather than re-signing with its own, so a proof from another authority can be verified at all rather than reported as tampered.
+
+  AutoMigrator no longer reports a migration it did not perform. It honours the drainPod verdict, takes a resolveWorkload option to supply what should be deployed, and workload names only what actually landed.
+
+  The PeerSession heartbeat timeout can now fire; it was cleared by every ping, so a dead peer was never detected.
+
 ## 0.0.1
 
 ### Patch Changes
@@ -18,6 +30,7 @@
   shape as `peer-chat.mjs`'s convention, and compatible with
   `MeshIdentityManager.sign(podId, data)`/`.verify(pubKey, data, sig)`
   from `@johnhenry/browsermesh-core`):
+
   - `pay()` signs the `PaymentUpdate` it produces when a `signFn` is
     configured.
   - `receive()` verifies an incoming update's signature and rejects

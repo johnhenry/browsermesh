@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.0
+
+### Minor Changes
+
+- WasmSandbox.execute() no longer invents its CPU figure. It used Math.random() and enforced the policy budget against that, so usage.cpuMs was noise and the absence of a Policy violation throw meant nothing. load() now takes the executor that actually runs the module, and execute() returns { result, cpuMs, executed }.
+
+  MeshKeyring.fromJSON() now dispatches on the serialised shape, so a restored keyring carrying signed links actually verifies them. A keyring that previously round-tripped as valid without running any cryptography can now report invalid.
+
+  An encrypted identity export can be imported again, and attenuation actually narrows the resource scope.
+
 ## 0.0.1
 
 ### Patch Changes
