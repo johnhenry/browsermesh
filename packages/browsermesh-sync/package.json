@@ -1,6 +1,6 @@
 {
   "name": "@johnhenry/browsermesh-sync",
-  "version": "0.0.0",
+  "version": "0.0.1",
   "description": "CRDT sync engine, delta sync, file transfer, and collaboration for BrowserMesh",
   "type": "module",
   "main": "./src/index.mjs",
@@ -19,7 +19,7 @@
     "directory": "packages/browsermesh-sync"
   },
   "peerDependencies": {
-    "@johnhenry/browsermesh-primitives": ">=0.0.0"
+    "@johnhenry/browsermesh-primitives": ">=0.0.1 <1.0.0"
   },
   "scripts": {
     "test": "node --import ./test/_setup-globals.mjs --test test/*.test.mjs"

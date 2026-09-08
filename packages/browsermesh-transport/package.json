@@ -1,6 +1,6 @@
 {
   "name": "@johnhenry/browsermesh-transport",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "WebSocket, WebRTC, WebTransport, and relay adapters for BrowserMesh",
   "type": "module",
   "main": "./src/index.mjs",
@@ -19,7 +19,7 @@
     "directory": "packages/browsermesh-transport"
   },
   "peerDependencies": {
-    "@johnhenry/browsermesh-primitives": ">=0.0.0"
+    "@johnhenry/browsermesh-primitives": ">=0.0.1 <1.0.0"
   },
   "devDependencies": {
     "node-datachannel": "^0.33.2"

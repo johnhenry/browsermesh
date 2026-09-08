@@ -1,6 +1,6 @@
 {
   "name": "@johnhenry/browsermesh-apps",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Application layer: marketplace, chat, payments, compute, orchestration, and agent tools for BrowserMesh",
   "type": "module",
   "main": "./src/index.mjs",
@@ -20,11 +20,22 @@
     "directory": "packages/browsermesh-apps"
   },
   "peerDependencies": {
-    "@johnhenry/browsermesh-primitives": ">=0.0.0",
-    "@johnhenry/browsermesh-core": ">=0.0.0",
-    "@johnhenry/browsermesh-transport": ">=0.0.0",
-    "@johnhenry/browsermesh-sync": ">=0.0.0",
-    "@johnhenry/browsermesh-discovery": ">=0.0.0"
+    "@johnhenry/browsermesh-primitives": ">=0.0.1 <1.0.0",
+    "@johnhenry/browsermesh-core": ">=0.1.0 <1.0.0",
+    "@johnhenry/browsermesh-transport": ">=0.1.0 <1.0.0",
+    "@johnhenry/browsermesh-sync": ">=0.0.0 <1.0.0",
+    "@johnhenry/browsermesh-discovery": ">=0.0.1 <1.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@johnhenry/browsermesh-transport": {
+      "optional": true
+    },
+    "@johnhenry/browsermesh-core": {
+      "optional": true
+    },
+    "@johnhenry/browsermesh-discovery": {
+      "optional": true
+    }
   },
   "scripts": {
     "test": "node --import ./test/_setup-globals.mjs --test test/*.test.mjs"
