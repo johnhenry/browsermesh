@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.0.1
+
+### Patch Changes
+
+- Feature-detect the platform floors instead of crashing on them.
+
 ## 0.0.0
 
 Extracted from the private `clawser` monorepo and imported into the `@johnhenry` npm scope as part of the browsermesh monorepo consolidation. Previously published unscoped as `browsermesh-discovery@0.1.0` (2026-07-17, manual publish, never CI-automated). Per family convention, the version restarts at 0.0.0 on scope import.

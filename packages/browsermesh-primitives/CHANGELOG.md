@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.0.1
+
+### Patch Changes
+
+- Feature-detect the platform floors instead of crashing on them.
+
 ## 0.0.0
 
 Imported into the `@johnhenry` npm scope as part of the browsermesh
