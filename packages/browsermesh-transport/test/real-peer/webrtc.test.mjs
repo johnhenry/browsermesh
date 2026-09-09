@@ -237,6 +237,10 @@ describeIfReal('WebRTC against real peers', () => {
        * reported as rejected and does not take the process down -- is
        * deterministic, and is re-asserted on every attempt. Only the "and
        * the connection still completes" tail is retried.
+       *
+       * DELETE THIS RETRY at the same time as connect()'s -- the revert
+       * condition is documented there and in CLAUDE.md. Deleting one and
+       * leaving the other puts the flake back in exactly this test.
        */
       for (let attempt = 0; ; attempt += 1) {
         const offer = await peers.alice.createOffer()
