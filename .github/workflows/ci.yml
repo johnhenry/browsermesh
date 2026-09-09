@@ -33,7 +33,13 @@ jobs:
       # idle, 6/40 immediately after a heavy run, every stall the full 15s
       # timeout. `turbo run test --concurrency=4` is exactly that loaded
       # condition, so they are kept out of it and serialised against each
-      # other too (two of them running together failed 2 runs in 3). See #26.
+      # other too (two of them running together failed 2 runs in 3).
+      #
+      # The stalls are an upstream DTLS race, fixed in libdatachannel v0.24.5
+      # but not yet in node-datachannel, which still pins v0.24.3. Every test
+      # here now retries the handshake once, which covers it. Keep the
+      # serialisation regardless -- it predates that bug and is about load,
+      # not about #26. See #26 for the root cause and the revert condition.
       - name: Run real-peer WebRTC tests (serialized)
         # Fail rather than skip if the native binding is missing -- a skipped
         # suite reports success, which would make this step decorative.
