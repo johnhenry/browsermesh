@@ -26,6 +26,7 @@ export * from './peer-node.mjs';
 export * from './signaling.mjs';
 export * from './webrtc-negotiator.mjs';
 export * from './mesh-bootstrap.mjs';
+export * from './mesh-sync.mjs';
 export * from './kernel-mesh.mjs';
 export * from './mesh-relay-host.mjs';
 export * from './mesh-relay-backend.mjs';
