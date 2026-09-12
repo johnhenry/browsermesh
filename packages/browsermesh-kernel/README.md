@@ -13,7 +13,7 @@ Extracted from the private `clawser` monorepo (previously `packages/browsermesh-
 
 | Module | Key Exports |
 |--------|-------------|
-| constants / errors | `KERNEL_DEFAULTS`, `KERNEL_CAP`, `KERNEL_ERROR`, `KernelError` + 7 subclasses |
+| constants / errors | `KERNEL_DEFAULTS`, `KERNEL_CAP`, `KERNEL_ERROR`, `KernelError` + 8 subclasses |
 | resource-table | `ResourceTable` — handle-based `res_N` resource allocation |
 | byte-stream | `BYTE_STREAM`, `isByteStream`, `asByteStream`, `createPipe`, `pipe`, `devNull`, `compose` |
 | clock / rng | `Clock` (fixed for testing), `RNG` (seeded xorshift128+) |
@@ -49,6 +49,11 @@ const tenant = kernel.createTenant({
 // Use kernel subsystems
 const handle = kernel.resources.allocate('stream', myStream, tenant.id)
 kernel.tracer.emit({ type: 'custom', tenant: tenant.id })
+
+// Tenant-scoped resource access: get/getTyped/drop are bound to tenant.id and
+// throw ResourceOwnershipError if the handle belongs to a different tenant.
+const myResources = kernel.resourcesFor(tenant.id)
+myResources.get(handle)
 
 // Clean up
 kernel.destroyTenant(tenant.id)

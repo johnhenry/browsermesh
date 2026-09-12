@@ -22,6 +22,11 @@
  * const handle = kernel.resources.allocate('stream', myStream, tenant.id);
  * kernel.tracer.emit({ type: 'custom', tenant: tenant.id });
  *
+ * // Tenant-scoped resource access: get/getTyped/drop are bound to tenant.id and
+ * // throw ResourceOwnershipError if the handle belongs to a different tenant.
+ * const myResources = kernel.resourcesFor(tenant.id);
+ * myResources.get(handle);
+ *
  * // Clean up
  * kernel.destroyTenant(tenant.id);
  * kernel.close();
@@ -35,7 +40,7 @@ export { KERNEL_DEFAULTS, KERNEL_CAP, KERNEL_ERROR } from './constants.mjs';
 export {
   KernelError, HandleNotFoundError, HandleTypeMismatchError,
   TableFullError, StreamClosedError, CapabilityDeniedError,
-  AlreadyRegisteredError, NotFoundError,
+  AlreadyRegisteredError, NotFoundError, ResourceOwnershipError,
 } from './errors.mjs';
 
 // Resource management

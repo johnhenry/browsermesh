@@ -9,7 +9,12 @@
  */
 
 import { KERNEL_DEFAULTS } from './constants.mjs';
-import { HandleNotFoundError, HandleTypeMismatchError, TableFullError } from './errors.mjs';
+import {
+  HandleNotFoundError,
+  HandleTypeMismatchError,
+  TableFullError,
+  ResourceOwnershipError,
+} from './errors.mjs';
 
 /**
  * A bounded, handle-keyed resource table with ownership tracking.
@@ -50,12 +55,19 @@ export class ResourceTable {
    * Get a resource entry by handle.
    *
    * @param {string} handle - The resource handle.
+   * @param {string} [expectedOwner] - If supplied, the handle's stored owner must match this
+   *   value or a {@link ResourceOwnershipError} is thrown. Omit for ambient/trusted access
+   *   (e.g. kernel-internal bookkeeping) where no caller identity is being asserted.
    * @returns {{ type: string, value: *, owner: string }} The resource entry.
    * @throws {HandleNotFoundError} If the handle does not exist.
+   * @throws {ResourceOwnershipError} If `expectedOwner` is supplied and does not match.
    */
-  get(handle) {
+  get(handle, expectedOwner) {
     const entry = this.#entries.get(handle);
     if (!entry) throw new HandleNotFoundError(handle);
+    if (expectedOwner !== undefined && entry.owner !== expectedOwner) {
+      throw new ResourceOwnershipError(handle, expectedOwner, entry.owner);
+    }
     return { type: entry.type, value: entry.value, owner: entry.owner };
   }
 
@@ -64,12 +76,15 @@ export class ResourceTable {
    *
    * @param {string} handle - The resource handle.
    * @param {string} type - The expected resource type.
+   * @param {string} [expectedOwner] - If supplied, the handle's stored owner must match this
+   *   value or a {@link ResourceOwnershipError} is thrown.
    * @returns {*} The resource value.
    * @throws {HandleNotFoundError} If the handle does not exist.
+   * @throws {ResourceOwnershipError} If `expectedOwner` is supplied and does not match.
    * @throws {HandleTypeMismatchError} If the resource type does not match.
    */
-  getTyped(handle, type) {
-    const entry = this.get(handle);
+  getTyped(handle, type, expectedOwner) {
+    const entry = this.get(handle, expectedOwner);
     if (entry.type !== type) {
       throw new HandleTypeMismatchError(handle, type, entry.type);
     }
@@ -93,12 +108,18 @@ export class ResourceTable {
    * Drop (remove) a resource from the table.
    *
    * @param {string} handle - The resource handle to drop.
+   * @param {string} [expectedOwner] - If supplied, the handle's stored owner must match this
+   *   value or a {@link ResourceOwnershipError} is thrown (and the entry is left in place).
    * @returns {*} The resource value that was removed.
    * @throws {HandleNotFoundError} If the handle does not exist.
+   * @throws {ResourceOwnershipError} If `expectedOwner` is supplied and does not match.
    */
-  drop(handle) {
+  drop(handle, expectedOwner) {
     const entry = this.#entries.get(handle);
     if (!entry) throw new HandleNotFoundError(handle);
+    if (expectedOwner !== undefined && entry.owner !== expectedOwner) {
+      throw new ResourceOwnershipError(handle, expectedOwner, entry.owner);
+    }
     this.#entries.delete(handle);
     return entry.value;
   }

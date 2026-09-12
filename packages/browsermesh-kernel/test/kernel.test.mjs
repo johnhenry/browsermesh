@@ -112,4 +112,61 @@ describe('Kernel', () => {
     wall = 1500;
     assert.equal(kernel.uptime, 500);
   });
+
+  describe('resourcesFor (tenant-scoped resource access)', () => {
+    it('lets a tenant get/drop its own resource', () => {
+      const kernel = new Kernel();
+      const tenant = kernel.createTenant({ capabilities: [] });
+      const handle = kernel.resources.allocate('stream', 'mine', tenant.id);
+
+      const mine = kernel.resourcesFor(tenant.id);
+      assert.deepEqual(mine.get(handle), { type: 'stream', value: 'mine', owner: tenant.id });
+      assert.equal(mine.getTyped(handle, 'stream'), 'mine');
+      assert.equal(mine.drop(handle), 'mine');
+      assert.equal(kernel.resources.has(handle), false);
+
+      kernel.close();
+    });
+
+    it('throws ResourceOwnershipError, not undefined/success, when tenant view is used with wrong owner', () => {
+      const kernel = new Kernel();
+      const tenantA = kernel.createTenant({ capabilities: [] });
+      const tenantB = kernel.createTenant({ capabilities: [] });
+      const handle = kernel.resources.allocate('stream', 'a-data', tenantA.id);
+
+      const asB = kernel.resourcesFor(tenantB.id);
+      assert.throws(() => asB.get(handle), { name: 'ResourceOwnershipError' });
+      assert.throws(() => asB.getTyped(handle, 'stream'), { name: 'ResourceOwnershipError' });
+      assert.throws(() => asB.drop(handle), { name: 'ResourceOwnershipError' });
+
+      // Resource must still exist and be untouched — drop() must not have succeeded.
+      assert.equal(kernel.resources.has(handle), true);
+      assert.equal(kernel.resources.get(handle).value, 'a-data');
+
+      kernel.close();
+    });
+
+    it('end-to-end: tenant-scoped view cannot reach another tenant resource by guessing the handle', () => {
+      const kernel = new Kernel();
+      const tenantA = kernel.createTenant({ capabilities: [] });
+      const tenantB = kernel.createTenant({ capabilities: [] });
+
+      // tenant A allocates a resource via the ambient table (as kernel-internal code would
+      // on tenant A's behalf).
+      const secretHandle = kernel.resources.allocate('socket', { secret: 42 }, tenantA.id);
+
+      // tenant B only ever touches resources through its own tenant-scoped view.
+      const asTenantB = kernel.resourcesFor(tenantB.id);
+
+      // Guessing/holding the handle string alone is not enough — ownership is enforced.
+      assert.throws(() => asTenantB.get(secretHandle), { name: 'ResourceOwnershipError' });
+      assert.throws(() => asTenantB.drop(secretHandle), { name: 'ResourceOwnershipError' });
+
+      // tenant A's own scoped view still works fine.
+      const asTenantA = kernel.resourcesFor(tenantA.id);
+      assert.deepEqual(asTenantA.get(secretHandle).value, { secret: 42 });
+
+      kernel.close();
+    });
+  });
 });
