@@ -65,6 +65,8 @@ import {
   MeshPeerManager,
   TrustGraph,
   MeshACL,
+  CapabilityValidator,
+  CapabilityToken,
 } from '@johnhenry/browsermesh-core'
 import {
   DiscoveryManager,
@@ -104,6 +106,10 @@ import { MeshRelayHost } from './mesh-relay-host.mjs'
  * @param {import('@johnhenry/browsermesh-core').MeshPeerManager} [options.peerManager]
  * @param {import('@johnhenry/browsermesh-core').TrustGraph} [options.trustGraph]
  * @param {import('@johnhenry/browsermesh-core').MeshACL} [options.acl]
+ * @param {import('@johnhenry/browsermesh-core').CapabilityValidator} [options.capabilityValidator]
+ *   Backs `PeerRegistry.grantCapabilities()`/`.revokeCapabilities()`'s real
+ *   token issuance/revocation (Phase 5). Defaults to a fresh real
+ *   `CapabilityValidator` from `@johnhenry/browsermesh-core`.
  * @param {import('@johnhenry/browsermesh-discovery').DiscoveryStrategy[]} [options.discoveryStrategies]
  *   Defaults to `[new BroadcastChannelStrategy(...)]`; throws if omitted
  *   and `BroadcastChannel` is not available (e.g. plain Node) -- pass e.g.
@@ -185,6 +191,7 @@ export async function createMeshNode(options = {}) {
     peerManager,
     trustGraph,
     acl,
+    capabilityValidator,
     discoveryStrategies,
     discoveryChannelName = 'mesh-discovery',
     announceInterval,
@@ -218,12 +225,18 @@ export async function createMeshNode(options = {}) {
   const wallet = new IdentityWallet({ identityManager, onLog })
   const { podId } = await wallet.createIdentity(label)
 
-  // -- Registry (peers + trust + ACL) ------------------------------------
+  // -- Registry (peers + trust + ACL + capability tokens) -----------------
+  // capabilityValidator/tokenFactory back Phase 5's real granting/revocation
+  // path (see peer-registry.mjs's grantCapabilities()/revokeCapabilities()/
+  // checkAccess()) with the genuine, tested `-core` classes rather than
+  // PeerRegistry's in-package duck-typed defaults.
   const registry = new PeerRegistry({
     localPodId: podId,
     peerManager: peerManager || new MeshPeerManager({ onLog }),
     trustGraph: trustGraph || new TrustGraph(),
     acl: acl || new MeshACL({ owner: podId, onLog }),
+    capabilityValidator: capabilityValidator || new CapabilityValidator(),
+    tokenFactory: (tokenOpts) => new CapabilityToken(tokenOpts),
     onLog,
   })
 

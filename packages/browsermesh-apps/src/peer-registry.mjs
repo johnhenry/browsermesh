@@ -1,4 +1,5 @@
 import { silentCatch } from './silent-catch.mjs'
+import { matchScope } from '@johnhenry/browsermesh-primitives'
 /**
  * clawser-peer-registry.js -- Unified peer registry with permission management.
  *
@@ -12,6 +13,51 @@ import { silentCatch } from './silent-catch.mjs'
  * Run tests:
  *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-peer-registry.test.mjs
  */
+
+// ---------------------------------------------------------------------------
+// Capability tokens (Phase 5 -- real granting/revocation, layered under the
+// existing ACL template mechanism, not replacing it)
+// ---------------------------------------------------------------------------
+
+/**
+ * Duck-typed default token, used only when no `tokenFactory` is injected.
+ * Shaped to satisfy both this module's own default `CapabilityValidator`
+ * fallback below AND the real `@johnhenry/browsermesh-core` `CapabilityValidator`
+ * (whose `register()`/`revokeTree()`/`validate()` only ever touch `.id`,
+ * `.revoked`, `.parentId`, `.resource`, `.permissions`, `.constraints`,
+ * `.isExpired()`, `.hasPermission()`, `.revoke()` -- nothing constructor-specific)
+ * -- so real callers (see `mesh-bootstrap.mjs`) can inject the real
+ * `CapabilityToken` class as `tokenFactory` for the genuine, tested class,
+ * while this file itself stays decoupled from `-core` at the module level,
+ * matching the existing peerManager/trustGraph/acl DI pattern in this class.
+ */
+let _localCapTokenSeq = 0
+class _DefaultCapabilityToken {
+  constructor({ issuer, holder, resource, permissions, constraints = {}, parentId = null, createdAt, expiresAt = null }) {
+    this.id = `peercap_${Date.now()}_${++_localCapTokenSeq}`
+    this.issuer = issuer
+    this.holder = holder
+    this.resource = resource
+    this.permissions = [...permissions]
+    this.constraints = { ...constraints }
+    this.parentId = parentId
+    this.createdAt = createdAt || Date.now()
+    this.expiresAt = expiresAt
+    this.revoked = false
+  }
+
+  isExpired(now = Date.now()) {
+    return this.expiresAt !== null && this.expiresAt !== undefined && now >= this.expiresAt
+  }
+
+  hasPermission(perm) {
+    return this.permissions.includes(perm)
+  }
+
+  revoke() {
+    this.revoked = true
+  }
+}
 
 // ---------------------------------------------------------------------------
 // PeerRegistry
@@ -42,14 +88,47 @@ export class PeerRegistry {
   #observedTrust = new Map()
 
   /**
+   * Real capability tokens issued through `grantCapabilities()`, tracked so
+   * `revokeCapabilities()` can find and revoke the matching token(s) later,
+   * and so `checkAccess()` can consult live revocation status. Keyed by
+   * peer pubKey -> (exact granted scope string -> token). Only scopes
+   * granted via `grantCapabilities()` get an entry here; peers configured
+   * purely via `updatePermissions()`/`addEntry()`/default templates have no
+   * tracked tokens and are therefore governed by the ACL alone, unaffected
+   * by this mechanism (see checkAccess()).
+   *
+   * @type {Map<string, Map<string, object>>}
+   */
+  #capabilityTokens = new Map()
+
+  /** Validates/revokes tokens -- real `CapabilityValidator` when injected, a
+   * duck-typed equivalent otherwise. @type {{ register: Function, revokeTree: Function }} */
+  #capabilityValidator
+
+  /** Constructs a token object for grantCapabilities() -- real `CapabilityToken`
+   * when injected, `_DefaultCapabilityToken` otherwise. @type {Function} */
+  #tokenFactory
+
+  /**
    * @param {object} opts
    * @param {string} opts.localPodId - Owner identity used for ACL and trust edges
    * @param {import('@johnhenry/browsermesh-core').MeshPeerManager} [opts.peerManager]
    * @param {import('@johnhenry/browsermesh-core').TrustGraph} [opts.trustGraph]
    * @param {import('@johnhenry/browsermesh-core').MeshACL} [opts.acl]
+   * @param {import('@johnhenry/browsermesh-core').CapabilityValidator} [opts.capabilityValidator]
+   *   Backs the real granting/revocation path for `grantCapabilities()`/
+   *   `revokeCapabilities()` (Phase 5). Defaults to a lightweight in-package
+   *   equivalent when omitted, so this class stays usable without `-core`
+   *   installed -- inject the real class (see `mesh-bootstrap.mjs`) for the
+   *   genuine, tested implementation.
+   * @param {Function} [opts.tokenFactory] - `(opts) => token`, used to construct
+   *   the token registered with `capabilityValidator` on each grant. Defaults to
+   *   a small duck-typed equivalent of `@johnhenry/browsermesh-core`'s
+   *   `CapabilityToken`; pass `(opts) => new CapabilityToken(opts)` to use the
+   *   real class.
    * @param {Function} [opts.onLog] - Logging callback (level, msg)
    */
-  constructor({ localPodId, peerManager, trustGraph, acl, onLog }) {
+  constructor({ localPodId, peerManager, trustGraph, acl, capabilityValidator, tokenFactory, onLog }) {
     if (!localPodId || typeof localPodId !== 'string') {
       throw new Error('localPodId is required and must be a non-empty string')
     }
@@ -63,6 +142,8 @@ export class PeerRegistry {
     this.#peerManager = peerManager ?? this.#createDefaultPeerManager()
     this.#trustGraph = trustGraph ?? this.#createDefaultTrustGraph()
     this.#acl = acl ?? this.#createDefaultACL()
+    this.#capabilityValidator = capabilityValidator ?? this.#createDefaultCapabilityValidator()
+    this.#tokenFactory = tokenFactory ?? ((tokenOpts) => new _DefaultCapabilityToken(tokenOpts))
   }
 
   // ── Peer CRUD ───────────────────────────────────────────────────────
@@ -103,6 +184,17 @@ export class PeerRegistry {
 
     // Remove ACL roster entry
     this.#acl.revokeAll(pubKey)
+
+    // Revoke any live capability tokens issued to this peer and stop
+    // tracking them -- a removed peer must not retain live tokens that a
+    // later re-add under the same pubKey could otherwise inherit.
+    const peerTokens = this.#capabilityTokens.get(pubKey)
+    if (peerTokens) {
+      for (const token of peerTokens.values()) {
+        if (!token.revoked) this.#capabilityValidator.revokeTree(token.id)
+      }
+      this.#capabilityTokens.delete(pubKey)
+    }
 
     if (existed) {
       this.#onLog(2, `PeerRegistry: removed ${pubKey}`)
@@ -148,14 +240,22 @@ export class PeerRegistry {
   }
 
   /**
-   * Grant additional capability scopes to a peer via a dynamic ACL template.
-   * Creates a per-peer template named `_peer_{pubKey}` that merges with
-   * any existing scopes.
+   * Grant additional capability scopes to a peer via a dynamic ACL template,
+   * AND issue a real capability token per scope through the injected (or
+   * default) `CapabilityValidator` (Phase 5). The ACL template remains the
+   * mechanism `checkAccess()` primarily checks -- fully backward compatible
+   * with any caller that only cares about the pre-Phase-5 ACL behavior --
+   * while the token gives `revokeCapabilities()` a live revocation target
+   * that `checkAccess()` additionally consults, independent of whether/when
+   * the ACL template itself gets re-read.
    *
    * @param {string} pubKey
    * @param {string[]} scopes - Scopes to add (e.g. ['files:read', 'chat:write'])
+   * @param {object} [opts]
+   * @param {number|null} [opts.expiresAt] - Optional expiry (ms epoch) applied
+   *   to newly-issued tokens for this call. Omit for no expiry.
    */
-  grantCapabilities(pubKey, scopes) {
+  grantCapabilities(pubKey, scopes, opts = {}) {
     const templateName = `_peer_${pubKey}`
     const existing = this.#acl.getTemplate(templateName)
     const merged = existing
@@ -171,12 +271,44 @@ export class PeerRegistry {
       this.#acl.addEntry(pubKey, templateName)
     }
 
+    // Issue a real capability token per scope so revocation has a live
+    // target beyond the ACL template. Skip scopes that already have a live
+    // (non-revoked, non-expired) token -- re-granting an already-granted
+    // scope is a no-op at the token layer, matching the ACL's own
+    // dedup/additive behavior above. A scope whose prior token was revoked
+    // gets a fresh token (tokens are one-way revocable, never un-revoked).
+    let peerTokens = this.#capabilityTokens.get(pubKey)
+    if (!peerTokens) {
+      peerTokens = new Map()
+      this.#capabilityTokens.set(pubKey, peerTokens)
+    }
+    for (const scope of scopes) {
+      const current = peerTokens.get(scope)
+      const currentLive = current && !current.revoked &&
+        !(typeof current.isExpired === 'function' && current.isExpired())
+      if (currentLive) continue
+
+      const token = this.#tokenFactory({
+        issuer: this.#localPodId,
+        holder: pubKey,
+        resource: scope,
+        permissions: ['use'],
+        expiresAt: opts.expiresAt ?? null,
+      })
+      this.#capabilityValidator.register(token)
+      peerTokens.set(scope, token)
+    }
+
     this.#onLog(3, `PeerRegistry: granted ${scopes.join(', ')} to ${pubKey}`)
   }
 
   /**
-   * Revoke specific capability scopes from a peer.
-   * If no scopes remain, removes the per-peer template and roster entry.
+   * Revoke specific capability scopes from a peer: removes them from the ACL
+   * template (if no scopes remain, removes the per-peer template and roster
+   * entry -- unchanged from pre-Phase-5 behavior) AND revokes the matching
+   * capability token(s) issued by `grantCapabilities()` through the
+   * `CapabilityValidator`, so `checkAccess()`'s live check denies immediately
+   * regardless of ACL template state.
    *
    * @param {string} pubKey
    * @param {string[]} scopes - Scopes to remove
@@ -184,18 +316,32 @@ export class PeerRegistry {
   revokeCapabilities(pubKey, scopes) {
     const templateName = `_peer_${pubKey}`
     const existing = this.#acl.getTemplate(templateName)
-    if (!existing) return
 
-    const remaining = existing.scopes.filter(s => !scopes.includes(s))
+    if (existing) {
+      const remaining = existing.scopes.filter(s => !scopes.includes(s))
 
-    if (remaining.length === 0) {
-      this.#acl.removeEntry(pubKey)
-      this.#acl.removeTemplate(templateName)
-    } else {
-      this.#acl.addTemplate(templateName, remaining, `Auto-generated for ${pubKey}`)
-      // Re-sync the roster entry
-      this.#acl.removeEntry(pubKey)
-      this.#acl.addEntry(pubKey, templateName)
+      if (remaining.length === 0) {
+        this.#acl.removeEntry(pubKey)
+        this.#acl.removeTemplate(templateName)
+      } else {
+        this.#acl.addTemplate(templateName, remaining, `Auto-generated for ${pubKey}`)
+        // Re-sync the roster entry
+        this.#acl.removeEntry(pubKey)
+        this.#acl.addEntry(pubKey, templateName)
+      }
+    }
+
+    // Revoke the matching token(s), if any were issued via grantCapabilities().
+    // Scoped precisely: only the exact scopes named here are touched, so a
+    // different, still-granted scope for the same peer is unaffected.
+    const peerTokens = this.#capabilityTokens.get(pubKey)
+    if (peerTokens) {
+      for (const scope of scopes) {
+        const token = peerTokens.get(scope)
+        if (token && !token.revoked) {
+          this.#capabilityValidator.revokeTree(token.id)
+        }
+      }
     }
 
     this.#onLog(3, `PeerRegistry: revoked ${scopes.join(', ')} from ${pubKey}`)
@@ -221,13 +367,39 @@ export class PeerRegistry {
   /**
    * Check if a peer is allowed to perform an action on a resource.
    *
+   * First checks the ACL template (unchanged, pre-Phase-5 behavior -- owner
+   * bypass, roster/template scope matching). If the ACL allows it, ALSO
+   * consults live revocation status for any capability token issued via
+   * `grantCapabilities()` whose scope covers this resource/action (Phase 5):
+   * a token that was granted then revoked denies access on this check, even
+   * if the ACL template itself hasn't been re-read or doesn't (e.g. a
+   * broader wildcard scope that revokeCapabilities()'s exact-match ACL
+   * removal didn't touch). Peers/scopes never routed through
+   * `grantCapabilities()` (e.g. `updatePermissions()`/`addEntry()` callers,
+   * default templates) have no tracked token and are therefore governed by
+   * the ACL alone, exactly as before.
+   *
    * @param {string} pubKey
    * @param {string} resource
    * @param {string} action
    * @returns {{ allowed: boolean, reason?: string }}
    */
   checkAccess(pubKey, resource, action) {
-    return this.#acl.check(pubKey, resource, action)
+    const aclResult = this.#acl.check(pubKey, resource, action)
+    if (!aclResult.allowed) return aclResult
+
+    const scope = `${resource}:${action}`
+    const peerTokens = this.#capabilityTokens.get(pubKey)
+    if (peerTokens) {
+      for (const [grantedScope, token] of peerTokens) {
+        if (!matchScope(grantedScope, scope)) continue
+        if (token.revoked || (typeof token.isExpired === 'function' && token.isExpired())) {
+          return { allowed: false, reason: 'capability_revoked' }
+        }
+      }
+    }
+
+    return aclResult
   }
 
   // ── Trust management ────────────────────────────────────────────────
@@ -591,5 +763,57 @@ export class PeerRegistry {
         }
       },
     }
+  }
+
+  /**
+   * Create a minimal duck-typed CapabilityValidator when none is injected.
+   * Mirrors the subset of `@johnhenry/browsermesh-core`'s real
+   * `CapabilityValidator` that `grantCapabilities()`/`revokeCapabilities()`/
+   * `checkAccess()` actually use: `register()`, `revokeTree()` (revokes a
+   * token and, transitively, any tracked token whose `parentId` chains up to
+   * it -- unused by this class today since tokens here are always
+   * root/flat, but kept for parity with the real class and any future
+   * attenuation use), and `validate()` for completeness/introspection.
+   * @returns {object}
+   */
+  #createDefaultCapabilityValidator() {
+    const tokens = new Map()
+    const revokedIds = new Set()
+
+    const validator = {
+      register(token) {
+        tokens.set(token.id, token)
+        if (token.revoked) revokedIds.add(token.id)
+      },
+      revokeTree(tokenId) {
+        revokedIds.add(tokenId)
+        const token = tokens.get(tokenId)
+        if (token) token.revoke()
+        for (const [id, t] of tokens) {
+          if (t.parentId === tokenId && !revokedIds.has(id)) {
+            validator.revokeTree(id)
+          }
+        }
+      },
+      validate(tokenId, resource, permission) {
+        const token = tokens.get(tokenId)
+        if (!token) return { allowed: false, reason: 'Token not found' }
+        if (revokedIds.has(tokenId)) return { allowed: false, reason: 'Token revoked' }
+        if (token.isExpired()) return { allowed: false, reason: 'Token expired' }
+        if (!token.hasPermission(permission)) {
+          return { allowed: false, reason: `Permission "${permission}" not granted` }
+        }
+        const pattern = token.resource
+        const matches = pattern === resource || pattern === '*' ||
+          (pattern.endsWith('*') && resource.startsWith(pattern.slice(0, -1)))
+        if (!matches) {
+          return { allowed: false, reason: `Resource "${resource}" not covered by "${pattern}"` }
+        }
+        return { allowed: true }
+      },
+      get size() { return tokens.size },
+      listTokens() { return [...tokens.values()] },
+    }
+    return validator
   }
 }
