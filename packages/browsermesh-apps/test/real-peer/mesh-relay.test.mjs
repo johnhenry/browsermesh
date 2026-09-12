@@ -256,11 +256,26 @@ describeIfReal('mesh-relay: MeshRelayHost + MeshRelayBackend over real WebRTC, r
       await nodeB.discover()
       await nodeC.discover()
 
-      await nodeA.connectToPeer(nodeB.podId, { webrtc: nodeB.podId }, { answerTimeoutMs: 10_000, openTimeoutMs: 10_000 })
-      await waitFor(() => nodeB.meshManager.getConnection(nodeA.podId)?.isOpen, 10_000, "bob's side of the DataChannel to open")
+      // This test establishes TWO real WebRTC connections from the same
+      // local node (Alice<->Bob, Alice<->Carol), sequentially -- more
+      // libdatachannel/DTLS handshake work than the single-connection
+      // real-peer suites elsewhere in this package. Generous timeouts here
+      // (vs. those suites' 10_000ms) give CI's documented under-load DTLS
+      // stalls (see .github/workflows/ci.yml's comment on this suite) real
+      // room, rather than papering over a slow-but-correct second handshake.
+      const WEBRTC_TIMEOUT_MS = 30_000
 
-      await nodeA.connectToPeer(nodeC.podId, { webrtc: nodeC.podId }, { answerTimeoutMs: 10_000, openTimeoutMs: 10_000 })
-      await waitFor(() => nodeC.meshManager.getConnection(nodeA.podId)?.isOpen, 10_000, "carol's side of the DataChannel to open")
+      await nodeA.connectToPeer(
+        nodeB.podId, { webrtc: nodeB.podId },
+        { answerTimeoutMs: WEBRTC_TIMEOUT_MS, openTimeoutMs: WEBRTC_TIMEOUT_MS },
+      )
+      await waitFor(() => nodeB.meshManager.getConnection(nodeA.podId)?.isOpen, WEBRTC_TIMEOUT_MS, "bob's side of the DataChannel to open")
+
+      await nodeA.connectToPeer(
+        nodeC.podId, { webrtc: nodeC.podId },
+        { answerTimeoutMs: WEBRTC_TIMEOUT_MS, openTimeoutMs: WEBRTC_TIMEOUT_MS },
+      )
+      await waitFor(() => nodeC.meshManager.getConnection(nodeA.podId)?.isOpen, WEBRTC_TIMEOUT_MS, "carol's side of the DataChannel to open")
 
       // Only Bob is authorized -- Carol gets no grant at all.
       nodeA.registry.grantCapabilities(nodeB.podId, ['mesh-relay:local-tcp:connect'])
