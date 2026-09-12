@@ -45,6 +45,33 @@ export class HandleNotFoundError extends KernelError {
 }
 
 /**
+ * Thrown when a resource handle exists but is owned by a different tenant than
+ * the caller-supplied `expectedOwner`.
+ *
+ * @property {string} handle - The handle that was accessed.
+ * @property {string} expectedOwner - The owner the caller expected.
+ * @property {string} actualOwner - The owner actually recorded for the handle.
+ * @property {string} code - Always `'EOWNERSHIP'`.
+ */
+export class ResourceOwnershipError extends KernelError {
+  /**
+   * @param {string} handle - The handle accessed.
+   * @param {string} expectedOwner - The owner the caller expected.
+   * @param {string} actualOwner - The owner actually recorded for the handle.
+   */
+  constructor(handle, expectedOwner, actualOwner) {
+    super(
+      `Resource ownership mismatch: ${handle} is owned by ${actualOwner}, not ${expectedOwner}`,
+      KERNEL_ERROR.EOWNERSHIP
+    );
+    this.name = 'ResourceOwnershipError';
+    this.handle = handle;
+    this.expectedOwner = expectedOwner;
+    this.actualOwner = actualOwner;
+  }
+}
+
+/**
  * Thrown when a resource handle exists but its type does not match the expected type.
  *
  * @property {string} handle - The handle that was accessed.

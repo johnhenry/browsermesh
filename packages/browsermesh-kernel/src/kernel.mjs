@@ -56,8 +56,38 @@ export class Kernel {
     this.#startTime = this.#clock.nowWall();
   }
 
-  /** The kernel's resource table. */
+  /**
+   * The kernel's resource table.
+   *
+   * This is ambient, trusted access: `get`/`getTyped`/`drop` called through this getter do
+   * NOT check ownership, so any code holding the kernel reference can reach any tenant's
+   * resources by handle. It exists for kernel-internal bookkeeping (e.g. `destroyTenant`)
+   * and trusted callers. Tenant-facing code should use {@link Kernel#resourcesFor} instead,
+   * which scopes access to a single tenant and enforces ownership on every call.
+   */
   get resources() { return this.#resources; }
+
+  /**
+   * Get a tenant-scoped view of the resource table, bound to `tenantId`.
+   *
+   * The returned object exposes `get`/`getTyped`/`drop`, each automatically passing
+   * `tenantId` as the `expectedOwner` to the underlying {@link ResourceTable} methods —
+   * so a tenant-scoped view can never read or destroy another tenant's resource, even if
+   * it guesses the handle. `allocate`/`transfer`/listing methods are intentionally not
+   * exposed here: allocation records the owner explicitly at the call site, and transfer/
+   * listing are kernel-internal operations, not something arbitrary tenant code should do
+   * to itself.
+   *
+   * @param {string} tenantId - Tenant identifier to scope access to.
+   * @returns {{ get: Function, getTyped: Function, drop: Function }} Tenant-scoped resource view.
+   */
+  resourcesFor(tenantId) {
+    return {
+      get: (handle) => this.#resources.get(handle, tenantId),
+      getTyped: (handle, type) => this.#resources.getTyped(handle, type, tenantId),
+      drop: (handle) => this.#resources.drop(handle, tenantId),
+    };
+  }
 
   /** The kernel clock. */
   get clock() { return this.#clock; }

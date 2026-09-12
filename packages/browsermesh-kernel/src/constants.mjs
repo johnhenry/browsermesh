@@ -72,6 +72,7 @@ export const KERNEL_CAP = Object.freeze({
  * @property {string} EALREADY - Name or resource already registered.
  * @property {string} ENOTFOUND - Named resource not found.
  * @property {string} ESIGNAL - Operation interrupted by signal.
+ * @property {string} EOWNERSHIP - Resource handle exists but is owned by a different tenant.
  */
 export const KERNEL_ERROR = Object.freeze({
   ENOHANDLE: 'ENOHANDLE',
@@ -82,4 +83,5 @@ export const KERNEL_ERROR = Object.freeze({
   EALREADY: 'EALREADY',
   ENOTFOUND: 'ENOTFOUND',
   ESIGNAL: 'ESIGNAL',
+  EOWNERSHIP: 'EOWNERSHIP',
 });

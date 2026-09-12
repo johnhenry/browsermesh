@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   KernelError, HandleNotFoundError, HandleTypeMismatchError,
   TableFullError, StreamClosedError, CapabilityDeniedError,
-  AlreadyRegisteredError, NotFoundError,
+  AlreadyRegisteredError, NotFoundError, ResourceOwnershipError,
 } from '../src/errors.mjs';
 
 describe('KernelError', () => {
@@ -86,5 +86,18 @@ describe('NotFoundError', () => {
     assert.equal(err.name, 'NotFoundError');
     assert.equal(err.code, 'ENOTFOUND');
     assert.equal(err.identifier, 'missing');
+  });
+});
+
+describe('ResourceOwnershipError', () => {
+  it('has correct properties', () => {
+    const err = new ResourceOwnershipError('res_1', 'tenant_1', 'tenant_2');
+    assert.ok(err instanceof KernelError);
+    assert.equal(err.name, 'ResourceOwnershipError');
+    assert.equal(err.code, 'EOWNERSHIP');
+    assert.equal(err.handle, 'res_1');
+    assert.equal(err.expectedOwner, 'tenant_1');
+    assert.equal(err.actualOwner, 'tenant_2');
+    assert.ok(err.message.includes('res_1'));
   });
 });

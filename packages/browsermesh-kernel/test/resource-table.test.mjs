@@ -104,4 +104,66 @@ describe('ResourceTable', () => {
     table.allocate('stream', 'b', 'tenant_1');
     assert.throws(() => table.allocate('stream', 'c', 'tenant_1'), { name: 'TableFullError' });
   });
+
+  describe('ownership enforcement (expectedOwner)', () => {
+    it('get with no expectedOwner is ambient (no ownership check)', () => {
+      const table = new ResourceTable();
+      const h = table.allocate('stream', 'val', 'tenant_1');
+      assert.equal(table.get(h).owner, 'tenant_1');
+    });
+
+    it('get with matching expectedOwner succeeds', () => {
+      const table = new ResourceTable();
+      const h = table.allocate('stream', { fd: 1 }, 'tenant_1');
+      const entry = table.get(h, 'tenant_1');
+      assert.deepEqual(entry.value, { fd: 1 });
+    });
+
+    it('get with mismatched expectedOwner throws ResourceOwnershipError', () => {
+      const table = new ResourceTable();
+      const h = table.allocate('stream', 'val', 'tenant_1');
+      assert.throws(() => table.get(h, 'tenant_2'), (err) => {
+        assert.equal(err.name, 'ResourceOwnershipError');
+        assert.equal(err.code, 'EOWNERSHIP');
+        assert.equal(err.handle, h);
+        assert.equal(err.expectedOwner, 'tenant_2');
+        assert.equal(err.actualOwner, 'tenant_1');
+        return true;
+      });
+    });
+
+    it('getTyped with matching expectedOwner succeeds', () => {
+      const table = new ResourceTable();
+      const h = table.allocate('stream', 'myStream', 'tenant_1');
+      assert.equal(table.getTyped(h, 'stream', 'tenant_1'), 'myStream');
+    });
+
+    it('getTyped with mismatched expectedOwner throws ResourceOwnershipError, not silently undefined', () => {
+      const table = new ResourceTable();
+      const h = table.allocate('stream', 'myStream', 'tenant_1');
+      assert.throws(() => table.getTyped(h, 'stream', 'tenant_2'), { name: 'ResourceOwnershipError' });
+    });
+
+    it('getTyped checks ownership before type, still throws on wrong owner even with wrong type', () => {
+      const table = new ResourceTable();
+      const h = table.allocate('stream', 'val', 'tenant_1');
+      assert.throws(() => table.getTyped(h, 'port', 'tenant_2'), { name: 'ResourceOwnershipError' });
+    });
+
+    it('drop with matching expectedOwner succeeds and removes entry', () => {
+      const table = new ResourceTable();
+      const h = table.allocate('stream', 'val', 'tenant_1');
+      const val = table.drop(h, 'tenant_1');
+      assert.equal(val, 'val');
+      assert.equal(table.has(h), false);
+    });
+
+    it('drop with mismatched expectedOwner throws ResourceOwnershipError and leaves entry intact', () => {
+      const table = new ResourceTable();
+      const h = table.allocate('stream', 'val', 'tenant_1');
+      assert.throws(() => table.drop(h, 'tenant_2'), { name: 'ResourceOwnershipError' });
+      assert.equal(table.has(h), true);
+      assert.equal(table.get(h).value, 'val');
+    });
+  });
 });
