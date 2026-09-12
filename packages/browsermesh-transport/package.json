@@ -22,7 +22,7 @@
     "@johnhenry/browsermesh-primitives": ">=0.0.1 <1.0.0"
   },
   "devDependencies": {
-    "node-datachannel": "^0.33.2"
+    "node-datachannel": "^0.33.4"
   },
   "scripts": {
     "test": "node --import ./test/_setup-globals.mjs --test test/*.test.mjs",
