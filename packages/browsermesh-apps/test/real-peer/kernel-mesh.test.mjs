@@ -1,7 +1,12 @@
 // Two real PeerNodes, one real Kernel tenant, no server: proves Phase 4 --
 // browsermesh-kernel's MESH capability wired to a real, capability-scoped
 // send/receive view of a connected PeerNode, gated by PeerRegistry's real
-// checkAccess() -- against a real RTCPeerConnection, not a mock.
+// checkAccess() -- against a real RTCPeerConnection, not a mock. Also
+// proves Phase 5 -- capability revocation wired to the same real granting
+// path (a capability granted via `PeerRegistry.grantCapabilities()`, backed
+// by a real `CapabilityValidator`/`CapabilityToken` from `browsermesh-core`,
+// is genuinely revoked mid-session by `revokeCapabilities()`, denying the
+// tenant's very next send attempt).
 //
 // Mirrors mesh-bootstrap.test.mjs's real-peer setup exactly (same optional
 // `node-datachannel` devDependency guard, same hermetic `iceServers: []`
@@ -13,7 +18,7 @@
 // onIncomingData() over a real DataChannel) PLUS a real `Kernel` instance,
 // a real tenant with `KERNEL_CAP.MESH` granted, and real bytes sent over the
 // real connection through `tenant.caps.mesh.send()` -- not a mock kernel,
-// not a mock PeerNode.
+// not a mock PeerNode. Plus (Phase 5) a real, live-revoked `CapabilityToken`.
 
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
@@ -196,6 +201,35 @@ describeIfReal('kernel mesh capability: a real Kernel tenant sends/receives over
       assert.equal(receivedByTenant[0].peerId, nodeB.podId)
       assert.equal(receivedByTenant[0].data, 'plain string from bob, via kernel onReceive')
       unsubscribe()
+
+      // == Phase 5: revoke mid-session -> the tenant's very next send is denied, live ==
+      // grantCapabilities() above issued a real CapabilityToken (via a real
+      // CapabilityValidator from browsermesh-core, wired in mesh-bootstrap.mjs)
+      // alongside the ACL scope. revokeCapabilities() must revoke that token
+      // so this next check denies immediately -- not eventually, not only
+      // after some cache expires.
+      nodeA.registry.revokeCapabilities(nodeB.podId, ['mesh:send'])
+
+      const atBobAfterRevoke = []
+      bobsConnToAlice.onMessage((data) => atBobAfterRevoke.push(data))
+      await assert.rejects(
+        () => trustedTenant.caps.mesh.send(nodeB.podId, { should: 'never arrive either' }),
+        { name: 'MeshAccessDeniedError' },
+        'the next send after revocation must be denied, not silently succeed or silently no-op',
+      )
+      await new Promise((r) => setTimeout(r, 100))
+      assert.deepEqual(atBobAfterRevoke, [], 'nothing was sent after revocation -- the deny must be real')
+
+      // Revocation must be scoped: 'mesh:receive' was never revoked, so
+      // inbound data granted under that separate scope still reaches the
+      // tenant -- proves revoking one capability doesn't blunt-revoke all
+      // of a peer's capabilities.
+      const receivedAfterRevoke = []
+      const unsubscribe2 = trustedTenant.caps.mesh.onReceive((peerId, data) => receivedAfterRevoke.push({ peerId, data }))
+      bobsConnToAlice.send('still-granted mesh:receive after mesh:send was revoked')
+      await waitFor(() => receivedAfterRevoke.length === 1, 5_000, 'mesh:receive to remain live after only mesh:send was revoked')
+      assert.equal(receivedAfterRevoke[0].data, 'still-granted mesh:receive after mesh:send was revoked')
+      unsubscribe2()
 
       kernel.close()
     } finally {

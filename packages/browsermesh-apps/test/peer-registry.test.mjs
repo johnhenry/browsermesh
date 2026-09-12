@@ -186,6 +186,98 @@ describe('PeerRegistry', () => {
     })
   })
 
+  // ── Capability token revocation (Phase 5) ─────────────────────────
+
+  describe('capability token revocation', () => {
+    it('a capability granted via grantCapabilities() is usable, then denied after revocation', () => {
+      reg.addPeer(PEER_A, 'Alice')
+      reg.grantCapabilities(PEER_A, ['mesh:send'])
+
+      const before = reg.checkAccess(PEER_A, 'mesh', 'send')
+      assert.equal(before.allowed, true)
+
+      reg.revokeCapabilities(PEER_A, ['mesh:send'])
+
+      const after = reg.checkAccess(PEER_A, 'mesh', 'send')
+      assert.equal(after.allowed, false)
+    })
+
+    it('revoking one capability does not affect a different, still-granted capability for the same peer', () => {
+      reg.addPeer(PEER_A, 'Alice')
+      reg.grantCapabilities(PEER_A, ['mesh:send', 'mesh:receive'])
+
+      reg.revokeCapabilities(PEER_A, ['mesh:send'])
+
+      const sendResult = reg.checkAccess(PEER_A, 'mesh', 'send')
+      assert.equal(sendResult.allowed, false)
+
+      const receiveResult = reg.checkAccess(PEER_A, 'mesh', 'receive')
+      assert.equal(receiveResult.allowed, true, 'revoking mesh:send must not revoke mesh:receive')
+    })
+
+    it('revocation is scoped per-peer: revoking one peer does not affect another peer granted the same scope', () => {
+      reg.addPeer(PEER_A, 'Alice')
+      reg.addPeer(PEER_B, 'Bob')
+      reg.grantCapabilities(PEER_A, ['mesh:send'])
+      reg.grantCapabilities(PEER_B, ['mesh:send'])
+
+      reg.revokeCapabilities(PEER_A, ['mesh:send'])
+
+      assert.equal(reg.checkAccess(PEER_A, 'mesh', 'send').allowed, false)
+      assert.equal(reg.checkAccess(PEER_B, 'mesh', 'send').allowed, true, 'Bob keeps his own, separately-issued token')
+    })
+
+    it('re-granting a scope after revocation issues a fresh, live token', () => {
+      reg.addPeer(PEER_A, 'Alice')
+      reg.grantCapabilities(PEER_A, ['mesh:send'])
+      reg.revokeCapabilities(PEER_A, ['mesh:send'])
+      assert.equal(reg.checkAccess(PEER_A, 'mesh', 'send').allowed, false)
+
+      reg.grantCapabilities(PEER_A, ['mesh:send'])
+      assert.equal(reg.checkAccess(PEER_A, 'mesh', 'send').allowed, true)
+    })
+
+    it('scopes granted outside grantCapabilities() (updatePermissions) are unaffected -- ACL alone governs them', () => {
+      reg.addPeer(PEER_A, 'Alice')
+      reg.updatePermissions(PEER_A, 'guest')
+      // No token was ever issued for 'chat:read' -- checkAccess must defer
+      // entirely to the ACL template, exactly as before Phase 5.
+      assert.equal(reg.checkAccess(PEER_A, 'chat', 'read').allowed, true)
+    })
+
+    it('removePeer revokes any live tokens for that peer', () => {
+      reg.addPeer(PEER_A, 'Alice')
+      reg.grantCapabilities(PEER_A, ['mesh:send'])
+      reg.removePeer(PEER_A)
+
+      // Re-add the same pubKey fresh -- it must not inherit a live token
+      // from before removal (the ACL roster entry is also gone, so this
+      // also exercises the ordinary not_in_roster path).
+      reg.addPeer(PEER_A, 'Alice')
+      assert.equal(reg.checkAccess(PEER_A, 'mesh', 'send').allowed, false)
+    })
+
+    it('accepts an injected capabilityValidator and tokenFactory (DI, matching peerManager/trustGraph/acl)', () => {
+      const registered = []
+      const revoked = []
+      const fakeValidator = {
+        register(token) { registered.push(token.id) },
+        revokeTree(id) { revoked.push(id) },
+      }
+      let seq = 0
+      const r = new PeerRegistry({
+        localPodId: LOCAL,
+        capabilityValidator: fakeValidator,
+        tokenFactory: (opts) => ({ id: `tok-${++seq}`, revoked: false, ...opts }),
+      })
+      r.addPeer(PEER_A, 'Alice')
+      r.grantCapabilities(PEER_A, ['mesh:send'])
+      assert.deepEqual(registered, ['tok-1'])
+      r.revokeCapabilities(PEER_A, ['mesh:send'])
+      assert.deepEqual(revoked, ['tok-1'])
+    })
+  })
+
   // ── Trust management ─────────────────────────────────────────────
 
   describe('trust', () => {
