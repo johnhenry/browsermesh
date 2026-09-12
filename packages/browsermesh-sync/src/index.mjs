@@ -1,5 +1,6 @@
 // browsermesh-sync — CRDT & sync
 export * from './sync.mjs';
+export * from './storage-indexeddb.mjs';
 export * from './delta-sync.mjs';
 export * from './migration.mjs';
 export * from './files.mjs';
