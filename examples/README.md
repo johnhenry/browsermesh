@@ -15,10 +15,12 @@ Run one with `npm run example:01` (etc.), or all of them with `npm run examples`
 | [`03-virtual-network-loopback.mjs`](./03-virtual-network-loopback.mjs) | `VirtualNetwork`'s listen/connect/accept/read/write moving real bidirectional byte streams, including exact binary round-trips. |
 | [`04-kernel-capability-denial.mjs`](./04-kernel-capability-denial.mjs) | Two kernel tenants with different capability grants — the same operation succeeds for one and throws `CapabilityDeniedError` for the other; the security boundary is enforced, not just documented. |
 | [`05-crdt-sync-across-two-engines.mjs`](./05-crdt-sync-across-two-engines.mjs) | Two independent `MeshSyncEngine` instances converge on identical state after exchanging CRDT sync payloads in arbitrary order — no coordinator, no app-level conflict resolution. |
+| [`06-mesh-relay.mjs`](./06-mesh-relay.mjs) | One peer (`MeshRelayHost`) shares access to its own `VirtualNetwork` with a specific, authorized mesh peer (`MeshRelayBackend`) — an ungranted attempt is refused, a granted one relays real bytes to a real local service and back, and revoking access denies the next attempt. |
 
 These cover the five foundational packages (`browsermesh-primitives`,
-`-pod`, `-netway`, `-kernel`, `-sync`). The higher-level packages built on
-top of them — `browsermesh-core`, `-transport`, `-discovery`, `-apps`,
+`-pod`, `-netway`, `-kernel`, `-sync`) plus `browsermesh-apps`'s mesh-relay
+composition (`06`). The higher-level packages built on top of them —
+`browsermesh-core`, `-transport`, `-discovery`, most of `-apps`,
 `browsermesh-embed` — are exercised end-to-end in a real browser by
 [clawser](https://github.com/erisera-code/clawser)'s Mesh and Peers panels;
 see their own package READMEs for API-level usage.

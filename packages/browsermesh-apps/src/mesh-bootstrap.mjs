@@ -46,6 +46,16 @@
  * `createMeshSync({ node })` available for callers who want to construct
  * the binding themselves (e.g. a custom storage adapter per document type).
  *
+ * **Mesh relay is opt-in via `{ enableRelayHost: true, relayHostNetwork }`**
+ * (Phase 8). When set, this function builds a `MeshRelayHost`
+ * (`mesh-relay-host.mjs`) bridging inbound, `PeerRegistry`-authorized relay
+ * connections into `relayHostNetwork` (a caller-supplied `VirtualNetwork`,
+ * e.g. one with a `GatewayBackend` reaching a real local service), attached
+ * as `node.relayHost`. This is the "share my `VirtualNetwork` access with
+ * specific peers" side; the client side is `mesh-relay-backend.mjs`'s
+ * `MeshRelayBackend`, constructed directly (not via this function) and
+ * registered on the *client's own* `VirtualNetwork`.
+ *
  * No browser-only imports at module level.
  */
 
@@ -72,6 +82,7 @@ import { PeerRegistry } from './peer-registry.mjs'
 import { MeshSignalingChannel } from './signaling.mjs'
 import { createWebRTCTransportFactory } from './webrtc-negotiator.mjs'
 import { createMeshSync } from './mesh-sync.mjs'
+import { MeshRelayHost } from './mesh-relay-host.mjs'
 
 /**
  * Build and boot a real, WebRTC-capable `PeerNode`.
@@ -143,11 +154,29 @@ import { createMeshSync } from './mesh-sync.mjs'
  *   `node.sync.load()` before returning so previously-persisted documents
  *   (e.g. from a prior page session, via `IndexedDBSyncStorage`) are already
  *   present -- the actual "a workspace survives a reload" behavior.
+ * @param {boolean} [options.enableRelayHost=false] - Build a `MeshRelayHost`
+ *   (Phase 8) and wire it to the returned node as `node.relayHost`, so
+ *   authorized mesh peers can relay through `options.relayHostNetwork` (e.g.
+ *   a `VirtualNetwork` with a `GatewayBackend` reaching a real local
+ *   service) via `PeerRegistry.grantCapabilities()`-gated
+ *   `mesh-relay:<service>:connect` scopes. See `mesh-relay-host.mjs`.
+ * @param {import('@johnhenry/browsermesh-netway').VirtualNetwork} [options.relayHostNetwork]
+ *   Required when `enableRelayHost` -- the `VirtualNetwork` `MeshRelayHost`
+ *   bridges inbound relay connections into.
+ * @param {Object<string,string>} [options.relayHostServices] - Optional
+ *   `{ name: targetAddress }` map of services to `exposeService()` on the
+ *   new `MeshRelayHost` immediately (equivalent to calling
+ *   `node.relayHost.exposeService(name, targetAddress)` for each entry).
+ * @param {string} [options.relayHostEnvelopeType] - Overrides the
+ *   `envelope.type` the relay host routes/sends on `PeerNode`'s dispatch bus
+ *   (default `'mesh-relay'`).
  * @returns {Promise<PeerNode>} A booted (unless `skipBoot`) PeerNode, with
  *   `node.meshManager` (`WebRTCMeshManager`) and `node.signaling`
  *   (`MeshSignalingChannel`) attached for callers/tests that need lower-level
- *   access beyond what `PeerNode`'s own API exposes, and `node.sync`
- *   (`MeshSyncBinding`, see `mesh-sync.mjs`) attached when `enableSync`.
+ *   access beyond what `PeerNode`'s own API exposes, `node.sync`
+ *   (`MeshSyncBinding`, see `mesh-sync.mjs`) attached when `enableSync`, and
+ *   `node.relayHost` (`MeshRelayHost`, see `mesh-relay-host.mjs`) attached
+ *   when `enableRelayHost`.
  */
 export async function createMeshNode(options = {}) {
   const {
@@ -171,6 +200,10 @@ export async function createMeshNode(options = {}) {
     syncDbName,
     syncEnvelopeType,
     syncAutoLoad = true,
+    enableRelayHost = false,
+    relayHostNetwork,
+    relayHostServices,
+    relayHostEnvelopeType,
   } = options
 
   if (!signalingTransport) {
@@ -287,6 +320,28 @@ export async function createMeshNode(options = {}) {
     })
     if (syncAutoLoad) {
       await node.sync.load()
+    }
+  }
+
+  // -- Mesh relay host (opt-in, Phase 8) -------------------------------------
+  if (enableRelayHost) {
+    if (!relayHostNetwork) {
+      throw new Error(
+        'createMeshNode: options.relayHostNetwork is required when enableRelayHost is true ' +
+        '(the VirtualNetwork MeshRelayHost bridges inbound relay connections into).',
+      )
+    }
+    node.relayHost = new MeshRelayHost({
+      node,
+      network: relayHostNetwork,
+      registry,
+      envelopeType: relayHostEnvelopeType,
+      onLog,
+    })
+    if (relayHostServices) {
+      for (const [name, targetAddress] of Object.entries(relayHostServices)) {
+        node.relayHost.exposeService(name, targetAddress)
+      }
     }
   }
 

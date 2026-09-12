@@ -20,7 +20,8 @@
     "example:02": "node examples/02-two-pods-discover-and-message.mjs",
     "example:03": "node examples/03-virtual-network-loopback.mjs",
     "example:04": "node examples/04-kernel-capability-denial.mjs",
-    "example:05": "node examples/05-crdt-sync-across-two-engines.mjs"
+    "example:05": "node examples/05-crdt-sync-across-two-engines.mjs",
+    "example:06": "node examples/06-mesh-relay.mjs"
   },
   "devDependencies": {
     "@changesets/cli": "^2.27.0",
