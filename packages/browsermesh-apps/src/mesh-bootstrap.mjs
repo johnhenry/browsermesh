@@ -64,6 +64,7 @@ import {
 import {
   MeshTransportNegotiator,
   WebRTCMeshManager,
+  mergeIceServers,
 } from '@johnhenry/browsermesh-transport'
 
 import { PeerNode } from './peer-node.mjs'
@@ -102,7 +103,30 @@ import { createMeshSync } from './mesh-sync.mjs'
  * @param {{send: Function, onMessage: Function, open?: Function, close?: Function}} options.signalingTransport
  *   Required. Injectable bus for WebRTC offer/answer/ICE relay -- see
  *   `signaling.mjs`.
- * @param {RTCIceServer[]} [options.iceServers]
+ * @param {RTCIceServer[]} [options.iceServers] - TURN (or additional STUN)
+ *   servers, merged alongside `DEFAULT_ICE_SERVERS` via
+ *   `@johnhenry/browsermesh-transport`'s `mergeIceServers()` -- the same
+ *   extension point `webrtc.mjs` already documents, not reimplemented here.
+ *   `DEFAULT_ICE_SERVERS` is empty (no ICE servers, for privacy -- see
+ *   `webrtc.mjs`), so omitting this option preserves today's default
+ *   behaviour exactly. An explicit `iceServers: []` is honoured as "no ICE
+ *   servers at all" (used by this package's own real-peer test for a
+ *   hermetic, loopback-only connection); a non-empty array is merged with
+ *   the defaults and malformed entries are silently dropped. To combine a
+ *   TURN server with the family's opt-in public STUN server, spread
+ *   `PUBLIC_STUN_SERVERS` in yourself:
+ *   ```js
+ *   import { PUBLIC_STUN_SERVERS } from '@johnhenry/browsermesh-transport'
+ *   import { createMeshNode } from '@johnhenry/browsermesh-apps'
+ *
+ *   const node = await createMeshNode({
+ *     signalingTransport,
+ *     iceServers: [
+ *       ...PUBLIC_STUN_SERVERS,
+ *       { urls: 'turn:turn.example.com:3478', username: 'alice', credential: 's3cr3t' },
+ *     ],
+ *   })
+ *   ```
  * @param {import('./audit.mjs').AuditChain} [options.auditChain]
  * @param {Function} [options.onLog]
  * @param {boolean} [options.skipDiscovery=false] - Passed through to `PeerNode.boot()`.
@@ -193,7 +217,13 @@ export async function createMeshNode(options = {}) {
   const discovery = new DiscoveryManager(discoveryOpts)
 
   // -- WebRTC transport negotiator -----------------------------------------
-  const meshManager = new WebRTCMeshManager({ localPodId: podId, iceServers, onLog })
+  // mergeIceServers() is webrtc.mjs's own extension point: it honours an
+  // explicit `[]` as "no ICE servers" (used by this package's real-peer
+  // test for a hermetic, loopback-only connection) and otherwise merges any
+  // caller-supplied servers (typically TURN) alongside DEFAULT_ICE_SERVERS
+  // (empty by default), filtering out malformed entries rather than handing
+  // them straight to WebRTCMeshManager.
+  const meshManager = new WebRTCMeshManager({ localPodId: podId, iceServers: mergeIceServers(iceServers), onLog })
   const signaling = new MeshSignalingChannel({ localPodId: podId, transport: signalingTransport, onLog })
   await signaling.open()
 
