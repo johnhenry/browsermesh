@@ -243,6 +243,32 @@ inherited `Backend` "not implemented" throws). See
 simulated mesh connection) and
 `test/real-peer/mesh-relay.test.mjs` for the real-WebRTC, real-TCP proof.
 
+## Putting it all together: sync + kernel-gated mesh + relay on one connection
+
+Every composition layer above (`enableSync`, a `Kernel` wired via
+`createMeshKernel({ peerNode })`, and `enableRelayHost`) attaches to the
+*same* `PeerNode` independently -- nothing about wiring one requires or
+excludes the others, and each dispatches on `PeerNode`'s shared
+`onIncomingData()` bus, filtering by its own `envelope.type` (`'mesh-sync'`,
+`'mesh-relay'`; the kernel's `caps.mesh` view is unfiltered -- see below).
+
+`test/real-peer/full-pipeline.test.mjs` proves all three actually compose on
+one live, real WebRTC connection: CRDT sync converges, a kernel tenant's
+`caps.mesh.send()`/`onReceive()` moves real bytes, and a mesh-relay round
+trip completes, all interleaved on the same `PeerNode` pair, with no
+envelope-type collisions or dispatch corruption between them.
+`examples/07-full-mesh-pipeline.mjs` is the same story narrated for a human
+reader (in-process simulated connection, like `06`).
+
+One property worth knowing if you wire a kernel mesh capability alongside
+sync/relay: `Kernel#meshFor()`'s `onReceive` is **not** scoped by
+`envelope.type` the way `MeshSyncBinding`/`MeshRelayHost` are -- a kernel
+tenant's `caps.mesh.onReceive` callback sees every inbound payload on the
+connection, including `mesh-sync`/`mesh-relay`-typed envelopes not meant for
+it (harmless -- those envelopes are just plain objects with a `.type` field
+tenant code can filter on itself if it cares, but worth knowing rather than
+assuming the view is pre-filtered).
+
 ## License
 
 MIT
