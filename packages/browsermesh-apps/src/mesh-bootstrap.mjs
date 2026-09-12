@@ -37,6 +37,15 @@
  * is the ready-made browser option; tests supply a Node-safe bus (see
  * `test/mesh-bootstrap.test.mjs`).
  *
+ * **CRDT sync is opt-in via `{ enableSync: true }`** (Phase 3). When set,
+ * this function also builds a `MeshSyncEngine` (`@johnhenry/browsermesh-sync`)
+ * -- durable `IndexedDBSyncStorage` by default -- and wires it to the
+ * returned `PeerNode` via `mesh-sync.mjs`'s `createMeshSync()`, attached as
+ * `node.sync` (a `MeshSyncBinding`). This keeps `createMeshNode()` the one
+ * obvious place to get a fully-wired mesh node, while leaving direct
+ * `createMeshSync({ node })` available for callers who want to construct
+ * the binding themselves (e.g. a custom storage adapter per document type).
+ *
  * No browser-only imports at module level.
  */
 
@@ -61,6 +70,7 @@ import { PeerNode } from './peer-node.mjs'
 import { PeerRegistry } from './peer-registry.mjs'
 import { MeshSignalingChannel } from './signaling.mjs'
 import { createWebRTCTransportFactory } from './webrtc-negotiator.mjs'
+import { createMeshSync } from './mesh-sync.mjs'
 
 /**
  * Build and boot a real, WebRTC-capable `PeerNode`.
@@ -97,10 +107,23 @@ import { createWebRTCTransportFactory } from './webrtc-negotiator.mjs'
  * @param {Function} [options.onLog]
  * @param {boolean} [options.skipDiscovery=false] - Passed through to `PeerNode.boot()`.
  * @param {boolean} [options.skipBoot=false] - Construct but don't boot (caller calls `node.boot()` itself).
+ * @param {boolean} [options.enableSync=false] - Build a `MeshSyncEngine` and
+ *   wire it to the returned node as `node.sync` (see `mesh-sync.mjs`).
+ * @param {object} [options.syncStorage] - Storage adapter for the sync engine.
+ *   Defaults to a durable `IndexedDBSyncStorage`; only used when `enableSync`.
+ * @param {string} [options.syncDbName] - dbName for the default `IndexedDBSyncStorage`.
+ *   Defaults to `mesh-sync-${podId}`. Ignored if `syncStorage` is supplied.
+ * @param {string} [options.syncEnvelopeType] - Overrides the `envelope.type`
+ *   the sync binding sends/routes on `PeerNode`'s dispatch bus (default `'mesh-sync'`).
+ * @param {boolean} [options.syncAutoLoad=true] - When `enableSync`, await
+ *   `node.sync.load()` before returning so previously-persisted documents
+ *   (e.g. from a prior page session, via `IndexedDBSyncStorage`) are already
+ *   present -- the actual "a workspace survives a reload" behavior.
  * @returns {Promise<PeerNode>} A booted (unless `skipBoot`) PeerNode, with
  *   `node.meshManager` (`WebRTCMeshManager`) and `node.signaling`
  *   (`MeshSignalingChannel`) attached for callers/tests that need lower-level
- *   access beyond what `PeerNode`'s own API exposes.
+ *   access beyond what `PeerNode`'s own API exposes, and `node.sync`
+ *   (`MeshSyncBinding`, see `mesh-sync.mjs`) attached when `enableSync`.
  */
 export async function createMeshNode(options = {}) {
   const {
@@ -119,6 +142,11 @@ export async function createMeshNode(options = {}) {
     onLog = () => {},
     skipDiscovery = false,
     skipBoot = false,
+    enableSync = false,
+    syncStorage,
+    syncDbName,
+    syncEnvelopeType,
+    syncAutoLoad = true,
   } = options
 
   if (!signalingTransport) {
@@ -169,14 +197,14 @@ export async function createMeshNode(options = {}) {
   const signaling = new MeshSignalingChannel({ localPodId: podId, transport: signalingTransport, onLog })
   await signaling.open()
 
-  const webrtcFactory = createWebRTCTransportFactory({
-    localPodId: podId,
-    meshManager,
-    signaling,
-    onLog,
-  })
+  // The negotiator is constructed (and handed to PeerNode) before its
+  // 'webrtc' adapter is registered -- registerAdapter() only needs to run
+  // before connectToPeer() is actually called at runtime, not before
+  // PeerNode's constructor captures the negotiator reference. This
+  // ordering is what lets the webrtc factory's onIncomingConnection hook
+  // below close over `node` and call PeerNode.adoptIncomingSession() --
+  // resolving the callee-side session gap (see peer-node.mjs / Phase 3).
   const transportNegotiator = new MeshTransportNegotiator()
-  transportNegotiator.registerAdapter('webrtc', webrtcFactory)
 
   // -- PeerNode -------------------------------------------------------------
   const node = new PeerNode({
@@ -188,6 +216,26 @@ export async function createMeshNode(options = {}) {
     onLog,
   })
 
+  const webrtcFactory = createWebRTCTransportFactory({
+    localPodId: podId,
+    meshManager,
+    signaling,
+    onLog,
+    // Callee side: once an auto-answered inbound offer's DataChannel opens,
+    // give it the same PeerNode-level session bookkeeping connectToPeer()
+    // gives the caller side, so sendTo()/onIncomingData() work symmetrically
+    // regardless of which side dialed.
+    onIncomingConnection: (remotePodId, adapter) => {
+      node.adoptIncomingSession(remotePodId, adapter, 'webrtc').catch((err) => {
+        onLog('mesh-bootstrap:adopt-incoming-session-failed', {
+          remotePodId,
+          error: err?.message || String(err),
+        })
+      })
+    },
+  })
+  transportNegotiator.registerAdapter('webrtc', webrtcFactory)
+
   if (!skipBoot) {
     await node.boot({ label, skipDiscovery })
   }
@@ -197,6 +245,20 @@ export async function createMeshNode(options = {}) {
   // (e.g. to inspect connection stats, or to close the signaling bus).
   node.meshManager = meshManager
   node.signaling = signaling
+
+  // -- CRDT sync (opt-in, Phase 3) -------------------------------------------
+  if (enableSync) {
+    node.sync = createMeshSync({
+      node,
+      storage: syncStorage,
+      dbName: syncDbName,
+      envelopeType: syncEnvelopeType,
+      onLog,
+    })
+    if (syncAutoLoad) {
+      await node.sync.load()
+    }
+  }
 
   return node
 }

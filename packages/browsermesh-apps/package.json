@@ -38,7 +38,8 @@
     }
   },
   "devDependencies": {
-    "node-datachannel": "^0.33.2"
+    "node-datachannel": "^0.33.2",
+    "fake-indexeddb": "^6.2.5"
   },
   "scripts": {
     "test": "node --import ./test/_setup-globals.mjs --test test/*.test.mjs",

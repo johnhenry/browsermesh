@@ -366,24 +366,110 @@ export class PeerNode {
 
     this.#registry.connect(pubKey, connectOpts)
 
-    // Create session
+    // Create session (and wire its inbound data fan-out) via the same
+    // helper `adoptIncomingSession()` uses for the callee side, so both
+    // sides of a connection end up with identically-shaped bookkeeping.
+    const session = this.#createSession(pubKey, transportType, transport)
+
+    this.#onLog('peer-node:session:created', {
+      sessionId: session.sessionId,
+      pubKey,
+      transport: transportType,
+    })
+
+    // Log to audit chain
+    await this.#audit('peer-node:connect', {
+      sessionId: session.sessionId,
+      pubKey,
+      transport: transportType,
+    })
+
+    return { ...session, transportInstance: undefined }
+  }
+
+  /**
+   * Adopt a `PeerNode`-level session for a transport connection this node
+   * did not initiate itself -- the callee side of an inbound connection
+   * (e.g. a WebRTC peer that only ever answered an offer, and never called
+   * `connectToPeer()`).
+   *
+   * `connectToPeer()` is the only place that used to create session
+   * bookkeeping (the entry in `#sessions`, and the inbound-data fan-out
+   * `onIncomingData()` subscribers rely on), which meant a peer that was
+   * only ever connected *to* had a live, open transport (visible e.g. via
+   * `node.meshManager.getConnection(remotePodId)`) but no `PeerNode`-level
+   * session -- `sendTo()` would throw "no active session" and its inbound
+   * bytes never reached `onIncomingData()` subscribers. This method gives
+   * the callee side the same session bookkeeping the caller side already
+   * got, so `sendTo()` / `hasActiveSession()` / `onIncomingData()` all work
+   * symmetrically regardless of which side dialed.
+   *
+   * Intended to be called by transport-negotiator adapter factories (see
+   * `webrtc-negotiator.mjs`'s `onIncomingConnection` hook), not directly by
+   * application code.
+   *
+   * @param {string} pubKey - Remote peer's fingerprint / public key hash
+   * @param {object} transportInstance - An already-open MeshTransport-shaped
+   *   object: must implement `send(data)`, should implement `onMessage(cb)`.
+   * @param {string} transportType - e.g. `'webrtc'`
+   * @returns {Promise<object>} Session info (same shape as `connectToPeer()`'s)
+   */
+  async adoptIncomingSession(pubKey, transportInstance, transportType) {
+    this.#ensureRunning('adoptIncomingSession')
+    if (!pubKey || typeof pubKey !== 'string') {
+      throw new Error('adoptIncomingSession: pubKey is required')
+    }
+    if (!transportInstance || typeof transportInstance.send !== 'function') {
+      throw new Error('adoptIncomingSession: transportInstance must implement send(data)')
+    }
+
+    this.#registry.connect(pubKey, { transport: transportType })
+
+    const session = this.#createSession(pubKey, transportType, transportInstance)
+
+    this.#onLog('peer-node:session:adopted', {
+      sessionId: session.sessionId,
+      pubKey,
+      transport: transportType,
+    })
+
+    await this.#audit('peer-node:connect', {
+      sessionId: session.sessionId,
+      pubKey,
+      transport: transportType,
+      direction: 'inbound',
+    })
+
+    return { ...session, transportInstance: undefined }
+  }
+
+  /**
+   * Shared session-bookkeeping helper for both `connectToPeer()` (caller
+   * side) and `adoptIncomingSession()` (callee side): creates the
+   * `#sessions` entry and wires inbound data fan-out to `onIncomingData()`
+   * subscribers -- this is what backs `ClawserPod.onMessage` so workspace
+   * consumers can route incoming sync/deploy envelopes by `envelope.type`.
+   *
+   * @param {string} pubKey
+   * @param {string|null} transportType
+   * @param {object|null} transportInstance
+   * @returns {object} The new session entry (includes `transportInstance`;
+   *   callers strip it before returning to their own caller)
+   */
+  #createSession(pubKey, transportType, transportInstance) {
     const sessionId = crypto.randomUUID()
     const session = {
       sessionId,
       pubKey,
       transport: transportType,
-      transportInstance: transport,
+      transportInstance,
       connectedAt: Date.now(),
       state: 'active',
     }
     this.#sessions.set(sessionId, session)
 
-    // Wire inbound data fan-out — every connected transport pushes
-    // received bytes to subscribers registered via `onIncomingData`.
-    // This is what backs `ClawserPod.onMessage` so workspace consumers
-    // can route incoming sync/deploy envelopes by `envelope.type`.
-    if (transport && typeof transport.onMessage === 'function') {
-      transport.onMessage((data) => {
+    if (transportInstance && typeof transportInstance.onMessage === 'function') {
+      transportInstance.onMessage((data) => {
         for (const cb of this.#dataListeners) {
           try { cb(pubKey, data, { sessionId, transport: transportType }) }
           catch (err) { this.#onLog('peer-node:data-listener-error', { error: err?.message || String(err) }) }
@@ -391,16 +477,7 @@ export class PeerNode {
       })
     }
 
-    this.#onLog('peer-node:session:created', { sessionId, pubKey, transport: transportType })
-
-    // Log to audit chain
-    await this.#audit('peer-node:connect', {
-      sessionId,
-      pubKey,
-      transport: transportType,
-    })
-
-    return { ...session, transportInstance: undefined }
+    return session
   }
 
   /**
