@@ -78,12 +78,17 @@ export declare const KERNEL_ERROR: Readonly<{
   ENOTFOUND: 'ENOTFOUND';
   /** Operation interrupted by signal. */
   ESIGNAL: 'ESIGNAL';
+  /** Resource handle exists but is owned by a different tenant. */
+  EOWNERSHIP: 'EOWNERSHIP';
+  /** Mesh send/receive denied by PeerRegistry.checkAccess(). */
+  EMESHDENIED: 'EMESHDENIED';
 }>;
 
 /** Union of all valid KERNEL_ERROR codes. */
 export type KernelErrorCode =
   | 'ENOHANDLE' | 'EHANDLETYPE' | 'ETABLEFULL' | 'ESTREAMCLOSED'
-  | 'ECAPDENIED' | 'EALREADY' | 'ENOTFOUND' | 'ESIGNAL';
+  | 'ECAPDENIED' | 'EALREADY' | 'ENOTFOUND' | 'ESIGNAL'
+  | 'EOWNERSHIP' | 'EMESHDENIED';
 
 // ── Errors ───────────────────────────────────────────────────────────
 
@@ -100,6 +105,36 @@ export declare class HandleNotFoundError extends KernelError {
   readonly handle: string;
   readonly code: 'ENOHANDLE';
   constructor(handle: string);
+}
+
+/** Thrown when a resource handle exists but is owned by a different tenant than `expectedOwner`. */
+export declare class ResourceOwnershipError extends KernelError {
+  /** The handle that was accessed. */
+  readonly handle: string;
+  /** The owner the caller expected. */
+  readonly expectedOwner: string;
+  /** The owner actually recorded for the handle. */
+  readonly actualOwner: string;
+  readonly code: 'EOWNERSHIP';
+  constructor(handle: string, expectedOwner: string, actualOwner: string);
+}
+
+/**
+ * Thrown when a tenant's scoped mesh view (from `Kernel#meshFor`) attempts to send to,
+ * or receive from, a peer that the injected mesh provider's `registry.checkAccess()`
+ * does not authorize for the given resource/action pair.
+ */
+export declare class MeshAccessDeniedError extends KernelError {
+  /** The tenant whose mesh view attempted the operation. */
+  readonly tenantId: string;
+  /** The peer that was denied. */
+  readonly peerId: string;
+  /** The mesh action attempted (`'send'` or `'receive'`). */
+  readonly action: string;
+  /** The reason reported by `checkAccess()`, if any. */
+  readonly reason: string | undefined;
+  readonly code: 'EMESHDENIED';
+  constructor(tenantId: string, peerId: string, action: string, reason?: string);
 }
 
 /** Thrown when a resource handle exists but its type does not match the expected type. */
@@ -180,16 +215,22 @@ export declare class ResourceTable {
 
   /**
    * Get a resource entry by handle.
+   * @param expectedOwner - If supplied, the handle's stored owner must match or a
+   *   {@link ResourceOwnershipError} is thrown. Omit for ambient/trusted access.
    * @throws {HandleNotFoundError} If the handle does not exist.
+   * @throws {ResourceOwnershipError} If `expectedOwner` is supplied and does not match.
    */
-  get(handle: string): ResourceEntry;
+  get(handle: string, expectedOwner?: string): ResourceEntry;
 
   /**
    * Get a resource value by handle, verifying the expected type.
+   * @param expectedOwner - If supplied, the handle's stored owner must match or a
+   *   {@link ResourceOwnershipError} is thrown.
    * @throws {HandleNotFoundError} If the handle does not exist.
    * @throws {HandleTypeMismatchError} If the resource type does not match.
+   * @throws {ResourceOwnershipError} If `expectedOwner` is supplied and does not match.
    */
-  getTyped(handle: string, type: string): unknown;
+  getTyped(handle: string, type: string, expectedOwner?: string): unknown;
 
   /**
    * Transfer ownership of a resource to a new owner.
@@ -199,10 +240,13 @@ export declare class ResourceTable {
 
   /**
    * Drop (remove) a resource from the table.
+   * @param expectedOwner - If supplied, the handle's stored owner must match or a
+   *   {@link ResourceOwnershipError} is thrown (and the entry is left in place).
    * @returns The resource value that was removed.
    * @throws {HandleNotFoundError} If the handle does not exist.
+   * @throws {ResourceOwnershipError} If `expectedOwner` is supplied and does not match.
    */
-  drop(handle: string): unknown;
+  drop(handle: string, expectedOwner?: string): unknown;
 
   /** Check whether a handle exists in the table. */
   has(handle: string): boolean;
@@ -336,6 +380,21 @@ export declare class RNG {
 
 // ── Capabilities ─────────────────────────────────────────────────────
 
+/** A tenant-scoped view of a real mesh provider, returned by `Kernel#meshFor()`. */
+export interface MeshCapabilityView {
+  /**
+   * Send data to a peer. Throws {@link MeshAccessDeniedError} unless the mesh
+   * provider's `registry.checkAccess(peerId, 'mesh', 'send')` allows it.
+   */
+  send(peerId: string, data: unknown): Promise<void>;
+  /**
+   * Subscribe to incoming data. Only delivers from peers for which
+   * `registry.checkAccess(peerId, 'mesh', 'receive')` allows it.
+   * @returns Unsubscribe function.
+   */
+  onReceive(cb: (peerId: string, data: unknown, meta: { sessionId: string; transport: string }) => void): () => void;
+}
+
 /** Frozen capabilities object returned by buildCaps(). */
 export interface Caps {
   readonly clock?: Clock;
@@ -348,14 +407,20 @@ export interface Caps {
   readonly chaos?: ChaosEngine;
   readonly env?: true;
   readonly signal?: true;
+  /**
+   * `true` (bare marker) when the kernel has no mesh provider wired, or a
+   * {@link MeshCapabilityView} when it does (see `Kernel`'s `mesh` constructor option).
+   */
+  readonly mesh?: true | MeshCapabilityView;
   readonly _granted: readonly string[];
 }
 
 /**
  * Build a frozen capabilities object from granted capability tags.
  * Each granted tag maps to the corresponding kernel subsystem reference.
+ * @param tenantId - Threaded through to `Kernel#meshFor()` for a granted MESH capability.
  */
-export declare function buildCaps(kernel: Kernel, grantedCaps: string[]): Readonly<Caps>;
+export declare function buildCaps(kernel: Kernel, grantedCaps: string[], tenantId?: string): Readonly<Caps>;
 
 /**
  * Require that a capability tag is present in a caps object.
@@ -368,7 +433,7 @@ export declare class CapsBuilder {
   /**
    * Build capabilities from kernel and granted tags.
    */
-  build(kernel: Kernel, grantedCaps: string[]): Readonly<Caps>;
+  build(kernel: Kernel, grantedCaps: string[], tenantId?: string): Readonly<Caps>;
 }
 
 // ── MessagePort / IPC ────────────────────────────────────────────────
@@ -765,6 +830,20 @@ export interface CreateTenantOptions {
   stdio?: StdioOptions;
 }
 
+/**
+ * Duck-typed mesh provider accepted by `Kernel`'s `mesh` constructor option.
+ * Deliberately not imported from any `@johnhenry/browsermesh-*` package --
+ * `browsermesh-kernel` has zero dependency on other packages in this family.
+ * `browsermesh-apps`'s `PeerNode` already satisfies this shape as-is.
+ */
+export interface KernelMeshProvider {
+  sendTo(peerId: string, data: unknown): Promise<void>;
+  onIncomingData(cb: (peerId: string, data: unknown, meta: { sessionId: string; transport: string }) => void): () => void;
+  registry: {
+    checkAccess(peerId: string, resource: string, action: string): { allowed: boolean; reason?: string };
+  };
+}
+
 /** Options for the Kernel constructor. */
 export interface KernelOptions {
   /** Clock instance (defaults to real clock). */
@@ -777,14 +856,35 @@ export interface KernelOptions {
   loggerOpts?: LoggerOptions;
   /** Options for ResourceTable constructor. */
   resourceOpts?: ResourceTableOptions;
+  /** Real mesh provider backing the MESH capability. Omit to leave MESH as a bare boolean marker. */
+  mesh?: KernelMeshProvider;
 }
 
 /** The Kernel facade. Creates and wires all subsystems. */
 export declare class Kernel {
   constructor(opts?: KernelOptions);
 
-  /** The kernel's resource table. */
+  /** The kernel's resource table. Ambient/trusted access -- see `resourcesFor()`. */
   readonly resources: ResourceTable;
+
+  /**
+   * Get a tenant-scoped view of the resource table, bound to `tenantId`. `get`/`getTyped`/
+   * `drop` on the returned object automatically pass `tenantId` as `expectedOwner`.
+   */
+  resourcesFor(tenantId: string): {
+    get(handle: string): ResourceEntry;
+    getTyped(handle: string, type: string): unknown;
+    drop(handle: string): unknown;
+  };
+
+  /** The raw injected mesh provider, or `null`. Ambient/trusted access -- see `meshFor()`. */
+  readonly mesh: KernelMeshProvider | null;
+
+  /**
+   * Get a tenant-scoped view of the mesh capability, bound to `tenantId`. Returns `null`
+   * if no mesh provider was injected via the constructor.
+   */
+  meshFor(tenantId: string): MeshCapabilityView | null;
 
   /** The kernel clock. */
   readonly clock: Clock;

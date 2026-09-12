@@ -26,6 +26,7 @@ export * from './peer-node.mjs';
 export * from './signaling.mjs';
 export * from './webrtc-negotiator.mjs';
 export * from './mesh-bootstrap.mjs';
+export * from './kernel-mesh.mjs';
 export * from './peer-payments.mjs';
 export * from './peer-registry.mjs';
 export * from './peer-routing.mjs';

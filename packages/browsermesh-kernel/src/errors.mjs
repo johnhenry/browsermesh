@@ -141,6 +141,40 @@ export class CapabilityDeniedError extends KernelError {
 }
 
 /**
+ * Thrown when a tenant's scoped mesh view (from {@link Kernel#meshFor}) attempts to
+ * send to, or receive from, a peer that the injected `PeerRegistry`'s `checkAccess()`
+ * does not authorize for the given resource/action pair (e.g. `'mesh'`/`'send'`). The
+ * peer must have been granted a matching ACL scope (e.g. via
+ * `registry.grantCapabilities(peerPubKey, ['mesh:send'])`) before a tenant can reach it.
+ *
+ * @property {string} tenantId - The tenant whose mesh view attempted the operation.
+ * @property {string} peerId - The peer public key / pod identifier that was denied.
+ * @property {string} action - The mesh action attempted (`'send'` or `'receive'`).
+ * @property {string} [reason] - The reason reported by `PeerRegistry.checkAccess()`, if any.
+ * @property {string} code - Always `'EMESHDENIED'`.
+ */
+export class MeshAccessDeniedError extends KernelError {
+  /**
+   * @param {string} tenantId - The tenant whose mesh view attempted the operation.
+   * @param {string} peerId - The peer that was denied.
+   * @param {string} action - The mesh action attempted (`'send'` or `'receive'`).
+   * @param {string} [reason] - The reason reported by `PeerRegistry.checkAccess()`, if any.
+   */
+  constructor(tenantId, peerId, action, reason) {
+    super(
+      `Mesh access denied: tenant ${tenantId} may not ${action} to/from peer ${peerId}` +
+      (reason ? ` (${reason})` : ''),
+      KERNEL_ERROR.EMESHDENIED
+    );
+    this.name = 'MeshAccessDeniedError';
+    this.tenantId = tenantId;
+    this.peerId = peerId;
+    this.action = action;
+    this.reason = reason;
+  }
+}
+
+/**
  * Thrown when attempting to register a name or resource that already exists.
  *
  * @property {string} identifier - The name that was already registered.
