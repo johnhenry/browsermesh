@@ -2,6 +2,16 @@ import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
 import { EmbeddedPod, ClawserEmbed } from '../src/index.mjs'
 import { Pod } from '@johnhenry/browsermesh-pod'
+import { installDomStub, makeElement } from './_dom-stub.mjs'
+
+/** Fresh `document` stub with a `<div id="...">` container already present. */
+function setupContainer(id = 'clawser') {
+  const body = installDomStub()
+  const container = makeElement('div')
+  container.id = id
+  body.appendChild(container)
+  return container
+}
 
 /** Minimal real agent stand-in exercising the exact surface EmbeddedPod uses. */
 class FakeAgent {
@@ -109,7 +119,7 @@ describe('EmbeddedPod', () => {
     assert.equal(result.content, 'blocked')
   })
 
-  test('on/off/emit dispatch to registered listeners only while registered', () => {
+  test('on/off/emit dispatch to registered listeners only while registered (unified, inherited Pod bus)', () => {
     const pod = new EmbeddedPod()
     const calls = []
     const handler = (payload) => calls.push(payload)
@@ -123,7 +133,190 @@ describe('EmbeddedPod', () => {
     assert.deepEqual(calls, ['hi'])
   })
 
+  test('sendMessage fires a "response" event with the exact returned object', async () => {
+    const agent = new FakeAgent()
+    const pod = new EmbeddedPod({ agent })
+    const received = []
+    pod.on('response', (payload) => received.push(payload))
+
+    const result = await pod.sendMessage('hello')
+
+    assert.equal(received.length, 1)
+    assert.equal(received[0], result)
+  })
+
   test('ClawserEmbed is a backward-compatible alias for EmbeddedPod', () => {
     assert.equal(ClawserEmbed, EmbeddedPod)
+  })
+})
+
+describe('EmbeddedPod widget DOM (mount)', () => {
+  const cleanupDoc = () => { delete globalThis.document }
+
+  test('mount() creates the expected structural DOM nodes under the container', () => {
+    const container = setupContainer('clawser')
+    try {
+      const pod = new EmbeddedPod()
+      pod.mount()
+
+      assert.ok(pod.mounted)
+      const shadow = container.shadowRoot
+      assert.ok(shadow, 'container should have a shadowRoot')
+
+      const wrap = shadow.children.find((c) => c.classList.contains('bm-embed'))
+      assert.ok(wrap, 'expected a .bm-embed wrapper')
+
+      const statusEl = wrap.children.find((c) => c.classList.contains('bm-status'))
+      const logEl = wrap.children.find((c) => c.classList.contains('bm-log'))
+      const formEl = wrap.children.find((c) => c.tagName === 'FORM')
+      assert.ok(statusEl, 'expected a status element')
+      assert.ok(logEl, 'expected a log element')
+      assert.ok(formEl, 'expected a form element')
+
+      const inputEl = formEl.children.find((c) => c.tagName === 'INPUT')
+      const submitEl = formEl.children.find((c) => c.tagName === 'BUTTON')
+      assert.ok(inputEl, 'expected an input element')
+      assert.ok(submitEl, 'expected a submit button')
+    } finally {
+      cleanupDoc()
+    }
+  })
+
+  test('mount() auto-runs from the constructor when the container already exists', () => {
+    const container = setupContainer('clawser')
+    try {
+      const pod = new EmbeddedPod()
+      assert.ok(pod.mounted)
+      assert.ok(container.shadowRoot)
+    } finally {
+      cleanupDoc()
+    }
+  })
+
+  test('mount() is a no-op if the container does not exist (no throw)', () => {
+    installDomStub()
+    try {
+      assert.doesNotThrow(() => {
+        const pod = new EmbeddedPod()
+        pod.mount()
+        assert.equal(pod.mounted, false)
+      })
+    } finally {
+      cleanupDoc()
+    }
+  })
+
+  test('mount() is idempotent — calling it twice does not rebuild the DOM', () => {
+    const container = setupContainer('clawser')
+    try {
+      const pod = new EmbeddedPod()
+      pod.mount()
+      const shadowFirst = container.shadowRoot
+      const childCountFirst = shadowFirst.children.length
+
+      pod.mount()
+
+      assert.equal(container.shadowRoot, shadowFirst, 'attachShadow should not be called again')
+      assert.equal(container.shadowRoot.children.length, childCountFirst)
+    } finally {
+      cleanupDoc()
+    }
+  })
+
+  test('status line reflects peers.size after real peer:found/peer:lost events from a boot()', async () => {
+    const container = setupContainer('clawser')
+    try {
+      const pod = new EmbeddedPod()
+      const statusEl = container.shadowRoot.children.find((c) => c.classList.contains('bm-embed'))
+        .children.find((c) => c.classList.contains('bm-status'))
+
+      assert.match(statusEl.textContent, /0 peers/)
+
+      // Minimal fake DiscoveryAdapter satisfying exactly the contract Pod's
+      // #peerDiscovery() calls (onPeerDiscovered/onPeerLost/onMessage/start) —
+      // this drives Pod's *real* #addPeer()/#removePeer() (and therefore its
+      // real `peers` Map and real 'peer:found'/'peer:lost' emits), rather than
+      // faking the event payload directly, since EmbeddedPod's status line is
+      // grounded in `this.peers.size`, not the event payload.
+      let onPeerFound, onPeerLost
+      const discovery = {
+        onPeerDiscovered(cb) { onPeerFound = cb },
+        onPeerLost(cb) { onPeerLost = cb },
+        onMessage() {},
+        start: async () => {},
+        stop: async () => {},
+      }
+
+      await pod.boot({ discovery })
+      assert.match(statusEl.textContent, /ready/)
+      assert.match(statusEl.textContent, /0 peers/)
+
+      onPeerFound({ podId: 'peer-1', kind: 'window' })
+      assert.equal(pod.peers.size, 1)
+      assert.match(statusEl.textContent, /1 peer\b/)
+
+      onPeerFound({ podId: 'peer-2', kind: 'window' })
+      assert.match(statusEl.textContent, /2 peers/)
+
+      onPeerLost({ podId: 'peer-1' })
+      assert.equal(pod.peers.size, 1)
+      assert.match(statusEl.textContent, /1 peer\b/)
+    } finally {
+      cleanupDoc()
+    }
+  })
+
+  test('submitting the form calls sendMessage() and appends user + agent entries to the log', async () => {
+    const container = setupContainer('clawser')
+    try {
+      const agent = new FakeAgent()
+      const pod = new EmbeddedPod({ agent })
+      const wrap = container.shadowRoot.children.find((c) => c.classList.contains('bm-embed'))
+      const logEl = wrap.children.find((c) => c.classList.contains('bm-log'))
+      const formEl = wrap.children.find((c) => c.tagName === 'FORM')
+      const inputEl = formEl.children.find((c) => c.tagName === 'INPUT')
+
+      inputEl.value = 'hello there'
+
+      const responseReceived = new Promise((resolve) => pod.on('response', resolve))
+      formEl.dispatchEvent({ type: 'submit' })
+      await responseReceived
+
+      const userEntry = logEl.children.find((c) => c.classList.contains('bm-entry-user'))
+      const agentEntry = logEl.children.find((c) => c.classList.contains('bm-entry-agent'))
+      assert.ok(userEntry, 'expected a user entry in the log')
+      assert.equal(userEntry.textContent, 'hello there')
+      assert.ok(agentEntry, 'expected an agent entry in the log')
+      assert.equal(agentEntry.textContent, 'ok')
+
+      // pending "thinking…" entry should have been removed once the response landed
+      const pendingEntry = logEl.children.find((c) => c.classList.contains('bm-entry-pending'))
+      assert.equal(pendingEntry, undefined)
+    } finally {
+      cleanupDoc()
+    }
+  })
+
+  test('submitting the form before setAgent() renders an inline error entry, not an uncaught rejection', async () => {
+    const container = setupContainer('clawser')
+    try {
+      const pod = new EmbeddedPod() // no agent attached
+      const wrap = container.shadowRoot.children.find((c) => c.classList.contains('bm-embed'))
+      const logEl = wrap.children.find((c) => c.classList.contains('bm-log'))
+      const formEl = wrap.children.find((c) => c.tagName === 'FORM')
+      const inputEl = formEl.children.find((c) => c.tagName === 'INPUT')
+
+      inputEl.value = 'hello'
+      formEl.dispatchEvent({ type: 'submit' })
+
+      // Give the rejected sendMessage() promise's .catch() a turn to run.
+      await new Promise((resolve) => setImmediate(resolve))
+
+      const errorEntry = logEl.children.find((c) => c.classList.contains('bm-entry-error'))
+      assert.ok(errorEntry, 'expected an inline error entry')
+      assert.match(errorEntry.textContent, /No agent attached/)
+    } finally {
+      cleanupDoc()
+    }
   })
 })
