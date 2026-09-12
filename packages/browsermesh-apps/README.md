@@ -45,6 +45,8 @@ Extracted from the private `clawser` monorepo (previously `packages/browsermesh-
 | peer-torrent | `TorrentManager` |
 | peer-verification | `VerificationQuorum`, `Attestation` |
 | marketplace-ui | `SkillMarketplace` |
+| mesh-relay-host | `MeshRelayHost` |
+| mesh-relay-backend | `MeshRelayBackend` |
 
 ## GPU compute
 
@@ -181,6 +183,65 @@ reimplemented:
 This reaches the `WebRTCMeshManager` that `createMeshNode()` attaches to the
 returned node as `node.meshManager`, and from there every
 `WebRTCPeerConnection` it creates.
+
+## Sharing a `VirtualNetwork` with specific peers: mesh relay
+
+Real-world scenario: your peer already reaches a real local service (e.g. an
+S3-compatible emulator, via `@johnhenry/browsermesh-netway`'s `GatewayBackend`
+tunneling real TCP through a local `wsh` server) on its own `VirtualNetwork`.
+`MeshRelayHost`/`MeshRelayBackend` let you share *that specific access* with
+specific, authorized mesh peers over the real WebRTC connection you already
+have -- gated per-peer, per-service, per-action, with zero new authorization
+machinery.
+
+On the host side (the peer whose `VirtualNetwork` is being shared), either
+pass `{ enableRelayHost: true, relayHostNetwork }` to `createMeshNode()`:
+
+```js
+import { createMeshNode } from '@johnhenry/browsermesh-apps';
+
+const alice = await createMeshNode({
+  signalingTransport,
+  enableRelayHost: true,
+  relayHostNetwork: aliceNetwork, // alice's own VirtualNetwork
+  relayHostServices: { 's3-local': 'tcp://127.0.0.1:9000' },
+});
+// alice.relayHost.exposeService(name, targetAddress) / .hideService(name)
+// are also available for exposing services after boot.
+```
+
+or construct a `MeshRelayHost` directly against any booted `PeerNode`. Then
+grant specific peers access to specific services via `PeerRegistry`'s
+existing capability API -- no new scope grammar, just
+`mesh-relay:<service>:connect` (wildcards like `mesh-relay:*:connect` work
+too, since `MeshACL`'s scope matching already supports them):
+
+```js
+alice.registry.grantCapabilities(bob.podId, ['mesh-relay:s3-local:connect']);
+// ...later, to cut Bob off:
+alice.registry.revokeCapabilities(bob.podId, ['mesh-relay:s3-local:connect']);
+```
+
+On the client side (the peer being granted access), `MeshRelayBackend` is a
+`browsermesh-netway` `Backend` -- register it on your own `VirtualNetwork`
+under any scheme you like, and connect through the normal API, treating the
+service name as the "host":
+
+```js
+import { MeshRelayBackend } from '@johnhenry/browsermesh-apps';
+import { VirtualNetwork } from '@johnhenry/browsermesh-netway';
+
+const bobNetwork = new VirtualNetwork();
+bobNetwork.addBackend('via-alice', new MeshRelayBackend({ node: bob, relayPeerPubKey: alice.podId }));
+
+const socket = await bobNetwork.connect('via-alice://s3-local'); // refused (ConnectionRefusedError) until granted
+```
+
+TCP-only for now (`listen()`/`bindDatagram()` on `MeshRelayBackend` are the
+inherited `Backend` "not implemented" throws). See
+`examples/06-mesh-relay.mjs` for a full runnable walkthrough (in-process
+simulated mesh connection) and
+`test/real-peer/mesh-relay.test.mjs` for the real-WebRTC, real-TCP proof.
 
 ## License
 
