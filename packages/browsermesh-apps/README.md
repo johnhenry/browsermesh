@@ -77,21 +77,40 @@ binding a hard failure rather than a silent skip -- see that file for the
 full rationale, which mirrors `browsermesh-transport`'s `test:real-peer`
 pattern).
 
-**Headless CI finding**: this tier is wired into CI (see
-`.github/workflows/ci.yml`), but only after installing a software Vulkan
-driver first. On a bare `ubuntu-latest`-equivalent image with no GPU
-hardware, `requestAdapter()` returns `null` -- Dawn's Vulkan backend has no
-ICD to talk to at all (`libvulkan.so.1` isn't installed by default, so
-there's nothing to even attempt a software fallback through). Installing
+**Headless CI finding**: this tier is deliberately **not** wired into CI
+(see `.github/workflows/ci.yml`) -- run it locally/manually via
+`npm run test:real-gpu`. Getting a real adapter/device at all took work: on
+a bare `ubuntu-latest`-equivalent image with no GPU hardware,
+`requestAdapter()` returns `null` -- Dawn's Vulkan backend has no ICD to
+talk to at all (`libvulkan.so.1` isn't installed by default, so there's
+nothing to even attempt a software fallback through). Installing
 `libvulkan1` and `mesa-vulkan-drivers` (Mesa's `llvmpipe`/lavapipe software
-rasterizer) makes a real adapter/device available, and the shader computes
-correct results under it -- verified by running the actual kernel (both the
-weighted and unweighted branches) against a headless Ubuntu 24.04 container
-with no physical or virtual GPU device attached, cross-checked against the
-CPU `aggregate()` path. Without those two packages, this step would
-silently produce a device-less skip on every run, which is exactly why
-`REQUIRE_WEBGPU=1` (set by the CI step) turns that into a hard failure
-instead.
+rasterizer) does make a real adapter/device available headlessly, and the
+shader's actual compute output (both the weighted and unweighted branches)
+was verified correct against it, cross-checked against the CPU
+`aggregate()` path -- confirmed on a local emulated approximation of that
+environment.
+
+But wiring that into an actual CI step and running it against this repo's
+real GitHub-hosted `ubuntu-latest` runner surfaced a second problem the
+local approximation didn't: a deterministic **native crash** inside the
+`webgpu` binding itself, partway through the very first test, right as
+`GPUBuffer.mapAsync()`'s cross-thread completion callback fires:
+
+```
+Fatal glibc error: pthread_mutex_lock.c:94 (___pthread_mutex_lock): assertion failed: mutex->__data.__owner == 0
+```
+
+That's a threading bug in `dawn.node`'s own native code (a pthread mutex
+locked from the wrong owning thread), not in this package's WGSL or JS --
+and it didn't reproduce locally, most likely because the local
+approximation ran the same Ubuntu image under QEMU emulation, which serializes/
+slows execution enough to mask a real-hardware timing race. There is no
+JS-level try/catch that can turn a native process crash into a clean test
+failure, let alone a graceful skip, so this tier cannot be safely made a
+required CI check today. It stays a real, valuable, but local-only/manual
+verification path until either the upstream binding fixes this, or a
+different Node WebGPU binding is adopted.
 
 ## Install
 

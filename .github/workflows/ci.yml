@@ -47,30 +47,24 @@ jobs:
           REQUIRE_REAL_PEER: '1'
         run: npm run test:real-peer
 
-      # Real WebGPU compute (browsermesh-apps' gpu-kernel.mjs), against
-      # Dawn's software (Vulkan/lavapipe) renderer -- there is no physical
-      # GPU on this runner. Verified during development (browsermesh#63):
-      # on a bare ubuntu-latest-equivalent image, requestAdapter() returns
-      # null (no Vulkan ICD present at all); installing libvulkan1 +
-      # mesa-vulkan-drivers (llvmpipe/lavapipe) makes a real adapter/device
-      # available and the shader computes correct results, cross-checked
-      # against the CPU aggregate() path. Without these two packages this
-      # step would silently produce a device-less skip on every run.
-      - name: Install software Vulkan driver for headless WebGPU
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libvulkan1 mesa-vulkan-drivers vulkan-tools
-
-      - name: Report Vulkan driver info (diagnostic)
-        run: vulkaninfo --summary || true
-
-      - name: Run real-WebGPU compute tests
-        # Fail rather than skip if the native binding is missing or no
-        # adapter/device is obtainable -- a skipped suite reports success,
-        # which would make this step decorative. GPU_KERNEL_DEBUG is
-        # temporary diagnostic instrumentation (browsermesh#63) tracing
-        # this repo's own JS/WGSL kernel code around each native WebGPU
-        # call -- not the underlying binding's own logs, which are
-        # unconditional and appear regardless.
-        env:
-          REQUIRE_WEBGPU: '1'
-          GPU_KERNEL_DEBUG: '1'
-        run: npm run test:real-gpu
+      # Real WebGPU compute (browsermesh-apps' gpu-kernel.mjs) is
+      # deliberately NOT wired into this CI job. It was investigated
+      # (browsermesh#63): a software Vulkan renderer (llvmpipe, via
+      # `apt-get install libvulkan1 mesa-vulkan-drivers`) does let Dawn's
+      # `webgpu` binding obtain a real adapter/device headlessly -- adapter
+      # acquisition, device acquisition, and the shader's actual compute
+      # results (cross-checked against the CPU aggregate() path) all
+      # verified working, on both a local emulated approximation of this
+      # runner and briefly on this repo's real GitHub-hosted ubuntu-latest
+      # runner itself. But that same real-runner run also hit a native
+      # crash inside the binding itself, deterministically:
+      #   Fatal glibc error: pthread_mutex_lock.c:94 (___pthread_mutex_lock):
+      #   assertion failed: mutex->__data.__owner == 0
+      # right as `GPUBuffer.mapAsync()`'s cross-thread completion callback
+      # fires -- a threading bug in dawn.node's own native code, not in
+      # this package's WGSL/JS, and not reproducible in a slower/emulated
+      # local approximation (real hardware timing exposes races that
+      # emulation hides). There is no JS-level mitigation for a native
+      # crash like this, so `npm run test:real-gpu` stays a local/manual-
+      # only tier (see packages/browsermesh-apps/README.md) rather than a
+      # CI step that would fail unpredictably on every run.

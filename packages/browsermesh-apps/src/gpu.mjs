@@ -26,10 +26,13 @@
  * and needs no GPU. Coverage of the real shader against actual WebGPU
  * hardware/drivers is gated behind an optional devDependency and lives in
  * `test/gpu-real-webgpu/kernel.test.mjs` (run via `npm run test:real-gpu`).
- * It does run in CI (see `.github/workflows/ci.yml`), against Dawn's
- * software Vulkan renderer rather than a physical GPU -- see that test
- * file and this package's README for what was found making that work
- * headlessly.
+ * It deliberately does NOT run in CI (see `.github/workflows/ci.yml`):
+ * verified correct on real hardware and on a local headless-Linux
+ * approximation, but a real CI run against this repo's actual
+ * GitHub-hosted runner hit a native crash inside the `webgpu` binding
+ * itself (a pthread mutex assertion failure during `mapAsync()`) that no
+ * JS-level handling can turn into a clean skip or failure -- see that test
+ * file and this package's README for the full finding.
  *
  * Run tests:
  *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-mesh-gpu.test.mjs
