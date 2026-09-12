@@ -354,6 +354,70 @@ describe('GradientAggregator', () => {
 })
 
 // ---------------------------------------------------------------------------
+// GradientAggregator.aggregateGPU -- fallback branch (no GPU required)
+//
+// These are the always-on CI tests: they never touch a real GPUDevice, and
+// carry the correctness burden for the fallback path per gpu-real-webgpu's
+// gating rationale (see test/gpu-real-webgpu/kernel.test.mjs). Real-shader
+// coverage is gated separately since it needs actual WebGPU hardware.
+// ---------------------------------------------------------------------------
+
+describe('GradientAggregator.aggregateGPU (fallback branch)', () => {
+  it('falls back to aggregate() when no device is supplied (undefined)', async () => {
+    const agg = new GradientAggregator({ strategy: 'sync_allreduce', parameterCount: 3 })
+    agg.submit('s1', [2, 4, 6])
+    agg.submit('s2', [4, 6, 8])
+    const expected = agg.aggregate() // aggregate() doesn't mutate state
+    const result = await agg.aggregateGPU(undefined)
+    assert.deepEqual(result, expected)
+    assert.deepEqual(result, [3, 5, 7])
+  })
+
+  it('falls back to aggregate() when device is null, for federated_avg too', async () => {
+    const agg = new GradientAggregator({ strategy: 'federated_avg', parameterCount: 2 })
+    agg.submit('s1', [10, 20], 1)
+    agg.submit('s2', [20, 40], 3)
+    const expected = agg.aggregate()
+    const result = await agg.aggregateGPU(null)
+    assert.deepEqual(result, expected)
+    assert.deepEqual(result, [17.5, 35])
+  })
+
+  it('falls back to aggregate() when there are zero submitted gradients, even with a usable device', async () => {
+    const agg = new GradientAggregator({ strategy: 'sync_allreduce', parameterCount: 4 })
+    // A device that would otherwise be perfectly usable -- the zero-entries
+    // check must short-circuit before touching it at all.
+    const fakeDevice = { limits: { maxStorageBufferBindingSize: 1_000_000 } }
+    const expected = agg.aggregate()
+    const result = await agg.aggregateGPU(fakeDevice)
+    assert.deepEqual(result, expected)
+    assert.deepEqual(result, new Array(4).fill(0))
+  })
+
+  it('falls back to aggregate() when the flattened buffer would exceed maxStorageBufferBindingSize', async () => {
+    const agg = new GradientAggregator({ strategy: 'sync_allreduce', parameterCount: 3 })
+    agg.submit('s1', [2, 4, 6])
+    agg.submit('s2', [4, 6, 8])
+    // 2 shards * 3 params * 4 bytes/f32 = 24 bytes -- a deliberately tiny
+    // limit forces the buffer-size fallback branch rather than the
+    // no-device branch.
+    const fakeDevice = { limits: { maxStorageBufferBindingSize: 8 } }
+    const expected = agg.aggregate()
+    const result = await agg.aggregateGPU(fakeDevice)
+    assert.deepEqual(result, expected)
+    assert.deepEqual(result, [3, 5, 7])
+  })
+
+  it('aggregate() itself is unaffected -- still synchronous, same contract', () => {
+    const agg = new GradientAggregator({ strategy: 'sync_allreduce', parameterCount: 3 })
+    agg.submit('s1', [2, 4, 6])
+    agg.submit('s2', [4, 6, 8])
+    const result = agg.aggregate() // no `await`, no Promise
+    assert.deepEqual(result, [3, 5, 7])
+  })
+})
+
+// ---------------------------------------------------------------------------
 // TrainingOrchestrator
 // ---------------------------------------------------------------------------
 
@@ -418,7 +482,7 @@ describe('TrainingOrchestrator', () => {
     assert.throws(() => orchestrator.startJob(spec), /No capable peers/)
   })
 
-  it('handleGradientPush aggregates correctly', () => {
+  it('handleGradientPush aggregates correctly', async () => {
     const cap = new GpuCapability({ podId: 'p1', hasWebGPU: true })
     orchestrator.registerPeer('p1', cap)
 
@@ -434,11 +498,32 @@ describe('TrainingOrchestrator', () => {
     const assign = sent.find(s => s.msg.type === GPU_SHARD_ASSIGN)
     const shardId = assign.msg.shard.shardId
 
-    orchestrator.handleGradientPush('p1', shardId, [0.5, 1.0])
+    await orchestrator.handleGradientPush('p1', shardId, [0.5, 1.0])
 
     const status = orchestrator.getJobStatus('j-grad')
     assert.equal(status.completedShards, 1)
     assert.equal(status.aggregated, true)
+    // Single shard, sync_allreduce (default strategy) -- the "average" of
+    // one value is itself. This is the real completeness fix: aggregate()
+    // is now actually invoked and its result actually stored/exposed.
+    assert.deepEqual(status.result, [0.5, 1.0])
+    assert.deepEqual(orchestrator.getJobResult('j-grad'), [0.5, 1.0])
+  })
+
+  it('getJobResult returns null before aggregation and for unknown jobs', () => {
+    assert.equal(orchestrator.getJobResult('nonexistent'), null)
+
+    const cap = new GpuCapability({ podId: 'p1', hasWebGPU: true })
+    orchestrator.registerPeer('p1', cap)
+    const spec = new TrainingSpec({
+      jobId: 'j-noresult',
+      modelConfig: { dataSize: 100 },
+      datasetRef: 'ds',
+      shardCount: 2,
+    })
+    orchestrator.startJob(spec)
+    // No shard has reported yet -- not aggregated yet.
+    assert.equal(orchestrator.getJobResult('j-noresult'), null)
   })
 
   it('getJobStatus returns correct status', () => {
@@ -500,15 +585,40 @@ describe('TrainingOrchestrator', () => {
     assert.equal(sent[2].targetId, 'p3')
   })
 
-  it('handleMessage dispatches correctly', () => {
+  it('handleMessage dispatches correctly', async () => {
     // Set up local capability so handleMessage can respond to probes
     const localCap = new GpuCapability({ podId: 'local', hasWebGPU: true })
     const orch = new TrainingOrchestrator({ sendFn, localCapability: localCap })
 
-    orch.handleMessage('remote-1', { type: GPU_PROBE })
+    await orch.handleMessage('remote-1', { type: GPU_PROBE })
     const probeResponses = sent.filter(s => s.msg.type === GPU_PROBE && s.msg.response === true)
     assert.equal(probeResponses.length, 1)
     assert.equal(probeResponses[0].targetId, 'remote-1')
+  })
+
+  it('handleMessage GPU_GRADIENT_PUSH awaits aggregation and stores the result', async () => {
+    const cap = new GpuCapability({ podId: 'p1', hasWebGPU: true })
+    orchestrator.registerPeer('p1', cap)
+
+    const spec = new TrainingSpec({
+      jobId: 'j-msg-grad',
+      modelConfig: { parameterCount: 3, dataSize: 100 },
+      datasetRef: 'ds',
+      shardCount: 1,
+    })
+    orchestrator.startJob(spec)
+    const assign = sent.find(s => s.msg.type === GPU_SHARD_ASSIGN)
+    const shardId = assign.msg.shard.shardId
+
+    await orchestrator.handleMessage('p1', {
+      type: GPU_GRADIENT_PUSH,
+      shardId,
+      gradients: [1, 2, 3],
+    })
+
+    // If handleMessage did not actually await handleGradientPush, the
+    // result would not be visible immediately after the call resolves.
+    assert.deepEqual(orchestrator.getJobResult('j-msg-grad'), [1, 2, 3])
   })
 
   it('handleProbeResponse registers peer', () => {
