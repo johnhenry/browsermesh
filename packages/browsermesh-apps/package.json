@@ -39,11 +39,13 @@
   },
   "devDependencies": {
     "node-datachannel": "^0.33.2",
-    "fake-indexeddb": "^6.2.5"
+    "fake-indexeddb": "^6.2.5",
+    "webgpu": "^0.6.1"
   },
   "scripts": {
     "test": "node --import ./test/_setup-globals.mjs --test test/*.test.mjs",
-    "test:real-peer": "node --import ./test/_setup-globals.mjs --test --test-concurrency=1 test/real-peer/*.test.mjs"
+    "test:real-peer": "node --import ./test/_setup-globals.mjs --test --test-concurrency=1 test/real-peer/*.test.mjs",
+    "test:real-gpu": "node --import ./test/_setup-globals.mjs --test test/gpu-real-webgpu/*.test.mjs"
   },
   "homepage": "https://opensource.johnhenry.me/browsermesh/",
   "engines": {

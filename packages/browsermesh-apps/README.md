@@ -46,6 +46,53 @@ Extracted from the private `clawser` monorepo (previously `packages/browsermesh-
 | peer-verification | `VerificationQuorum`, `Attestation` |
 | marketplace-ui | `SkillMarketplace` |
 
+## GPU compute
+
+`GradientAggregator.aggregateGPU(device)` runs a real WGSL compute shader
+(`src/gpu-kernel.mjs`) to aggregate submitted gradients when given a usable
+`GPUDevice` -- one thread per output parameter index, covering both
+`aggregate()`'s aggregation strategies (weighted `federated_avg`, unweighted
+`sync_allreduce`/`async_parameter_server`) via a uniform flag. The compiled
+shader module/pipeline is cached per-device.
+
+It is entirely optional and degrades safely: called with no device, or a
+device whose `limits.maxStorageBufferBindingSize` is too small for the
+flattened gradient buffer, it falls back to the existing synchronous
+`aggregate()` CPU implementation (wrapped in a resolved Promise). That
+fallback is exercised unconditionally in `test/gpu.test.mjs` and needs no
+GPU -- it is what keeps this package's normal `npm test` green everywhere,
+including CI.
+
+`TrainingOrchestrator` accepts an optional `{ gpuDevice }` constructor
+option; when supplied, `handleGradientPush()` uses it once a job's
+aggregator has every shard's gradient, and stores the result on the job
+record (retrievable via `getJobResult(jobId)`, and included in
+`getJobStatus()`'s return).
+
+Coverage against a *real* WebGPU implementation (not just the fallback
+branch) lives in `test/gpu-real-webgpu/kernel.test.mjs`, gated behind the
+optional `webgpu` devDependency, run via `npm run test:real-gpu`
+(`REQUIRE_WEBGPU=1 npm run test:real-gpu` to make an absent/non-functional
+binding a hard failure rather than a silent skip -- see that file for the
+full rationale, which mirrors `browsermesh-transport`'s `test:real-peer`
+pattern).
+
+**Headless CI finding**: this tier is wired into CI (see
+`.github/workflows/ci.yml`), but only after installing a software Vulkan
+driver first. On a bare `ubuntu-latest`-equivalent image with no GPU
+hardware, `requestAdapter()` returns `null` -- Dawn's Vulkan backend has no
+ICD to talk to at all (`libvulkan.so.1` isn't installed by default, so
+there's nothing to even attempt a software fallback through). Installing
+`libvulkan1` and `mesa-vulkan-drivers` (Mesa's `llvmpipe`/lavapipe software
+rasterizer) makes a real adapter/device available, and the shader computes
+correct results under it -- verified by running the actual kernel (both the
+weighted and unweighted branches) against a headless Ubuntu 24.04 container
+with no physical or virtual GPU device attached, cross-checked against the
+CPU `aggregate()` path. Without those two packages, this step would
+silently produce a device-less skip on every run, which is exactly why
+`REQUIRE_WEBGPU=1` (set by the CI step) turns that into a hard failure
+instead.
+
 ## Install
 
 ```bash

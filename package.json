@@ -10,6 +10,7 @@
   "scripts": {
     "test": "turbo run test --concurrency=4",
     "test:real-peer": "npm run test:real-peer --workspace=@johnhenry/browsermesh-transport && npm run test:real-peer --workspace=@johnhenry/browsermesh-apps",
+    "test:real-gpu": "npm run test:real-gpu --workspace=@johnhenry/browsermesh-apps",
     "changeset": "changeset",
     "version-packages": "changeset version",
     "release": "changeset publish",
@@ -35,5 +36,8 @@
     "type": "git",
     "url": "https://github.com/johnhenry/browsermesh"
   },
-  "homepage": "https://opensource.johnhenry.me/browsermesh/"
+  "homepage": "https://opensource.johnhenry.me/browsermesh/",
+  "allowScripts": {
+    "webgpu@0.6.1": true
+  }
 }

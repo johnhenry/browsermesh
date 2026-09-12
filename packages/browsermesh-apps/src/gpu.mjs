@@ -12,11 +12,31 @@
  *
  * No browser-only imports at module level.
  *
+ * ## GPU compute: real, optional, and safe to omit
+ *
+ * `GradientAggregator.aggregateGPU(device)` (see below) dispatches a real
+ * WGSL compute shader (`./gpu-kernel.mjs`) when given a usable `GPUDevice`.
+ * It is entirely optional: pass no device (or a device whose storage-buffer
+ * limits are too small for the flattened gradient buffer) and it falls back
+ * to the existing synchronous `aggregate()` CPU path, wrapped in a resolved
+ * Promise. Nothing in this package requires WebGPU to be present -- the
+ * fallback is a first-class, always-tested code path, not a stub.
+ *
+ * Always-on coverage of the fallback branch lives in `test/gpu.test.mjs`
+ * and needs no GPU. Coverage of the real shader against actual WebGPU
+ * hardware/drivers is gated behind an optional devDependency and lives in
+ * `test/gpu-real-webgpu/kernel.test.mjs` (run via `npm run test:real-gpu`).
+ * It does run in CI (see `.github/workflows/ci.yml`), against Dawn's
+ * software Vulkan renderer rather than a physical GPU -- see that test
+ * file and this package's README for what was found making that work
+ * headlessly.
+ *
  * Run tests:
  *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-mesh-gpu.test.mjs
  */
 
 import { MESH_TYPE } from '@johnhenry/browsermesh-primitives'
+import { runAggregateKernel } from './gpu-kernel.mjs'
 
 // ---------------------------------------------------------------------------
 // Wire Constants — imported from canonical registry
@@ -422,6 +442,46 @@ export class GradientAggregator {
   }
 
   /**
+   * Aggregate submitted gradients on the GPU when possible, falling back to
+   * the synchronous `aggregate()` CPU path otherwise. The fallback covers:
+   *   - no `device` supplied (falsy),
+   *   - zero submitted gradients,
+   *   - a flattened gradient buffer (`shards * vectorLength * 4` bytes)
+   *     that would exceed `device.limits.maxStorageBufferBindingSize`.
+   * In every fallback case this calls the real, unmodified `aggregate()`
+   * and wraps its result in a resolved Promise -- the fallback is a real
+   * code path (tested in test/gpu.test.mjs), not a placeholder.
+   * @param {object} [device] GPUDevice
+   * @returns {Promise<number[]>} Aggregated gradient vector
+   */
+  async aggregateGPU(device) {
+    const entries = [...this.#gradients.entries()]
+    if (!device || entries.length === 0) {
+      return this.aggregate()
+    }
+
+    const vectorLength = entries[0][1].length
+    const numShards = entries.length
+    const bufferBytes = numShards * vectorLength * 4
+    const maxBufferBytes = device.limits?.maxStorageBufferBindingSize
+    if (typeof maxBufferBytes === 'number' && bufferBytes > maxBufferBytes) {
+      return this.aggregate()
+    }
+
+    const useWeights = this.strategy === 'federated_avg'
+    const gradients = new Array(numShards * vectorLength)
+    const weights = new Array(numShards)
+    entries.forEach(([shardId, grads], shardIndex) => {
+      weights[shardIndex] = this.#weights.get(shardId) || 1
+      for (let i = 0; i < vectorLength; i++) {
+        gradients[shardIndex * vectorLength + i] = grads[i]
+      }
+    })
+
+    return runAggregateKernel(device, { gradients, weights, useWeights })
+  }
+
+  /**
    * Clear all stored gradients and weights.
    */
   reset() {
@@ -453,17 +513,25 @@ export class TrainingOrchestrator {
   /** @type {Map<string, GpuCapability>} podId → capability */
   #peerCapabilities = new Map()
 
+  /** @type {object|null} GPUDevice, used by handleGradientPush's aggregateGPU() call */
+  #gpuDevice
+
   /**
    * @param {object} opts
    * @param {Function} opts.sendFn         Send function: (targetId, msg) => {}
    * @param {GpuCapability} [opts.localCapability] Local GPU capability
+   * @param {object} [opts.gpuDevice]       Optional GPUDevice. When supplied,
+   *   `handleGradientPush()` aggregates on the GPU via
+   *   `GradientAggregator.aggregateGPU()`; when omitted, aggregation runs on
+   *   the CPU (aggregateGPU()'s own no-device fallback).
    */
-  constructor({ sendFn, localCapability }) {
+  constructor({ sendFn, localCapability, gpuDevice }) {
     if (typeof sendFn !== 'function') {
       throw new Error('sendFn is required and must be a function')
     }
     this.#sendFn = sendFn
     this.#localCapability = localCapability || null
+    this.#gpuDevice = gpuDevice || null
   }
 
   /**
@@ -523,6 +591,7 @@ export class TrainingOrchestrator {
       shards: shardMap,
       aggregator,
       status: 'running',
+      result: null,
     })
 
     // Send shard assignments to peers
@@ -583,12 +652,17 @@ export class TrainingOrchestrator {
   }
 
   /**
-   * Handle a gradient push from a shard peer.
+   * Handle a gradient push from a shard peer. Once the job's aggregator has
+   * received a gradient from every shard, actually runs aggregation
+   * (GPU-accelerated when a `gpuDevice` was supplied to the constructor,
+   * otherwise the CPU path via `aggregateGPU()`'s own fallback) and stores
+   * the result on the job record, retrievable via `getJobResult()`.
    * @param {string} fromId
    * @param {string} shardId
    * @param {number[]} gradients
+   * @returns {Promise<void>}
    */
-  handleGradientPush(fromId, shardId, gradients) {
+  async handleGradientPush(fromId, shardId, gradients) {
     // Find the job that contains this shard
     for (const [jobId, job] of this.#jobs) {
       if (job.shards.has(shardId)) {
@@ -597,6 +671,7 @@ export class TrainingOrchestrator {
         job.aggregator.submit(shardId, gradients)
 
         if (job.aggregator.isReady(job.shards.size)) {
+          job.result = await job.aggregator.aggregateGPU(this.#gpuDevice)
           job.status = 'aggregated'
         }
         return
@@ -646,7 +721,7 @@ export class TrainingOrchestrator {
   getJobStatus(jobId) {
     const job = this.#jobs.get(jobId)
     if (!job) {
-      return { jobId, status: 'not_found', shardCount: 0, completedShards: 0, aggregated: false }
+      return { jobId, status: 'not_found', shardCount: 0, completedShards: 0, aggregated: false, result: null }
     }
 
     let completedShards = 0
@@ -660,7 +735,19 @@ export class TrainingOrchestrator {
       shardCount: job.shards.size,
       completedShards,
       aggregated: job.status === 'aggregated',
+      result: job.result ?? null,
     }
+  }
+
+  /**
+   * Get the aggregated result for a job, or `null` if the job doesn't
+   * exist yet or hasn't finished aggregating.
+   * @param {string} jobId
+   * @returns {number[]|null}
+   */
+  getJobResult(jobId) {
+    const job = this.#jobs.get(jobId)
+    return job ? (job.result ?? null) : null
   }
 
   /**
@@ -699,11 +786,15 @@ export class TrainingOrchestrator {
   }
 
   /**
-   * Main message handler — dispatches based on msg.type.
+   * Main message handler — dispatches based on msg.type. Async because the
+   * GPU_GRADIENT_PUSH branch awaits `handleGradientPush()` (which itself
+   * awaits GPU/CPU aggregation once a job's shards are all in) — callers
+   * must `await` this rather than fire-and-forget it.
    * @param {string} fromId
    * @param {object} msg
+   * @returns {Promise<void>}
    */
-  handleMessage(fromId, msg) {
+  async handleMessage(fromId, msg) {
     switch (msg.type) {
       case GPU_PROBE:
         // Respond with local capability
@@ -721,7 +812,7 @@ export class TrainingOrchestrator {
         break
 
       case GPU_GRADIENT_PUSH:
-        this.handleGradientPush(fromId, msg.shardId, msg.gradients)
+        await this.handleGradientPush(fromId, msg.shardId, msg.gradients)
         break
 
       case GPU_TRAIN_CONTROL:

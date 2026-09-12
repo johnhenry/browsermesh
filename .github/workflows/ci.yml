@@ -46,3 +46,23 @@ jobs:
         env:
           REQUIRE_REAL_PEER: '1'
         run: npm run test:real-peer
+
+      # Real WebGPU compute (browsermesh-apps' gpu-kernel.mjs), against
+      # Dawn's software (Vulkan/lavapipe) renderer -- there is no physical
+      # GPU on this runner. Verified during development (browsermesh#63):
+      # on a bare ubuntu-latest-equivalent image, requestAdapter() returns
+      # null (no Vulkan ICD present at all); installing libvulkan1 +
+      # mesa-vulkan-drivers (llvmpipe/lavapipe) makes a real adapter/device
+      # available and the shader computes correct results, cross-checked
+      # against the CPU aggregate() path. Without these two packages this
+      # step would silently produce a device-less skip on every run.
+      - name: Install software Vulkan driver for headless WebGPU
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libvulkan1 mesa-vulkan-drivers
+
+      - name: Run real-WebGPU compute tests
+        # Fail rather than skip if the native binding is missing or no
+        # adapter/device is obtainable -- a skipped suite reports success,
+        # which would make this step decorative.
+        env:
+          REQUIRE_WEBGPU: '1'
+        run: npm run test:real-gpu
