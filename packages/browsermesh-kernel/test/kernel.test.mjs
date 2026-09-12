@@ -169,4 +169,107 @@ describe('Kernel', () => {
       kernel.close();
     });
   });
+
+  describe('meshFor (tenant-scoped mesh capability)', () => {
+    // Duck-typed stand-in for a real `PeerNode` + `PeerRegistry` pair (see
+    // browsermesh-apps/src/peer-node.mjs, peer-registry.mjs). The kernel package has
+    // zero dependency on browsermesh-apps, so its own tests exercise the interface
+    // contract with a minimal mock rather than a real PeerNode — the real-peer proof
+    // lives in browsermesh-apps/test/real-peer/kernel-mesh.test.mjs.
+    function createMockMeshProvider() {
+      const dataListeners = new Set();
+      const sent = [];
+      const grants = new Map(); // peerId -> Set<'mesh:send'|'mesh:receive'>
+      return {
+        sent,
+        grant(peerId, scopes) { grants.set(peerId, new Set(scopes)); },
+        sendTo(peerId, data) { sent.push({ peerId, data }); return Promise.resolve(); },
+        onIncomingData(cb) {
+          dataListeners.add(cb);
+          return () => dataListeners.delete(cb);
+        },
+        deliver(peerId, data, meta = { sessionId: 's1', transport: 'webrtc' }) {
+          for (const cb of [...dataListeners]) cb(peerId, data, meta);
+        },
+        registry: {
+          checkAccess(peerId, resource, action) {
+            const scopes = grants.get(peerId);
+            const allowed = !!scopes && scopes.has(`${resource}:${action}`);
+            return allowed ? { allowed: true } : { allowed: false, reason: 'scope_denied' };
+          },
+        },
+      };
+    }
+
+    it('returns null when no mesh provider was injected into the kernel', () => {
+      const kernel = new Kernel();
+      const tenant = kernel.createTenant({ capabilities: [] });
+      assert.equal(kernel.meshFor(tenant.id), null);
+      kernel.close();
+    });
+
+    it('kernel.mesh (ambient) exposes the raw injected provider', () => {
+      const mesh = createMockMeshProvider();
+      const kernel = new Kernel({ mesh });
+      assert.equal(kernel.mesh, mesh);
+      kernel.close();
+    });
+
+    it('send() calls provider.sendTo() when registry.checkAccess() allows it', async () => {
+      const mesh = createMockMeshProvider();
+      mesh.grant('peer-a', ['mesh:send']);
+      const kernel = new Kernel({ mesh });
+      const tenant = kernel.createTenant({ capabilities: [] });
+
+      const view = kernel.meshFor(tenant.id);
+      await view.send('peer-a', { hello: 'world' });
+      assert.deepEqual(mesh.sent, [{ peerId: 'peer-a', data: { hello: 'world' } }]);
+
+      kernel.close();
+    });
+
+    it('send() throws MeshAccessDeniedError, and never calls provider.sendTo(), when registry.checkAccess() denies it', async () => {
+      const mesh = createMockMeshProvider(); // 'peer-b' was never granted anything
+      const kernel = new Kernel({ mesh });
+      const tenant = kernel.createTenant({ capabilities: [] });
+
+      const view = kernel.meshFor(tenant.id);
+      await assert.rejects(() => view.send('peer-b', 'data'), { name: 'MeshAccessDeniedError' });
+      assert.deepEqual(mesh.sent, [], 'sendTo must not have been called');
+
+      kernel.close();
+    });
+
+    it('onReceive() only delivers data from peers registry.checkAccess() allows for the receive action', () => {
+      const mesh = createMockMeshProvider();
+      mesh.grant('peer-a', ['mesh:receive']);
+      const kernel = new Kernel({ mesh });
+      const tenant = kernel.createTenant({ capabilities: [] });
+
+      const view = kernel.meshFor(tenant.id);
+      const received = [];
+      view.onReceive((peerId, data) => received.push({ peerId, data }));
+
+      mesh.deliver('peer-a', 'allowed'); // granted
+      mesh.deliver('peer-b', 'denied'); // never granted
+
+      assert.deepEqual(received, [{ peerId: 'peer-a', data: 'allowed' }]);
+
+      kernel.close();
+    });
+
+    it('mesh view exposes only send/onReceive, not the full underlying provider API', () => {
+      const mesh = createMockMeshProvider();
+      const kernel = new Kernel({ mesh });
+      const tenant = kernel.createTenant({ capabilities: [] });
+
+      const view = kernel.meshFor(tenant.id);
+      assert.deepEqual(Object.keys(view).sort(), ['onReceive', 'send']);
+      assert.equal(view.registry, undefined);
+      assert.equal(view.deliver, undefined);
+      assert.ok(Object.isFrozen(view));
+
+      kernel.close();
+    });
+  });
 });

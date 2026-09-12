@@ -73,6 +73,7 @@ export const KERNEL_CAP = Object.freeze({
  * @property {string} ENOTFOUND - Named resource not found.
  * @property {string} ESIGNAL - Operation interrupted by signal.
  * @property {string} EOWNERSHIP - Resource handle exists but is owned by a different tenant.
+ * @property {string} EMESHDENIED - Mesh send/receive denied by PeerRegistry.checkAccess().
  */
 export const KERNEL_ERROR = Object.freeze({
   ENOHANDLE: 'ENOHANDLE',
@@ -84,4 +85,5 @@ export const KERNEL_ERROR = Object.freeze({
   ENOTFOUND: 'ENOTFOUND',
   ESIGNAL: 'ESIGNAL',
   EOWNERSHIP: 'EOWNERSHIP',
+  EMESHDENIED: 'EMESHDENIED',
 });

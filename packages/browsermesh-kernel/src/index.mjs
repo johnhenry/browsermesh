@@ -41,6 +41,7 @@ export {
   KernelError, HandleNotFoundError, HandleTypeMismatchError,
   TableFullError, StreamClosedError, CapabilityDeniedError,
   AlreadyRegisteredError, NotFoundError, ResourceOwnershipError,
+  MeshAccessDeniedError,
 } from './errors.mjs';
 
 // Resource management

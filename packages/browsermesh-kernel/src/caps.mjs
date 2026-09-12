@@ -17,9 +17,14 @@ import { CapabilityDeniedError } from './errors.mjs';
  *
  * @param {Object} kernel - Kernel instance with subsystem accessors.
  * @param {string[]} grantedCaps - Array of KERNEL_CAP tags to grant.
+ * @param {string} [tenantId] - Tenant identifier, threaded through to
+ *   {@link Kernel#meshFor} (if present on `kernel`) so a granted MESH
+ *   capability resolves to a tenant-scoped mesh view rather than ambient
+ *   access. Safe to omit for callers/mocks that don't wire mesh support --
+ *   `caps.mesh` then falls back to the pre-Phase-4 bare boolean marker.
  * @returns {Readonly<Object>} Frozen capabilities object.
  */
-export function buildCaps(kernel, grantedCaps) {
+export function buildCaps(kernel, grantedCaps, tenantId) {
   const caps = {};
   const granted = new Set(grantedCaps);
   const hasAll = granted.has(KERNEL_CAP.ALL);
@@ -55,7 +60,16 @@ export function buildCaps(kernel, grantedCaps) {
     caps.signal = true; // Signal access marker
   }
   if (hasAll || granted.has(KERNEL_CAP.MESH)) {
-    caps.mesh = true; // Mesh networking access marker
+    // When the kernel was constructed with a real mesh provider (see
+    // Kernel's `mesh` constructor option / `meshFor()`), hand the tenant a
+    // scoped send/receive view instead of a bare marker -- restricted to
+    // send/receive, and gated per-peer by the injected PeerRegistry's
+    // checkAccess(), not the raw PeerNode API. Falls back to the historical
+    // bare boolean marker when no mesh provider is wired (e.g. plain
+    // `new Kernel()`, or a duck-typed mock kernel in tests), so existing
+    // callers that only check truthiness are unaffected.
+    const meshView = typeof kernel.meshFor === 'function' ? kernel.meshFor(tenantId) : null;
+    caps.mesh = meshView || true;
   }
   if (hasAll || granted.has(KERNEL_CAP.PAYMENT)) {
     caps.payment = true; // Payment channel access marker

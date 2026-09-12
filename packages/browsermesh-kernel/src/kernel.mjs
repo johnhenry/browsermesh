@@ -19,6 +19,7 @@ import { SignalController } from './signal.mjs';
 import { Environment } from './env.mjs';
 import { Stdio } from './stdio.mjs';
 import { buildCaps } from './caps.mjs';
+import { MeshAccessDeniedError } from './errors.mjs';
 
 /**
  * The Kernel facade. Creates and wires all subsystems.
@@ -32,6 +33,7 @@ export class Kernel {
   #chaos;
   #services;
   #signals;
+  #mesh;
   #tenants = new Map();
   #tenantCounter = 0;
   #startTime;
@@ -43,8 +45,19 @@ export class Kernel {
    * @param {Object} [opts.tracerOpts] - Options for Tracer constructor.
    * @param {Object} [opts.loggerOpts] - Options for Logger constructor.
    * @param {Object} [opts.resourceOpts] - Options for ResourceTable constructor.
+   * @param {Object} [opts.mesh] - Optional real mesh provider backing the MESH
+   *   capability. The kernel has zero dependency on any `@johnhenry/browsermesh-*`
+   *   package (including `browsermesh-apps`) -- this is deliberately a
+   *   duck-typed interface, not an imported class, so callers must pass an
+   *   object shaped like:
+   *   `{ sendTo(peerId, data): Promise<void>, onIncomingData(cb): () => void,
+   *      registry: { checkAccess(peerId, resource, action): {allowed, reason?} } }`.
+   *   `browsermesh-apps`'s `PeerNode` already satisfies this shape as-is (see
+   *   `browsermesh-apps/src/kernel-mesh.mjs`, the composition helper that
+   *   wires a real `PeerNode` in). Omit to leave the MESH capability as the
+   *   pre-Phase-4 bare boolean marker.
    */
-  constructor({ clock, rng, tracerOpts, loggerOpts, resourceOpts } = {}) {
+  constructor({ clock, rng, tracerOpts, loggerOpts, resourceOpts, mesh } = {}) {
     this.#clock = clock || new Clock();
     this.#rng = rng || new RNG();
     this.#resources = new ResourceTable(resourceOpts);
@@ -53,6 +66,7 @@ export class Kernel {
     this.#chaos = new ChaosEngine({ rng: this.#rng, clock: this.#clock });
     this.#services = new ServiceRegistry();
     this.#signals = new SignalController();
+    this.#mesh = mesh || null;
     this.#startTime = this.#clock.nowWall();
   }
 
@@ -87,6 +101,59 @@ export class Kernel {
       getTyped: (handle, type) => this.#resources.getTyped(handle, type, tenantId),
       drop: (handle) => this.#resources.drop(handle, tenantId),
     };
+  }
+
+  /**
+   * The raw injected mesh provider, or `null` if none was supplied to the constructor.
+   *
+   * This is ambient, trusted access -- like {@link Kernel#resources}, it does NOT
+   * gate send/receive by peer access. It exists for kernel-internal use and trusted
+   * composition code. Tenant-facing code should use {@link Kernel#meshFor} instead,
+   * which scopes access to send/receive only and enforces the provider's
+   * `registry.checkAccess()` on every call.
+   */
+  get mesh() { return this.#mesh; }
+
+  /**
+   * Get a tenant-scoped view of the mesh capability, bound to `tenantId`.
+   *
+   * Returns `null` if no mesh provider was injected via the constructor (the MESH
+   * capability then falls back to a bare boolean marker in {@link buildCaps}). When a
+   * provider IS present, the returned view exposes exactly two operations -- `send`
+   * and `onReceive` -- deliberately not the full `PeerNode` API (no `connectToPeer`,
+   * `addPeer`, `removePeer`, `discover`, etc.): a tenant's mesh capability lets it use
+   * an already-connected mesh session, not administer one. Every `send`/`onReceive`
+   * delivery is checked against the provider's `registry.checkAccess(peerId, 'mesh',
+   * 'send'|'receive')`, so a tenant can only reach peers the injected `PeerRegistry`
+   * has actually authorized (e.g. via `registry.grantCapabilities(peerId,
+   * ['mesh:send', 'mesh:receive'])`) -- not every peer the underlying PeerNode
+   * happens to be connected to.
+   *
+   * @param {string} tenantId - Tenant identifier to scope access to (used for error
+   *   attribution in {@link MeshAccessDeniedError}; enforcement itself is per-peer).
+   * @returns {{ send: (peerId: string, data: *) => Promise<void>, onReceive: (cb: Function) => (() => void) } | null}
+   */
+  meshFor(tenantId) {
+    if (!this.#mesh) return null;
+    const provider = this.#mesh;
+    return Object.freeze({
+      send: async (peerId, data) => {
+        const access = provider.registry.checkAccess(peerId, 'mesh', 'send');
+        if (!access || !access.allowed) {
+          throw new MeshAccessDeniedError(tenantId, peerId, 'send', access && access.reason);
+        }
+        return provider.sendTo(peerId, data);
+      },
+      onReceive: (cb) => {
+        if (typeof cb !== 'function') {
+          throw new TypeError('meshFor().onReceive: callback must be a function');
+        }
+        return provider.onIncomingData((peerId, data, meta) => {
+          const access = provider.registry.checkAccess(peerId, 'mesh', 'receive');
+          if (access && access.allowed) cb(peerId, data, meta);
+        });
+      },
+    });
   }
 
   /** The kernel clock. */
@@ -130,7 +197,7 @@ export class Kernel {
    */
   createTenant({ capabilities = [], env = {}, stdio } = {}) {
     const id = `tenant_${++this.#tenantCounter}`;
-    const caps = buildCaps(this, capabilities);
+    const caps = buildCaps(this, capabilities, id);
     const tenantEnv = new Environment(env);
     const tenantStdio = new Stdio(stdio || {});
     const tenantSignals = new SignalController();
