@@ -28,17 +28,25 @@ Fixed upstream in libdatachannel v0.24.5 (`paullouisageneau/libdatachannel#1584`
 `node-datachannel` still pins `GIT_TAG "v0.24.3"`, the last release without it,
 so we inherit the bug. `murat-dogan/node-datachannel#444` bumps the pin.
 
-**Revert condition.** When `node-datachannel` ships a release built against
-libdatachannel >= v0.24.5:
+**Reverted on 2026-09-12 — the condition was met.** `node-datachannel` 0.33.4 is
+the first release whose CMakeLists carries `GIT_TAG "v0.24.5"` AND whose nine
+platform packages are all published at 0.33.4. Both halves were needed:
+0.33.3 bumped the source pin while still depending on the 0.33.2 prebuilt
+binaries (`murat-dogan/node-datachannel#445`), so the fix did not reach the
+addon that loads.
 
-1. Bump `node-datachannel` in `packages/browsermesh-transport/package.json`.
-2. Delete both retries and their comments.
-3. Re-run `npm run test:real-peer` at least 24 times and confirm 0 failures.
-   Check *durations*, not just exit codes: before the retries the
-   malformed-candidate test failed 3/24 on a 15s timeout; with them it passes
-   in 277ms normally and 5.5s when the retry fires. A green run alone does not
-   distinguish "fixed" from "got lucky".
-4. Close #26.
+Verified by content rather than by version number, and by what actually loads
+rather than by what the install printed: the addon in `require.cache` resolves
+to `@node-datachannel/darwin-arm64@0.33.4`.
+
+Both retries are deleted. Measured after deleting them, 30 serialised runs on
+an idle machine: **0/30 runs failed, 330/330 tests passed**, and the
+malformed-candidate test ran in **273.5-279.2 ms** — a 5.7 ms spread across
+thirty runs. That tightness is the evidence, not the green: the retry-fired
+signature is ~5.5 s and the unfixed-without-retry signature is a 15 s timeout,
+and neither appears anywhere in the distribution. A surviving flake would be
+bimodal. If the old 3/24 per-run rate still held, thirty clean runs had a 1.8%
+chance of happening.
 
 **Do not try to pin `node-datachannel` to a source build.** This was tried and
 it silently does nothing. The package ships prebuilt per-platform addons and has
