@@ -57,12 +57,20 @@ jobs:
       # against the CPU aggregate() path. Without these two packages this
       # step would silently produce a device-less skip on every run.
       - name: Install software Vulkan driver for headless WebGPU
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libvulkan1 mesa-vulkan-drivers
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libvulkan1 mesa-vulkan-drivers vulkan-tools
+
+      - name: Report Vulkan driver info (diagnostic)
+        run: vulkaninfo --summary || true
 
       - name: Run real-WebGPU compute tests
         # Fail rather than skip if the native binding is missing or no
         # adapter/device is obtainable -- a skipped suite reports success,
-        # which would make this step decorative.
+        # which would make this step decorative. GPU_KERNEL_DEBUG is
+        # temporary diagnostic instrumentation (browsermesh#63) tracing
+        # this repo's own JS/WGSL kernel code around each native WebGPU
+        # call -- not the underlying binding's own logs, which are
+        # unconditional and appear regardless.
         env:
           REQUIRE_WEBGPU: '1'
+          GPU_KERNEL_DEBUG: '1'
         run: npm run test:real-gpu

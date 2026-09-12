@@ -57,13 +57,28 @@ if (!webgpu) {
 
 const describeIfReal = webgpu ? describe : describe.skip
 
+// Temporary diagnostic instrumentation (browsermesh#63): a real CI run
+// against a headless software-Vulkan device failed with no JS-catchable
+// error and no TAP subtest output at all (0 suites reported) -- consistent
+// with the native Dawn/Vulkan process dying outright rather than a normal
+// JS throw. These markers are flushed to stderr immediately around each
+// native call, gated behind GPU_KERNEL_DEBUG, so a silent process death
+// still leaves a trail of exactly how far it got.
+const debug = process.env.GPU_KERNEL_DEBUG
+  ? (stage) => { console.error(`[kernel.test] ${stage}`) }
+  : () => {}
+
 describeIfReal('GPU kernel against real WebGPU', () => {
   /** @type {any} */ let device = null
 
   before(async () => {
+    debug('before: Object.assign(globalThis, webgpu.globals)')
     Object.assign(globalThis, webgpu.globals)
+    debug('before: webgpu.create([])')
     const gpu = webgpu.create([])
+    debug('before: gpu.requestAdapter(): start')
     const adapter = await gpu.requestAdapter()
+    debug(`before: gpu.requestAdapter(): done, adapter=${adapter ? 'obtained' : 'null'}`)
 
     if (!adapter) {
       if (process.env.REQUIRE_WEBGPU) {
@@ -78,14 +93,19 @@ describeIfReal('GPU kernel against real WebGPU', () => {
       return
     }
 
+    debug('before: adapter.requestDevice(): start')
     device = await adapter.requestDevice()
+    debug(`before: adapter.requestDevice(): done, device=${device ? 'obtained' : 'null'}`)
   })
 
   after(() => {
+    debug('after: device?.destroy()')
     device?.destroy?.()
+    debug('after: done')
   })
 
   it('matches aggregate() for sync_allreduce (unweighted elementwise mean)', async (t) => {
+    debug('test 1: entered')
     if (!device) { t.skip('no GPU adapter/device available in this environment'); return }
 
     const agg = new GradientAggregator({ strategy: 'sync_allreduce', parameterCount: 5 })
@@ -94,7 +114,15 @@ describeIfReal('GPU kernel against real WebGPU', () => {
     agg.submit('s3', [10, 10, 10, 10, 10])
 
     const expected = agg.aggregate() // the trusted CPU path
-    const result = await agg.aggregateGPU(device)
+    debug('test 1: aggregateGPU(): start')
+    let result
+    try {
+      result = await agg.aggregateGPU(device)
+    } catch (err) {
+      console.error('[kernel.test] test 1: aggregateGPU() threw:', err && err.stack ? err.stack : err)
+      throw err
+    }
+    debug('test 1: aggregateGPU(): done')
 
     assert.equal(result.length, expected.length)
     // The shader computes in f32; aggregate() computes in f64 -- compare
@@ -109,6 +137,7 @@ describeIfReal('GPU kernel against real WebGPU', () => {
   })
 
   it('matches aggregate() for federated_avg (weighted elementwise mean)', async (t) => {
+    debug('test 2: entered')
     if (!device) { t.skip('no GPU adapter/device available in this environment'); return }
 
     const agg = new GradientAggregator({ strategy: 'federated_avg', parameterCount: 3 })
@@ -117,7 +146,15 @@ describeIfReal('GPU kernel against real WebGPU', () => {
     agg.submit('s3', [5, 5, 5], 2)
 
     const expected = agg.aggregate() // the trusted CPU path
-    const result = await agg.aggregateGPU(device)
+    debug('test 2: aggregateGPU(): start')
+    let result
+    try {
+      result = await agg.aggregateGPU(device)
+    } catch (err) {
+      console.error('[kernel.test] test 2: aggregateGPU() threw:', err && err.stack ? err.stack : err)
+      throw err
+    }
+    debug('test 2: aggregateGPU(): done')
 
     assert.equal(result.length, expected.length)
     // f32 GPU arithmetic vs f64 JS arithmetic can differ in the last bit(s)
@@ -131,14 +168,24 @@ describeIfReal('GPU kernel against real WebGPU', () => {
   })
 
   it('reuses the cached pipeline across repeated calls on the same device', async (t) => {
+    debug('test 3: entered')
     if (!device) { t.skip('no GPU adapter/device available in this environment'); return }
 
     const agg = new GradientAggregator({ strategy: 'sync_allreduce', parameterCount: 2 })
     agg.submit('a', [1, 1])
     agg.submit('b', [3, 3])
 
-    const first = await agg.aggregateGPU(device)
-    const second = await agg.aggregateGPU(device)
+    debug('test 3: aggregateGPU() #1: start')
+    let first, second
+    try {
+      first = await agg.aggregateGPU(device)
+      debug('test 3: aggregateGPU() #1: done, starting #2')
+      second = await agg.aggregateGPU(device)
+      debug('test 3: aggregateGPU() #2: done')
+    } catch (err) {
+      console.error('[kernel.test] test 3: aggregateGPU() threw:', err && err.stack ? err.stack : err)
+      throw err
+    }
 
     assert.deepEqual(first, [2, 2])
     assert.deepEqual(second, [2, 2])

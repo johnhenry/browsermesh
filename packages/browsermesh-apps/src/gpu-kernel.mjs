@@ -114,6 +114,19 @@ function getOrCreatePipeline(device) {
  *   shape so callers never need to special-case typed vs. plain arrays.
  */
 export async function runAggregateKernel(device, { gradients, weights, useWeights }) {
+  // Temporary diagnostic instrumentation (browsermesh#63): a real CI run
+  // against a headless software-Vulkan device failed with no JS-catchable
+  // error at all (0 suites reported, no stack) -- consistent with the
+  // native Dawn/Vulkan process dying rather than a normal JS throw. These
+  // markers are flushed to stderr immediately before/after each native
+  // call, gated behind GPU_KERNEL_DEBUG so a silent process death still
+  // leaves a trail of exactly how far it got, in CI logs, without adding
+  // noise to normal runs (this function is never called from the always-on
+  // fallback-branch tests, only from the gated real-hardware tier).
+  const debug = process.env.GPU_KERNEL_DEBUG
+    ? (stage) => { console.error(`[gpu-kernel] ${stage}`) }
+    : () => {}
+
   const numShards = weights.length
   const vectorLength = numShards > 0 ? gradients.length / numShards : 0
 
@@ -123,8 +136,11 @@ export async function runAggregateKernel(device, { gradients, weights, useWeight
       `divisible by weights.length (${numShards})`
     )
   }
+  debug(`start: numShards=${numShards} vectorLength=${vectorLength} useWeights=${useWeights}`)
 
+  debug('getOrCreatePipeline: start')
   const { pipeline } = getOrCreatePipeline(device)
+  debug('getOrCreatePipeline: done')
 
   const totalWeight = useWeights ? weights.reduce((a, b) => a + b, 0) : numShards
 
@@ -135,42 +151,53 @@ export async function runAggregateKernel(device, { gradients, weights, useWeight
   paramsView.setUint32(8, useWeights ? 1 : 0, true)
   paramsView.setFloat32(12, totalWeight, true)
 
+  debug('createBuffer(params): start')
   const paramsBuffer = device.createBuffer({
     size: paramsData.byteLength,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     label: 'browsermesh-gradient-aggregate-params',
   })
   device.queue.writeBuffer(paramsBuffer, 0, paramsData)
+  debug('createBuffer(params): done')
 
   const gradientsArray = Float32Array.from(gradients)
+  debug('createBuffer(gradients): start')
   const gradientsBuffer = device.createBuffer({
     size: Math.max(gradientsArray.byteLength, 4),
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     label: 'browsermesh-gradient-aggregate-gradients',
   })
   device.queue.writeBuffer(gradientsBuffer, 0, gradientsArray)
+  debug('createBuffer(gradients): done')
 
   const weightsArray = Float32Array.from(weights.length > 0 ? weights : [0])
+  debug('createBuffer(weights): start')
   const weightsBuffer = device.createBuffer({
     size: Math.max(weightsArray.byteLength, 4),
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     label: 'browsermesh-gradient-aggregate-weights',
   })
   device.queue.writeBuffer(weightsBuffer, 0, weightsArray)
+  debug('createBuffer(weights): done')
 
   const outputByteLength = Math.max(vectorLength * 4, 4)
+  debug('createBuffer(output): start')
   const outputBuffer = device.createBuffer({
     size: outputByteLength,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
     label: 'browsermesh-gradient-aggregate-output',
   })
+  debug('createBuffer(output): done')
 
+  debug('createBuffer(readback): start')
   const readbackBuffer = device.createBuffer({
     size: outputByteLength,
     usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
     label: 'browsermesh-gradient-aggregate-readback',
   })
+  debug('createBuffer(readback): done')
 
+  debug('createBindGroup: start')
   const bindGroup = device.createBindGroup({
     layout: pipeline.getBindGroupLayout(0),
     entries: [
@@ -181,7 +208,9 @@ export async function runAggregateKernel(device, { gradients, weights, useWeight
     ],
     label: 'browsermesh-gradient-aggregate-bindgroup',
   })
+  debug('createBindGroup: done')
 
+  debug('encode+dispatch: start')
   const encoder = device.createCommandEncoder({ label: 'browsermesh-gradient-aggregate-encoder' })
   const pass = encoder.beginComputePass({ label: 'browsermesh-gradient-aggregate-pass' })
   pass.setPipeline(pipeline)
@@ -190,12 +219,17 @@ export async function runAggregateKernel(device, { gradients, weights, useWeight
   pass.dispatchWorkgroups(workgroupCount)
   pass.end()
   encoder.copyBufferToBuffer(outputBuffer, 0, readbackBuffer, 0, outputByteLength)
+  debug('encode+dispatch: done, calling queue.submit')
   device.queue.submit([encoder.finish()])
+  debug('queue.submit: done')
 
+  debug('mapAsync: start')
   await readbackBuffer.mapAsync(GPUMapMode.READ)
+  debug('mapAsync: done')
   const mapped = readbackBuffer.getMappedRange()
   const resultFloats = new Float32Array(mapped.slice(0, vectorLength * 4))
   readbackBuffer.unmap()
+  debug('readback: done, destroying buffers')
 
   paramsBuffer.destroy?.()
   gradientsBuffer.destroy?.()
@@ -203,5 +237,6 @@ export async function runAggregateKernel(device, { gradients, weights, useWeight
   outputBuffer.destroy?.()
   readbackBuffer.destroy?.()
 
+  debug('runAggregateKernel: returning result')
   return Array.from(resultFloats)
 }
