@@ -21,6 +21,9 @@
   "peerDependencies": {
     "@johnhenry/browsermesh-primitives": ">=0.0.1 <1.0.0"
   },
+  "devDependencies": {
+    "fake-indexeddb": "^6.2.5"
+  },
   "scripts": {
     "test": "node --import ./test/_setup-globals.mjs --test test/*.test.mjs"
   },
