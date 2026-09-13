@@ -39,14 +39,25 @@ Verified by content rather than by version number, and by what actually loads
 rather than by what the install printed: the addon in `require.cache` resolves
 to `@node-datachannel/darwin-arm64@0.33.4`.
 
-Both retries are deleted. Measured after deleting them, 30 serialised runs on
-an idle machine: **0/30 runs failed, 330/330 tests passed**, and the
-malformed-candidate test ran in **273.5-279.2 ms** — a 5.7 ms spread across
-thirty runs. That tightness is the evidence, not the green: the retry-fired
-signature is ~5.5 s and the unfixed-without-retry signature is a 15 s timeout,
-and neither appears anywhere in the distribution. A surviving flake would be
-bimodal. If the old 3/24 per-run rate still held, thirty clean runs had a 1.8%
-chance of happening.
+Both retries are deleted, and both packages that depend on `node-datachannel`
+are pinned — `browsermesh-apps` was still at `^0.33.2`, which resolved to
+0.33.4 via the caret but *stated* that the buggy version was acceptable.
+
+Measured after deleting them, 30 serialised runs on an idle machine covering
+BOTH real-peer workspaces (`test:real-peer` at the root runs transport then
+apps): **0/30 runs failed, 480/480 tests passed**, and the malformed-candidate
+test ran in **275.7-280.3 ms** — a 4.6 ms spread across thirty runs.
+
+That tightness is the evidence, not the green: the retry-fired signature is
+~5.5 s and the unfixed-without-retry signature is a 15 s timeout, and neither
+appears anywhere in the distribution. A surviving flake would be bimodal. If
+the old 3/24 per-run rate still held, thirty clean runs had a 1.8% chance of
+happening.
+
+The under-load stall is a DIFFERENT problem and is not addressed by this. The
+mesh-relay suite's 30 s WebRTC timeouts stay, the serialisation stays, and the
+suite stays out of `turbo run test --concurrency=4`. Whether 0.33.4 also
+relieves the under-load case is a separate measurement nobody has taken.
 
 **Do not try to pin `node-datachannel` to a source build.** This was tried and
 it silently does nothing. The package ships prebuilt per-platform addons and has
