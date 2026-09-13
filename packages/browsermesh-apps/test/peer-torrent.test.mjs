@@ -2,6 +2,17 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { TorrentManager, TORRENT_DEFAULTS } from '../src/peer-torrent.mjs'
+import { createTorrentService } from '../src/mesh-torrent.mjs'
+import { attachService } from '../src/mesh-service.mjs'
+import { PeerRegistry } from '../src/peer-registry.mjs'
+import { createMeshNode } from '../src/mesh-bootstrap.mjs'
+import {
+  IdentityWallet,
+  MeshIdentityManager,
+  MeshPeerManager,
+  TrustGraph,
+  MeshACL,
+} from '@johnhenry/browsermesh-core'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -469,3 +480,327 @@ describe('TorrentManager toJSON', () => {
     assert.deepEqual(json.activeTorrents, [])
   })
 })
+
+// =============================================================================
+// createTorrentService -- wired as a MeshService (attachService(), Phase C,
+// issue #122)
+// =============================================================================
+//
+// Fixtures mirror peer-routing.test.mjs's own real-identity precedent: real
+// Ed25519 IdentityWallet/MeshIdentityManager identities + real PeerRegistry
+// (wired to real MeshACL/MeshPeerManager/TrustGraph from
+// @johnhenry/browsermesh-core), connected via a minimal duck-typed
+// sendTo()/onIncomingData() bus restricted to explicit edges -- not real
+// WebRTC (that's a different layer's job).
+
+/** A real Ed25519 identity + wallet + registry bundle for one "peer". */
+async function createTorrentTestPeer(label) {
+  const identityManager = new MeshIdentityManager({});
+  const wallet = new IdentityWallet({ identityManager });
+  const { podId } = await wallet.createIdentity(label);
+  const registry = new PeerRegistry({
+    localPodId: podId,
+    peerManager: new MeshPeerManager({}),
+    trustGraph: new TrustGraph(),
+    acl: new MeshACL({ owner: podId }),
+  });
+  return { podId, wallet, registry };
+}
+
+/**
+ * A duck-typed multi-peer bus restricted to an explicit set of edges --
+ * see peer-routing.test.mjs's own `wireRestrictedMesh()` for the full
+ * rationale (this is what makes "C never talks to A directly" a genuine
+ * proof, not just an untested assumption).
+ * @param {Array<{podId: string, wallet?: object, registry: object}>} peers
+ * @param {Array<[string, string]>} edges
+ * @returns {Record<string, any>} keyed by each peer's `podId`
+ */
+function wireTorrentMesh(peers, edges) {
+  const edgeSet = new Set();
+  for (const [a, b] of edges) {
+    edgeSet.add(`${a}|${b}`);
+    edgeSet.add(`${b}|${a}`);
+  }
+  const listenersByPodId = new Map(peers.map((p) => [p.podId, new Set()]));
+  const nodesByPodId = {};
+  for (const peer of peers) {
+    nodesByPodId[peer.podId] = {
+      podId: peer.podId,
+      wallet: peer.wallet,
+      registry: peer.registry,
+      onIncomingData(cb) {
+        const set = listenersByPodId.get(peer.podId);
+        set.add(cb);
+        return () => set.delete(cb);
+      },
+      async sendTo(pubKey, data) {
+        if (!edgeSet.has(`${peer.podId}|${pubKey}`)) return; // no direct link -- silently unreachable
+        const set = listenersByPodId.get(pubKey);
+        if (!set) return;
+        queueMicrotask(() => {
+          for (const cb of set) cb(peer.podId, data);
+        });
+      },
+    };
+  }
+  return nodesByPodId;
+}
+
+/** Poll until `fn()` is truthy, or throw after `timeoutMs`. */
+async function waitForTorrent(fn, timeoutMs = 1000, what = 'condition') {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await fn()) return;
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  throw new Error(`Timed out after ${timeoutMs}ms waiting for: ${what}`);
+}
+
+// -----------------------------------------------------------------------
+// The real swarm proof: origin -> downloader, then downloader -> a THIRD
+// peer that has NO direct link to the origin at all.
+// -----------------------------------------------------------------------
+
+describe('createTorrentService: real swarm piece exchange closes the capability gap', () => {
+  it('a peer downloads content from the original seeder via real chunk-request/chunk-response traffic', async () => {
+    const alice = await createTorrentTestPeer('alice'); // origin seeder
+    const bob = await createTorrentTestPeer('bob'); // downloader
+    const mesh = wireTorrentMesh([alice, bob], [[alice.podId, bob.podId]]);
+    const { [alice.podId]: nodeA, [bob.podId]: nodeB } = mesh;
+
+    const served = [];
+    const { api: aliceApi, on: aliceOn } = attachService(nodeA, undefined, createTorrentService({ chunkSize: 4 }));
+    aliceOn('torrent:chunk-served', (e) => served.push(e));
+
+    const received = [];
+    const { api: bobApi, on: bobOn } = attachService(nodeB, undefined, createTorrentService({ chunkSize: 4 }));
+    bobOn('torrent:chunk-received', (e) => received.push(e));
+
+    const original = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]); // 13 bytes / 4-byte chunks -> 4 pieces
+    const info = await aliceApi.seed(original, { name: 'swarm.bin' });
+
+    aliceApi.share(info.magnetURI, [bob.podId]);
+
+    const { data, info: bobInfo } = await bobApi.download(info.magnetURI, { peers: [alice.podId] });
+
+    assert.deepEqual(data, original);
+    assert.equal(bobInfo.magnetURI, info.magnetURI); // deterministic content-addressing: identical bytes -> identical magnet
+    assert.equal(served.length, 4); // 13 bytes / 4-byte chunks = 4 pieces, all served by alice
+    assert.equal(received.length, 4);
+    assert.ok(served.every((e) => e.to === bob.podId));
+    assert.ok(received.every((e) => e.from === alice.podId));
+  });
+
+  it('a THIRD peer downloads purely from the first downloader -- the original seeder is never contacted', async () => {
+    const alice = await createTorrentTestPeer('alice'); // origin seeder
+    const bob = await createTorrentTestPeer('bob'); // downloads from alice, then re-shares
+    const carol = await createTorrentTestPeer('carol'); // downloads from bob only
+
+    // Alice <-> Bob and Bob <-> Carol edges exist -- NO Alice <-> Carol edge
+    // at all, so any bytes Carol receives can only have come via Bob.
+    const mesh = wireTorrentMesh(
+      [alice, bob, carol],
+      [[alice.podId, bob.podId], [bob.podId, carol.podId]],
+    );
+    const { [alice.podId]: nodeA, [bob.podId]: nodeB, [carol.podId]: nodeC } = mesh;
+
+    const { api: aliceApi } = attachService(nodeA, undefined, createTorrentService({ chunkSize: 8 }));
+    const { api: bobApi } = attachService(nodeB, undefined, createTorrentService({ chunkSize: 8 }));
+    const { api: carolApi } = attachService(nodeC, undefined, createTorrentService({ chunkSize: 8 }));
+
+    const original = new Uint8Array(Array.from({ length: 30 }, (_, i) => i)); // 30 bytes, 8-byte chunks -> 4 pieces
+    const info = await aliceApi.seed(original, { name: 'relay.bin' });
+
+    // Step 1: Bob downloads from Alice (the only peer he's linked to).
+    aliceApi.share(info.magnetURI, [bob.podId]);
+    const { data: bobData } = await bobApi.download(info.magnetURI, { peers: [alice.podId] });
+    assert.deepEqual(bobData, original);
+
+    // Step 2: Bob re-shares with Carol. Carol has no transport edge to
+    // Alice at all -- wireTorrentMesh() silently drops any sendTo() between
+    // unconnected podIds, so if createTorrentService() ever fell back to
+    // asking Alice directly, Carol's download would simply hang and time out.
+    bobApi.share(info.magnetURI, [carol.podId]);
+    const { data: carolData, info: carolInfo } = await carolApi.download(info.magnetURI, { peers: [bob.podId] });
+
+    assert.deepEqual(carolData, original);
+    assert.equal(carolInfo.magnetURI, info.magnetURI);
+
+    // Direct proof this is real peer-to-peer piece exchange, not
+    // origin-fan-out: every chunk Carol knows a provider for resolves to
+    // Bob, never Alice (Carol never even learned of Alice's podId).
+    for (const cid of carolApi.getManifest(info.magnetURI).chunkCids) {
+      assert.deepEqual(carolApi.listKnownProviders(cid), [bob.podId]);
+    }
+  });
+});
+
+// -----------------------------------------------------------------------
+// Manifest discovery, ctx.emit() bridging, and introspection
+// -----------------------------------------------------------------------
+
+describe('createTorrentService: manifest discovery and ctx.emit() events', () => {
+  it('a peer with no prior announce can still fetch the manifest via manifest-request/-response', async () => {
+    const alice = await createTorrentTestPeer('alice');
+    const bob = await createTorrentTestPeer('bob');
+    const mesh = wireTorrentMesh([alice, bob], [[alice.podId, bob.podId]]);
+    const { [alice.podId]: nodeA, [bob.podId]: nodeB } = mesh;
+
+    const { api: aliceApi } = attachService(nodeA, undefined, createTorrentService({}));
+    const { api: bobApi } = attachService(nodeB, undefined, createTorrentService({}));
+
+    const original = new Uint8Array([9, 8, 7, 6, 5]);
+    const info = await aliceApi.seed(original, { name: 'no-announce.bin' });
+
+    // Deliberately no aliceApi.share() call -- bob has never heard an
+    // announce for this magnetURI, so download() must fall back to
+    // requesting the manifest directly.
+    assert.equal(bobApi.getManifest(info.magnetURI), null);
+    const { data } = await bobApi.download(info.magnetURI, { peers: [alice.podId] });
+    assert.deepEqual(data, original);
+    assert.ok(bobApi.getManifest(info.magnetURI));
+  });
+
+  it('emits torrent:seed, torrent:announce-received, torrent:download-start/-complete', async () => {
+    const alice = await createTorrentTestPeer('alice');
+    const bob = await createTorrentTestPeer('bob');
+    const mesh = wireTorrentMesh([alice, bob], [[alice.podId, bob.podId]]);
+    const { [alice.podId]: nodeA, [bob.podId]: nodeB } = mesh;
+
+    const aliceEvents = [];
+    const { api: aliceApi, on: aliceOn } = attachService(nodeA, undefined, createTorrentService({}));
+    aliceOn('torrent:seed', (info) => aliceEvents.push({ type: 'seed', info }));
+
+    const bobEvents = [];
+    const { api: bobApi, on: bobOn } = attachService(nodeB, undefined, createTorrentService({}));
+    bobOn('torrent:announce-received', (e) => bobEvents.push({ type: 'announce-received', ...e }));
+    bobOn('torrent:download-start', (e) => bobEvents.push({ type: 'download-start', ...e }));
+    bobOn('torrent:download-complete', (e) => bobEvents.push({ type: 'download-complete', ...e }));
+
+    const info = await aliceApi.seed(new Uint8Array([1, 2, 3]), { name: 'events.bin' });
+    assert.equal(aliceEvents.length, 1); // aliceApi.seed() -> tm.seed() -> bridged 'seed' event
+
+    aliceApi.share(info.magnetURI, [bob.podId]);
+    await waitForTorrent(() => bobEvents.some((e) => e.type === 'announce-received'), 1000, 'bob to receive the announce');
+
+    await bobApi.download(info.magnetURI);
+
+    assert.ok(bobEvents.some((e) => e.type === 'announce-received' && e.magnetURI === info.magnetURI));
+    assert.ok(bobEvents.some((e) => e.type === 'download-start' && e.magnetURI === info.magnetURI));
+    assert.ok(bobEvents.some((e) => e.type === 'download-complete' && e.magnetURI === info.magnetURI));
+
+    // bob's own successful download registers him as a seed too (see
+    // mesh-torrent.mjs's download() doc comment) -- his OWN service instance
+    // bridges its own tm's 'seed' event independently of alice's.
+  });
+
+  it('a corrupted chunk response fails integrity verification and download() rejects when no other provider exists', async () => {
+    const alice = await createTorrentTestPeer('alice');
+    const bob = await createTorrentTestPeer('bob');
+    const mesh = wireTorrentMesh([alice, bob], [[alice.podId, bob.podId]]);
+    const { [alice.podId]: nodeA, [bob.podId]: nodeB } = mesh;
+
+    // Intercept alice's outgoing sendTo() to corrupt chunk-response payloads
+    // in flight -- proves fetchChunk()'s ChunkStore.verify() check is real,
+    // not decorative.
+    const realSendTo = nodeA.sendTo.bind(nodeA);
+    nodeA.sendTo = async (pubKey, data) => {
+      if (data && data.kind === 'chunk-response' && data.data) {
+        return realSendTo(pubKey, { ...data, data: Buffer.from('corrupted-not-the-real-bytes').toString('base64') });
+      }
+      return realSendTo(pubKey, data);
+    };
+
+    const { api: aliceApi } = attachService(nodeA, undefined, createTorrentService({}));
+    const { api: bobApi } = attachService(nodeB, undefined, createTorrentService({}));
+
+    const info = await aliceApi.seed(new Uint8Array([42, 43, 44]), { name: 'corrupt.bin' });
+
+    await assert.rejects(
+      () => bobApi.download(info.magnetURI, { peers: [alice.podId] }),
+      /mesh-torrent/,
+    );
+  });
+
+  it('teardown unsubscribes and rejects any in-flight chunk fetch', async () => {
+    const alice = await createTorrentTestPeer('alice');
+    const bob = await createTorrentTestPeer('bob');
+    const mesh = wireTorrentMesh([alice, bob], [[alice.podId, bob.podId]]);
+    const { [alice.podId]: nodeA, [bob.podId]: nodeB } = mesh;
+
+    const aliceHandle = attachService(nodeA, undefined, createTorrentService({}));
+    const bobHandle = attachService(nodeB, undefined, createTorrentService({ chunkTimeoutMs: 60000 }));
+
+    const info = await aliceHandle.api.seed(new Uint8Array([1, 2, 3]), { name: 'x' });
+    aliceHandle.api.share(info.magnetURI, [bob.podId]);
+    await waitForTorrent(() => bobHandle.api.getManifest(info.magnetURI) !== null, 1000, "bob to receive alice's manifest");
+
+    // Alice goes offline (her own service torn down) before ever answering a
+    // chunk-request -- bob's fetch is now permanently unanswered, exactly
+    // the scenario chunkTimeoutMs=60000 is here to rule out as the cause of
+    // the eventual rejection below.
+    await aliceHandle.teardown();
+
+    const pending = bobHandle.api.download(info.magnetURI, { peers: [alice.podId] }).catch((err) => err);
+    // Give the chunk-request a beat to actually go out (and go unanswered).
+    await new Promise((r) => setTimeout(r, 20));
+
+    // Bob's own teardown() must resolve the pending fetch itself, not leave
+    // it hanging until chunkTimeoutMs (60s) -- see mesh-torrent.mjs's own
+    // teardown()'s explicit rejection of pendingChunkFetches.
+    await bobHandle.teardown();
+    const result = await pending;
+    assert.ok(result instanceof Error);
+  });
+});
+
+// -----------------------------------------------------------------------
+// createMeshNode({ enableTorrent: true }) -- opt-in surface (issue #122)
+// -----------------------------------------------------------------------
+
+function createStubTorrentSignalingTransport() {
+  return { send() {}, onMessage() {} };
+}
+
+describe('createMeshNode({ enableTorrent: true })', () => {
+  it('leaves node.torrent unset and node.services empty of "torrent" when enableTorrent is omitted', async () => {
+    const node = await createMeshNode({
+      label: 'alice',
+      signalingTransport: createStubTorrentSignalingTransport(),
+      skipBoot: true,
+    });
+
+    assert.equal(node.torrent, undefined);
+    assert.equal(node.services.has('torrent'), false);
+  });
+
+  it('attaches node.torrent (== node.services.get("torrent")) when enableTorrent is set', async () => {
+    const node = await createMeshNode({
+      label: 'alice',
+      signalingTransport: createStubTorrentSignalingTransport(),
+      enableTorrent: true,
+      skipBoot: true,
+    });
+
+    assert.ok(node.torrent, 'node.torrent is attached');
+    assert.equal(node.torrent, node.services.get('torrent'));
+    assert.equal(typeof node.torrent.api.seed, 'function');
+    assert.equal(typeof node.torrent.api.download, 'function');
+    assert.equal(typeof node.torrent.api.share, 'function');
+  });
+
+  it('torrentOptions are forwarded to createTorrentService()', async () => {
+    const node = await createMeshNode({
+      label: 'alice',
+      signalingTransport: createStubTorrentSignalingTransport(),
+      enableTorrent: true,
+      torrentOptions: { trackerUrl: 'wss://tracker.example.com' },
+      skipBoot: true,
+    });
+
+    const info = await node.torrent.api.seed(new Uint8Array([1, 2, 3]), { name: 'x' });
+    assert.equal(typeof info.magnetURI, 'string');
+    assert.equal(node.torrent.api.getStats().seeding, 1);
+  });
+});
