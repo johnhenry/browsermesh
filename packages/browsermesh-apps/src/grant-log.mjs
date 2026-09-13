@@ -173,6 +173,25 @@
  * real reason. Diffing means a scope that was granted before and still is
  * after a merge is never revoked even transiently.
  *
+ * ---------------------------------------------------------------------------
+ * Change notification (added for Phase E, `key-distribution.mjs`): an
+ * optional `onGrantChange` constructor callback, invoked once per affected
+ * `pubKey` at the end of every `#replay()` (local mutation or `mergeRemote()`
+ * alike -- the same single place the existing `registry.grantCapabilities()`/
+ * `revokeCapabilities()` diffing already runs), with `{pubKey, before, after,
+ * added, removed}` (`before`/`after` are the pre/post `Set<string>` of
+ * effective scopes for that `pubKey` on this resource; `added`/`removed` are
+ * arrays of the scopes that actually changed). This reuses the diff
+ * `#replay()` already computes for `PeerRegistry` -- no extra pass over the
+ * log. Phase E's key-distribution service uses `before.size === 0 &&
+ * after.size > 0` to detect "this pubKey just gained SOME capability on this
+ * resource" (equivalent to "gained any of read/write/delete/list/admin/
+ * replica" for an s3 resource, since those are the only six actions ever
+ * used -- this module still doesn't hardcode that list, staying resource-
+ * agnostic per its own design goal above). Follows this file's own established
+ * convention for optional constructor-injected callbacks (`onLog`) rather than
+ * introducing a new event-emitter dependency.
+ *
  * No browser-only imports at module level.
  */
 
@@ -274,6 +293,9 @@ export class GrantLog {
   /** @type {Function} */
   #onLog
 
+  /** @type {Function|null} See the module doc comment's "Change notification" section. */
+  #onGrantChange
+
   /** @type {ORSet} Element type: canonical-JSON-stringified signed records. */
   #orSet = new ORSet()
 
@@ -313,8 +335,11 @@ export class GrantLog {
    *   Replayed into via its existing, completely unmodified
    *   `grantCapabilities()`/`revokeCapabilities()`.
    * @param {Function} [opts.onLog]
+   * @param {(change: {pubKey: string, before: Set<string>, after: Set<string>,
+   *   added: string[], removed: string[]}) => void} [opts.onGrantChange] - See
+   *   the module doc comment's "Change notification" section.
    */
-  constructor({ resource, localPodId, wallet, registry, onLog } = {}) {
+  constructor({ resource, localPodId, wallet, registry, onLog, onGrantChange } = {}) {
     if (!resource || typeof resource !== 'string') {
       throw new Error('GrantLog: resource is required and must be a non-empty string')
     }
@@ -334,6 +359,7 @@ export class GrantLog {
     this.#wallet = wallet
     this.#registry = registry
     this.#onLog = onLog || (() => {})
+    this.#onGrantChange = typeof onGrantChange === 'function' ? onGrantChange : null
   }
 
   /** @returns {string} */
@@ -649,6 +675,10 @@ export class GrantLog {
 
       if (added.length > 0) this.#registry.grantCapabilities(pubKey, added)
       if (removed.length > 0) this.#registry.revokeCapabilities(pubKey, removed)
+
+      if ((added.length > 0 || removed.length > 0) && this.#onGrantChange) {
+        this.#onGrantChange({ pubKey, before, after, added, removed })
+      }
     }
 
     this.#effective = next
@@ -711,9 +741,14 @@ export class GrantLog {
  *   to get a handle back to call `grant()`/`bootstrapAdmin()`/etc. later
  *   (see the friction note above).
  * @param {Function} [opts.onLog]
+ * @param {(change: {pubKey: string, before: Set<string>, after: Set<string>,
+ *   added: string[], removed: string[]}) => void} [opts.onGrantChange] -
+ *   Forwarded to `GrantLog`'s constructor. See that module's doc comment's
+ *   "Change notification" section -- this is Phase E's (`key-distribution.mjs`)
+ *   hook into "a pubKey just gained some capability on this resource".
  * @returns {import('./mesh-service.mjs').MeshService}
  */
-export function createGrantLogService({ resource, envelopeType = DEFAULT_ENVELOPE_TYPE, onReady, onLog } = {}) {
+export function createGrantLogService({ resource, envelopeType = DEFAULT_ENVELOPE_TYPE, onReady, onLog, onGrantChange } = {}) {
   if (!resource || typeof resource !== 'string') {
     throw new Error('createGrantLogService: resource is required and must be a non-empty string')
   }
@@ -728,6 +763,7 @@ export function createGrantLogService({ resource, envelopeType = DEFAULT_ENVELOP
         wallet: peerNode.wallet,
         registry: ctx.registry,
         onLog,
+        onGrantChange,
       })
 
       const unsubscribe = ctx.onIncomingData(envelopeType, (fromPubKey, data) => {

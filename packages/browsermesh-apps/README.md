@@ -47,6 +47,10 @@ Extracted from the private `clawser` monorepo (previously `packages/browsermesh-
 | marketplace-ui | `SkillMarketplace` |
 | mesh-relay-host | `MeshRelayHost` |
 | mesh-relay-backend | `MeshRelayBackend` |
+| mesh-service | `attachService`, `MeshService` (attach convention) |
+| cloud-storage-backend | `CloudStorageBackend` |
+| grant-log | `GrantLog`, `createGrantLogService` |
+| key-distribution | `createKeyDistributionService` |
 
 ## GPU compute
 
@@ -242,6 +246,39 @@ inherited `Backend` "not implemented" throws). See
 `examples/06-mesh-relay.mjs` for a full runnable walkthrough (in-process
 simulated mesh connection) and
 `test/real-peer/mesh-relay.test.mjs` for the real-WebRTC, real-TCP proof.
+
+## CloudStorage bucket authorization and key distribution
+
+`grant-log.mjs`'s `GrantLog` (`createGrantLogService()`) is a replicated,
+Ed25519-signed append-log of `grant`/`revoke` records per bucket resource
+(`s3:<bucketId>`), used to propagate a CloudStorage bucket's access-control
+decisions to every peer independently enforcing them (each peer replays the
+merged log into its own, unmodified `PeerRegistry.grantCapabilities()`/
+`revokeCapabilities()`).
+
+`key-distribution.mjs`'s `createKeyDistributionService()` builds on top of
+`GrantLog`'s change notifications: whenever a peer's merged, effective grants
+on a bucket go from none to some, a peer that already holds that bucket's
+AES-256-GCM key (`cloud-storage-backend.mjs`'s `CloudStorageBackend`) sends it
+to the newly-granted peer over a dedicated, signed, point-to-point channel,
+encrypted to a companion X25519 key the recipient generates and advertises
+for exactly this purpose (Ed25519 identity keys can't do ECDH directly, and
+this repo intentionally has no Ed25519-to-X25519 conversion utility -- see
+that file's own doc comment for the full writeup, including why the wrap/
+unwrap step itself reuses `browsermesh-core`'s existing `wrapKeyForMember()`/
+`unwrapKeyForMember()` rather than adding a new crypto primitive).
+
+**Permanent limitation, not a bug to fix later:** revoking a peer's grant
+(via `GrantLog.revoke()`) stops *future* key distribution and *future* chunk
+replication to that peer, but cannot retroactively erase a key -- or any
+plaintext already decrypted with it -- already delivered to that peer before
+the revoke. A bucket's AES key is never rotated on revoke anywhere in this
+plan. Any since-revoked peer that retained the key (or any chunk ciphertext
+plus the key) can still decrypt that data offline, forever. This is a
+fundamental property of any scheme that hands symmetric key material to
+multiple independent parties -- the same is true of, say, a downloaded S3
+object whose bucket policy changes afterward -- not something a future phase
+of this plan is expected to close.
 
 ## Putting it all together: sync + kernel-gated mesh + relay on one connection
 

@@ -33,6 +33,7 @@ export * from './mesh-relay-backend.mjs';
 export * from './mesh-service.mjs';
 export * from './cloud-storage-backend.mjs';
 export * from './grant-log.mjs';
+export * from './key-distribution.mjs';
 export * from './peer-payments.mjs';
 export * from './peer-registry.mjs';
 export * from './peer-routing.mjs';

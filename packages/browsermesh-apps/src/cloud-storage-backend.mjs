@@ -57,6 +57,26 @@
  *   - Every chunk gets a fresh random IV (AES-GCM requires a unique IV per
  *     encryption under the same key). The IV is not secret and is stored
  *     alongside the CID in the manifest entry.
+ *   - `peekKeyRaw()`/`exportKeyRaw()`/`importKeyRaw()` (added for Phase E,
+ *     `key-distribution.mjs`) let a caller read this backend's raw 32-byte
+ *     bucket key (to hand to a newly-granted peer over Phase E's dedicated
+ *     encrypted channel) and let a *different* `CloudStorageBackend` instance
+ *     (a newly-granted peer's own local instance for the same bucket) adopt
+ *     received key material instead of generating its own. See each method's
+ *     own doc comment for exactly how they avoid the auto-create-on-first-use
+ *     behavior below stepping on a receive-only instance.
+ *
+ *     PERMANENT LIMITATION (Phase E's own documented constraint, restated
+ *     here since this is the file whose data a leaked/undeleted key actually
+ *     protects): revoking a peer's grant (the replicated `GrantLog`, Phase D)
+ *     stops FUTURE key distribution and future chunk replication (Phase G) to
+ *     that peer, but cannot retroactively erase a key -- or any plaintext
+ *     already decrypted with it -- already delivered to that peer before the
+ *     revoke. This bucket's AES key is never rotated on revoke in this plan;
+ *     a since-revoked peer that retained the key (or any chunk ciphertext
+ *     plus the key) can still decrypt it offline forever. This is a
+ *     fundamental property of any such scheme (the same is true of, say, a
+ *     downloaded-then-access-revoked S3 object), not a bug to fix later.
  *
  * Manifest: an `LWWMap` (`@johnhenry/browsermesh-primitives`) persisted via
  * `IndexedDBSyncStorage`'s `save(docs)`/`load()` for local durability of this
@@ -207,6 +227,15 @@ function fromBase64(str) {
   const bytes = new Uint8Array(bin.length)
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
   return bytes
+}
+
+/** Constant-time-ish byte equality (length-checked first; not a security-critical comparison, just correctness). @param {Uint8Array} a @param {Uint8Array} b @returns {boolean} */
+function bytesEqual(a, b) {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false
+  }
+  return true
 }
 
 // ---------------------------------------------------------------------------
@@ -527,6 +556,11 @@ export class CloudStorageBackend extends Backend {
   }
 
   async #loadOrCreateKey() {
+    // Idempotent guard: if `importKeyRaw()` (Phase E) already populated
+    // `#bucketKey` directly -- deliberately bypassing this method entirely,
+    // see that method's own doc comment -- never overwrite it with a freshly
+    // generated key just because `#ensureReady()` also happened to run.
+    if (this.#bucketKey) return
     const docs = await this.#keyStorage.load()
     if (docs && docs.length > 0) {
       const doc = docs.find((d) => d.id === KEY_DOC_ID) || docs[0]
@@ -534,6 +568,96 @@ export class CloudStorageBackend extends Backend {
       return
     }
     this.#bucketKey = generateKey()
+    await this.#keyStorage.save([{ id: KEY_DOC_ID, key: toBase64(this.#bucketKey) }])
+  }
+
+  // -----------------------------------------------------------------------
+  // Key export/import (Phase E: cross-peer bucket-key distribution)
+  // -----------------------------------------------------------------------
+
+  /**
+   * Read the currently-persisted bucket key WITHOUT the auto-create side
+   * effect `#ensureReady()`/`#loadOrCreateKey()` has on first use. Returns
+   * `null` if this backend has never created or received a key yet.
+   *
+   * This exists specifically so Phase E's key-distribution service can ask
+   * "do I already hold this bucket's key" (to decide whether it can help
+   * relay it onward to a newly-granted peer) without accidentally
+   * *originating* a brand-new key as a side effect on a peer that was only
+   * ever meant to *receive* one -- calling `exportKeyRaw()` (below) for that
+   * same question would silently mint and persist a fresh, never-to-be-
+   * reconciled key on any peer that hasn't been granted access yet, which is
+   * exactly the bug this method avoids.
+   *
+   * @returns {Promise<Uint8Array|null>}
+   */
+  async peekKeyRaw() {
+    if (this.#bucketKey) return this.#bucketKey.slice()
+    const docs = await this.#keyStorage.load()
+    const doc = docs && docs.length > 0 ? (docs.find((d) => d.id === KEY_DOC_ID) || docs[0]) : null
+    return doc ? fromBase64(doc.key) : null
+  }
+
+  /**
+   * Export this backend's raw 32-byte AES-256-GCM bucket key, generating one
+   * first via the normal `#ensureReady()` path if this backend has never
+   * been used yet (i.e. the same auto-create semantics every other op has).
+   * Intended for a peer that legitimately already owns/administers this
+   * bucket to hand its key to Phase E's key-distribution service for sending
+   * to a newly-granted peer -- NOT for a receive-only instance to call before
+   * it has ever received anything (use `peekKeyRaw()` for that question
+   * instead, so as to not auto-create a key that would then need reconciling
+   * with whatever arrives later).
+   *
+   * @returns {Promise<Uint8Array>}
+   */
+  async exportKeyRaw() {
+    await this.#ensureReady()
+    return this.#bucketKey.slice()
+  }
+
+  /**
+   * Adopt received raw key material (32 bytes), e.g. from Phase E's
+   * key-distribution service after it decrypts a delivered bucket key --
+   * WITHOUT going through `#ensureReady()`/`#loadOrCreateKey()`'s
+   * auto-generate path, so a fresh `CloudStorageBackend` instance
+   * constructed purely to receive a key never races its own local
+   * key-of-nothing generation against the key actually arriving. Persists
+   * the imported key to this backend's own local key storage exactly like a
+   * self-generated key, so it survives reload identically (see
+   * `#loadOrCreateKey`'s "reload" test coverage).
+   *
+   * Idempotent: importing the same key bytes that are already stored is a
+   * silent no-op. By default, importing DIFFERENT key bytes than whatever is
+   * already stored throws rather than silently clobbering local state that
+   * may already have encrypted chunks written under the existing key -- pass
+   * `{ overwrite: true }` to force replacement (there is no supported way to
+   * re-encrypt already-written chunks under the new key; this is an escape
+   * hatch for callers who know what they're doing, e.g. tests).
+   *
+   * @param {Uint8Array} rawKeyBytes - Exactly 32 bytes.
+   * @param {object} [opts]
+   * @param {boolean} [opts.overwrite=false]
+   * @returns {Promise<void>}
+   */
+  async importKeyRaw(rawKeyBytes, { overwrite = false } = {}) {
+    if (!(rawKeyBytes instanceof Uint8Array) || rawKeyBytes.length !== 32) {
+      throw new Error('CloudStorageBackend.importKeyRaw: rawKeyBytes must be a 32-byte Uint8Array')
+    }
+
+    const existing = await this.peekKeyRaw()
+    if (existing && !overwrite) {
+      if (!bytesEqual(existing, rawKeyBytes)) {
+        throw new Error(
+          'CloudStorageBackend.importKeyRaw: a different bucket key is already stored locally ' +
+          '-- pass { overwrite: true } to replace it (existing encrypted chunks will not be re-encrypted)',
+        )
+      }
+      this.#bucketKey = existing
+      return
+    }
+
+    this.#bucketKey = rawKeyBytes.slice()
     await this.#keyStorage.save([{ id: KEY_DOC_ID, key: toBase64(this.#bucketKey) }])
   }
 
