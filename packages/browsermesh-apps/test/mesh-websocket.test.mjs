@@ -346,6 +346,47 @@ describe('mesh-websocket: close() from either side', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Regression: onIncomingConnection must fire before the ack is sent, so a
+// fast remote peer's first message (sent the instant its own 'open' event
+// fires, no artificial delay) is never lost. See mesh-websocket.mjs's
+// handleOpen() doc comment for the full explanation of the race this
+// guards against.
+// ---------------------------------------------------------------------------
+
+describe('mesh-websocket: no message loss on the first send after open', () => {
+  it('a message sent immediately in the client\'s open handler (no delay) still reaches the server', async () => {
+    const alice = await createPeer('alice')
+    const bob = await createPeer('bob')
+    const { nodeA, nodeB } = wireNodes(alice, bob)
+
+    let server = null
+    const received = []
+    attachService(nodeB, undefined, createMeshWebSocketService({
+      onConnection: () => true,
+      // Attach onmessage synchronously, inside this callback -- exactly the
+      // usage pattern the fix is meant to make safe.
+      onIncomingConnection: (session) => {
+        server = session
+        session.onmessage = (event) => received.push(event.data)
+      },
+    }))
+
+    const client = new BrowserMeshWebSocket(`mesh://${bob.podId}/fast`, { peerNode: nodeA })
+    const opened = waitForEvent(client, 'open')
+
+    client.addEventListener('open', () => {
+      // No setTimeout, no waitFor -- send the instant 'open' fires.
+      client.send('hello immediately')
+    })
+
+    await opened
+    await waitFor(() => received.length === 1, 500, 'the immediate send was received')
+    assert.ok(server, 'server session was created before the client could have opened')
+    assert.deepEqual(received, ['hello immediately'])
+  })
+})
+
+// ---------------------------------------------------------------------------
 // send() before OPEN / after CLOSE throws
 // ---------------------------------------------------------------------------
 
