@@ -17,11 +17,13 @@ Run one with `npm run example:01` (etc.), or all of them with `npm run examples`
 | [`05-crdt-sync-across-two-engines.mjs`](./05-crdt-sync-across-two-engines.mjs) | Two independent `MeshSyncEngine` instances converge on identical state after exchanging CRDT sync payloads in arbitrary order — no coordinator, no app-level conflict resolution. |
 | [`06-mesh-relay.mjs`](./06-mesh-relay.mjs) | One peer (`MeshRelayHost`) shares access to its own `VirtualNetwork` with a specific, authorized mesh peer (`MeshRelayBackend`) — an ungranted attempt is refused, a granted one relays real bytes to a real local service and back, and revoking access denies the next attempt. |
 | [`07-full-mesh-pipeline.mjs`](./07-full-mesh-pipeline.mjs) | The full story in one script: two peers discover each other, connect, converge on shared CRDT state (`MeshSyncEngine`), run kernel-gated application code over that connection (`Kernel`'s mesh capability), and relay through to a shared local service (`MeshRelayHost`/`MeshRelayBackend`) — all riding the SAME connection at once. See `packages/browsermesh-apps/test/real-peer/full-pipeline.test.mjs` for the identical composition proved over a real WebRTC connection. |
+| [`08-mesh-fetch-websocket.mjs`](./08-mesh-fetch-websocket.mjs) | `browserMeshFetch()` (a `fetch()`-shaped request/response round trip to a real mesh-RPC handler, including a non-2xx route resolving as a real `Response` rather than rejecting) and `BrowserMeshWebSocket` (a persistent duplex channel, including both the accept and reject halves of its open handshake) — the two web-standard-API-shaped wrappers over a mesh connection. |
 
 These cover the five foundational packages (`browsermesh-primitives`,
 `-pod`, `-netway`, `-kernel`, `-sync`) plus `browsermesh-apps`'s mesh-relay
-composition (`06`) and its full discovery+sync+kernel+relay composition
-(`07`). The higher-level packages built on top of them — `browsermesh-core`,
+composition (`06`), its full discovery+sync+kernel+relay composition
+(`07`), and its `fetch()`/`WebSocket`-shaped mesh wrappers (`08`). The
+higher-level packages built on top of them — `browsermesh-core`,
 `-transport`, `-discovery`, most of `-apps`, `browsermesh-embed` — are
 exercised end-to-end in a real browser by
 [clawser](https://github.com/erisera-code/clawser)'s Mesh and Peers panels;
