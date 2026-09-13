@@ -51,6 +51,9 @@ Extracted from the private `clawser` monorepo (previously `packages/browsermesh-
 | cloud-storage-backend | `CloudStorageBackend` |
 | grant-log | `GrantLog`, `createGrantLogService` |
 | key-distribution | `createKeyDistributionService` |
+| manifest-sync | `createManifestSyncService` |
+| chunk-replication | `createChunkReplicationService` |
+| cloud-storage | `CloudStorage`, `CloudStorageNotFoundError` (the ergonomic S3-like SDK) |
 
 ## GPU compute
 
@@ -279,6 +282,41 @@ fundamental property of any scheme that hands symmetric key material to
 multiple independent parties -- the same is true of, say, a downloaded S3
 object whose bucket policy changes afterward -- not something a future phase
 of this plan is expected to close.
+
+## CloudStorage: the ergonomic SDK
+
+`cloud-storage.mjs`'s `CloudStorage` class is the actual developer-facing
+surface the whole plan above was building toward:
+
+```js
+import { CloudStorage as s3 } from '@johnhenry/browsermesh-apps'
+const store = new s3({ bucket: 'my-bucket', node: peerNode })
+await store.becomeAdmin()                      // bootstrap: this peer owns the bucket
+await store.grant(otherPubKey, ['read', 'write'])
+const { durability, replicatedTo } = await store.put('key', data)
+const bytes = await store.get('key')            // falls back to a remote peer request if not held locally
+```
+
+It composes `CloudStorageBackend` (local, durable, encrypted-at-rest reads/
+writes) with `createGrantLogService()`, `createKeyDistributionService()`,
+`createManifestSyncService()`, and `createChunkReplicationService()` — all
+four attached via `attachService()` with no `network` required — behind
+`put`/`get`/`delete`/`list` plus bucket-admin methods
+(`becomeAdmin`/`grant`/`revoke`/`designateReplica`/`effectiveGrants`). See
+`src/cloud-storage.mjs`'s own module doc comment for the full design
+writeup, including several real gaps the plan's original brief left open and
+exactly how each was resolved.
+
+`examples/09-cloud-storage.mjs` is the full story end to end, runnable with
+plain `node`. `test/real-peer/cloud-storage.test.mjs` proves the identical
+composition over an actual WebRTC connection. **New to building a
+mesh-native service yourself?** `docs/building-mesh-services.md` is the
+reusable guide this phase (K, the plan's capstone) produced — the
+`MeshService` attach contract, the control/data-plane transport split, the
+CRDT-manifest-plus-content-addressed-chunk pattern, the signed
+GrantLog pattern, and the key-distribution pattern, each with pointers to
+the real code, written so the *next* mesh-native service doesn't have to
+rediscover these same design questions from scratch.
 
 ## Putting it all together: sync + kernel-gated mesh + relay on one connection
 
