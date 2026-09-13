@@ -373,26 +373,34 @@ can drift (if you copy `mesh-kv.mjs`'s shape when you actually needed a
 mirror) — decide this explicitly, in your own service's module doc comment,
 the way both files here do.
 
-**A real implementation pitfall worth flagging, found while building
-`examples/10-mesh-kv-and-observability.mjs`**: `MeshSyncEngine.merge()`
-(`packages/browsermesh-sync/src/sync.mjs`) notifies subscribers
-unconditionally — even when a merge changes nothing (an already-known
-entry, re-delivered). Combined with `mesh-kv.mjs`'s `watch()` (broadcast on
-every document-changed notification to every watched peer), two peers that
-both `watch()` each other *and* have each authored at least one entry can
-enter an unbounded broadcast/re-merge/re-notify cycle: each side's own
-authored entries always pass the *other* side's "attribution must match the
-immediate sender" check on every hop, so nothing ever breaks the loop, and
-because delivery here rides `queueMicrotask()`, it starves the event loop's
-macrotask queue rather than merely running hot. The fix is not to touch
-`MeshSyncEngine` (a shared primitive four other services depend on) but to
-avoid *mutual, persistent* `watch()` between exactly two peers: have one
-side hold a standing `watch()`, and have the other side push its own
-changes with a one-shot `syncWith(pubKey)` call instead (exactly the
-pattern `MeshKv.grant()` already uses for its push-with-retry). If your own
-next service composes `watch()`-shaped broadcast in more than one direction
-between the same two peers, check for this before you assume a hang is your
-new code's bug.
+**A real implementation pitfall found while building
+`examples/10-mesh-kv-and-observability.mjs`, since fixed** (see
+[#112](https://github.com/johnhenry/browsermesh/issues/112)):
+`MeshSyncEngine.merge()` (`packages/browsermesh-sync/src/sync.mjs`) used to
+notify subscribers unconditionally — even when a merge changed nothing (an
+already-known entry, re-delivered). Combined with `mesh-kv.mjs`'s `watch()`
+(broadcast on every document-changed notification to every watched peer),
+two peers that both `watch()` each other *and* have each authored at least
+one entry could enter an unbounded broadcast/re-merge/re-notify cycle: each
+side's own authored entries always pass the *other* side's "attribution must
+match the immediate sender" check on every hop, so nothing ever broke the
+loop, and because delivery here rides `queueMicrotask()`, it starved the
+event loop's macrotask queue rather than merely running hot.
+
+`MeshSyncEngine.merge()` now compares the remote payload's vector clock
+against the local document's before deciding whether to notify: if the
+local document's version already causally dominates (or equals) the
+remote's, the remote carries no information the document hasn't already
+incorporated, so the merge is guaranteed to be a value-level no-op and the
+notification is skipped — while a merge that genuinely advances either
+side's state still notifies as before, so real propagation and convergence
+are unaffected. This means **mutual, persistent `watch()` between two
+peers who both author entries is now safe** — you no longer need to fall
+back to a one-shot `syncWith(pubKey)` push in one direction to avoid this.
+The worked example below still uses that one-shot `syncWith()` pattern for
+bob's side (it mirrors `MeshKv.grant()`'s own push-with-retry style and
+remains a perfectly reasonable way to drive a first sync), not because
+mutual `watch()` would be unsafe.
 
 ## Worked examples
 

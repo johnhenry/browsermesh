@@ -211,6 +211,23 @@ export class MeshSyncEngine {
    * The remote payload is typically obtained via `prepareSyncPayload()` on
    * a peer engine.  CRDT merge is always conflict-free by design.
    *
+   * Subscribers are only notified when the remote payload actually carries
+   * causal information this document hasn't already incorporated. Without
+   * this check, two peers with mutual `watch()`/auto-broadcast-on-change
+   * (see `mesh-kv.mjs`, `manifest-sync.mjs`) would notify each other on
+   * every merge -- including no-op merges of state each side already has --
+   * producing an unbounded broadcast -> merge -> notify -> broadcast cycle
+   * with no timeout (see #112). The document's vector clock is a reliable,
+   * cheap proxy for this: every local mutation goes through `update()`
+   * (which increments it) or `merge()` (which folds in the remote clock via
+   * component-wise max), so if `doc.version` already causally dominates (or
+   * equals) `remoteVersion`, the remote has nothing this document hasn't
+   * already seen and the CRDT merge below is guaranteed to be a value-level
+   * no-op. The merge itself is still performed unconditionally (it's cheap
+   * and idempotent, and keeps `merge()`'s other guarantees -- e.g. that
+   * `doc.crdt`/`doc.version` always reflect the union of both sides --
+   * unchanged); only the notification is conditional.
+   *
    * @param {string} docId
    * @param {object} remoteData  Must contain `crdt` and `version` fields.
    * @returns {{ conflicts: number }}  Always `{ conflicts: 0 }`.
@@ -223,12 +240,17 @@ export class MeshSyncEngine {
     const remoteCrdt    = Ctor.fromJSON(remoteData.crdt);
     const remoteVersion = VectorClock.fromJSON(remoteData.version);
 
+    const cmp = doc.version.compare(remoteVersion);
+    const isNewInformation = cmp !== 'after' && cmp !== 'equal';
+
     // CRDT merge returns a new instance.
     doc.crdt    = doc.crdt.merge(remoteCrdt);
     doc.version = doc.version.merge(remoteVersion);
     doc.lastModified = Date.now();
 
-    this.#notifySubscribers(docId, doc);
+    if (isNewInformation) {
+      this.#notifySubscribers(docId, doc);
+    }
     return { conflicts: 0 };
   }
 
