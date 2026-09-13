@@ -41,6 +41,7 @@ export * from './mesh-fetch.mjs';
 export * from './mesh-websocket.mjs';
 export * from './cloud-storage.mjs';
 export * from './observability-bridge.mjs';
+export * from './mesh-kv.mjs';
 export * from './peer-payments.mjs';
 export * from './peer-registry.mjs';
 export * from './peer-routing.mjs';
