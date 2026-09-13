@@ -264,6 +264,25 @@
  * node as `node.compute` (the `attachService()` handle -- also reachable via
  * `node.services.get('compute')`).
  *
+ * **Remote terminal/shell execution is opt-in via `{ enableTerminal: true,
+ * terminalOptions: { shell } }`** (issue #84, Phase 10 of the
+ * browsermesh-app-layer-migration plan -- blocked on, and unblocked by,
+ * issue #86's design pass). When set, this function attaches
+ * `peer-terminal.mjs`'s `createTerminalService()` -- wiring `TerminalHost`/
+ * `TerminalClient` (real remote command execution, migrated off
+ * `peer-session.mjs`'s `PeerSession`) onto `ctx.sendTo()`/
+ * `ctx.onIncomingData()`, gating inbound exec requests via
+ * `registry.checkAccess(fromPubKey, 'terminal', 'execute')` -- see that
+ * function's own doc comment for the full design (in particular, why this is
+ * a single coarse scope rather than per-command/per-target). Just like
+ * `enableEscrow`'s `escrowOptions.creditLedger`, `terminalOptions.shell` is
+ * REQUIRED -- there is no default shell (no `child_process`, no OS command
+ * execution shipped by this package); this function throws if `enableTerminal`
+ * is set with no `terminalOptions.shell`, so nobody gets real remote shell
+ * execution just by flipping the opt-in flag. Attached to the returned node
+ * as `node.terminal` (the `attachService()` handle -- also reachable at
+ * `node.services.get('terminal')`, same as any other opt-in service).
+ *
  * No browser-only imports at module level.
  */
 
@@ -308,6 +327,7 @@ import { createTorrentService } from './mesh-torrent.mjs'
 import { createEscrowService } from './peer-escrow.mjs'
 import { createChatService } from './peer-chat.mjs'
 import { createComputeService } from './mesh-compute.mjs'
+import { createTerminalService } from './peer-terminal.mjs'
 
 /**
  * Build and boot a real, WebRTC-capable `PeerNode`.
@@ -596,6 +616,22 @@ import { createComputeService } from './mesh-compute.mjs'
  *   serve as a compute worker for other peers' jobs; this function throws if
  *   `enableCompute` is set without it -- see `mesh-compute.mjs`'s header for
  *   why, settled by issue #86's resolved design pass.
+ * @param {boolean} [options.enableTerminal=false] - Attach `peer-terminal.mjs`'s
+ *   `createTerminalService()` (issue #84, Phase 10): real remote shell
+ *   execution, migrated off `PeerSession` onto `ctx.sendTo()`/
+ *   `ctx.onIncomingData()`, gated via `registry.checkAccess(fromPubKey,
+ *   'terminal', 'execute')` (issue #86's resolved gate mechanism). Attached
+ *   to the returned node as `node.terminal` (the `attachService()` handle --
+ *   also reachable via `node.services.get('terminal')`).
+ * @param {object} [options.terminalOptions] - Required when `enableTerminal`.
+ *   Passed straight through to `createTerminalService()`
+ *   (`shell`/`allowedCommands`/`blockedCommands`/`maxOutputLength`/`timeout`/
+ *   `accessResource`/`accessAction`/`requestEnvelopeType`/
+ *   `responseEnvelopeType`) -- see that function's own doc comment.
+ *   `terminalOptions.shell` (must implement `execute(command) ->
+ *   {output, exitCode}`) is required; this function throws if it's missing
+ *   (issue #86's resolved "bring-your-own, required, no default" execution-
+ *   backend decision).
  * @returns {Promise<PeerNode>} A booted (unless `skipBoot`) PeerNode, with
  *   `node.meshManager` (`WebRTCMeshManager`), `node.signaling`
  *   (`MeshSignalingChannel`), and `node.transportNegotiator` (the real,
@@ -702,6 +738,8 @@ export async function createMeshNode(options = {}) {
     chatOptions,
     enableCompute = false,
     computeOptions,
+    enableTerminal = false,
+    terminalOptions,
   } = options
 
   if (!signalingTransport) {
@@ -1161,6 +1199,43 @@ export async function createMeshNode(options = {}) {
     const computeHandle = attachService(node, servicesNetwork, computeDescriptor)
     node.services.set(computeHandle.name, computeHandle)
     node.compute = computeHandle
+  }
+
+  // -- Remote terminal/shell execution (opt-in, Phase 10 of the
+  // browsermesh-app-layer-migration plan, issue #84, unblocked by issue #86) -
+  // Attached the same way options.services/enableHealthCheck/enableRouting/
+  // enableTimestamp/enableHealthMonitor/enableIpfs/enableEscrow entries are
+  // (attachService()), just after -- so node.services already has whatever
+  // the caller listed in options.services (plus any other enabled services)
+  // before this one is added under createTerminalService()'s own 'terminal'
+  // name. Unlike enableRouting, `shell` has no sensible default (no
+  // `child_process`, no OS command execution shipped by this package) --
+  // mirrors enableEscrow's own required-dependency check for
+  // escrowOptions.creditLedger (issue #86's resolved "bring-your-own,
+  // required, no default" execution-backend decision).
+  if (enableTerminal) {
+    if (!terminalOptions?.shell) {
+      throw new Error(
+        'createMeshNode: options.terminalOptions.shell is required when enableTerminal is true ' +
+        '(must implement execute(command) -> {output, exitCode} -- see peer-terminal.mjs\'s TerminalHost). ' +
+        'No default shell is provided by this package.',
+      )
+    }
+    const terminalDescriptor = createTerminalService({
+      shell: terminalOptions.shell,
+      allowedCommands: terminalOptions?.allowedCommands,
+      blockedCommands: terminalOptions?.blockedCommands,
+      maxOutputLength: terminalOptions?.maxOutputLength,
+      timeout: terminalOptions?.timeout,
+      accessResource: terminalOptions?.accessResource,
+      accessAction: terminalOptions?.accessAction,
+      requestEnvelopeType: terminalOptions?.requestEnvelopeType,
+      responseEnvelopeType: terminalOptions?.responseEnvelopeType,
+      onLog: terminalOptions?.onLog ?? onLog,
+    })
+    const terminalHandle = attachService(node, servicesNetwork, terminalDescriptor)
+    node.services.set(terminalHandle.name, terminalHandle)
+    node.terminal = terminalHandle
   }
 
   return node
