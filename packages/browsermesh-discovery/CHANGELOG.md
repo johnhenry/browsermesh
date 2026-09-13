@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.0.3
+
+### Patch Changes
+
+- `RelayStrategy#connect()`'s 10s WebSocket-connection-timeout guard was never captured, cleared, or unref'd, so it kept the event loop alive for the full 10s after every connection attempt, success or failure, not just genuine timeouts. The handle is now cleared in both the `onopen` success path and the `onerror` path.
+
 ## 0.0.2
 
 ### Patch Changes
