@@ -103,6 +103,22 @@
  * so `PeerNode`'s audit path silently no-ops exactly as it did before this
  * option existed.
  *
+ * **DHT discovery is opt-in via `{ enableDht: true, dhtBootstrapPeers }`**
+ * (Phase D, issue #87). `@johnhenry/browsermesh-discovery`'s
+ * `DhtDiscoveryStrategy` (dht.mjs) is a real, tested Kademlia
+ * `DiscoveryStrategy` implementation that was never constructed anywhere in
+ * this repo -- it only takes a bare `sendFn`, with no transport of its own.
+ * When set, this function constructs one via `mesh-dht.mjs`'s
+ * `createMeshDht()`, multiplexing its wire traffic onto the same
+ * `signalingTransport` bus already required for WebRTC signaling (the one
+ * thing in this architecture that already reaches arbitrary podIds before a
+ * WebRTC connection exists), and adds it to `discoveryStrategies`. This is
+ * NOT a full rendezvous solution: `dhtBootstrapPeers` must supply at least
+ * one already-known peer podId out-of-band, or the node has no way to find
+ * its first DHT contact -- see `mesh-dht.mjs`'s header for the full
+ * explanation of what this does and does not solve. The constructed
+ * strategy is attached as `node.dht`.
+ *
  * No browser-only imports at module level.
  */
 
@@ -135,6 +151,7 @@ import { MeshRelayHost } from './mesh-relay-host.mjs'
 import { attachService } from './mesh-service.mjs'
 import { AuditChain } from './audit.mjs'
 import { createHardenedNegotiator } from './mesh-hardening.mjs'
+import { createMeshDht, shareTransport } from './mesh-dht.mjs'
 
 /**
  * Build and boot a real, WebRTC-capable `PeerNode`.
@@ -266,6 +283,28 @@ import { createHardenedNegotiator } from './mesh-hardening.mjs'
  * @param {object} [options.hardeningOptions.retry] - Passed to each
  *   per-peer `new RetryWithBackoff()` (see `hardening.mjs` for
  *   `maxRetries`/`baseDelayMs`/`maxDelayMs`/`jitterFactor`/`resetTimeoutMs`).
+ * @param {boolean} [options.enableDht=false] - Build a real, wire-connected
+ *   `DhtDiscoveryStrategy` (Phase D, issue #87; see `mesh-dht.mjs`) and add
+ *   it to `discoveryStrategies`, in addition to any other strategies
+ *   (default `BroadcastChannelStrategy`, or caller-supplied
+ *   `discoveryStrategies`). Its wire traffic is multiplexed onto
+ *   `signalingTransport` (the same bus already required for WebRTC
+ *   signaling) via `mesh-dht.mjs`'s `shareTransport()`. Does NOT solve
+ *   first-contact rendezvous -- see `dhtBootstrapPeers` and `mesh-dht.mjs`'s
+ *   header.
+ * @param {Array<string|{podId: string}>} [options.dhtBootstrapPeers=[]] -
+ *   Already-known peer podIds (or `{podId}` records) to seed the DHT routing
+ *   table with. Only used when `enableDht`. Required for this node to
+ *   discover anyone via DHT at all; without it the strategy starts with an
+ *   empty routing table and can only ever learn of peers who bootstrap
+ *   *with* this node directly.
+ * @param {number} [options.dhtK] - Kademlia bucket size, forwarded to
+ *   `DhtDiscoveryStrategy` (defaults to 20 there). Only used when
+ *   `enableDht`.
+ * @param {string} [options.dhtMessageType] - Overrides the `type` tag used
+ *   to distinguish DHT wire messages sharing `signalingTransport` with
+ *   WebRTC signaling traffic (default `'dht-relay'`). Only used when
+ *   `enableDht`.
  * @returns {Promise<PeerNode>} A booted (unless `skipBoot`) PeerNode, with
  *   `node.meshManager` (`WebRTCMeshManager`), `node.signaling`
  *   (`MeshSignalingChannel`), and `node.transportNegotiator` (the real,
@@ -279,8 +318,9 @@ import { createHardenedNegotiator } from './mesh-hardening.mjs'
  *   `options.services` (always present, empty when `options.services` is
  *   omitted), `node.auditChain` (`AuditChain`, see `audit.mjs`) attached
  *   when `enableAudit` or `options.auditChain` is supplied (left unset
- *   otherwise), and `node.hardening`/`node.transportMetrics` attached when
- *   `enableHardening`.
+ *   otherwise), `node.hardening`/`node.transportMetrics` attached when
+ *   `enableHardening`, and `node.dht` (`DhtDiscoveryStrategy`, see
+ *   `mesh-dht.mjs`) attached when `enableDht`.
  */
 export async function createMeshNode(options = {}) {
   const {
@@ -315,6 +355,10 @@ export async function createMeshNode(options = {}) {
     servicesNetwork,
     enableHardening = false,
     hardeningOptions,
+    enableDht = false,
+    dhtBootstrapPeers = [],
+    dhtK,
+    dhtMessageType,
   } = options
 
   if (!signalingTransport) {
@@ -354,15 +398,42 @@ export async function createMeshNode(options = {}) {
   // -- Discovery ----------------------------------------------------------
   let strategies = discoveryStrategies
   if (!strategies) {
-    if (typeof BroadcastChannel === 'undefined') {
+    if (typeof BroadcastChannel === 'undefined' && !enableDht) {
       throw new Error(
         'createMeshNode: no options.discoveryStrategies supplied and BroadcastChannel ' +
         'is not available in this environment (e.g. Node). Pass a Node-safe strategy, ' +
-        'such as [new ManualStrategy()] from @johnhenry/browsermesh-discovery.',
+        'such as [new ManualStrategy()] from @johnhenry/browsermesh-discovery, or set ' +
+        '{ enableDht: true, dhtBootstrapPeers } instead.',
       )
     }
-    strategies = [new BroadcastChannelStrategy({ channelName: discoveryChannelName })]
+    strategies = typeof BroadcastChannel !== 'undefined'
+      ? [new BroadcastChannelStrategy({ channelName: discoveryChannelName })]
+      : []
   }
+
+  // -- DHT discovery (opt-in, Phase D, issue #87) --------------------------
+  // DhtDiscoveryStrategy has no transport of its own (see mesh-dht.mjs's
+  // header) -- its wire traffic is multiplexed onto signalingTransport, the
+  // same bus already required for WebRTC offer/answer/ICE relay, since it's
+  // the one thing here that already reaches arbitrary podIds pre-connection.
+  // shareTransport() wraps it so both MeshSignalingChannel (below) and the
+  // DHT strategy can subscribe independently -- most real transports only
+  // support one onMessage() subscriber at a time.
+  let effectiveSignalingTransport = signalingTransport
+  let dht = null
+  if (enableDht) {
+    effectiveSignalingTransport = shareTransport(signalingTransport)
+    dht = createMeshDht({
+      localPodId: podId,
+      transport: effectiveSignalingTransport,
+      bootstrapPeers: dhtBootstrapPeers,
+      k: dhtK,
+      messageType: dhtMessageType,
+      onLog,
+    })
+    strategies.push(dht.strategy)
+  }
+
   const localRecord = new DiscoveryRecord({
     podId,
     label,
@@ -381,7 +452,7 @@ export async function createMeshNode(options = {}) {
   // (empty by default), filtering out malformed entries rather than handing
   // them straight to WebRTCMeshManager.
   const meshManager = new WebRTCMeshManager({ localPodId: podId, iceServers: mergeIceServers(iceServers), onLog })
-  const signaling = new MeshSignalingChannel({ localPodId: podId, transport: signalingTransport, onLog })
+  const signaling = new MeshSignalingChannel({ localPodId: podId, transport: effectiveSignalingTransport, onLog })
   await signaling.open()
 
   // The negotiator is constructed (and handed to PeerNode) before its
@@ -460,6 +531,11 @@ export async function createMeshNode(options = {}) {
   // opted in" contract -- PeerNode's own #audit() already no-ops in that case.
   if (auditChain) {
     node.auditChain = auditChain
+  }
+
+  // -- DHT discovery (opt-in, Phase D, issue #87) -----------------------------
+  if (dht) {
+    node.dht = dht.strategy
   }
 
   // -- CRDT sync (opt-in, Phase 3) -------------------------------------------
