@@ -7,7 +7,18 @@ import {
   ESCROW_STATUSES,
   EscrowContract,
   EscrowManager,
+  createEscrowService,
 } from '../src/peer-escrow.mjs'
+import { attachService } from '../src/mesh-service.mjs'
+import { PeerRegistry } from '../src/peer-registry.mjs'
+import { createMeshNode } from '../src/mesh-bootstrap.mjs'
+import {
+  IdentityWallet,
+  MeshIdentityManager,
+  MeshPeerManager,
+  TrustGraph,
+  MeshACL,
+} from '@johnhenry/browsermesh-core'
 
 // ── Mock ledger ──────────────────────────────────────────────────
 
@@ -289,5 +300,399 @@ describe('EscrowManager', () => {
     )
     // Balance unchanged
     assert.equal(ledger.getBalance('bob'), 50)
+  })
+})
+
+// =============================================================================
+// createEscrowService -- wired as a MeshService (attachService(), issue #117)
+// =============================================================================
+//
+// Fixtures mirror mesh-rpc.test.mjs's / peer-routing.test.mjs's own: real
+// Ed25519 IdentityWallet/MeshIdentityManager identities + real PeerRegistry
+// (wired to real MeshACL/MeshPeerManager/TrustGraph from
+// @johnhenry/browsermesh-core), connected via a minimal duck-typed in-memory
+// sendTo()/onIncomingData() bus -- not real WebRTC (that's a different
+// layer's job). `PeerRegistry.grantCapabilities()` is called DIRECTLY in
+// these tests (mirroring chunk-replication.test.mjs's/manifest-sync.test.mjs's
+// own convention) rather than going through a higher-level grant flow --
+// these tests exist to prove `createEscrowService()` correctly *consumes*
+// `checkAccess()`, not how a registry gets populated in general.
+
+/** A real Ed25519 identity + wallet + registry bundle for one "peer". */
+async function createEscrowTestPeer(label) {
+  const identityManager = new MeshIdentityManager({})
+  const wallet = new IdentityWallet({ identityManager })
+  const { podId } = await wallet.createIdentity(label)
+  const registry = new PeerRegistry({
+    localPodId: podId,
+    peerManager: new MeshPeerManager({}),
+    trustGraph: new TrustGraph(),
+    acl: new MeshACL({ owner: podId }),
+  })
+  return { podId, wallet, registry }
+}
+
+/**
+ * A minimal duck-typed multi-peer bus: every peer gets a node that can
+ * `sendTo()` any other peer's podId and dispatches to that peer's own
+ * `onIncomingData()` listeners. Mirrors mesh-rpc.test.mjs's `wireMesh()`.
+ * @param {Array<{podId: string, wallet?: object, registry: object}>} peers
+ * @returns {Record<string, any>} keyed by each peer's `podId`
+ */
+function wireEscrowMesh(peers) {
+  const listenersByPodId = new Map(peers.map((p) => [p.podId, new Set()]))
+  const nodesByPodId = {}
+  for (const peer of peers) {
+    nodesByPodId[peer.podId] = {
+      podId: peer.podId,
+      wallet: peer.wallet,
+      registry: peer.registry,
+      onIncomingData(cb) {
+        const set = listenersByPodId.get(peer.podId)
+        set.add(cb)
+        return () => set.delete(cb)
+      },
+      async sendTo(pubKey, data) {
+        const set = listenersByPodId.get(pubKey)
+        if (!set) return
+        queueMicrotask(() => {
+          for (const cb of set) cb(peer.podId, data)
+        })
+      },
+    }
+  }
+  return nodesByPodId
+}
+
+// -----------------------------------------------------------------------
+// Full lifecycle between two real peers: create, release, refund
+// -----------------------------------------------------------------------
+
+describe('createEscrowService: full contract lifecycle between two real peers', () => {
+  it('bob funds a contract on host, releases it to the payee, and separately refunds a second contract', async () => {
+    const host = await createEscrowTestPeer('host')
+    const bob = await createEscrowTestPeer('bob')
+    const mesh = wireEscrowMesh([host, bob])
+    const { [host.podId]: nodeHost, [bob.podId]: nodeBob } = mesh
+
+    const ledger = createMockLedger({ [bob.podId]: 100 })
+    attachService(nodeHost, undefined, createEscrowService({ creditLedger: ledger }))
+    const { api: bobApi } = attachService(nodeBob, undefined, createEscrowService({ creditLedger: createMockLedger() }))
+
+    // Host's operator opts bob in to opening escrow contracts against its
+    // ledger at all -- the coarse admin-granted 'escrow:create' gate (see
+    // createEscrowService()'s AUTHORIZATION MODEL doc comment).
+    host.registry.grantCapabilities(bob.podId, ['escrow:create'])
+
+    // -- create, funded by bob, payee is an arbitrary off-mesh id --
+    const contract = await bobApi.requestCreate(host.podId, {
+      payeePodId: 'alice-service',
+      amount: 40,
+      description: 'compute job',
+    })
+    assert.equal(contract.payer, bob.podId)
+    assert.equal(contract.payee, 'alice-service')
+    assert.equal(contract.amount, 40)
+    assert.equal(contract.status, 'funded')
+    assert.equal(ledger.getBalance(bob.podId), 60)
+
+    // -- release --
+    const releaseResult = await bobApi.requestRelease(host.podId, contract.id)
+    assert.equal(releaseResult.success, true)
+    assert.equal(releaseResult.txId, contract.id)
+    assert.equal(ledger.getBalance('alice-service'), 40)
+
+    // -- a second, independent contract, refunded instead of released --
+    const contract2 = await bobApi.requestCreate(host.podId, {
+      payeePodId: 'alice-service',
+      amount: 20,
+    })
+    assert.equal(ledger.getBalance(bob.podId), 40) // 60 - 20
+
+    const refundResult = await bobApi.requestRefund(host.podId, contract2.id, 'changed my mind')
+    assert.equal(refundResult.success, true)
+    assert.equal(ledger.getBalance(bob.podId), 60) // refunded back
+  })
+
+  it('dispute locks a contract without moving funds', async () => {
+    const host = await createEscrowTestPeer('host')
+    const bob = await createEscrowTestPeer('bob')
+    const mesh = wireEscrowMesh([host, bob])
+    const { [host.podId]: nodeHost, [bob.podId]: nodeBob } = mesh
+
+    const ledger = createMockLedger({ [bob.podId]: 100 })
+    attachService(nodeHost, undefined, createEscrowService({ creditLedger: ledger }))
+    const { api: bobApi } = attachService(nodeBob, undefined, createEscrowService({ creditLedger: createMockLedger() }))
+    host.registry.grantCapabilities(bob.podId, ['escrow:create'])
+
+    const contract = await bobApi.requestCreate(host.podId, { payeePodId: 'alice-service', amount: 25 })
+    const { disputeId } = await bobApi.requestDispute(host.podId, contract.id, { note: 'no delivery yet' })
+    assert.equal(typeof disputeId, 'string')
+    // Funds remain locked -- neither side has been credited.
+    assert.equal(ledger.getBalance(bob.podId), 75)
+    assert.equal(ledger.getBalance('alice-service'), 0)
+  })
+})
+
+// -----------------------------------------------------------------------
+// ctx.emit() events fire at the right moments
+// -----------------------------------------------------------------------
+
+describe('createEscrowService: ctx.emit() bridges EscrowManager events', () => {
+  it('emits escrow:created / escrow:released / escrow:refunded / escrow:disputed', async () => {
+    const host = await createEscrowTestPeer('host')
+    const bob = await createEscrowTestPeer('bob')
+    const mesh = wireEscrowMesh([host, bob])
+    const { [host.podId]: nodeHost, [bob.podId]: nodeBob } = mesh
+
+    const ledger = createMockLedger({ [bob.podId]: 100 })
+    const { on } = attachService(nodeHost, undefined, createEscrowService({ creditLedger: ledger }))
+    const { api: bobApi } = attachService(nodeBob, undefined, createEscrowService({ creditLedger: createMockLedger() }))
+    host.registry.grantCapabilities(bob.podId, ['escrow:create'])
+
+    const created = []
+    const released = []
+    const refunded = []
+    const disputed = []
+    on('escrow:created', (c) => created.push(c))
+    on('escrow:released', (c) => released.push(c))
+    on('escrow:refunded', (c) => refunded.push(c))
+    on('escrow:disputed', (d) => disputed.push(d))
+
+    const c1 = await bobApi.requestCreate(host.podId, { payeePodId: 'alice-service', amount: 10 })
+    assert.equal(created.length, 1)
+    assert.equal(created[0].id, c1.id)
+    assert.equal(created[0].status, 'funded')
+
+    await bobApi.requestRelease(host.podId, c1.id)
+    assert.equal(released.length, 1)
+    assert.equal(released[0].id, c1.id)
+    assert.equal(released[0].status, 'released')
+
+    const c2 = await bobApi.requestCreate(host.podId, { payeePodId: 'alice-service', amount: 10 })
+    assert.equal(created.length, 2)
+    await bobApi.requestRefund(host.podId, c2.id, 'nope')
+    assert.equal(refunded.length, 1)
+    assert.equal(refunded[0].id, c2.id)
+    assert.equal(refunded[0].status, 'refunded')
+
+    const c3 = await bobApi.requestCreate(host.podId, { payeePodId: 'alice-service', amount: 10 })
+    await bobApi.requestDispute(host.podId, c3.id, { note: 'bad result' })
+    assert.equal(disputed.length, 1)
+    assert.equal(disputed[0].contract.id, c3.id)
+    assert.equal(typeof disputed[0].disputeId, 'string')
+  })
+
+  it('emits escrow:expired via the LOCAL checkExpired() admin sweep', async () => {
+    const host = await createEscrowTestPeer('host')
+    const mesh = wireEscrowMesh([host])
+    const { [host.podId]: nodeHost } = mesh
+
+    const ledger = createMockLedger({ [host.podId]: 100 })
+    const { api, on } = attachService(nodeHost, undefined, createEscrowService({ creditLedger: ledger }))
+
+    const expired = []
+    on('escrow:expired', (c) => expired.push(c))
+
+    const contract = api.create({ payerPodId: host.podId, payeePodId: 'someone', amount: 10, timeoutMs: 1 })
+    await new Promise((r) => setTimeout(r, 20))
+    const count = api.checkExpired()
+    assert.equal(count, 1)
+    assert.equal(expired.length, 1)
+    assert.equal(expired[0].id, contract.id)
+    assert.equal(expired[0].status, 'expired')
+  })
+})
+
+// -----------------------------------------------------------------------
+// Authorization: the important security property -- ownership boundary
+// -----------------------------------------------------------------------
+
+describe('createEscrowService: authorization boundary (peer-initiated ops)', () => {
+  it('a peer never granted escrow:create cannot open a contract against the host ledger', async () => {
+    const host = await createEscrowTestPeer('host')
+    const mallory = await createEscrowTestPeer('mallory') // never granted anything
+    const mesh = wireEscrowMesh([host, mallory])
+    const { [host.podId]: nodeHost, [mallory.podId]: nodeMallory } = mesh
+
+    const ledger = createMockLedger({ [mallory.podId]: 100 })
+    attachService(nodeHost, undefined, createEscrowService({ creditLedger: ledger }))
+    const { api: malloryApi } = attachService(nodeMallory, undefined, createEscrowService({ creditLedger: createMockLedger() }))
+
+    assert.equal(host.registry.checkAccess(mallory.podId, 'escrow', 'create').allowed, false)
+
+    await assert.rejects(
+      () => malloryApi.requestCreate(host.podId, { payeePodId: 'alice-service', amount: 40 }),
+      /access denied/,
+    )
+    // No debit happened -- the request was refused before EscrowManager.create() ever ran.
+    assert.equal(ledger.getBalance(mallory.podId), 100)
+  })
+
+  it("an unauthorized peer's release/refund/dispute attempt against a contract they don't own is rejected", async () => {
+    const host = await createEscrowTestPeer('host')
+    const bob = await createEscrowTestPeer('bob')
+    const mallory = await createEscrowTestPeer('mallory') // never party to bob's contract
+    const mesh = wireEscrowMesh([host, bob, mallory])
+    const { [host.podId]: nodeHost, [bob.podId]: nodeBob, [mallory.podId]: nodeMallory } = mesh
+
+    const ledger = createMockLedger({ [bob.podId]: 100, [mallory.podId]: 100 })
+    attachService(nodeHost, undefined, createEscrowService({ creditLedger: ledger }))
+    const { api: bobApi } = attachService(nodeBob, undefined, createEscrowService({ creditLedger: createMockLedger() }))
+    const { api: malloryApi } = attachService(nodeMallory, undefined, createEscrowService({ creditLedger: createMockLedger() }))
+
+    // Mallory IS allowed to create her own contracts (broad create grant)
+    // but must never be able to touch BOB's contract.
+    host.registry.grantCapabilities(bob.podId, ['escrow:create'])
+    host.registry.grantCapabilities(mallory.podId, ['escrow:create'])
+
+    const contract = await bobApi.requestCreate(host.podId, { payeePodId: 'alice-service', amount: 30 })
+
+    assert.equal(host.registry.checkAccess(mallory.podId, `escrow:${contract.id}`, 'release').allowed, false)
+
+    await assert.rejects(
+      () => malloryApi.requestRelease(host.podId, contract.id),
+      /access denied/,
+    )
+    await assert.rejects(
+      () => malloryApi.requestRefund(host.podId, contract.id, 'give me bob\'s money'),
+      /access denied/,
+    )
+    await assert.rejects(
+      () => malloryApi.requestDispute(host.podId, contract.id, {}),
+      /access denied/,
+    )
+
+    // Contract untouched -- still funded, bob's balance unchanged by mallory's attempts.
+    assert.equal(ledger.getBalance(bob.podId), 70)
+    assert.equal(ledger.getBalance('alice-service'), 0)
+
+    // Meanwhile bob (the real owner) CAN release his own contract.
+    const result = await bobApi.requestRelease(host.podId, contract.id)
+    assert.equal(result.success, true)
+    assert.equal(ledger.getBalance('alice-service'), 30)
+  })
+
+  it('a request for a nonexistent contractId is rejected, not silently a no-op', async () => {
+    const host = await createEscrowTestPeer('host')
+    const bob = await createEscrowTestPeer('bob')
+    const mesh = wireEscrowMesh([host, bob])
+    const { [host.podId]: nodeHost, [bob.podId]: nodeBob } = mesh
+
+    attachService(nodeHost, undefined, createEscrowService({ creditLedger: createMockLedger() }))
+    const { api: bobApi } = attachService(nodeBob, undefined, createEscrowService({ creditLedger: createMockLedger() }))
+
+    await assert.rejects(
+      () => bobApi.requestRelease(host.podId, 'nonexistent-contract-id'),
+      /access denied/,
+    )
+  })
+})
+
+// -----------------------------------------------------------------------
+// Local/admin-only ops are never wire-exposed
+// -----------------------------------------------------------------------
+
+describe('createEscrowService: local-only ops have no wire surface', () => {
+  it('getContract/listContracts/getStats/checkExpired are unreachable over the wire', async () => {
+    const host = await createEscrowTestPeer('host')
+    const bob = await createEscrowTestPeer('bob')
+    const mesh = wireEscrowMesh([host, bob])
+    const { [host.podId]: nodeHost, [bob.podId]: nodeBob } = mesh
+
+    const ledger = createMockLedger({ [bob.podId]: 100 })
+    const { api: hostApi } = attachService(nodeHost, undefined, createEscrowService({ creditLedger: ledger }))
+    const { api: bobApi } = attachService(nodeBob, undefined, createEscrowService({ creditLedger: createMockLedger() }))
+    host.registry.grantCapabilities(bob.podId, ['escrow:create'])
+
+    const contract = await bobApi.requestCreate(host.podId, { payeePodId: 'alice-service', amount: 15 })
+
+    // No client-side request* method exists for any of these.
+    assert.equal(bobApi.requestGetContract, undefined)
+    assert.equal(bobApi.requestListContracts, undefined)
+    assert.equal(bobApi.requestGetStats, undefined)
+    assert.equal(bobApi.requestCheckExpired, undefined)
+
+    // Local api still works directly, in-process, on the host.
+    assert.equal(hostApi.getContract(contract.id).id, contract.id)
+    assert.equal(hostApi.listContracts().length, 1)
+    assert.equal(hostApi.getStats().active, 1)
+  })
+})
+
+// -----------------------------------------------------------------------
+// teardown
+// -----------------------------------------------------------------------
+
+describe('createEscrowService: teardown', () => {
+  it('unsubscribes from incoming data, stops event delivery, and rejects in-flight requests', async () => {
+    const host = await createEscrowTestPeer('host')
+    const bob = await createEscrowTestPeer('bob')
+    const mesh = wireEscrowMesh([host, bob])
+    const { [host.podId]: nodeHost, [bob.podId]: nodeBob } = mesh
+
+    attachService(nodeHost, undefined, createEscrowService({ creditLedger: createMockLedger() }))
+    const { api: bobApi, on, teardown } = attachService(nodeBob, undefined, createEscrowService({ creditLedger: createMockLedger() }))
+
+    const events = []
+    on('escrow:created', (c) => events.push(c))
+
+    const pending = bobApi.requestCreate(host.podId, { payeePodId: 'x', amount: 1 })
+    await teardown()
+
+    await assert.rejects(() => pending, /torn down/)
+  })
+})
+
+// =============================================================================
+// createMeshNode({ enableEscrow: true }) -- opt-in surface (issue #117)
+// =============================================================================
+// Mirrors peer-routing.test.mjs's own "createMeshNode({ enableRouting: true })"
+// integration section: real createMeshNode() PeerNodes, skipBoot: true where
+// the test doesn't need actual discovery/WebRTC boot, just construction and
+// the opt-in wiring surface itself.
+
+function createStubSignalingTransport() {
+  return { send() {}, onMessage() {} }
+}
+
+describe('createMeshNode({ enableEscrow: true })', () => {
+  it('leaves node.escrow unset and node.services empty of "escrow" when enableEscrow is omitted', async () => {
+    const node = await createMeshNode({
+      label: 'alice',
+      signalingTransport: createStubSignalingTransport(),
+      skipBoot: true,
+    })
+
+    assert.equal(node.escrow, undefined)
+    assert.equal(node.services.has('escrow'), false)
+  })
+
+  it('throws when enableEscrow is set but escrowOptions.creditLedger is missing', async () => {
+    await assert.rejects(
+      () => createMeshNode({
+        label: 'alice',
+        signalingTransport: createStubSignalingTransport(),
+        enableEscrow: true,
+        skipBoot: true,
+      }),
+      /creditLedger is required/,
+    )
+  })
+
+  it('attaches node.escrow (== node.services.get("escrow")) when enableEscrow + escrowOptions.creditLedger are set', async () => {
+    const ledger = createMockLedger({})
+    const node = await createMeshNode({
+      label: 'alice',
+      signalingTransport: createStubSignalingTransport(),
+      enableEscrow: true,
+      escrowOptions: { creditLedger: ledger },
+      skipBoot: true,
+    })
+
+    assert.ok(node.escrow, 'node.escrow is attached')
+    assert.equal(node.escrow, node.services.get('escrow'))
+    assert.equal(typeof node.escrow.api.create, 'function')
+    assert.equal(typeof node.escrow.api.requestCreate, 'function')
   })
 })

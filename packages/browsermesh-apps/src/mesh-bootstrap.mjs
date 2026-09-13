@@ -117,6 +117,25 @@
  * `attachService()` handle -- also reachable via
  * `node.services.get('peer-ipfs')`).
  *
+ * **Escrow (real credit/payment holds) is opt-in via `{ enableEscrow: true,
+ * escrowOptions: { creditLedger } }`** (issue #117). When set, this function
+ * attaches `peer-escrow.mjs`'s `createEscrowService()` -- wiring
+ * `EscrowManager` (`create`/`release`/`refund`/`dispute`/`checkExpired`
+ * against the caller-supplied `creditLedger`) so a peer can ask this node
+ * (or this node can ask another peer's own `enableEscrow` node) to hold
+ * credits in escrow. `escrowOptions.creditLedger` is REQUIRED -- there is no
+ * default ledger, matching the `enableRelayHost`/`relayHostNetwork`
+ * "opt-in flag needs its one real dependency supplied explicitly" pattern
+ * (this function throws if `enableEscrow` is set with no
+ * `escrowOptions.creditLedger`). See `peer-escrow.mjs`'s own
+ * `createEscrowService()` doc comment for the full authorization model
+ * (peer-initiated `create`/`release`/`refund`/`dispute` are individually
+ * gated via `registry.checkAccess()`; `getContract`/`listContracts`/
+ * `getStats`/`checkExpired` are local-only, never wire-exposed). Attached
+ * to the returned node as `node.escrow` (the `attachService()` handle --
+ * also reachable at `node.services.get('escrow')`, same as any other
+ * opt-in service).
+ *
  * **Mesh-native services are opt-in via `{ services: [...] }`** (Phase C).
  * Each entry is a `MeshService` descriptor (`mesh-service.mjs`) attached via
  * `attachService()`, mirroring the `enableRelayHost`/`relayHostServices`
@@ -244,6 +263,7 @@ import { createHealthMonitorService } from './mesh-health.mjs'
 import { createIpfsService } from './peer-ipfs.mjs'
 import { createVerificationService } from './mesh-verification.mjs'
 import { createTorrentService } from './mesh-torrent.mjs'
+import { createEscrowService } from './peer-escrow.mjs'
 
 /**
  * Build and boot a real, WebRTC-capable `PeerNode`.
@@ -488,6 +508,20 @@ import { createTorrentService } from './mesh-torrent.mjs'
  * @param {object} [options.torrentOptions] - Only used when `enableTorrent`.
  *   Passed straight through to `createTorrentService()`
  *   (`trackerUrl`/`chunkSize`/`envelopeType`/`manifestTimeoutMs`/`chunkTimeoutMs`).
+ * @param {boolean} [options.enableEscrow=false] - Attach `peer-escrow.mjs`'s
+ *   `createEscrowService()` (issue #117): real escrow-contract create/
+ *   release/refund/dispute against `escrowOptions.creditLedger`, with
+ *   peer-initiated operations individually authorized via
+ *   `registry.checkAccess()` -- see that function's own doc comment for the
+ *   full authorization model. Attached to the returned node as
+ *   `node.escrow` (the `attachService()` handle -- also reachable via
+ *   `node.services.get('escrow')`).
+ * @param {object} [options.escrowOptions] - Required when `enableEscrow`.
+ *   Passed straight through to `createEscrowService()`
+ *   (`creditLedger`/`onLog`/`envelopeType`/`requestTimeoutMs`) -- see that
+ *   function's own doc comment. `escrowOptions.creditLedger` (must have
+ *   `charge()`/`credit()`/`getBalance()`) is required; this function throws
+ *   if it's missing.
  * @returns {Promise<PeerNode>} A booted (unless `skipBoot`) PeerNode, with
  *   `node.meshManager` (`WebRTCMeshManager`), `node.signaling`
  *   (`MeshSignalingChannel`), and `node.transportNegotiator` (the real,
@@ -525,6 +559,9 @@ import { createTorrentService } from './mesh-torrent.mjs'
  *   `node.fileShare` (`attachService()`'s handle for `peer-files.mjs`'s
  *   `createFileShareService()`, also reachable via
  *   `node.services.get('file-share')`) attached when `enableFileShare`.
+ *   `node.escrow` (`attachService()`'s handle for `peer-escrow.mjs`'s
+ *   `createEscrowService()`, also reachable via `node.services.get('escrow')`)
+ *   attached when `enableEscrow`.
  */
 export async function createMeshNode(options = {}) {
   const {
@@ -579,6 +616,8 @@ export async function createMeshNode(options = {}) {
     torrentOptions,
     enableFileShare = false,
     fileShareOptions,
+    enableEscrow = false,
+    escrowOptions,
   } = options
 
   if (!signalingTransport) {
@@ -958,6 +997,33 @@ export async function createMeshNode(options = {}) {
     const fileShareHandle = attachService(node, servicesNetwork, fileShareDescriptor)
     node.services.set(fileShareHandle.name, fileShareHandle)
     node.fileShare = fileShareHandle
+  }
+
+  // -- Escrow (real credit/payment holds, opt-in, issue #117) ----------------
+  // Attached the same way options.services/enableHealthCheck/enableRouting/
+  // enableTimestamp/enableHealthMonitor/enableIpfs entries are
+  // (attachService()), just after -- so node.services already has whatever
+  // the caller listed in options.services (plus 'keepalive'/'mesh-routing'/
+  // 'timestamp'/'health-monitor'/'peer-ipfs', if enabled) before this one is
+  // added under createEscrowService()'s own 'escrow' name. Unlike
+  // enableRouting, creditLedger has no sensible default (there is no
+  // "default ledger" the way there's a default MeshACL/TrustGraph) --
+  // mirrors enableRelayHost's own required-dependency check for
+  // relayHostNetwork.
+  if (enableEscrow) {
+    if (!escrowOptions?.creditLedger) {
+      throw new Error(
+        'createMeshNode: options.escrowOptions.creditLedger is required when enableEscrow is true ' +
+        '(must implement charge()/credit()/getBalance() -- see peer-escrow.mjs\'s EscrowManager).',
+      )
+    }
+    const escrowDescriptor = createEscrowService({
+      ...escrowOptions,
+      onLog: escrowOptions?.onLog ?? onLog,
+    })
+    const escrowHandle = attachService(node, servicesNetwork, escrowDescriptor)
+    node.services.set(escrowHandle.name, escrowHandle)
+    node.escrow = escrowHandle
   }
 
   return node
