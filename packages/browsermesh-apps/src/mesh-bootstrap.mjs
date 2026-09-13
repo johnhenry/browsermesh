@@ -65,6 +65,24 @@
  * { name, backendScheme, teardown }>` keyed by descriptor name, always
  * present (empty if `services` is omitted).
  *
+ * **The audit trail is opt-in via `{ enableAudit: true }`** (or by passing
+ * an already-constructed `{ auditChain }`, the same "boolean toggle for a
+ * default, or supply your own instance" shape `enableSync`/`syncStorage`
+ * already establishes). Unlike `sync`/`relayHost`, the resulting
+ * `AuditChain` (`audit.mjs`) has to exist *before* `PeerNode` is
+ * constructed -- it's a constructor-time dependency, not something attached
+ * to the node afterwards -- so this function builds it (or accepts a
+ * caller-supplied one) right after the local identity is created and passes
+ * it straight into `new PeerNode({ ..., auditChain })`. `AuditChain` itself
+ * needs no signing key at construction; `PeerNode`'s `#audit()` already
+ * signs every entry with the node's own identity via `wallet.sign()`, so
+ * `enableAudit: true` only needs a `chainId` (defaults to `audit-${podId}`,
+ * overridable via `auditChainId`). The instance is attached as
+ * `node.auditChain`, mirroring `node.sync`/`node.relayHost`'s convention;
+ * it is left unset when neither `enableAudit` nor `auditChain` is supplied,
+ * so `PeerNode`'s audit path silently no-ops exactly as it did before this
+ * option existed.
+ *
  * No browser-only imports at module level.
  */
 
@@ -95,6 +113,7 @@ import { createWebRTCTransportFactory } from './webrtc-negotiator.mjs'
 import { createMeshSync } from './mesh-sync.mjs'
 import { MeshRelayHost } from './mesh-relay-host.mjs'
 import { attachService } from './mesh-service.mjs'
+import { AuditChain } from './audit.mjs'
 
 /**
  * Build and boot a real, WebRTC-capable `PeerNode`.
@@ -154,7 +173,6 @@ import { attachService } from './mesh-service.mjs'
  *     ],
  *   })
  *   ```
- * @param {import('./audit.mjs').AuditChain} [options.auditChain]
  * @param {Function} [options.onLog]
  * @param {boolean} [options.skipDiscovery=false] - Passed through to `PeerNode.boot()`.
  * @param {boolean} [options.skipBoot=false] - Construct but don't boot (caller calls `node.boot()` itself).
@@ -198,16 +216,35 @@ import { attachService } from './mesh-service.mjs'
  *   `options.services`. Only required if at least one descriptor declares
  *   `createBackend`; `attachService()` throws for any such descriptor if
  *   this is omitted.
+ * @param {boolean} [options.enableAudit=false] - Construct a default
+ *   `AuditChain` (`audit.mjs`) and wire it into the returned `PeerNode` as
+ *   `options.auditChain`, so `PeerNode`'s existing "audit trail for every
+ *   session action" path (boot, connect, shutdown -- see `peer-node.mjs`'s
+ *   `#audit()`) actually produces signed entries, using the node's own
+ *   identity (`node.wallet.sign()`) the same way `PeerNode` already does.
+ *   Ignored if `options.auditChain` is supplied directly.
+ * @param {import('./audit.mjs').AuditChain} [options.auditChain] - Pass a
+ *   pre-built `AuditChain` instead of letting `enableAudit` construct a
+ *   default one (e.g. to share one chain across multiple nodes/chainIds, or
+ *   to restore one via `AuditChain.fromJSON()`). Implies audit logging is
+ *   active even if `enableAudit` is left `false`, mirroring the
+ *   `enableSync`/`syncStorage` "boolean toggle for a default, or supply your
+ *   own instance" pattern.
+ * @param {string} [options.auditChainId] - `chainId` for the default
+ *   `AuditChain` `enableAudit` constructs. Defaults to `audit-${podId}`.
+ *   Ignored if `options.auditChain` is supplied.
  * @returns {Promise<PeerNode>} A booted (unless `skipBoot`) PeerNode, with
  *   `node.meshManager` (`WebRTCMeshManager`) and `node.signaling`
  *   (`MeshSignalingChannel`) attached for callers/tests that need lower-level
  *   access beyond what `PeerNode`'s own API exposes, `node.sync`
  *   (`MeshSyncBinding`, see `mesh-sync.mjs`) attached when `enableSync`,
  *   `node.relayHost` (`MeshRelayHost`, see `mesh-relay-host.mjs`) attached
- *   when `enableRelayHost`, and `node.services` (a `Map<string, { name,
+ *   when `enableRelayHost`, `node.services` (a `Map<string, { name,
  *   backendScheme, api, teardown }>`, see `mesh-service.mjs`) populated from
  *   `options.services` (always present, empty when `options.services` is
- *   omitted).
+ *   omitted), and `node.auditChain` (`AuditChain`, see `audit.mjs`) attached
+ *   when `enableAudit` or `options.auditChain` is supplied (left unset
+ *   otherwise).
  */
 export async function createMeshNode(options = {}) {
   const {
@@ -223,7 +260,9 @@ export async function createMeshNode(options = {}) {
     capabilities = [],
     signalingTransport,
     iceServers,
-    auditChain,
+    enableAudit = false,
+    auditChain: providedAuditChain,
+    auditChainId,
     onLog = () => {},
     skipDiscovery = false,
     skipBoot = false,
@@ -251,6 +290,13 @@ export async function createMeshNode(options = {}) {
   const identityManager = providedIdentityManager || new MeshIdentityManager({ onLog })
   const wallet = new IdentityWallet({ identityManager, onLog })
   const { podId } = await wallet.createIdentity(label)
+
+  // -- Audit chain (opt-in, boolean enableAudit or pass-your-own via
+  // auditChain) -- resolved here, before PeerNode is constructed, since
+  // (unlike sync/relayHost) PeerNode takes it as a constructor-time
+  // dependency rather than something attached to the node afterwards.
+  const auditChain = providedAuditChain
+    || (enableAudit ? new AuditChain(auditChainId || `audit-${podId}`) : undefined)
 
   // -- Registry (peers + trust + ACL + capability tokens) -----------------
   // capabilityValidator/tokenFactory back Phase 5's real granting/revocation
@@ -348,6 +394,15 @@ export async function createMeshNode(options = {}) {
   // (e.g. to inspect connection stats, or to close the signaling bus).
   node.meshManager = meshManager
   node.signaling = signaling
+
+  // -- Audit chain (opt-in) --------------------------------------------------
+  // Attached for inspection/verification, mirroring node.sync/node.relayHost's
+  // convention. Left unset (not even `null`) when neither enableAudit nor
+  // auditChain was supplied, matching those subsystems' "absent means never
+  // opted in" contract -- PeerNode's own #audit() already no-ops in that case.
+  if (auditChain) {
+    node.auditChain = auditChain
+  }
 
   // -- CRDT sync (opt-in, Phase 3) -------------------------------------------
   if (enableSync) {
