@@ -518,6 +518,7 @@ export class RelayStrategy extends DiscoveryStrategy {
       this.#ws = ws;
 
       await new Promise((resolve, reject) => {
+        const timeoutId = setTimeout(() => reject(new Error('WebSocket connection timeout')), 10000);
         ws.onopen = async () => {
           try {
             const regMsg = { type: 'register', podId: this.#podId };
@@ -527,13 +528,17 @@ export class RelayStrategy extends DiscoveryStrategy {
               regMsg.signature = signature;
             }
             ws.send(JSON.stringify(regMsg));
+            clearTimeout(timeoutId);
             resolve();
           } catch (err) {
+            clearTimeout(timeoutId);
             reject(err);
           }
         };
-        ws.onerror = () => reject(new Error('WebSocket connection failed'));
-        setTimeout(() => reject(new Error('WebSocket connection timeout')), 10000);
+        ws.onerror = () => {
+          clearTimeout(timeoutId);
+          reject(new Error('WebSocket connection failed'));
+        };
       });
 
       ws.onmessage = (event) => {
