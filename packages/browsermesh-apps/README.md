@@ -39,7 +39,6 @@ Extracted from the private `clawser` monorepo (previously `packages/browsermesh-
 | peer-registry | `PeerRegistry` |
 | peer-routing | `MeshRouter`, `ServerSharing` |
 | peer-services | `ServiceAdvertiser`, `ServiceBrowser` |
-| peer-session | `PeerSession`, `SessionManager` |
 | peer-terminal | `TerminalHost`, `TerminalClient` |
 | peer-timestamp | `TimestampAuthority`, `TimestampProof` |
 | peer-torrent | `TorrentManager` |

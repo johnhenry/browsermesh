@@ -115,28 +115,41 @@ not by a second transport mechanism.**
 **Why not `PeerSession`/`peer-files.mjs`'s `FileClient`?** The CloudStorage
 plan's own original text suggested investigating `peer-files.mjs`'s existing
 `FileClient`/`PeerSession` machinery as a data-plane counterpart for bulk
-chunk transfer — it already has heartbeats, rate limiting, and an audit
+chunk transfer — it already had heartbeats, rate limiting, and an audit
 trail, which sounds like exactly what chattier chunk traffic would want.
 That investigation happened during Phase G (tracked as
 `johnhenry/browsermesh` issue #84) and found a real, load-bearing fact this
-guide exists partly to broadcast: **`peer-files.mjs`/`PeerSession`/
-`SessionManager` are an entirely separate, unwired session architecture that
-the real `PeerNode` composition root never touches.** Every real, connected
-node in this repo — every `createMeshNode()` call, every `attachService()`
-consumer, phases C through H of this very plan — is built on `PeerNode`'s
-own `sendTo()`/`onIncomingData()` dispatch bus. There is no live bridge from
-a `PeerNode`'s sessions to a `PeerSession`. Building Phase G on top of
-`PeerSession`/`FileClient` would have required first solving issue #84's
-much larger "bridge two independent session architectures" problem — out of
-scope for a bulk-transfer phase. So `chunk-replication.mjs` builds **both**
-planes directly on `PeerNode.sendTo()`/`onIncomingData()`, matching every
-other phase in this plan, not a new bespoke transport and not `PeerSession`.
+guide exists partly to broadcast: **at the time, `peer-files.mjs`/
+`PeerSession`/`SessionManager` were an entirely separate, unwired session
+architecture that the real `PeerNode` composition root never touched.**
+Every real, connected node in this repo — every `createMeshNode()` call,
+every `attachService()` consumer, phases C through H of this very plan —
+was built on `PeerNode`'s own `sendTo()`/`onIncomingData()` dispatch bus.
+There was no live bridge from a `PeerNode`'s sessions to a `PeerSession`.
+Building Phase G on top of `PeerSession`/`FileClient` would have required
+first solving issue #84's much larger "bridge two independent session
+architectures" problem — out of scope for a bulk-transfer phase. So
+`chunk-replication.mjs` built **both** planes directly on
+`PeerNode.sendTo()`/`onIncomingData()`, matching every other phase in this
+plan, not a new bespoke transport and not `PeerSession`.
 
-**The lesson for your next service:** when a plan document (or your own
-first instinct) points at `peer-files.mjs`/`PeerSession` for anything, verify
-it's actually wired to the real composition root before building on it —
-it currently is not. Default to `ctx.sendTo()`/`ctx.onIncomingData()` for
-everything, control and data alike, unless you've confirmed otherwise.
+**Update:** issue #84's own later app-layer migration plan resolved this
+for good rather than just working around it — `peer-files.mjs` (and
+`peer-chat.mjs`, `peer-terminal.mjs`) were subsequently migrated off
+`PeerSession` onto this same `MeshService`/`ctx.sendTo()`/
+`ctx.onIncomingData()` convention, and `peer-session.mjs`'s `PeerSession`/
+`SessionManager` were deleted from the repo entirely once nothing
+depended on them anymore (issue #84's final phase). `PeerSession` no
+longer exists here in any form — every mention of it in this section is
+historical, describing why an earlier phase didn't build on it, not a
+live architecture to route around today.
+
+**The lesson for your next service, still valid:** when a plan document (or
+your own first instinct) points at some existing machinery for anything,
+verify it's actually wired to the real composition root before building on
+it — `PeerSession` wasn't, back when this section was written. Default to
+`ctx.sendTo()`/`ctx.onIncomingData()` for everything, control and data
+alike, unless you've confirmed otherwise.
 
 ## 3. CRDT manifest + content-addressed encrypted chunks
 

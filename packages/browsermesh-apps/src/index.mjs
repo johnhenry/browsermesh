@@ -53,7 +53,6 @@ export * from './peer-payments.mjs';
 export * from './peer-registry.mjs';
 export * from './peer-routing.mjs';
 export * from './peer-services.mjs';
-export * from './peer-session.mjs';
 export * from './peer-terminal.mjs';
 export * from './peer-timestamp.mjs';
 export * from './peer-torrent.mjs';
