@@ -56,6 +56,26 @@
  * `MeshRelayBackend`, constructed directly (not via this function) and
  * registered on the *client's own* `VirtualNetwork`.
  *
+ * **Transport hardening is opt-in via `{ enableHardening: true,
+ * hardeningOptions }`.** When set, the `MeshTransportNegotiator` this
+ * function constructs is wrapped (`mesh-hardening.mjs`'s
+ * `createHardenedNegotiator()`) with `@johnhenry/browsermesh-core`'s
+ * `hardening.mjs` primitives -- `RetryWithBackoff` (exponential backoff +
+ * circuit breaker, scoped per peer) and `TransportFailover` (transport-type
+ * failover) around every `connectToPeer()`'s negotiation attempt, plus
+ * `TransportMetrics`/`MetricsRegistry` for per-peer byte/message/error/
+ * latency counters -- before it is handed to `PeerNode`. This is what
+ * turns a transient WebRTC/ICE negotiation failure into a retried attempt
+ * instead of an immediate `connectToPeer()` rejection (see issue #26's
+ * documented WebRTC/ICE flakiness). Exposed as `node.hardening` (the full
+ * `{ metrics, failovers, retries }` bundle) and `node.transportMetrics`
+ * (alias for `node.hardening.metrics`, matching `node.sync`/`node.relayHost`'s
+ * convention of exposing the opt-in subsystem directly on the node).
+ * `TransportHealthCheck` and `ConnectionPool` are *not* wired here -- see
+ * `mesh-hardening.mjs`'s own header comment for why (a genuine health check
+ * needs a keepalive envelope protocol both peers speak, and `ConnectionPool`
+ * has no call site under `PeerNode`'s current one-session-per-peer model).
+ *
  * **Mesh-native services are opt-in via `{ services: [...] }`** (Phase C).
  * Each entry is a `MeshService` descriptor (`mesh-service.mjs`) attached via
  * `attachService()`, mirroring the `enableRelayHost`/`relayHostServices`
@@ -114,6 +134,7 @@ import { createMeshSync } from './mesh-sync.mjs'
 import { MeshRelayHost } from './mesh-relay-host.mjs'
 import { attachService } from './mesh-service.mjs'
 import { AuditChain } from './audit.mjs'
+import { createHardenedNegotiator } from './mesh-hardening.mjs'
 
 /**
  * Build and boot a real, WebRTC-capable `PeerNode`.
@@ -233,18 +254,33 @@ import { AuditChain } from './audit.mjs'
  * @param {string} [options.auditChainId] - `chainId` for the default
  *   `AuditChain` `enableAudit` constructs. Defaults to `audit-${podId}`.
  *   Ignored if `options.auditChain` is supplied.
+ * @param {boolean} [options.enableHardening=false] - Wrap the constructed
+ *   `MeshTransportNegotiator` with retry/backoff + failover + metrics (see
+ *   `mesh-hardening.mjs`) before it is handed to `PeerNode`, so
+ *   `connectToPeer()` retries transient negotiation failures instead of
+ *   rejecting immediately. Attached to the returned node as `node.hardening`
+ *   (`{ metrics, failovers, retries }`) and `node.transportMetrics` (alias
+ *   for `node.hardening.metrics`).
+ * @param {object} [options.hardeningOptions] - Only used when
+ *   `enableHardening`.
+ * @param {object} [options.hardeningOptions.retry] - Passed to each
+ *   per-peer `new RetryWithBackoff()` (see `hardening.mjs` for
+ *   `maxRetries`/`baseDelayMs`/`maxDelayMs`/`jitterFactor`/`resetTimeoutMs`).
  * @returns {Promise<PeerNode>} A booted (unless `skipBoot`) PeerNode, with
- *   `node.meshManager` (`WebRTCMeshManager`) and `node.signaling`
- *   (`MeshSignalingChannel`) attached for callers/tests that need lower-level
+ *   `node.meshManager` (`WebRTCMeshManager`), `node.signaling`
+ *   (`MeshSignalingChannel`), and `node.transportNegotiator` (the real,
+ *   unwrapped `MeshTransportNegotiator` -- see `enableHardening` below)
+ *   attached for callers/tests that need lower-level
  *   access beyond what `PeerNode`'s own API exposes, `node.sync`
  *   (`MeshSyncBinding`, see `mesh-sync.mjs`) attached when `enableSync`,
  *   `node.relayHost` (`MeshRelayHost`, see `mesh-relay-host.mjs`) attached
  *   when `enableRelayHost`, `node.services` (a `Map<string, { name,
  *   backendScheme, api, teardown }>`, see `mesh-service.mjs`) populated from
  *   `options.services` (always present, empty when `options.services` is
- *   omitted), and `node.auditChain` (`AuditChain`, see `audit.mjs`) attached
+ *   omitted), `node.auditChain` (`AuditChain`, see `audit.mjs`) attached
  *   when `enableAudit` or `options.auditChain` is supplied (left unset
- *   otherwise).
+ *   otherwise), and `node.hardening`/`node.transportMetrics` attached when
+ *   `enableHardening`.
  */
 export async function createMeshNode(options = {}) {
   const {
@@ -277,6 +313,8 @@ export async function createMeshNode(options = {}) {
     relayHostEnvelopeType,
     services,
     servicesNetwork,
+    enableHardening = false,
+    hardeningOptions,
   } = options
 
   if (!signalingTransport) {
@@ -355,12 +393,27 @@ export async function createMeshNode(options = {}) {
   // resolving the callee-side session gap (see peer-node.mjs / Phase 3).
   const transportNegotiator = new MeshTransportNegotiator()
 
+  // -- Transport hardening (opt-in) -----------------------------------------
+  // Wrapping happens before PeerNode is constructed, but adapter
+  // registration (below, after PeerNode's construction) still targets
+  // `transportNegotiator` -- the real, unwrapped instance -- directly:
+  // `createHardenedNegotiator()`'s returned `negotiate()` closes over that
+  // same `transportNegotiator` reference, so it sees adapters registered on
+  // it regardless of when registration happens relative to wrapping.
+  const hardening = enableHardening
+    ? createHardenedNegotiator({
+      negotiator: transportNegotiator,
+      retryOptions: hardeningOptions?.retry,
+      onLog,
+    })
+    : null
+
   // -- PeerNode -------------------------------------------------------------
   const node = new PeerNode({
     wallet,
     registry,
     discovery,
-    transportNegotiator,
+    transportNegotiator: hardening ? hardening : transportNegotiator,
     auditChain,
     onLog,
   })
@@ -391,9 +444,14 @@ export async function createMeshNode(options = {}) {
 
   // Not part of PeerNode's own API surface, but real callers/tests
   // occasionally need direct access below the PeerNode abstraction
-  // (e.g. to inspect connection stats, or to close the signaling bus).
+  // (e.g. to inspect connection stats, close the signaling bus, or register
+  // an additional transport adapter directly -- registering on this real,
+  // unwrapped negotiator works identically whether or not enableHardening
+  // wrapped it for PeerNode's own use, since the wrapper closes over this
+  // same instance).
   node.meshManager = meshManager
   node.signaling = signaling
+  node.transportNegotiator = transportNegotiator
 
   // -- Audit chain (opt-in) --------------------------------------------------
   // Attached for inspection/verification, mirroring node.sync/node.relayHost's
@@ -450,6 +508,12 @@ export async function createMeshNode(options = {}) {
       const handle = attachService(node, servicesNetwork, descriptor)
       node.services.set(handle.name, handle)
     }
+  }
+
+  // -- Transport hardening (opt-in) -----------------------------------------
+  if (hardening) {
+    node.hardening = hardening
+    node.transportMetrics = hardening.metrics
   }
 
   return node
