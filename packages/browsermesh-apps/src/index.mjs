@@ -34,6 +34,7 @@ export * from './mesh-relay-backend.mjs';
 export * from './mesh-service.mjs';
 export * from './mesh-timestamp.mjs';
 export * from './mesh-health.mjs';
+export * from './mesh-verification.mjs';
 export * from './cloud-storage-backend.mjs';
 export * from './grant-log.mjs';
 export * from './key-distribution.mjs';
