@@ -221,6 +221,20 @@
  * the full writeup). Stored in `node.services` under `'file-share'` and
  * ALSO exposed directly as `node.fileShare`, mirroring `node.router`/
  * `node.healthCheck`'s "reachable both ways" convention.
+ * **`peer-chat.mjs` is opt-in via `{ enableChat, chatOptions }`** (Phase 9
+ * of the browsermesh-app-layer-migration plan, issue #84 -- a migration off
+ * `PeerSession`, not a fresh wire-up: `peer-chat.mjs`'s `PeerChat` used to
+ * require a live `PeerSession`, which nothing in this repo ever constructs).
+ * Follows the exact `enableTimestamp`/`timestampOptions` shape just above:
+ * `createChatService()` is attached via `attachService()` the same way,
+ * stored in `node.services` under `'chat'` and ALSO exposed directly as
+ * `node.chat` (the `attachService()` handle -- `node.chat.api.sendMessage()`/
+ * etc., same "reachable both ways" convention `node.timestamp`/
+ * `node.healthMonitor`/`node.router` already establish). See
+ * `peer-chat.mjs`'s own header comment for the full design
+ * writeup (why `sendMessage()`/`sendTyping()` now take an explicit target
+ * pubKey, and why signature verification keys off each message's real
+ * sender instead of one fixed constructor-time key).
  *
  * No browser-only imports at module level.
  */
@@ -264,6 +278,7 @@ import { createIpfsService } from './peer-ipfs.mjs'
 import { createVerificationService } from './mesh-verification.mjs'
 import { createTorrentService } from './mesh-torrent.mjs'
 import { createEscrowService } from './peer-escrow.mjs'
+import { createChatService } from './peer-chat.mjs'
 
 /**
  * Build and boot a real, WebRTC-capable `PeerNode`.
@@ -522,6 +537,16 @@ import { createEscrowService } from './peer-escrow.mjs'
  *   function's own doc comment. `escrowOptions.creditLedger` (must have
  *   `charge()`/`credit()`/`getBalance()`) is required; this function throws
  *   if it's missing.
+ * @param {boolean} [options.enableChat=false] - Attach `peer-chat.mjs`'s
+ *   `createChatService()` (issue #84, Phase 9): P2P chat with optional
+ *   message signing/verification, history, typing indicators, and an
+ *   auto-responder hook, migrated off `PeerSession` onto `ctx.sendTo()`/
+ *   `ctx.onIncomingData()`. Attached to the returned node as `node.chat`
+ *   (the `attachService()` handle -- also reachable via
+ *   `node.services.get('chat')`).
+ * @param {object} [options.chatOptions] - Only used when `enableChat`.
+ *   Passed straight through to `createChatService()`
+ *   (`signFn`/`verifyFn`/`maxHistory`/`autoResponder`/`onLog`).
  * @returns {Promise<PeerNode>} A booted (unless `skipBoot`) PeerNode, with
  *   `node.meshManager` (`WebRTCMeshManager`), `node.signaling`
  *   (`MeshSignalingChannel`), and `node.transportNegotiator` (the real,
@@ -562,6 +587,9 @@ import { createEscrowService } from './peer-escrow.mjs'
  *   `node.escrow` (`attachService()`'s handle for `peer-escrow.mjs`'s
  *   `createEscrowService()`, also reachable via `node.services.get('escrow')`)
  *   attached when `enableEscrow`.
+ *   `node.chat` (`attachService()`'s handle for `peer-chat.mjs`'s
+ *   `createChatService()`, also reachable via `node.services.get('chat')`)
+ *   attached when `enableChat`.
  */
 export async function createMeshNode(options = {}) {
   const {
@@ -618,6 +646,8 @@ export async function createMeshNode(options = {}) {
     fileShareOptions,
     enableEscrow = false,
     escrowOptions,
+    enableChat = false,
+    chatOptions,
   } = options
 
   if (!signalingTransport) {
@@ -1024,6 +1054,24 @@ export async function createMeshNode(options = {}) {
     const escrowHandle = attachService(node, servicesNetwork, escrowDescriptor)
     node.services.set(escrowHandle.name, escrowHandle)
     node.escrow = escrowHandle
+  }
+
+  // -- P2P chat (opt-in, Phase 9 of the browsermesh-app-layer-migration
+  // plan, issue #84) --------------------------------------------------------
+  // Attached the same way enableHealthCheck's keepalive service is above --
+  // see peer-chat.mjs's own header comment for the full design (migration
+  // off PeerSession, not a fresh wire-up).
+  if (enableChat) {
+    const chatDescriptor = createChatService({
+      signFn: chatOptions?.signFn,
+      verifyFn: chatOptions?.verifyFn,
+      maxHistory: chatOptions?.maxHistory,
+      autoResponder: chatOptions?.autoResponder,
+      onLog: chatOptions?.onLog ?? onLog,
+    })
+    const chatHandle = attachService(node, servicesNetwork, chatDescriptor)
+    node.services.set(chatHandle.name, chatHandle)
+    node.chat = chatHandle
   }
 
   return node
