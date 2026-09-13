@@ -306,6 +306,125 @@ it (harmless -- those envelopes are just plain objects with a `.type` field
 tenant code can filter on itself if it cares, but worth knowing rather than
 assuming the view is pre-filtered).
 
+## `fetch()`/`WebSocket`-shaped mesh access: `browserMeshFetch` and `BrowserMeshWebSocket`
+
+Two web-standard-API-shaped wrappers over a mesh connection, so existing
+code that already expects `fetch(url) -> Response` or `new WebSocket(url)`
+can reach a mesh-addressable pod (`mesh://podId/path`) without learning
+`PeerNode`'s raw `sendTo()`/`onIncomingData()` API. Both are built on
+`mesh-rpc.mjs`'s `createMeshRpcService()`, a general-purpose request/response
+transport over the same `ctx.sendTo()`/`ctx.onIncomingData()` convention
+every `MeshService` in this family uses (attach it via
+`attachService(peerNode, network, createMeshRpcService({ onRequest }))`, or
+pass it through `createMeshNode({ services: [...] })`).
+
+**Authorization boundary, stated explicitly because it's easy to miss:**
+neither transport checks `registry.checkAccess()` against any fixed
+resource/scope -- a general-purpose RPC/duplex channel has no fixed resource
+to check a scope against. Deciding what `{method, path}` combinations (for
+`browserMeshFetch`) or which `(fromPubKey, path)` connections (for
+`BrowserMeshWebSocket`) are allowed is the *responding pod's own*
+`onRequest`/`onConnection` handler's job, the same way a real HTTP server's
+application code owns its own authorization, not its TCP/TLS transport
+layer.
+
+### `browserMeshFetch`
+
+`createBrowserMeshFetch(meshRpcApi) -> (url, init) => Promise<Response>` binds
+once to a live `mesh-rpc` service's `api` (the `{ request }` object
+`attachService()` returns as `.api`) and hands back a plain function whose
+call signature matches real `fetch(url, init)` exactly -- so it can be
+dropped in anywhere something expects "a fetch-shaped function", with no
+adapter:
+
+```js
+import { attachService, createMeshRpcService, createBrowserMeshFetch } from '@johnhenry/browsermesh-apps'
+
+// on the peer being called:
+attachService(bobNode, undefined, createMeshRpcService({
+  onRequest: async ({ method, path, body }) => {
+    if (method === 'GET' && path === '/status') return { status: 200, body: { ok: true } }
+    return { status: 404, body: { error: 'not found' } }
+  },
+}))
+
+// on the calling peer:
+const { api } = attachService(aliceNode, undefined, createMeshRpcService({}))
+const browserMeshFetch = createBrowserMeshFetch(api)
+
+const res = await browserMeshFetch('mesh://bob-pod-id/status')
+const data = await res.json() // { ok: true }
+```
+
+Error-vs-reject semantics deliberately match real `fetch()`, not a Service
+Worker interceptor's "always resolve some Response" convention: a malformed
+`mesh://`/`*.mesh.local` URL throws a `TypeError` *synchronously*, before any
+Promise exists; a responding pod's `onRequest` throwing or returning a
+non-2xx `status` still resolves a genuine `Response` (status/headers/body
+shaped from whatever it returned); only a transport-level failure -- no
+matching response within the timeout, or the peer being unreachable --
+*rejects* the returned promise, matching what a real network-level `fetch()`
+failure means.
+
+### `BrowserMeshWebSocket`
+
+A class implementing the standard `WebSocket` *instance* surface
+(`readyState`, `onopen`/`onmessage`/`onerror`/`onclose`,
+`addEventListener`/`removeEventListener`, `send()`, `close()`) over a
+persistent mesh envelope channel. **One real, deliberate deviation from the
+standard constructor:** `new WebSocket(url)` needs no extra arguments
+because a browser's networking stack is an ambient, process-wide resource --
+there is no mesh equivalent, so `new BrowserMeshWebSocket(url, opts)`
+requires `opts.peerNode` (anything exposing `podId`, `sendTo()`,
+`onIncomingData()` -- a real `PeerNode` satisfies this). Everything else
+matches the standard instance shape as closely as this transport allows.
+
+```js
+import { BrowserMeshWebSocket, attachService, createMeshWebSocketService } from '@johnhenry/browsermesh-apps'
+
+// on the peer accepting connections -- the ONLY side that needs a MeshService
+// attached; a client-role BrowserMeshWebSocket subscribes directly to its
+// own peerNode and needs nothing pre-attached:
+attachService(bobNode, undefined, createMeshWebSocketService({
+  onConnection: (fromPubKey, path) => path === '/chat', // accept/reject policy lives here
+  onIncomingConnection: (session) => {
+    session.onmessage = (event) => session.send(`echo: ${event.data}`)
+  },
+}))
+
+// on the connecting peer:
+const socket = new BrowserMeshWebSocket('mesh://bob-pod-id/chat', { peerNode: aliceNode })
+socket.onopen = () => socket.send('hello')
+socket.onmessage = (event) => console.log(event.data) // 'echo: hello'
+```
+
+The accept/reject handshake is `createMeshWebSocketService({ onConnection })`'s
+job entirely: `onConnection(fromPubKey, path) -> boolean|Promise<boolean>`
+decides per inbound connection attempt. No `onConnection` registered means
+every inbound connection is rejected (the safe default -- an "open door" is a
+worse default than an RPC transport's "not implemented" 501). A rejected
+attempt fires the connecting side's `onerror` then `onclose` with code
+`4403`; a connection that never gets a response within the open timeout
+(10s default) closes with code `1006`, mirroring real `WebSocket`'s own
+abnormal-closure code. `send()` throws `InvalidStateError` both before OPEN
+*and* after CLOSE -- the latter a deliberate deviation from the WHATWG spec
+(which silently drops a post-close `send()`), judged a worse default for
+mesh code than a loud, discoverable throw. `close()` is a one-directional
+notification, not a two-phase closing handshake -- there's no TCP-level
+half-open state to model over a persistent mesh envelope channel. See
+`src/mesh-websocket.mjs`'s module doc comment for the full wire-protocol and
+binary-encoding (base64-over-JSON) writeup.
+
+`examples/08-mesh-fetch-websocket.mjs` runs both APIs together end to end
+(request/response, and a duplex exchange including both the accept and
+reject halves of the handshake) over a simulated in-process connection.
+
+**Considered, deferred:** extending this same "web-standard-API-shaped
+wrapper" treatment to `WebTransport`/`RTCDataChannel` was evaluated and
+deliberately not scoped here -- see `browsermesh-fetch-websocket.md`'s own
+"Considered, deferred" section for the reasoning (mostly: avoid adding more
+unconsumed wrapper surface before these two have a real caller).
+
 ## License
 
 MIT

@@ -23,7 +23,8 @@
     "example:04": "node examples/04-kernel-capability-denial.mjs",
     "example:05": "node examples/05-crdt-sync-across-two-engines.mjs",
     "example:06": "node examples/06-mesh-relay.mjs",
-    "example:07": "node examples/07-full-mesh-pipeline.mjs"
+    "example:07": "node examples/07-full-mesh-pipeline.mjs",
+    "example:08": "node examples/08-mesh-fetch-websocket.mjs"
   },
   "devDependencies": {
     "@changesets/cli": "^2.27.0",
