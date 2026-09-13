@@ -186,19 +186,19 @@ await aliceGrantApi.grant(bob.podId, ['read', 'write'])
 await aliceGrantApi.syncWith(bob.podId)
 aliceKvHandle.api.watch(bob.podId)
 // NOTE: bob deliberately does NOT call kvApi.watch(alice.podId) here (a
-// persistent, mutual watch in both directions). `MeshSyncEngine.merge()`
-// notifies subscribers unconditionally, even for a no-op merge (see
-// `packages/browsermesh-sync/src/sync.mjs`) -- with exactly two peers
-// mutually watching each other, and each having authored at least one
-// entry, that turns into an unbounded broadcast/re-merge/re-notify cycle
-// between them (each side's own authored entries always pass the other
-// side's "attribution must match the immediate sender" check on every
-// hop, so nothing ever breaks the cycle). This is a real property of the
-// shipped `MeshSyncEngine`/`mesh-kv.mjs`, not something this example
-// works around superficially -- seen below, bob instead uses a one-shot
-// `kvApi.syncWith(pubKey)` push (matching `MeshKv.grant()`'s own pattern)
-// whenever HE wants to deliver a change, which never creates a second
-// permanent broadcast loop back toward alice.
+// persistent, mutual watch in both directions). Mutual watch() between two
+// peers who both author entries used to be unsafe: `MeshSyncEngine.merge()`
+// notified subscribers unconditionally, even for a no-op merge, which with
+// two peers mutually watching each other turned into an unbounded
+// broadcast/re-merge/re-notify cycle -- fixed in
+// `packages/browsermesh-sync/src/sync.mjs` (see
+// https://github.com/johnhenry/browsermesh/issues/112): `merge()` now
+// compares the remote payload's vector clock against the local document's
+// version and only notifies when the merge actually advances local state,
+// so mutual, persistent watch() between two authoring peers is safe today.
+// Bob still uses a one-shot `kvApi.syncWith(pubKey)` push below (matching
+// `MeshKv.grant()`'s own push-with-retry pattern) as a matter of style, not
+// because a standing `watch()` back toward alice would misbehave.
 // Same documented retry-on-delay workaround MeshKv.grant() uses: bob's own
 // GrantLog.mergeRemote() isn't awaited by his dispatch handler, so a data
 // push sent immediately after grantLogApi.syncWith() can arrive and be
