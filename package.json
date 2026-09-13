@@ -16,7 +16,7 @@
     "release": "changeset publish",
     "release:staggered": "./scripts/staggered-publish.sh",
     "release:staggered:dry-run": "./scripts/staggered-publish.sh --dry-run",
-    "examples": "for f in examples/0*.mjs; do echo \"== $f\" && node \"$f\" || exit 1; done",
+    "examples": "for f in examples/[0-9][0-9]-*.mjs; do echo \"== $f\" && node \"$f\" || exit 1; done",
     "example:01": "node examples/01-identity-and-signed-messages.mjs",
     "example:02": "node examples/02-two-pods-discover-and-message.mjs",
     "example:03": "node examples/03-virtual-network-loopback.mjs",
@@ -25,7 +25,8 @@
     "example:06": "node examples/06-mesh-relay.mjs",
     "example:07": "node examples/07-full-mesh-pipeline.mjs",
     "example:08": "node examples/08-mesh-fetch-websocket.mjs",
-    "example:09": "node examples/09-cloud-storage.mjs"
+    "example:09": "node examples/09-cloud-storage.mjs",
+    "example:10": "node examples/10-mesh-kv-and-observability.mjs"
   },
   "devDependencies": {
     "@changesets/cli": "^2.27.0",
