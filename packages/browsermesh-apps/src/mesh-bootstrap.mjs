@@ -175,6 +175,24 @@
  * migration plan's own Phase 1 note, since `TimestampAuthority`/
  * `HealthMonitor` already duck-type against `PeerNode.listSessions()`.
  *
+ * **`peer-verification.mjs` is opt-in via `{ enableVerification,
+ * verificationOptions }`** (Phase 4 of the browsermesh-app-layer-migration
+ * plan, issue #119). Attaches `mesh-verification.mjs`'s
+ * `createVerificationService()` -- a real request/response wire protocol
+ * (`'verify-request'`/`'verify-response'`) wrapping `peer-verification.mjs`'s
+ * `VerificationQuorum`: this node can dispatch a job to a quorum of trusted
+ * peers, collect their independently-computed results, and vote on
+ * correctness (unanimous/majority/threshold/byzantine). Follows the exact
+ * `enableTimestamp`/`timestampOptions` shape just above: attached via
+ * `attachService()`, stored in `node.services` under `'verification'`, and
+ * also exposed directly as `node.verification`. See `mesh-verification.mjs`'s
+ * own header comment for the full design -- in particular, why answering an
+ * inbound verification request requires both `ctx.registry.checkAccess()`
+ * authorization AND a caller-supplied `verificationOptions.executeFn` (never
+ * invented by this file), mirroring the same restraint `peer-compute.mjs`
+ * already shows while that module (and `peer-terminal.mjs`) stay blocked on
+ * issue #86's still-open execution-gating design pass.
+ *
  * No browser-only imports at module level.
  */
 
@@ -213,6 +231,7 @@ import { createMeshRoutingService } from './peer-routing.mjs'
 import { createTimestampService } from './mesh-timestamp.mjs'
 import { createHealthMonitorService } from './mesh-health.mjs'
 import { createIpfsService } from './peer-ipfs.mjs'
+import { createVerificationService } from './mesh-verification.mjs'
 
 /**
  * Build and boot a real, WebRTC-capable `PeerNode`.
@@ -419,6 +438,19 @@ import { createIpfsService } from './peer-ipfs.mjs'
  * @param {object} [options.ipfsOptions] - Only used when `enableIpfs`.
  *   Passed straight through to `createIpfsService()`
  *   (`enabled`/`maxStorageMb`).
+ * @param {boolean} [options.enableVerification=false] - Attach
+ *   `mesh-verification.mjs`'s `createVerificationService()` (Phase 4, issue
+ *   #119): quorum-based job-result verification wrapping
+ *   `peer-verification.mjs`'s `VerificationQuorum`. Attached to the returned
+ *   node as `node.verification` (the `attachService()` handle -- also
+ *   reachable via `node.services.get('verification')`).
+ * @param {object} [options.verificationOptions] - Only used when
+ *   `enableVerification`. Passed straight through to
+ *   `createVerificationService()` (`scheduler`/`trust`/`executeFn`/
+ *   `dispatchTimeoutMs`/`envelopeType`/`accessResource`/`accessAction`) --
+ *   see that function's own doc comment. `executeFn` is REQUIRED for this
+ *   node to usefully serve as a verifier for other peers' jobs (see
+ *   `mesh-verification.mjs`'s header for why it is never defaulted).
  * @returns {Promise<PeerNode>} A booted (unless `skipBoot`) PeerNode, with
  *   `node.meshManager` (`WebRTCMeshManager`), `node.signaling`
  *   (`MeshSignalingChannel`), and `node.transportNegotiator` (the real,
@@ -442,12 +474,15 @@ import { createIpfsService } from './peer-ipfs.mjs'
  *   `node.services.get('mesh-routing')`) attached when `enableRouting`,
  *   `node.timestamp` (`attachService()`'s handle for `mesh-timestamp.mjs`,
  *   also reachable via `node.services.get('timestamp')`) attached when
- *   `enableTimestamp`, and `node.healthMonitor` (`attachService()`'s handle
+ *   `enableTimestamp`, `node.healthMonitor` (`attachService()`'s handle
  *   for `mesh-health.mjs`, also reachable via
  *   `node.services.get('health-monitor')`) attached when
- *   `enableHealthMonitor`, and `node.ipfs` (`attachService()`'s handle for
+ *   `enableHealthMonitor`, `node.ipfs` (`attachService()`'s handle for
  *   `peer-ipfs.mjs`'s `createIpfsService()`, also reachable via
- *   `node.services.get('peer-ipfs')`) attached when `enableIpfs`.
+ *   `node.services.get('peer-ipfs')`) attached when `enableIpfs`, and
+ *   `node.verification` (`attachService()`'s handle for
+ *   `mesh-verification.mjs`, also reachable via
+ *   `node.services.get('verification')`) attached when `enableVerification`.
  */
 export async function createMeshNode(options = {}) {
   const {
@@ -496,6 +531,8 @@ export async function createMeshNode(options = {}) {
     healthMonitorOptions,
     enableIpfs = false,
     ipfsOptions,
+    enableVerification = false,
+    verificationOptions,
   } = options
 
   if (!signalingTransport) {
@@ -816,6 +853,27 @@ export async function createMeshNode(options = {}) {
     const ipfsHandle = attachService(node, servicesNetwork, ipfsDescriptor)
     node.services.set(ipfsHandle.name, ipfsHandle)
     node.ipfs = ipfsHandle
+  }
+
+  // -- Quorum-based job-result verification (opt-in, Phase 4, issue #119) ---
+  // Attached the same way enableTimestamp/enableHealthMonitor's services are
+  // above -- see mesh-verification.mjs's own header comment for the full
+  // design (in particular, why executeFn is required-but-not-provided for
+  // this node to usefully serve as a verifier).
+  if (enableVerification) {
+    const verificationDescriptor = createVerificationService({
+      scheduler: verificationOptions?.scheduler,
+      trust: verificationOptions?.trust,
+      executeFn: verificationOptions?.executeFn,
+      dispatchTimeoutMs: verificationOptions?.dispatchTimeoutMs,
+      envelopeType: verificationOptions?.envelopeType,
+      accessResource: verificationOptions?.accessResource,
+      accessAction: verificationOptions?.accessAction,
+      onLog: verificationOptions?.onLog ?? onLog,
+    })
+    const verificationHandle = attachService(node, servicesNetwork, verificationDescriptor)
+    node.services.set(verificationHandle.name, verificationHandle)
+    node.verification = verificationHandle
   }
 
   return node
