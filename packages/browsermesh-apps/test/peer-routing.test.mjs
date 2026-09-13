@@ -6,7 +6,18 @@ import {
   ROUTING_DEFAULTS,
   MeshRouter,
   ServerSharing,
+  createMeshRoutingService,
 } from '../src/peer-routing.mjs';
+import { attachService } from '../src/mesh-service.mjs';
+import { PeerRegistry } from '../src/peer-registry.mjs';
+import { createMeshNode } from '../src/mesh-bootstrap.mjs';
+import {
+  IdentityWallet,
+  MeshIdentityManager,
+  MeshPeerManager,
+  TrustGraph,
+  MeshACL,
+} from '@johnhenry/browsermesh-core';
 
 // ── ROUTING_DEFAULTS ───────────────────────────────────────────────
 
@@ -558,5 +569,412 @@ describe('ServerSharing', () => {
     const json = sharing.toJSON();
     assert.equal(json.localPodId, 'pod-local');
     assert.equal(json.servers.length, 2);
+  });
+});
+
+// =============================================================================
+// createMeshRoutingService -- wired as a MeshService (attachService(), Phase C)
+// =============================================================================
+//
+// Fixtures mirror mesh-rpc.test.mjs's own: real Ed25519 IdentityWallet/
+// MeshIdentityManager identities + real PeerRegistry (wired to real
+// MeshACL/MeshPeerManager/TrustGraph from @johnhenry/browsermesh-core),
+// connected via a minimal duck-typed in-memory sendTo()/onIncomingData()
+// bus -- not real WebRTC (that's a different layer's job).
+
+/** A real Ed25519 identity + wallet + registry bundle for one "peer". */
+async function createRoutingTestPeer(label) {
+  const identityManager = new MeshIdentityManager({});
+  const wallet = new IdentityWallet({ identityManager });
+  const { podId } = await wallet.createIdentity(label);
+  const registry = new PeerRegistry({
+    localPodId: podId,
+    peerManager: new MeshPeerManager({}),
+    trustGraph: new TrustGraph(),
+    acl: new MeshACL({ owner: podId }),
+  });
+  return { podId, wallet, registry };
+}
+
+/**
+ * A duck-typed multi-peer bus restricted to an explicit set of edges: `sendTo()`
+ * only delivers between two podIds if an edge connects them, silently
+ * dropping otherwise (modeling "no transport reachability", the same way an
+ * unconnected real PeerNode pair would never exchange envelopes at all).
+ * This is what makes the "A and C are not directly connected" multi-hop
+ * proof genuine: if `createMeshRoutingService()`'s `forwardFn` ever sent
+ * straight to the ultimate target instead of the next hop `MeshRouter`
+ * handed it, the message would never arrive here, not just skip an
+ * intermediate hop.
+ * @param {Array<{podId: string, wallet?: object, registry: object}>} peers
+ * @param {Array<[string, string]>} edges - Pairs of podIds with a direct transport link.
+ * @returns {Record<string, any>} keyed by each peer's `podId`
+ */
+function wireRestrictedMesh(peers, edges) {
+  const edgeSet = new Set();
+  for (const [a, b] of edges) {
+    edgeSet.add(`${a}|${b}`);
+    edgeSet.add(`${b}|${a}`);
+  }
+  const listenersByPodId = new Map(peers.map((p) => [p.podId, new Set()]));
+  const nodesByPodId = {};
+  for (const peer of peers) {
+    nodesByPodId[peer.podId] = {
+      podId: peer.podId,
+      wallet: peer.wallet,
+      registry: peer.registry,
+      onIncomingData(cb) {
+        const set = listenersByPodId.get(peer.podId);
+        set.add(cb);
+        return () => set.delete(cb);
+      },
+      async sendTo(pubKey, data) {
+        if (!edgeSet.has(`${peer.podId}|${pubKey}`)) return; // no direct link -- silently unreachable
+        const set = listenersByPodId.get(pubKey);
+        if (!set) return;
+        queueMicrotask(() => {
+          for (const cb of set) cb(peer.podId, data);
+        });
+      },
+    };
+  }
+  return nodesByPodId;
+}
+
+/** Poll until `fn()` is truthy, or throw after `timeoutMs`. */
+async function waitFor(fn, timeoutMs = 1000, what = 'condition') {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await fn()) return;
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  throw new Error(`Timed out after ${timeoutMs}ms waiting for: ${what}`);
+}
+
+// -----------------------------------------------------------------------
+// The real capability-gap proof: A -> B -> C, A and C share no transport edge
+// -----------------------------------------------------------------------
+
+describe('createMeshRoutingService: multi-hop forwarding closes the real capability gap', () => {
+  it('a message from A, routed through B, reaches C even though A and C have no direct transport link', async () => {
+    const alice = await createRoutingTestPeer('alice');
+    const bob = await createRoutingTestPeer('bob');
+    const carol = await createRoutingTestPeer('carol');
+
+    // Only A<->B and B<->C edges exist -- no A<->C edge at all.
+    const mesh = wireRestrictedMesh(
+      [alice, bob, carol],
+      [[alice.podId, bob.podId], [bob.podId, carol.podId]],
+    );
+    const { [alice.podId]: nodeA, [bob.podId]: nodeB, [carol.podId]: nodeC } = mesh;
+
+    const bobForwards = [];
+    const { api: bobApi, on: bobOn } = attachService(nodeB, undefined, createMeshRoutingService({}));
+    bobOn('mesh-routing:forward', (envelope) => bobForwards.push(envelope));
+    // Bob knows Carol directly; this is the routing-table knowledge that
+    // makes Bob able to relay onward, entirely separate from transport
+    // reachability (which wireRestrictedMesh already grants for B<->C).
+    bobApi.addDirectPeer(carol.podId);
+
+    const carolMessages = [];
+    const { on: carolOn } = attachService(nodeC, undefined, createMeshRoutingService({}));
+    carolOn('mesh-routing:message', (envelope) => carolMessages.push(envelope));
+
+    const { api: aliceApi } = attachService(nodeA, undefined, createMeshRoutingService({}));
+    // Alice has no direct transport link to Carol -- only a route entry
+    // saying "reach Carol via Bob".
+    aliceApi.addRoute(carol.podId, bob.podId, 2);
+
+    const result = aliceApi.route(carol.podId, { hello: 'world' });
+    assert.equal(result.success, true);
+    assert.equal(result.hops, 2);
+    assert.deepEqual(result.path, [alice.podId, bob.podId]);
+
+    await waitFor(() => carolMessages.length > 0, 1000, "carol to receive alice's routed message");
+
+    assert.equal(carolMessages[0].from, alice.podId);
+    assert.equal(carolMessages[0].to, carol.podId);
+    assert.deepEqual(carolMessages[0].message, { hello: 'world' });
+    // path proves it actually transited bob, not a direct hop.
+    assert.deepEqual(carolMessages[0].path, [alice.podId, bob.podId]);
+
+    assert.equal(bobForwards.length, 1);
+    assert.equal(bobForwards[0].to, carol.podId);
+  });
+
+  it('TTL still expires correctly across a real relayed hop (message dropped, not delivered)', async () => {
+    const alice = await createRoutingTestPeer('alice');
+    const bob = await createRoutingTestPeer('bob');
+    const carol = await createRoutingTestPeer('carol');
+
+    const mesh = wireRestrictedMesh(
+      [alice, bob, carol],
+      [[alice.podId, bob.podId], [bob.podId, carol.podId]],
+    );
+    const { [alice.podId]: nodeA, [bob.podId]: nodeB, [carol.podId]: nodeC } = mesh;
+
+    const { api: bobApi } = attachService(nodeB, undefined, createMeshRoutingService({}));
+    bobApi.addDirectPeer(carol.podId);
+
+    const carolMessages = [];
+    const { on: carolOn } = attachService(nodeC, undefined, createMeshRoutingService({}));
+    carolOn('mesh-routing:message', (envelope) => carolMessages.push(envelope));
+
+    // maxTTL: 1 -- by the time bob decrements it, it reaches 0 and bob drops it.
+    const { api: aliceApi } = attachService(nodeA, undefined, createMeshRoutingService({ maxTTL: 1 }));
+    aliceApi.addRoute(carol.podId, bob.podId, 2);
+
+    aliceApi.route(carol.podId, { hello: 'dropped' });
+
+    // Give the microtask chain a beat to (not) deliver.
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(carolMessages.length, 0);
+  });
+});
+
+// -----------------------------------------------------------------------
+// Route table management + ctx.emit() bridging, through the api surface
+// -----------------------------------------------------------------------
+
+describe('createMeshRoutingService: route table management via api, bridged through ctx.emit()', () => {
+  it('addRoute/getRoute/listRoutes/removeRoute delegate correctly and emit mesh-routing:route-add/-remove', async () => {
+    const alice = await createRoutingTestPeer('alice');
+    const bob = await createRoutingTestPeer('bob');
+    const mesh = wireRestrictedMesh([alice, bob], [[alice.podId, bob.podId]]);
+    const { [alice.podId]: nodeA } = mesh;
+
+    const events = [];
+    const { api, on } = attachService(nodeA, undefined, createMeshRoutingService({}));
+    on('mesh-routing:route-add', (entry) => events.push({ type: 'add', entry }));
+    on('mesh-routing:route-remove', (data) => events.push({ type: 'remove', data }));
+
+    assert.deepEqual(api.listRoutes(), []);
+    api.addRoute(bob.podId, 'relay-1', 2);
+    assert.equal(api.getRoute(bob.podId).nextHop, 'relay-1');
+    assert.equal(api.listRoutes().length, 1);
+
+    const removed = api.removeRoute(bob.podId);
+    assert.equal(removed, true);
+    assert.equal(api.getRoute(bob.podId), null);
+
+    assert.equal(events.length, 2);
+    assert.equal(events[0].type, 'add');
+    assert.equal(events[0].entry.target, bob.podId);
+    assert.equal(events[1].type, 'remove');
+    assert.equal(events[1].data.target, bob.podId);
+  });
+
+  it('addDirectPeer/removeDirectPeer/listDirectPeers delegate correctly', async () => {
+    const alice = await createRoutingTestPeer('alice');
+    const mesh = wireRestrictedMesh([alice], []);
+    const { [alice.podId]: nodeA } = mesh;
+    const { api } = attachService(nodeA, undefined, createMeshRoutingService({}));
+
+    assert.deepEqual(api.listDirectPeers(), []);
+    api.addDirectPeer('pod-x');
+    assert.deepEqual(api.listDirectPeers(), ['pod-x']);
+    api.removeDirectPeer('pod-x');
+    assert.deepEqual(api.listDirectPeers(), []);
+  });
+
+  it('pruneExpired removes expired routes and emits mesh-routing:route-remove for each', async () => {
+    const alice = await createRoutingTestPeer('alice');
+    const mesh = wireRestrictedMesh([alice], []);
+    const { [alice.podId]: nodeA } = mesh;
+
+    const removedTargets = [];
+    const { api, on } = attachService(nodeA, undefined, createMeshRoutingService({}));
+    on('mesh-routing:route-remove', ({ target }) => removedTargets.push(target));
+
+    api.addRoute('pod-old', 'pod-x', 1, 1); // 1ms TTL
+    api.addRoute('pod-new', 'pod-y', 1); // default 60s TTL
+
+    const pruned = api.pruneExpired(Date.now() + 100);
+    assert.equal(pruned, 1);
+    assert.equal(api.getRoute('pod-old'), null);
+    assert.notEqual(api.getRoute('pod-new'), null);
+    assert.deepEqual(removedTargets, ['pod-old']);
+  });
+
+  it('teardown unsubscribes from incoming data and stops further event delivery', async () => {
+    const alice = await createRoutingTestPeer('alice');
+    const bob = await createRoutingTestPeer('bob');
+    const mesh = wireRestrictedMesh([alice, bob], [[alice.podId, bob.podId]]);
+    const { [alice.podId]: nodeA } = mesh;
+
+    const events = [];
+    const { api, on, teardown } = attachService(nodeA, undefined, createMeshRoutingService({}));
+    on('mesh-routing:route-add', (entry) => events.push(entry));
+
+    api.addRoute(bob.podId, 'relay-1', 1);
+    assert.equal(events.length, 1);
+
+    await teardown();
+
+    api.addRoute('pod-after-teardown', 'relay-2', 1);
+    // The router itself still works (teardown only detaches this file's own
+    // wiring), but the event bus is closed -- no further emit() reaches `on()`.
+    assert.equal(events.length, 1);
+  });
+});
+
+// -----------------------------------------------------------------------
+// ServerSharing wiring (opt-in via fetchFn)
+// -----------------------------------------------------------------------
+
+describe('createMeshRoutingService: ServerSharing wiring (opt-in via fetchFn)', () => {
+  it('is NOT wired when fetchFn is omitted entirely', async () => {
+    const alice = await createRoutingTestPeer('alice');
+    const mesh = wireRestrictedMesh([alice], []);
+    const { [alice.podId]: nodeA } = mesh;
+    const { api } = attachService(nodeA, undefined, createMeshRoutingService({}));
+
+    assert.equal(api.expose, undefined);
+    assert.equal(api.requestProxy, undefined);
+  });
+
+  it('a remote peer can requestProxy() a server this peer exposed, proxied via the injected fetchFn', async () => {
+    const alice = await createRoutingTestPeer('alice');
+    const bob = await createRoutingTestPeer('bob');
+    const mesh = wireRestrictedMesh([alice, bob], [[alice.podId, bob.podId]]);
+    const { [alice.podId]: nodeA, [bob.podId]: nodeB } = mesh;
+
+    const fetchCalls = [];
+    const events = [];
+    const { api: bobApi, on: bobOn } = attachService(nodeB, undefined, createMeshRoutingService({
+      fetchFn: async (url, init) => {
+        fetchCalls.push({ url, init });
+        return {
+          status: 200,
+          headers: new Map([['content-type', 'application/json']]),
+          text: async () => '{"ok":true}',
+        };
+      },
+    }));
+    bobOn('mesh-routing:server-share-served', (data) => events.push(data));
+    bobApi.expose(3000, 'api');
+
+    const { api: aliceApi } = attachService(nodeA, undefined, createMeshRoutingService({ fetchFn: null }));
+
+    const res = await aliceApi.requestProxy(bob.podId, { name: 'api', method: 'GET', path: '/data' });
+
+    assert.equal(res.status, 200);
+    assert.equal(res.body, '{"ok":true}');
+    assert.equal(fetchCalls.length, 1);
+    assert.equal(fetchCalls[0].url, 'http://localhost:3000/data');
+
+    await waitFor(() => events.length > 0, 1000, 'mesh-routing:server-share-served to fire on the host side');
+    assert.equal(events[0].name, 'api');
+    assert.equal(events[0].status, 200);
+  });
+
+  it('requestProxy() returns 404 when the named server was never exposed', async () => {
+    const alice = await createRoutingTestPeer('alice');
+    const bob = await createRoutingTestPeer('bob');
+    const mesh = wireRestrictedMesh([alice, bob], [[alice.podId, bob.podId]]);
+    const { [alice.podId]: nodeA, [bob.podId]: nodeB } = mesh;
+
+    attachService(nodeB, undefined, createMeshRoutingService({ fetchFn: null }));
+    const { api: aliceApi } = attachService(nodeA, undefined, createMeshRoutingService({ fetchFn: null }));
+
+    const res = await aliceApi.requestProxy(bob.podId, { name: 'nonexistent' });
+    assert.equal(res.status, 404);
+  });
+
+  it('requestProxy() times out cleanly when the target has no mesh-routing service attached at all', async () => {
+    const alice = await createRoutingTestPeer('alice');
+    const bob = await createRoutingTestPeer('bob');
+    const mesh = wireRestrictedMesh([alice, bob], [[alice.podId, bob.podId]]);
+    const { [alice.podId]: nodeA } = mesh; // bob's node is never given a service
+
+    const { api: aliceApi } = attachService(nodeA, undefined, createMeshRoutingService({
+      fetchFn: null,
+      proxyTimeoutMs: 100,
+    }));
+
+    const start = Date.now();
+    await assert.rejects(
+      () => aliceApi.requestProxy(bob.podId, { name: 'anything' }),
+      /timed out after 100ms/,
+    );
+    const elapsed = Date.now() - start;
+    assert.ok(elapsed >= 90 && elapsed < 1000, `expected a timeout around 100ms, took ${elapsed}ms`);
+  });
+
+  it('teardown rejects any still-in-flight requestProxy() calls', async () => {
+    const alice = await createRoutingTestPeer('alice');
+    const bob = await createRoutingTestPeer('bob');
+    const mesh = wireRestrictedMesh([alice, bob], [[alice.podId, bob.podId]]);
+    const { [alice.podId]: nodeA, [bob.podId]: nodeB } = mesh;
+
+    const { api: bobApi } = attachService(nodeB, undefined, createMeshRoutingService({
+      fetchFn: () => new Promise(() => {}), // bob's fetchFn never resolves
+    }));
+    bobApi.expose(3000, 'whatever'); // must be exposed, or handleRequest() 404s instantly instead of hanging
+    const { api: aliceApi, teardown } = attachService(nodeA, undefined, createMeshRoutingService({
+      fetchFn: null,
+      proxyTimeoutMs: 5000,
+    }));
+
+    const pending = aliceApi.requestProxy(bob.podId, { name: 'whatever' });
+    await new Promise((r) => setTimeout(r, 10));
+    await teardown();
+
+    await assert.rejects(() => pending, /torn down/);
+  });
+});
+
+// -----------------------------------------------------------------------
+// createMeshNode({ enableRouting: true }) -- opt-in surface (issue #121)
+// -----------------------------------------------------------------------
+// Mirrors mesh-dht.test.mjs's own "createMeshNode({ enableDht: true })"
+// integration section: real createMeshNode() PeerNodes, skipBoot: true where
+// the test doesn't need actual discovery/WebRTC boot, just construction and
+// the opt-in wiring surface itself.
+
+function createStubSignalingTransport() {
+  return { send() {}, onMessage() {} };
+}
+
+describe('createMeshNode({ enableRouting: true })', () => {
+  it('leaves node.router unset and node.services empty of "mesh-routing" when enableRouting is omitted', async () => {
+    const node = await createMeshNode({
+      label: 'alice',
+      signalingTransport: createStubSignalingTransport(),
+      skipBoot: true,
+    });
+
+    assert.equal(node.router, undefined);
+    assert.equal(node.services.has('mesh-routing'), false);
+  });
+
+  it('attaches node.router (== node.services.get("mesh-routing")) when enableRouting is set', async () => {
+    const node = await createMeshNode({
+      label: 'alice',
+      signalingTransport: createStubSignalingTransport(),
+      enableRouting: true,
+      skipBoot: true,
+    });
+
+    assert.ok(node.router, 'node.router is attached');
+    assert.equal(node.router, node.services.get('mesh-routing'));
+    assert.equal(typeof node.router.api.route, 'function');
+    assert.equal(node.router.api.expose, undefined, 'ServerSharing not wired without routingOptions.fetchFn');
+  });
+
+  it('routingOptions are forwarded to createMeshRoutingService(), including wiring ServerSharing via fetchFn', async () => {
+    const node = await createMeshNode({
+      label: 'alice',
+      signalingTransport: createStubSignalingTransport(),
+      enableRouting: true,
+      routingOptions: { maxTTL: 3, fetchFn: null },
+      skipBoot: true,
+    });
+
+    assert.equal(typeof node.router.api.expose, 'function', 'ServerSharing wired since routingOptions.fetchFn was supplied');
+
+    node.router.api.addDirectPeer('pod-x');
+    const result = node.router.api.route('pod-x', { hello: 'world' });
+    assert.equal(result.success, true);
   });
 });
