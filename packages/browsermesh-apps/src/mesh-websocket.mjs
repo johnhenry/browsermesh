@@ -640,16 +640,29 @@ export function createMeshWebSocketService({
         }
 
         const session = createAcceptedSession({ peerNode, envelopeType, connectionId, remotePodId: fromPubKey, path })
+
+        // `onIncomingConnection` is called BEFORE the ack is sent (not
+        // after), and synchronously -- deliberately. Sending the ack first
+        // yields to the event loop (`await ctx.sendTo()`), and a fast
+        // remote peer can react to its own `onopen` and send a message
+        // before this continuation resumes; if the application hadn't
+        // attached its `onmessage`/etc. handlers to `session` yet at that
+        // point, the message is lost. Calling this synchronously, before
+        // any `await`, guarantees the application has had a chance to wire
+        // up handlers before the ack (and therefore before any reply) can
+        // possibly reach the other side. If the ack send below fails, the
+        // application already has `session` and will observe the failure
+        // via `onclose` (1011) rather than silently never learning the
+        // connection was attempted.
+        if (typeof onIncomingConnection === 'function') {
+          onIncomingConnection(session, { fromPubKey, path })
+        }
+
         try {
           await ctx.sendTo(fromPubKey, envelopeType, { kind: 'ws-open-ack', connectionId })
         } catch (err) {
           log('mesh-websocket:ack-send-failed', { to: fromPubKey, connectionId, error: err?.message || String(err) })
           session.close(1011, 'failed to acknowledge open')
-          return
-        }
-
-        if (typeof onIncomingConnection === 'function') {
-          onIncomingConnection(session, { fromPubKey, path })
         }
       }
 
