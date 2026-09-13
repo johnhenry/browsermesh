@@ -376,6 +376,23 @@ describe('RelayStrategy', () => {
     await s.stop();
   });
 
+  it('clears the connect-timeout handle once the socket opens (no leaked timer holding the event loop open, clawser#158)', async () => {
+    const originalClearTimeout = globalThis.clearTimeout;
+    const cleared = [];
+    globalThis.clearTimeout = (id) => { cleared.push(id); return originalClearTimeout(id); };
+    try {
+      const s = new RelayStrategy({ relayUrl: 'ws://x', podId: 'pod-clear' });
+      await s.start();
+      assert.ok(
+        cleared.length > 0,
+        'connect() should clearTimeout() its 10s connection-timeout guard once the socket opens, not leave it running for the full 10s',
+      );
+      await s.stop();
+    } finally {
+      globalThis.clearTimeout = originalClearTimeout;
+    }
+  });
+
   it('stop closes WebSocket and clears peers', async () => {
     const s = new RelayStrategy({ relayUrl: 'ws://x', podId: 'p' });
     await s.start();
