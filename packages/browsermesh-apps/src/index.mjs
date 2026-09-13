@@ -37,6 +37,7 @@ export * from './key-distribution.mjs';
 export * from './manifest-sync.mjs';
 export * from './chunk-replication.mjs';
 export * from './mesh-rpc.mjs';
+export * from './mesh-fetch.mjs';
 export * from './peer-payments.mjs';
 export * from './peer-registry.mjs';
 export * from './peer-routing.mjs';

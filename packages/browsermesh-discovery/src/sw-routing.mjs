@@ -1,9 +1,20 @@
 /**
-// STATUS: INTEGRATED — wired into ClawserPod lifecycle, proven via E2E testing
  * clawser-mesh-sw-routing.js -- ServiceWorker mesh:// fetch routing.
  *
  * Intercepts mesh:// protocol requests and *.mesh.local hostnames
  * in the Service Worker fetch handler, delegating to mesh RPC.
+ *
+ * STATUS: `parseMeshRequest()` is wired to a real transport as of
+ * `browsermesh-apps`' `mesh-fetch.mjs` (Phase 2 of the
+ * `browsermesh-fetch-websocket.md` plan), which uses it directly to power
+ * `createBrowserMeshFetch()` -- a directly-callable `fetch(url, init)`-shaped
+ * function bound to a live `mesh-rpc` service (`mesh-rpc.mjs`, Phase 1).
+ * `MeshFetchRouter` in THIS file remains the separate Service-Worker
+ * `fetch`-event-interceptor shape (`Request` in, `Response|null` out) and is
+ * not itself used by `mesh-fetch.mjs` (its `Request`-in shape doesn't fit a
+ * direct `browserMeshFetch(url, init)` call; see that file's module doc
+ * comment) -- it has no wired caller of its own yet, only this module's own
+ * `onRpc` gap being unblocked at the transport layer.
  *
  * No browser-only imports at module level.
  *
