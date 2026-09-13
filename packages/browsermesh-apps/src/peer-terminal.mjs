@@ -1,17 +1,130 @@
 /**
-// STATUS: EXPERIMENTAL — complete implementation, not yet integrated into main application
- * clawser-peer-terminal.js -- Remote terminal access over peer sessions.
+ * peer-terminal.mjs -- Remote terminal/shell execution over the mesh.
  *
- * Allows one peer to execute commands on another's virtual shell via
- * TerminalHost (accepts and executes) and TerminalClient (sends and
- * awaits results). Built on top of PeerSession's service handler system
- * using the 'terminal' service type.
+ * Allows one peer to execute commands on another's shell through
+ * `TerminalHost` (accepts and executes) and `TerminalClient` (sends and
+ * awaits results). Built as a `MeshService` (`mesh-service.mjs`, the same
+ * `attach(peerNode, ctx) -> {teardown, api}` convention `mesh-rpc.mjs`/
+ * `peer-files.mjs`/`peer-escrow.mjs` etc. already use), NOT on top of
+ * `peer-session.mjs`'s `PeerSession`/`SessionManager` -- see "Migration
+ * history" below.
  *
- * Dependencies are injected (PeerSession, shell).
- * No browser-only imports at module level.
+ * ---------------------------------------------------------------------------
+ * Migration history (issue #84, Phase 10 of the app-layer migration plan;
+ * blocked on issue #86 until its design pass resolved what gates remote
+ * shell execution):
+ *
+ * This file used to depend on `peer-session.mjs`'s `PeerSession` --
+ * `TerminalHost`'s constructor called `session.registerHandler('terminal', ...)`
+ * directly and `#handleCommand()` called `session.requireCapability('terminal:execute')`/
+ * `session.send()`/`session.remotePodId`; `TerminalClient` did the same for
+ * its own `registerHandler('terminal', ...)`/`session.send()`. Nothing in
+ * this repo ever constructed a live `PeerSession` (`SessionManager` is never
+ * instantiated outside its own tests) -- exactly the same dead-dependency
+ * situation Phase 8 (`peer-files.mjs`) and Phase 9 (`peer-chat.mjs`) already
+ * found and fixed -- so this migration removes the `PeerSession` dependency
+ * entirely rather than bridging it.
+ *
+ * Issue #86's resolved design pass (see that issue's closing comment) settled
+ * TWO things this file depends on directly:
+ *
+ *   1. GATE MECHANISM: `ctx.registry.checkAccess(pubKey, resource, action)`,
+ *      the SAME mechanism `mesh-relay-host.mjs` already used and Phases 3/4/
+ *      8/9 of this plan (`peer-escrow.mjs`/`mesh-verification.mjs`/
+ *      `peer-files.mjs`/`peer-chat.mjs`) independently converged on for their
+ *      own peer-initiated risky actions -- NOT `WasmSandbox`
+ *      (`browsermesh-core/src/capabilities.mjs`), which has zero real target
+ *      anywhere in this repo (no `WebAssembly.*` calls, no `.wasm` files),
+ *      and not `browsermesh-kernel`'s tenant capability model, which gates
+ *      *local* application code with no concept of a remote requester.
+ *      `session.requireCapability('terminal:execute')` (a static,
+ *      per-session capability list check) becomes
+ *      `checkAccess(fromPubKey, TERMINAL_RESOURCE, TERMINAL_ACTION)` --
+ *      live, per-request, per-sender ACL/capability-token checking via
+ *      `PeerRegistry` (`peer-registry.mjs`), called from the SAME place in
+ *      the request-handling flow the old `requireCapability()` call sat
+ *      (`TerminalHost#handleRequest()`'s step 1, before any command
+ *      validation/allowlist/execution) -- see `TERMINAL_RESOURCE`/
+ *      `TERMINAL_ACTION` below. No default template in
+ *      `@johnhenry/browsermesh-core`'s `acl.mjs` (`guest`/`collaborator`/
+ *      `admin`) grants `terminal:execute` -- unlike `files:read`/
+ *      `chat:*`/`compute:submit`, a peer gets NOTHING here until the node
+ *      operator explicitly calls `registry.grantCapabilities(peerPubKey,
+ *      ['terminal:execute'])`, a deliberate omission given the subject
+ *      matter (real remote command execution, not a read/write file or chat
+ *      message).
+ *      A single coarse `'terminal'`/`'execute'` scope (not per-command or
+ *      per-target-pod) is used -- mirroring `mesh-verification.mjs`'s own
+ *      single `'verification'`/`'execute'` gate for the same reason that
+ *      file documents: there is no natural per-resource id to scope against
+ *      the way `peer-escrow.mjs`'s per-contract `escrow:<contractId>:release`
+ *      grants exist (a contract id is created by `create()` and can be
+ *      auto-granted to its real payer/payee; a terminal command has no
+ *      equivalent identity to grant against before it's even sent). A node
+ *      operator who wants finer-grained terminal access per peer should grant/
+ *      revoke the single `terminal:execute` scope per peer via
+ *      `registry.grantCapabilities()`/`revokeCapabilities()`, and rely on
+ *      `TerminalHost`'s own `allowedCommands`/`blockedCommands` allow/deny
+ *      list (unchanged from the pre-migration version) for per-command
+ *      restriction.
+ *
+ *   2. EXECUTION BACKEND: bring-your-own, REQUIRED, no default shipped.
+ *      Neither the pre-migration nor this file has ever had a real `shell`
+ *      implementation anywhere in this repo -- only `createMockShell()` in
+ *      this file's own test. This migration does NOT add one (no
+ *      `child_process`, no OS command execution) -- that would be a much
+ *      bigger, separately-decided scope. `createTerminalService()` requires
+ *      `opts.shell` (an object with `execute(command) -> {output, exitCode}`);
+ *      omitting it throws immediately when the descriptor is `attach()`ed
+ *      (the same point `TerminalHost`'s own pre-migration constructor already
+ *      threw at), and `createMeshNode({enableTerminal: true})` throws even
+ *      earlier, before attaching anything, if `terminalOptions.shell` is
+ *      missing -- mirroring `enableEscrow`'s required-dependency-throws-if-
+ *      missing precedent for `escrowOptions.creditLedger` (see
+ *      `mesh-bootstrap.mjs`). This is deliberate, safe-by-construction
+ *      design: nobody gets real remote shell execution just by flipping
+ *      `enableTerminal: true` -- they must also consciously wire up a real
+ *      executor.
+ *
+ * `TerminalHost#handleRequest()`'s command-filtering/execution/truncation
+ * logic (`isCommandAllowed()`, blocklist-always-wins-over-allowlist,
+ * `maxOutputLength` truncation) is UNCHANGED from the `PeerSession`-era
+ * version -- only the transport/correlation/authorization plumbing changed:
+ *   - `TerminalHost` no longer owns "who do I reply to" (a `PeerSession`
+ *     bound to exactly one remote peer) -- `handleRequest(fromPubKey, payload)`
+ *     is now a pure function that COMPUTES and RETURNS a response (or `null`
+ *     for an informational resize event, which needs no response); the
+ *     caller (`createTerminalService()`'s `attach()`, below) sends it via
+ *     `ctx.sendTo()`. This is the same necessary shape change `peer-files.mjs`
+ *     went through: a `MeshService` is attached once per NODE and can be
+ *     asked to execute commands by any connected peer holding
+ *     `terminal:execute`, not once per peer-pair the way a `PeerSession` was.
+ *   - `TerminalClient` no longer wraps one `PeerSession` bound to one remote
+ *     peer -- `execute(pubKey, command, opts)`/`sendResize(pubKey, cols, rows)`
+ *     now take a leading `pubKey` argument, since one `TerminalClient` (like
+ *     `peer-files.mjs`'s `FileClient`) can request execution from ANY
+ *     connected peer, not just one fixed session. Internally it still does
+ *     exactly what it did before: generate a `requestId`, track a
+ *     `{resolve, reject, timer}` in a pending-requests map, and correlate the
+ *     eventual response by that id -- this was ALREADY a self-contained
+ *     `requestId`-based correlation mechanism (not something `PeerSession`
+ *     provided), so no new correlation primitive had to be invented; it's the
+ *     exact same shape `peer-files.mjs`'s `FileClient` and `mesh-rpc.mjs`'s
+ *     `request()` use. The one addition: each pending entry also records the
+ *     `pubKey` the request targeted, and `handleResponse()` ignores a reply
+ *     from any OTHER peer even if it happens to guess/replay a `requestId` --
+ *     a property the old design got "for free" (a `PeerSession`'s transport
+ *     only ever delivered messages from the one peer it was bound to) that a
+ *     shared, node-wide `onIncomingData()` subscription does not.
+ *
+ * `createTerminalService()` is ONE `MeshService` covering both directions
+ * (hosting a shell to others, and requesting execution from others) -- both
+ * share the same `terminal-request`/`terminal-response` envelope-type pair
+ * and the same `ctx.onIncomingData()` subscription, mirroring
+ * `peer-files.mjs`'s `createFileShareService()` exactly.
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-peer-terminal.test.mjs
+ *   node --import ./test/_setup-globals.mjs --test test/peer-terminal.test.mjs
  */
 
 // ---------------------------------------------------------------------------
@@ -23,6 +136,16 @@ export const TERMINAL_DEFAULTS = Object.freeze({
   timeout: 30000,            // 30s
   blockedCommands: ['exit', 'shutdown', 'reboot', 'halt', 'poweroff'],
 })
+
+/** `ctx.registry.checkAccess()` resource name used for exec requests (see module doc comment's "Migration history", point 1). */
+export const TERMINAL_RESOURCE = 'terminal'
+/** `ctx.registry.checkAccess()` action name used for exec requests. A single coarse scope -- see module doc comment for why there is no finer-grained per-command/per-target scope. */
+export const TERMINAL_ACTION = 'execute'
+
+/** Default `envelope.type` for a terminal request (exec or resize), on the shared `ctx.onIncomingData()` bus. */
+const DEFAULT_TERMINAL_REQUEST_ENVELOPE_TYPE = 'terminal-request'
+/** Default `envelope.type` for a terminal response. */
+const DEFAULT_TERMINAL_RESPONSE_ENVELOPE_TYPE = 'terminal-response'
 
 // ---------------------------------------------------------------------------
 // Internal — extract the command name (first token) from a command string.
@@ -59,18 +182,15 @@ function extractCommandName(command) {
 // ---------------------------------------------------------------------------
 
 /**
- * Accepts incoming terminal requests from remote peers and executes
- * commands on the local shell.
+ * Serves terminal-execution requests from the local shell to remote peers.
  *
- * Registers a handler on the PeerSession for the 'terminal' service
- * type. Incoming command requests are validated against an allowlist /
- * blocklist before execution. The remote peer must hold the
- * 'terminal:execute' capability on the session.
+ * Framework-agnostic: `handleRequest()` is a pure function that computes and
+ * RETURNS a response (or `null` for an informational resize event), it does
+ * not send anything itself -- see module doc comment's "Migration history".
+ * `createTerminalService()` (below) is what actually wires this to
+ * `ctx.onIncomingData()`/`ctx.sendTo()`.
  */
 export class TerminalHost {
-  /** @type {object} PeerSession */
-  #session
-
   /** @type {object} shell with execute(command) → { output, exitCode } */
   #shell
 
@@ -86,30 +206,40 @@ export class TerminalHost {
   /** @type {Function} */
   #onLog
 
+  /** @type {(fromPubKey: string) => ({allowed: boolean, reason?: string})} */
+  #checkAccess
+
   /** @type {number} commands executed */
   #executionCount = 0
 
   /**
    * @param {object} opts
-   * @param {object} opts.session - PeerSession instance
-   * @param {object} opts.shell - Object with execute(command) → { output, exitCode }
+   * @param {object} opts.shell - Object with execute(command) → { output, exitCode }.
+   *   REQUIRED -- there is no default shell (see module doc comment's
+   *   "Migration history", point 2). Constructing a `TerminalHost` with no
+   *   real `shell` throws immediately.
    * @param {string[]|Set<string>} [opts.allowedCommands] - Whitelist; null/undefined means all allowed
    * @param {string[]|Set<string>} [opts.blockedCommands] - Always blocked commands
    * @param {number} [opts.maxOutputLength=65536] - Truncate output beyond this length
    * @param {Function} [opts.onLog] - Logging callback
+   * @param {(fromPubKey: string) => ({allowed: boolean, reason?: string})} [opts.checkAccess]
+   *   Capability check for a given requester. `createTerminalService()`
+   *   supplies `(fromPubKey) => ctx.registry.checkAccess(fromPubKey, TERMINAL_RESOURCE, TERMINAL_ACTION)`.
+   *   Defaults to permissive (`{ allowed: true }` for everyone) when
+   *   constructed directly without one -- a `TerminalHost` built by hand
+   *   (e.g. in a unit test) has no registry of its own to consult; supplying
+   *   real gating is the caller's responsibility, exactly like
+   *   `peer-files.mjs`'s `FileHost`.
    */
-  constructor({ session, shell, allowedCommands, blockedCommands, maxOutputLength, onLog }) {
-    if (!session) {
-      throw new Error('session is required')
-    }
+  constructor({ shell, allowedCommands, blockedCommands, maxOutputLength, onLog, checkAccess }) {
     if (!shell || typeof shell.execute !== 'function') {
       throw new Error('shell with execute() method is required')
     }
 
-    this.#session = session
     this.#shell = shell
     this.#onLog = onLog || (() => {})
     this.#maxOutputLength = maxOutputLength ?? TERMINAL_DEFAULTS.maxOutputLength
+    this.#checkAccess = typeof checkAccess === 'function' ? checkAccess : () => ({ allowed: true })
 
     // Normalize allowedCommands
     if (allowedCommands != null) {
@@ -129,68 +259,70 @@ export class TerminalHost {
     this.#blockedCommands = new Set(
       [...defaultBlocked, ...userBlocked].map(c => c.toLowerCase())
     )
-
-    // Register handler on session for 'terminal' service type
-    this.#session.registerHandler('terminal', (envelope) => this.#handleCommand(envelope))
   }
 
-  // -- Command handling (private) -------------------------------------------
+  // -- Request handling -------------------------------------------------------
 
   /**
-   * Handle an incoming terminal command request.
+   * Handle an incoming terminal request from `fromPubKey`.
    *
-   * 1. Checks 'terminal:execute' capability on session
-   * 2. Validates command against allowlist/blocklist
-   * 3. Executes on the local shell
-   * 4. Truncates output if necessary
-   * 5. Sends response back via session
+   * 1. Handles resize events (informational -- returns `null`, no response needed)
+   * 2. Checks access via the injected `checkAccess`
+   * 3. Validates command is a non-empty string
+   * 4. Validates command against allowlist/blocklist
+   * 5. Executes on the local shell, truncating output if necessary
    *
-   * @param {object} envelope - Session envelope with payload
+   * @param {string} fromPubKey - Requesting peer's public key
+   * @param {object} payload - `{ command, requestId, resize }`
+   * @returns {Promise<{requestId: string|null, output: string, exitCode: number, truncated?: boolean}|null>}
+   *   `null` for a resize event (no response should be sent).
    */
-  async #handleCommand(envelope) {
-    const payload = envelope.payload || envelope
-    const { command, requestId, resize } = payload
+  async handleRequest(fromPubKey, payload) {
+    const { command, requestId, resize } = payload || {}
 
-    // Build base response
+    // 1. Handle resize events (informational, no response needed)
+    if (resize && typeof resize === 'object' && !command) {
+      this.#onLog(2, `Terminal resize from ${fromPubKey}: ${resize.cols}x${resize.rows}`)
+      return null
+    }
+
     const response = { requestId: requestId || null }
 
+    // 2. Check access
+    const { allowed, reason } = this.#checkAccess(fromPubKey) || {}
+    if (!allowed) {
+      response.output = `Error: capability "${TERMINAL_RESOURCE}:${TERMINAL_ACTION}" not granted for ${fromPubKey}${reason ? ` (${reason})` : ''}`
+      response.exitCode = 1
+      response.denied = true
+      this.#onLog(1, `Denied terminal request from ${fromPubKey}${reason ? `: ${reason}` : ''}`)
+      return response
+    }
+
+    // 3. Validate command is a non-empty string
+    if (!command || typeof command !== 'string') {
+      response.output = 'Error: command must be a non-empty string'
+      response.exitCode = 1
+      return response
+    }
+
+    // 4. Check against allowlist / blocklist
+    if (!this.isCommandAllowed(command)) {
+      const name = extractCommandName(command)
+      response.output = `Error: command "${name}" is not allowed`
+      response.exitCode = 126
+      this.#onLog(1, `Blocked terminal command "${name}" from ${fromPubKey}`)
+      return response
+    }
+
     try {
-      // 0. Handle resize events (informational, no response needed)
-      if (resize && typeof resize === 'object' && !command) {
-        this.#onLog(2, `Terminal resize from ${this.#session.remotePodId}: ${resize.cols}x${resize.rows}`)
-        return
-      }
-
-      // 1. Check capability
-      this.#session.requireCapability('terminal:execute')
-
-      // 2. Validate command is a non-empty string
-      if (!command || typeof command !== 'string') {
-        response.output = 'Error: command must be a non-empty string'
-        response.exitCode = 1
-        this.#session.send('terminal', response)
-        return
-      }
-
-      // 3. Check against allowlist / blocklist
-      if (!this.isCommandAllowed(command)) {
-        const name = extractCommandName(command)
-        response.output = `Error: command "${name}" is not allowed`
-        response.exitCode = 126
-        this.#session.send('terminal', response)
-        this.#onLog(1, `Blocked terminal command "${name}" from ${this.#session.remotePodId}`)
-        return
-      }
-
-      // 4. Execute on the local shell
-      this.#onLog(2, `Executing terminal command from ${this.#session.remotePodId}: ${command}`)
+      // 5. Execute on the local shell
+      this.#onLog(2, `Executing terminal command from ${fromPubKey}: ${command}`)
       const result = await this.#shell.execute(command)
       this.#executionCount++
 
       let output = result.output != null ? String(result.output) : ''
       let truncated = false
 
-      // 5. Truncate if needed
       if (output.length > this.#maxOutputLength) {
         output = output.slice(0, this.#maxOutputLength)
         truncated = true
@@ -207,8 +339,7 @@ export class TerminalHost {
       this.#onLog(0, `Terminal command error: ${err.message}`)
     }
 
-    // Send response back
-    this.#session.send('terminal', response)
+    return response
   }
 
   // -- Command filtering ----------------------------------------------------
@@ -240,15 +371,6 @@ export class TerminalHost {
     return this.#allowedCommands.has(name)
   }
 
-  // -- Lifecycle ------------------------------------------------------------
-
-  /**
-   * Close the terminal host. Removes the handler from the session.
-   */
-  close() {
-    this.#session.removeHandler('terminal')
-  }
-
   // -- Serialization --------------------------------------------------------
 
   /**
@@ -258,9 +380,6 @@ export class TerminalHost {
    */
   toJSON() {
     return {
-      sessionId: this.#session.sessionId,
-      localPodId: this.#session.localPodId,
-      remotePodId: this.#session.remotePodId,
       allowedCommands: this.#allowedCommands ? [...this.#allowedCommands] : null,
       blockedCommands: [...this.#blockedCommands],
       maxOutputLength: this.#maxOutputLength,
@@ -276,15 +395,22 @@ export class TerminalHost {
 /**
  * Client-side interface for executing commands on a remote peer's terminal.
  *
- * Sends command requests via the PeerSession and waits for responses
- * matched by requestId. Supports configurable timeout per command and
- * emits events for output and errors.
+ * One `TerminalClient` can request execution from ANY connected peer (not
+ * bound to a single remote peer the way the `PeerSession`-era version was)
+ * -- every public method takes a leading `pubKey` argument. Requests are
+ * correlated to their responses by a generated `requestId`, exactly like the
+ * `PeerSession`-era version already did (see module doc comment's
+ * "Migration history"); the only addition is also recording which `pubKey`
+ * a request targeted, so a response claiming a stale/guessed `requestId`
+ * from the WRONG peer is ignored rather than resolving/rejecting the wrong
+ * caller's promise -- a property a per-peer `PeerSession` transport provided
+ * for free that a shared, node-wide subscription does not.
  */
 export class TerminalClient {
-  /** @type {object} PeerSession */
-  #session
+  /** @type {(pubKey: string, payload: object) => Promise<void>} */
+  #sendRequest
 
-  /** @type {Map<string, { resolve: Function, reject: Function, timer: * }>} */
+  /** @type {Map<string, { resolve: Function, reject: Function, timer: *, pubKey: string }>} */
   #pendingRequests = new Map()
 
   /** @type {number} default timeout in ms */
@@ -298,37 +424,40 @@ export class TerminalClient {
 
   /**
    * @param {object} opts
-   * @param {object} opts.session - PeerSession instance
+   * @param {(pubKey: string, payload: object) => Promise<void>} opts.sendRequest
+   *   Sends a `terminal-request`-shaped payload to `pubKey`. `createTerminalService()`
+   *   supplies `(pubKey, payload) => ctx.sendTo(pubKey, 'terminal-request', payload)`.
    * @param {number} [opts.timeout=30000] - Default timeout for commands in ms
    * @param {Function} [opts.onLog] - Logging callback
    */
-  constructor({ session, timeout, onLog }) {
-    if (!session) {
-      throw new Error('session is required')
+  constructor({ sendRequest, timeout, onLog }) {
+    if (typeof sendRequest !== 'function') {
+      throw new Error('sendRequest function is required')
     }
 
-    this.#session = session
+    this.#sendRequest = sendRequest
     this.#timeout = timeout ?? TERMINAL_DEFAULTS.timeout
     this.#onLog = onLog || (() => {})
-
-    // Register handler on session for 'terminal' response messages
-    this.#session.registerHandler('terminal', (envelope) => this.#handleResponse(envelope))
   }
 
   // -- Command execution ----------------------------------------------------
 
   /**
-   * Execute a command on the remote peer's terminal.
+   * Execute a command on a remote peer's terminal.
    *
    * Sends the command with a unique requestId, then waits for the
    * matching response or times out.
    *
+   * @param {string} pubKey - Remote peer to execute on
    * @param {string} command - Command to execute
    * @param {object} [opts]
    * @param {number} [opts.timeout] - Override the default timeout for this command
    * @returns {Promise<{ output: string, exitCode: number, truncated?: boolean }>}
    */
-  async execute(command, opts) {
+  async execute(pubKey, command, opts) {
+    if (!pubKey || typeof pubKey !== 'string') {
+      throw new Error('pubKey must be a non-empty string')
+    }
     if (!command || typeof command !== 'string') {
       throw new Error('command must be a non-empty string')
     }
@@ -350,51 +479,62 @@ export class TerminalClient {
       }, timeoutMs)
 
       // Register pending request
-      this.#pendingRequests.set(requestId, { resolve, reject, timer })
+      this.#pendingRequests.set(requestId, { resolve, reject, timer, pubKey })
 
       // Send command to remote host
-      try {
-        this.#session.send('terminal', { command, requestId })
-        this.#onLog(2, `Sent terminal command to ${this.#session.remotePodId}: ${command}`)
-      } catch (err) {
-        clearTimeout(timer)
-        this.#pendingRequests.delete(requestId)
-        reject(err)
-      }
+      Promise.resolve(this.#sendRequest(pubKey, { command, requestId }))
+        .then(() => {
+          this.#onLog(2, `Sent terminal command to ${pubKey}: ${command}`)
+        })
+        .catch((err) => {
+          clearTimeout(timer)
+          this.#pendingRequests.delete(requestId)
+          reject(err)
+        })
     })
   }
 
   // -- Resize ---------------------------------------------------------------
 
   /**
-   * Send a resize event to the remote terminal (informational).
+   * Send a resize event to a remote peer's terminal (informational).
    * Does not wait for a response.
    *
+   * @param {string} pubKey - Remote peer to notify
    * @param {number} cols - Number of columns
    * @param {number} rows - Number of rows
    */
-  sendResize(cols, rows) {
-    this.#session.send('terminal', {
-      resize: { cols, rows },
+  sendResize(pubKey, cols, rows) {
+    if (!pubKey || typeof pubKey !== 'string') {
+      throw new Error('pubKey must be a non-empty string')
+    }
+    Promise.resolve(this.#sendRequest(pubKey, { resize: { cols, rows } })).catch((err) => {
+      this.#onLog(0, `Failed to send terminal resize to ${pubKey}: ${err.message}`)
     })
   }
 
-  // -- Response handling (private) ------------------------------------------
+  // -- Response handling ------------------------------------------------------
 
   /**
-   * Handle an incoming terminal response from the remote host.
-   * Matches by requestId and resolves the pending promise.
+   * Handle an incoming terminal response. Matches by requestId (AND the peer
+   * it was sent to -- see class doc comment) and resolves the pending
+   * promise.
    *
-   * @param {object} envelope - Session envelope with payload
+   * @param {string} fromPubKey - Peer the response actually arrived from
+   * @param {object} payload - `{ requestId, output, exitCode, truncated? }`
    */
-  #handleResponse(envelope) {
-    const payload = envelope.payload || envelope
-    const { requestId, output, exitCode, truncated } = payload
+  handleResponse(fromPubKey, payload) {
+    const { requestId, output, exitCode, truncated } = payload || {}
 
     if (!requestId) return
 
     const pending = this.#pendingRequests.get(requestId)
     if (!pending) return
+
+    // A response claiming this requestId but arriving from a different peer
+    // than the one it was sent to is never valid -- ignore it rather than
+    // resolving the wrong caller's promise (see class doc comment).
+    if (pending.pubKey !== fromPubKey) return
 
     // Clean up
     clearTimeout(pending.timer)
@@ -463,21 +603,15 @@ export class TerminalClient {
   // -- Cleanup --------------------------------------------------------------
 
   /**
-   * Close the terminal client. Removes the handler from the session
-   * and rejects all pending requests.
+   * Close the terminal client. Rejects all pending requests and clears
+   * listeners.
    */
   close() {
-    // Reject all pending requests
-    for (const [requestId, pending] of this.#pendingRequests) {
+    for (const [, pending] of this.#pendingRequests) {
       clearTimeout(pending.timer)
       pending.reject(new Error('TerminalClient closed'))
     }
     this.#pendingRequests.clear()
-
-    // Remove handler from session
-    this.#session.removeHandler('terminal')
-
-    // Clear listeners
     this.#listeners.clear()
   }
 
@@ -490,11 +624,147 @@ export class TerminalClient {
    */
   toJSON() {
     return {
-      sessionId: this.#session.sessionId,
-      localPodId: this.#session.localPodId,
-      remotePodId: this.#session.remotePodId,
       pendingRequests: this.#pendingRequests.size,
       timeout: this.#timeout,
     }
   }
 }
+
+// ---------------------------------------------------------------------------
+// createTerminalService -- the MeshService descriptor (issue #84, Phase 10)
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a `MeshService` descriptor (`mesh-service.mjs`) wiring `TerminalHost`/
+ * `TerminalClient` onto `ctx.sendTo()`/`ctx.onIncomingData()`. One service
+ * covers both directions -- hosting a shell to other peers (always, since
+ * `shell` is required -- see below) and requesting execution from other
+ * peers (always available via the returned `api`) -- see module doc comment
+ * for why this isn't split into two descriptors.
+ *
+ * `shell` is REQUIRED -- unlike `peer-files.mjs`'s `fs` (optional, "client-
+ * only" if omitted), there is no client-only mode here: `attach()` throws
+ * immediately (via `TerminalHost`'s own constructor check) if `opts.shell`
+ * is missing or doesn't implement `execute()`. See module doc comment's
+ * "Migration history", point 2, for why this is deliberate. A node that only
+ * ever wants to REQUEST execution from other peers still must supply *some*
+ * `shell` to attach this service at all today -- if a request-only mode
+ * becomes a real need, that's a follow-up, not a silent default.
+ *
+ * @param {object} opts
+ * @param {object} opts.shell - Object with `execute(command) -> {output, exitCode}`.
+ *   REQUIRED. No default is provided by this package (see module doc comment).
+ * @param {string[]|Set<string>} [opts.allowedCommands] - See `TerminalHost`.
+ * @param {string[]|Set<string>} [opts.blockedCommands] - See `TerminalHost`.
+ * @param {number} [opts.maxOutputLength] - See `TerminalHost`.
+ * @param {number} [opts.timeout] - See `TerminalClient`.
+ * @param {Function} [opts.onLog]
+ * @param {string} [opts.accessResource='terminal'] - `resource` passed to
+ *   `ctx.registry.checkAccess()` for inbound exec requests (see `TERMINAL_RESOURCE`).
+ * @param {string} [opts.accessAction='execute'] - `action` passed to
+ *   `ctx.registry.checkAccess()` for inbound exec requests (see `TERMINAL_ACTION`).
+ * @param {string} [opts.requestEnvelopeType='terminal-request']
+ * @param {string} [opts.responseEnvelopeType='terminal-response']
+ * @returns {import('./mesh-service.mjs').MeshService}
+ */
+export function createTerminalService(opts = {}) {
+  const {
+    shell,
+    allowedCommands,
+    blockedCommands,
+    maxOutputLength,
+    timeout,
+    onLog,
+    accessResource = TERMINAL_RESOURCE,
+    accessAction = TERMINAL_ACTION,
+    requestEnvelopeType = DEFAULT_TERMINAL_REQUEST_ENVELOPE_TYPE,
+    responseEnvelopeType = DEFAULT_TERMINAL_RESPONSE_ENVELOPE_TYPE,
+  } = opts
+  const log = onLog || (() => {})
+
+  return {
+    name: 'terminal',
+
+    attach(peerNode, ctx) {
+      // Throws here (inside attach(), not createTerminalService() itself) if
+      // shell is missing/invalid -- mirrors peer-escrow.mjs's EscrowManager
+      // throwing inside createEscrowService()'s attach() when creditLedger
+      // is missing. See module doc comment's "Migration history", point 2.
+      const host = new TerminalHost({
+        shell,
+        allowedCommands,
+        blockedCommands,
+        maxOutputLength,
+        onLog,
+        checkAccess: (fromPubKey) => ctx.registry.checkAccess(fromPubKey, accessResource, accessAction),
+      })
+
+      const client = new TerminalClient({
+        timeout,
+        onLog,
+        sendRequest: (pubKey, payload) => ctx.sendTo(pubKey, requestEnvelopeType, payload),
+      })
+
+      // Bridge TerminalClient's own pre-existing on()/off() events through
+      // ctx.emit() -- see mesh-service.mjs's "Observability events" section
+      // and peer-escrow.mjs's/mesh-verification.mjs's own bridging precedent.
+      const onOutput = (data) => ctx.emit('terminal:output', data)
+      const onError = (data) => ctx.emit('terminal:error', data)
+      client.on('output', onOutput)
+      client.on('error', onError)
+
+      const unsubscribeRequests = ctx.onIncomingData(requestEnvelopeType, async (fromPubKey, msg) => {
+        let response
+        try {
+          response = await host.handleRequest(fromPubKey, msg)
+        } catch (err) {
+          // TerminalHost#handleRequest() already catches every shell-execution
+          // error itself -- reaching here would mean something unexpected
+          // (e.g. checkAccess() throwing). Never let it become an unhandled
+          // rejection or crash the shared onIncomingData() dispatch loop.
+          log('terminal:request-handling-failed', { from: fromPubKey, requestId: msg?.requestId, error: err?.message || String(err) })
+          response = { requestId: msg?.requestId ?? null, output: `Error: ${err?.message || String(err)}`, exitCode: 1 }
+        }
+
+        // null means an informational resize event -- no response to send.
+        if (response === null) return
+
+        if (response.denied) {
+          ctx.emit('terminal:request-denied', { from: fromPubKey, requestId: response.requestId })
+        } else {
+          ctx.emit('terminal:request-served', { from: fromPubKey, requestId: response.requestId, exitCode: response.exitCode })
+        }
+
+        try {
+          await ctx.sendTo(fromPubKey, responseEnvelopeType, response)
+        } catch (err) {
+          log('terminal:response-send-failed', { to: fromPubKey, requestId: response.requestId, error: err?.message || String(err) })
+        }
+      })
+
+      const unsubscribeResponses = ctx.onIncomingData(responseEnvelopeType, (fromPubKey, msg) => {
+        client.handleResponse(fromPubKey, msg)
+      })
+
+      const api = {
+        host,
+        client,
+        execute: (pubKey, command, execOpts) => client.execute(pubKey, command, execOpts),
+        sendResize: (pubKey, cols, rows) => client.sendResize(pubKey, cols, rows),
+      }
+
+      return {
+        api,
+        teardown() {
+          client.off('output', onOutput)
+          client.off('error', onError)
+          unsubscribeRequests()
+          unsubscribeResponses()
+          client.close()
+        },
+      }
+    },
+  }
+}
+
+export { DEFAULT_TERMINAL_REQUEST_ENVELOPE_TYPE, DEFAULT_TERMINAL_RESPONSE_ENVELOPE_TYPE }
