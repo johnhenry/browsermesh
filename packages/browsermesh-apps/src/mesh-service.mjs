@@ -288,7 +288,23 @@ function createServiceContext({ peerNode, network, eventBus }) {
       const typeSet = new Set(Array.isArray(types) ? types : [types])
       return peerNode.onIncomingData((pubKey, data) => {
         if (!data || typeof data !== 'object' || !typeSet.has(data.type)) return
-        callback(pubKey, data)
+        // `peerNode.onIncomingData()`'s own dispatch loop only catches a
+        // SYNCHRONOUS throw from this callback. Every real handler in this
+        // family is `async`, so a rejection never throws synchronously --
+        // it resolves to a rejected Promise instead, which the outer catch
+        // structurally cannot see. Without catching it here too, a failing
+        // async handler becomes an unhandled promise rejection instead of
+        // the isolated, logged failure every other error path in this file
+        // already guarantees (see the module doc comment's "A THROWING
+        // SUBSCRIBER never crashes..." paragraph -- this closes the one
+        // gap that guarantee didn't actually cover).
+        try {
+          const result = callback(pubKey, data)
+          if (result && typeof result.catch === 'function') result.catch(() => {})
+        } catch {
+          // Synchronous throw: peerNode.onIncomingData()'s own dispatch
+          // loop already catches and logs this case -- nothing more to do.
+        }
       })
     },
 
