@@ -240,6 +240,36 @@ describe('mesh-service: attachService()', () => {
     await handle.teardown()
   })
 
+  it('a rejecting async onIncomingData callback does not become an unhandled promise rejection, and other subscribers still fire', async () => {
+    const registryA = createRegistry(ALICE)
+    const { nodeA, nodeB } = createNodePair(ALICE, BOB, { registryA })
+
+    const otherReceived = []
+    const descriptor = {
+      name: 'async-throws',
+      attach(peerNode, ctx) {
+        const unsubA = ctx.onIncomingData('ping', async () => {
+          throw new Error('boom -- simulated failing async handler')
+        })
+        const unsubB = ctx.onIncomingData('ping', (pubKey, envelope) => {
+          otherReceived.push(envelope.type)
+        })
+        return () => { unsubA(); unsubB() }
+      },
+    }
+    const handle = attachService(nodeA, undefined, descriptor)
+
+    await nodeB.sendTo(ALICE, { type: 'ping' })
+    await waitFor(() => otherReceived.length === 1, 500, 'the non-throwing subscriber still received the envelope')
+    // If the throwing async callback's rejection were unhandled, Node's
+    // test runner would fail this test file with an unhandledRejection --
+    // reaching this line at all is the actual assertion.
+    await new Promise((r) => setTimeout(r, 20))
+    assert.deepEqual(otherReceived, ['ping'])
+
+    await handle.teardown()
+  })
+
   it('ctx.sendTo(pubKey, type, payload) merges { type, ...payload } into the sent envelope', async () => {
     const registryA = createRegistry(ALICE)
     const { nodeA, nodeB } = createNodePair(ALICE, BOB, { registryA })
