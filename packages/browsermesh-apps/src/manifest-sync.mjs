@@ -94,6 +94,25 @@
  * deterministic (but not "correct" -- there is no correct answer here)
  * outcome.
  *
+ * ---------------------------------------------------------------------------
+ * Observability events (`ctx.emit()`, Phase 1 of the mesh-KV-and-
+ * observability plan -- see `mesh-service.mjs`'s module doc comment for the
+ * full convention this follows). Four curated events, not a mechanical
+ * conversion of this file's `onLog` calls:
+ *
+ *   - `manifest-sync:entry-merged` `{bucketId, from, keys}` -- at least one
+ *     remote manifest entry passed the ACL/attribution gate and was merged
+ *     into both this service's own engine copy and the durable backend.
+ *   - `manifest-sync:write-rejected` `{bucketId, from, key, reason}` -- one
+ *     remote entry was dropped BEFORE merge (`reason` is
+ *     `'attribution-mismatch'` or `'unauthorized'`); this is the gate this
+ *     whole file exists to enforce, so its rejections are exactly the kind
+ *     of security-relevant transition worth a dashboard being able to see.
+ *   - `manifest-sync:watching` `{bucketId, pubKey}` -- `api.watch()` started
+ *     broadcasting this bucket's changes to `pubKey`.
+ *   - `manifest-sync:unwatching` `{bucketId, pubKey}` -- `api.unwatch()`
+ *     stopped broadcasting to `pubKey`.
+ *
  * No browser-only imports at module level.
  */
 
@@ -261,6 +280,7 @@ export function createManifestSyncService({ bucketId, cloudStorageBackend, envel
           // deliberate limitation of this gate" section.
           if (writer !== fromPubKey) {
             log('manifest-sync:reject-attribution-mismatch', { bucketId, key, from: fromPubKey, claimedWriter: writer })
+            ctx.emit('manifest-sync:write-rejected', { bucketId, from: fromPubKey, key, reason: 'attribution-mismatch' })
             continue
           }
 
@@ -269,13 +289,15 @@ export function createManifestSyncService({ bucketId, cloudStorageBackend, envel
             log('manifest-sync:reject-unauthorized-write', {
               bucketId, key, from: fromPubKey, reason: check.reason,
             })
+            ctx.emit('manifest-sync:write-rejected', { bucketId, from: fromPubKey, key, reason: 'unauthorized' })
             continue
           }
 
           sanitizedEntries[key] = regState
         }
 
-        if (Object.keys(sanitizedEntries).length === 0) return
+        const mergedKeys = Object.keys(sanitizedEntries)
+        if (mergedKeys.length === 0) return
 
         // Make sure the engine's copy reflects the backend's latest
         // persisted state before merging remote input in, so the LWW
@@ -292,6 +314,8 @@ export function createManifestSyncService({ bucketId, cloudStorageBackend, envel
         // Persist into the actual source of truth every get/list/head op
         // reads from.
         await cloudStorageBackend.mergeManifestEntries({ entries: sanitizedEntries })
+
+        ctx.emit('manifest-sync:entry-merged', { bucketId, from: fromPubKey, keys: mergedKeys })
       }
 
       /**
@@ -312,10 +336,12 @@ export function createManifestSyncService({ bucketId, cloudStorageBackend, envel
         /** Start broadcasting local/merged manifest changes to `pubKey`. */
         watch(pubKey) {
           watchTargets.add(pubKey)
+          ctx.emit('manifest-sync:watching', { bucketId, pubKey })
         },
         /** Stop broadcasting to `pubKey`. */
         unwatch(pubKey) {
           watchTargets.delete(pubKey)
+          ctx.emit('manifest-sync:unwatching', { bucketId, pubKey })
         },
         syncWith,
       }

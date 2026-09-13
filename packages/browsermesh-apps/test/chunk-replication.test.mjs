@@ -250,6 +250,102 @@ describe('chunk-replication: eager push on put()', () => {
 })
 
 // ---------------------------------------------------------------------------
+// ctx.emit() observability events (Phase 1 of the mesh-KV-and-observability
+// plan -- see chunk-replication.mjs's own module doc comment's
+// "Observability events" section for the documented vocabulary this proves
+// out).
+// ---------------------------------------------------------------------------
+
+describe('chunk-replication: ctx.emit() observability events', () => {
+  it('emits chunk-replication:chunk-replicated when a connected, authorized replica fully acknowledges a push', async () => {
+    const alice = await createPeer('alice')
+    const bob = await createPeer('bob')
+    const { nodeA, nodeB } = wireNodes(alice, bob)
+    const backendA = createBackendFor(alice)
+    const backendB = createBackendFor(bob)
+
+    markConnected(alice, bob)
+    alice.registry.grantCapabilities(bob.podId, [`${RESOURCE}:replica`])
+    bob.registry.grantCapabilities(alice.podId, [`${RESOURCE}:write`])
+
+    const aliceHandle = attachService(nodeA, undefined, createChunkReplicationService({ bucketId: BUCKET, cloudStorageBackend: backendA }))
+    attachService(nodeB, undefined, createChunkReplicationService({ bucketId: BUCKET, cloudStorageBackend: backendB }))
+
+    const replicated = []
+    aliceHandle.on('chunk-replication:chunk-replicated', (data) => replicated.push(data))
+
+    const socketA = await backendA.connect()
+    const putRes = await send(socketA, { op: 'put', key: 'greeting.txt', data: toBase64(new TextEncoder().encode('hi bob')) })
+    assert.equal(putRes.durability, 'replicated')
+
+    assert.equal(replicated.length, 1)
+    assert.equal(replicated[0].bucketId, BUCKET)
+    assert.deepEqual(replicated[0].replicatedTo, [bob.podId])
+    assert.equal(replicated[0].cids.length, 1)
+  })
+
+  it('emits chunk-replication:push-rejected when an unauthorized sender attempts a chunk-push', async () => {
+    const alice = await createPeer('alice')
+    const bob = await createPeer('bob')
+    const { nodeA, nodeB } = wireNodes(alice, bob)
+    const backendA = createBackendFor(alice)
+    const backendB = createBackendFor(bob)
+
+    // Bob does NOT grant alice write access -- his chunk-replication service
+    // must reject the inbound push and emit accordingly.
+    attachService(nodeA, undefined, createChunkReplicationService({ bucketId: BUCKET, cloudStorageBackend: backendA }))
+    const bobHandle = attachService(nodeB, undefined, createChunkReplicationService({ bucketId: BUCKET, cloudStorageBackend: backendB }))
+
+    const rejected = []
+    bobHandle.on('chunk-replication:push-rejected', (data) => rejected.push(data))
+
+    // Directly inject a chunk-push envelope as if alice's replicatePut() had
+    // fired one, without needing a real 'replica' grant on alice's side.
+    await nodeA.sendTo(bob.podId, {
+      type: 'chunk-replication',
+      bucketId: BUCKET,
+      kind: 'chunk-push',
+      requestId: 'req-1',
+      cid: 'sha256-fake',
+      data: toBase64(new Uint8Array([1, 2, 3])),
+    })
+
+    await new Promise((r) => setTimeout(r, 30))
+    assert.equal(rejected.length, 1)
+    assert.equal(rejected[0].bucketId, BUCKET)
+    assert.equal(rejected[0].from, alice.podId)
+    assert.equal(rejected[0].cid, 'sha256-fake')
+    assert.equal(await backendB.hasChunkRaw('sha256-fake'), false, 'the unauthorized push must never be stored')
+  })
+
+  it('emits chunk-replication:read-repair when fetchChunk() successfully pulls a missing chunk from a peer', async () => {
+    const alice = await createPeer('alice')
+    const bob = await createPeer('bob')
+    const { nodeA, nodeB } = wireNodes(alice, bob)
+    const backendA = createBackendFor(alice)
+    const backendB = createBackendFor(bob)
+
+    alice.registry.grantCapabilities(bob.podId, [`${RESOURCE}:read`])
+    markConnected(bob, alice)
+
+    attachService(nodeA, undefined, createChunkReplicationService({ bucketId: BUCKET, cloudStorageBackend: backendA }))
+    const bobHandle = attachService(nodeB, undefined, createChunkReplicationService({ bucketId: BUCKET, cloudStorageBackend: backendB }))
+
+    const repaired = []
+    bobHandle.on('chunk-replication:read-repair', (data) => repaired.push(data))
+
+    const socketA = await backendA.connect()
+    await send(socketA, { op: 'put', key: 'shared.txt', data: toBase64(new TextEncoder().encode('content bob needs')) })
+    const cid = await firstCidFor(backendA, 'shared.txt')
+
+    await bobHandle.api.fetchChunk(cid)
+
+    assert.equal(repaired.length, 1)
+    assert.deepEqual(repaired[0], { bucketId: BUCKET, cid, from: alice.podId })
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Authorization: an unauthorized peer must never be served chunk bytes
 // ---------------------------------------------------------------------------
 

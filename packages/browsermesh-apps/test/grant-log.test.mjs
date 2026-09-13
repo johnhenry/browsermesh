@@ -430,3 +430,57 @@ describe('GrantLog as a MeshService (attachService())', () => {
     assert.equal(bob.registry.checkAccess(carol.podId, RESOURCE, 'admin').allowed, false)
   })
 })
+
+// ---------------------------------------------------------------------------
+// ctx.emit() observability events (Phase 1 of the mesh-KV-and-observability
+// plan -- see grant-log.mjs's own module doc comment's "Observability
+// events" section for the documented vocabulary this proves out).
+// ---------------------------------------------------------------------------
+
+describe('GrantLog as a MeshService: ctx.emit() observability events', () => {
+  /** @type {any} */ let alice
+  /** @type {any} */ let bob
+  /** @type {any} */ let nodeA
+
+  beforeEach(async () => {
+    alice = await createPeer('alice')
+    bob = await createPeer('bob')
+    ;({ nodeA } = wireNodes(alice, bob))
+  })
+
+  it('emits grant-log:grant-applied (and grant-log:admin-changed on bootstrap), and grant-log:revoke-applied on revoke', async () => {
+    let aliceApi
+    const handle = attachService(nodeA, undefined, createGrantLogService({ resource: RESOURCE, onReady: (api) => { aliceApi = api } }))
+
+    const grantApplied = []
+    const revokeApplied = []
+    const adminChanged = []
+    handle.on('grant-log:grant-applied', (data) => grantApplied.push(data))
+    handle.on('grant-log:revoke-applied', (data) => revokeApplied.push(data))
+    handle.on('grant-log:admin-changed', (data) => adminChanged.push(data))
+
+    // Bootstrap: alice self-grants the admin scope -- this is a 0 -> nonzero
+    // transition for alice's own pubKey, so it fires BOTH grant-applied and
+    // admin-changed.
+    await aliceApi.bootstrapAdmin()
+    assert.equal(adminChanged.length, 1)
+    assert.deepEqual(adminChanged[0], { resource: RESOURCE, pubKey: alice.podId, action: 'granted' })
+    assert.equal(grantApplied.length, 1)
+    assert.equal(grantApplied[0].pubKey, alice.podId)
+    assert.ok(grantApplied[0].added.includes(`${RESOURCE}:admin`))
+
+    // An ordinary (non-admin-scope) grant to bob: grant-applied only, no
+    // admin-changed.
+    await aliceApi.grant(bob.podId, ['read', 'write'])
+    assert.equal(grantApplied.length, 2)
+    assert.deepEqual(grantApplied[1], { resource: RESOURCE, pubKey: bob.podId, added: [`${RESOURCE}:read`, `${RESOURCE}:write`] })
+    assert.equal(adminChanged.length, 1, 'an ordinary capability grant does not also fire admin-changed')
+
+    // Revoke: revoke-applied fires for the pubKey/scopes that stopped being effective.
+    await aliceApi.revoke(bob.podId, ['read'])
+    assert.equal(revokeApplied.length, 1)
+    assert.deepEqual(revokeApplied[0], { resource: RESOURCE, pubKey: bob.podId, removed: [`${RESOURCE}:read`] })
+
+    await handle.teardown()
+  })
+})

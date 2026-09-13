@@ -215,6 +215,77 @@ describe('manifest-sync: authorized write propagation', () => {
 })
 
 // ---------------------------------------------------------------------------
+// ctx.emit() observability events (Phase 1 of the mesh-KV-and-observability
+// plan -- see manifest-sync.mjs's own module doc comment's "Observability
+// events" section for the documented vocabulary this proves out).
+// ---------------------------------------------------------------------------
+
+describe('manifest-sync: ctx.emit() observability events', () => {
+  /** @type {any} */ let alice
+  /** @type {any} */ let bob
+  /** @type {any} */ let nodeA
+  /** @type {any} */ let nodeB
+  /** @type {any} */ let backendA
+  /** @type {any} */ let backendB
+
+  beforeEach(async () => {
+    alice = await createPeer('alice')
+    bob = await createPeer('bob')
+    ;({ nodeA, nodeB } = wireNodes(alice, bob))
+    backendA = createBackendFor(alice)
+    backendB = createBackendFor(bob)
+  })
+
+  it('emits manifest-sync:watching/unwatching on watch()/unwatch(), and manifest-sync:entry-merged on a successful authorized merge', async () => {
+    bob.registry.grantCapabilities(alice.podId, [`${RESOURCE}:write`])
+
+    const aliceHandle = attachService(nodeA, undefined, createManifestSyncService({ bucketId: BUCKET, cloudStorageBackend: backendA }))
+    const bobHandle = attachService(nodeB, undefined, createManifestSyncService({ bucketId: BUCKET, cloudStorageBackend: backendB }))
+
+    const watching = []
+    const unwatching = []
+    const merged = []
+    aliceHandle.on('manifest-sync:watching', (data) => watching.push(data))
+    aliceHandle.on('manifest-sync:unwatching', (data) => unwatching.push(data))
+    bobHandle.on('manifest-sync:entry-merged', (data) => merged.push(data))
+
+    aliceHandle.api.watch(bob.podId)
+    assert.deepEqual(watching, [{ bucketId: BUCKET, pubKey: bob.podId }])
+
+    const socketA = await backendA.connect()
+    await send(socketA, { op: 'put', key: 'greeting.txt', data: toBase64(new TextEncoder().encode('hi')) })
+
+    await waitFor(() => merged.length > 0, 1000, "bob's manifest-sync emits entry-merged after the authorized merge")
+    assert.equal(merged[0].bucketId, BUCKET)
+    assert.equal(merged[0].from, alice.podId)
+    assert.deepEqual(merged[0].keys, ['greeting.txt'])
+
+    aliceHandle.api.unwatch(bob.podId)
+    assert.deepEqual(unwatching, [{ bucketId: BUCKET, pubKey: bob.podId }])
+  })
+
+  it('emits manifest-sync:write-rejected (reason: unauthorized) when the receiving peer has not granted write access', async () => {
+    // Deliberately NOT granting alice write access on bob's registry.
+    const aliceHandle = attachService(nodeA, undefined, createManifestSyncService({ bucketId: BUCKET, cloudStorageBackend: backendA }))
+    const bobHandle = attachService(nodeB, undefined, createManifestSyncService({ bucketId: BUCKET, cloudStorageBackend: backendB }))
+
+    const rejected = []
+    bobHandle.on('manifest-sync:write-rejected', (data) => rejected.push(data))
+
+    aliceHandle.api.watch(bob.podId)
+
+    const socketA = await backendA.connect()
+    await send(socketA, { op: 'put', key: 'k', data: toBase64(new Uint8Array([1])) })
+
+    await waitFor(() => rejected.length > 0, 1000, "bob's manifest-sync emits write-rejected for alice's unauthorized write")
+    assert.equal(rejected[0].bucketId, BUCKET)
+    assert.equal(rejected[0].from, alice.podId)
+    assert.equal(rejected[0].key, 'k')
+    assert.equal(rejected[0].reason, 'unauthorized')
+  })
+})
+
+// ---------------------------------------------------------------------------
 // THE critical test: an unauthorized peer's write must never reach the
 // local merged state.
 // ---------------------------------------------------------------------------

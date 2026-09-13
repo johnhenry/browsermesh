@@ -83,6 +83,25 @@
  * expectations should override it via
  * `createMeshRpcService({ requestTimeoutMs })`.
  *
+ * ---------------------------------------------------------------------------
+ * Observability events (`ctx.emit()`, Phase 1 of the mesh-KV-and-
+ * observability plan -- see `mesh-service.mjs`'s module doc comment for the
+ * full convention this follows). Three curated events, not a mechanical
+ * conversion of this file's `onLog` calls:
+ *
+ *   - `mesh-rpc:request-served` `{from, method, path, status}` -- this peer
+ *     finished handling an inbound request and sent a response (whatever
+ *     the status -- including the `501`/`500` fallback cases below).
+ *   - `mesh-rpc:handler-error` `{from, method, path, error}` -- the
+ *     registered `onRequest` threw/rejected; this is the one case this
+ *     file's own doc comment calls out as needing to "never become an
+ *     unhandled rejection or crash the dispatch loop", so it's worth a
+ *     dashboard being able to see it happened even though the caller still
+ *     got a clean `500`.
+ *   - `mesh-rpc:request-timeout` `{to, method, path}` -- the CALLING side's
+ *     `request()` gave up waiting after `requestTimeoutMs` with no matching
+ *     response.
+ *
  * No browser-only imports at module level.
  */
 
@@ -197,6 +216,7 @@ export function createMeshRpcService({
             // unhandled rejection or crash the dispatch loop -- turn it
             // into a clean error response instead.
             log('mesh-rpc:handler-threw', { from: fromPubKey, requestId, error: err?.message || String(err) })
+            ctx.emit('mesh-rpc:handler-error', { from: fromPubKey, method: msg.method, path: msg.path, error: err?.message || String(err) })
             result = { status: 500, body: { error: err?.message || String(err) } }
           }
         }
@@ -207,6 +227,7 @@ export function createMeshRpcService({
 
         try {
           await ctx.sendTo(fromPubKey, envelopeType, { kind: 'rpc-response', requestId, status, headers, body })
+          ctx.emit('mesh-rpc:request-served', { from: fromPubKey, method: msg.method, path: msg.path, status })
         } catch (err) {
           log('mesh-rpc:response-send-failed', { to: fromPubKey, requestId, error: err?.message || String(err) })
         }
@@ -239,6 +260,7 @@ export function createMeshRpcService({
         const promise = new Promise((resolve, reject) => {
           const timer = setTimeout(() => {
             pendingRequests.delete(requestId)
+            ctx.emit('mesh-rpc:request-timeout', { to: podId, method, path })
             reject(new Error(`mesh-rpc: request ${method} ${path} to ${podId} timed out after ${requestTimeoutMs}ms`))
           }, requestTimeoutMs)
           pendingRequests.set(requestId, { resolve, reject, timer })

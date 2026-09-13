@@ -180,6 +180,27 @@
  * peer answers "have" at all, or every peer that claimed to have it fails
  * to actually deliver it.
  *
+ * ---------------------------------------------------------------------------
+ * Observability events (`ctx.emit()`, Phase 1 of the mesh-KV-and-
+ * observability plan -- see `mesh-service.mjs`'s module doc comment for the
+ * full convention this follows). Four curated events, not a mechanical
+ * conversion of this file's `onLog` calls:
+ *
+ *   - `chunk-replication:chunk-replicated` `{bucketId, cids, replicatedTo}`
+ *     -- one `replicatePut()` call finished with `durability: 'replicated'`
+ *     (at least one designated replica fully acknowledged every pushed cid).
+ *   - `chunk-replication:read-repair` `{bucketId, cid, from}` -- a missing
+ *     chunk was successfully fetched from a peer via lazy pull
+ *     (`fetchChunk()`), the mechanism `syncMissingChunks()`/a `get()` miss
+ *     both rely on.
+ *   - `chunk-replication:push-rejected` `{bucketId, from, cid}` -- an
+ *     inbound `chunk-push` was refused because the sender did not currently
+ *     hold `write` on this bucket -- the core security property this file's
+ *     "AUTHORIZATION on every chunk transfer" section describes.
+ *   - `chunk-replication:fetch-exhausted` `{bucketId, cid}` -- `fetchChunk()`
+ *     gave up on a cid because either nobody answered "have" or every
+ *     responder failed to actually deliver it.
+ *
  * No browser-only imports at module level.
  */
 
@@ -352,6 +373,7 @@ export function createChunkReplicationService({
       async function handleChunkPush(fromPubKey, msg) {
         if (!ctx.registry.checkAccess(fromPubKey, resource, 'write').allowed) {
           log('chunk-replication:reject-unauthorized-push', { bucketId, from: fromPubKey, cid: msg.cid })
+          ctx.emit('chunk-replication:push-rejected', { bucketId, from: fromPubKey, cid: msg.cid })
           return
         }
         if (typeof msg.cid !== 'string' || typeof msg.data !== 'string') return
@@ -517,9 +539,14 @@ export function createChunkReplicationService({
         await Promise.all(sends)
         await donePromise
 
+        const replicatedTo = [...fullyAcked]
+        if (replicatedTo.length > 0) {
+          ctx.emit('chunk-replication:chunk-replicated', { bucketId, cids, replicatedTo })
+        }
+
         return {
-          durability: fullyAcked.size > 0 ? 'replicated' : 'local-only',
-          replicatedTo: [...fullyAcked],
+          durability: replicatedTo.length > 0 ? 'replicated' : 'local-only',
+          replicatedTo,
         }
       }
 
@@ -633,6 +660,7 @@ export function createChunkReplicationService({
 
         const responders = await queryHave(cid)
         if (responders.length === 0) {
+          ctx.emit('chunk-replication:fetch-exhausted', { bucketId, cid })
           throw new Error(`chunk-replication: no connected peer has chunk ${cid} for bucket ${bucketId}`)
         }
 
@@ -641,12 +669,14 @@ export function createChunkReplicationService({
           try {
             const bytes = await fetchFrom(pubKey, cid)
             await cloudStorageBackend.putChunkRaw(cid, bytes)
+            ctx.emit('chunk-replication:read-repair', { bucketId, cid, from: pubKey })
             return bytes
           } catch (err) {
             lastErr = err
             log('chunk-replication:fetch-attempt-failed', { bucketId, cid, from: pubKey, error: err?.message || String(err) })
           }
         }
+        ctx.emit('chunk-replication:fetch-exhausted', { bucketId, cid })
         throw lastErr || new Error(`chunk-replication: failed to fetch chunk ${cid} from any responder`)
       }
 

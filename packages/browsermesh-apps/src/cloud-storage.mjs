@@ -165,10 +165,39 @@
  * the real writer's entries in the first place, since nobody's
  * `manifest-sync` service ever `watch()`es an unauthorized peer).
  *
+ * ---------------------------------------------------------------------------
+ * Observability events (`ctx.emit()`/`on()`/`onEvent()`, Phase 1 of the
+ * mesh-KV-and-observability plan -- see `mesh-service.mjs`'s module doc
+ * comment for the full convention this follows). `CloudStorage` is NOT a
+ * `MeshService` descriptor itself -- it calls `attachService()` internally
+ * four times (D/E/F/G above) and each of THOSE handles already exposes its
+ * own low-level `ctx.emit()` vocabulary (see each service's own module doc
+ * comment), but `CloudStorage` has no `ctx` of its OWN to emit through.
+ * Rather than leave this class out of the convention, or force a caller to
+ * separately subscribe to all four internal handles just to observe "this
+ * bucket had a put", this class builds its own bus via `mesh-service.mjs`'s
+ * exported `createEventBus()` (the exact same `{emit, on, onEvent, closeAll}`
+ * shape `attachService()`'s handle uses) and exposes `on(event, callback)`/
+ * `onEvent(callback)` methods matching that same handle shape, so a caller
+ * that already knows how to subscribe to one `attachService()` handle knows
+ * how to subscribe to a `CloudStorage` instance too. Its own vocabulary is
+ * deliberately HIGHER-LEVEL than the internal services' wire-protocol
+ * events -- application-meaningful transitions a dashboard actually wants
+ * ("this bucket had a write", not "chunk X was pushed to peer Y"):
+ *
+ *   - `cloud-storage:put-completed` `{bucket, key, size, durability}`
+ *   - `cloud-storage:get-completed` `{bucket, key}`
+ *   - `cloud-storage:delete-completed` `{bucket, key}`
+ *   - `cloud-storage:admin-bootstrapped` `{bucket}` -- `becomeAdmin()` finished.
+ *   - `cloud-storage:grant-issued` `{bucket, pubKey, scopes}` -- `grant()` finished.
+ *
+ * `close()` calls the bus's own `closeAll()`, stopping further delivery, the
+ * same as `attachService()`'s handle does on `teardown()`.
+ *
  * No browser-only imports at module level.
  */
 
-import { attachService } from './mesh-service.mjs'
+import { attachService, createEventBus } from './mesh-service.mjs'
 import { CloudStorageBackend } from './cloud-storage-backend.mjs'
 import { createGrantLogService } from './grant-log.mjs'
 import { createKeyDistributionService } from './key-distribution.mjs'
@@ -311,6 +340,9 @@ export class CloudStorage {
   /** @type {Function} */
   #onLog
 
+  /** @type {import('./mesh-service.mjs').EventBus} This class's OWN higher-level event bus -- see module doc comment's "Observability events" section. Not the same bus as any of the four internally-attached services' own `ctx.emit()`. */
+  #events = createEventBus()
+
   /**
    * @param {object} opts
    * @param {string} opts.bucket - Bucket name. The ACL/sync resource used
@@ -447,6 +479,28 @@ export class CloudStorage {
   /** Advisory only -- see module doc comment, point 6. */
   get replicationFactor() { return this.#replicationFactor }
 
+  /**
+   * Subscribe to exactly one of this instance's own higher-level events
+   * (`cloud-storage:*` -- see module doc comment's "Observability events"
+   * section). Matches `attachService()`'s returned handle's `on()` shape.
+   * @param {string} event
+   * @param {(data: object) => void} callback
+   * @returns {() => void} Unsubscribe function.
+   */
+  on(event, callback) {
+    return this.#events.on(event, callback)
+  }
+
+  /**
+   * Subscribe to every event this instance emits, regardless of name.
+   * Matches `attachService()`'s returned handle's `onEvent()` shape.
+   * @param {(event: string, data: object) => void} callback
+   * @returns {() => void} Unsubscribe function.
+   */
+  onEvent(callback) {
+    return this.#events.onEvent(callback)
+  }
+
   // -----------------------------------------------------------------------
   // Local command socket (put/get/delete/list all flow through here)
   // -----------------------------------------------------------------------
@@ -521,11 +575,13 @@ export class CloudStorage {
       metadata: opts.metadata ?? {},
     })
     if (res.error) throw new Error(`CloudStorage.put: ${res.error}`)
+    const durability = res.durability === 'replicated' ? 'replicated' : 'local-only'
+    this.#events.emit('cloud-storage:put-completed', { bucket: this.#bucket, key: res.key, size: res.size, durability })
     return {
       stored: true,
       key: res.key,
       size: res.size,
-      durability: res.durability === 'replicated' ? 'replicated' : 'local-only',
+      durability,
       replicatedTo: Array.isArray(res.replicatedTo) ? res.replicatedTo : [],
     }
   }
@@ -583,6 +639,7 @@ export class CloudStorage {
       // than a raw backend error string.
       throw new CloudStorageNotFoundError(key, { reason: 'deleted' })
     }
+    this.#events.emit('cloud-storage:get-completed', { bucket: this.#bucket, key })
     return fromBase64(res.data)
   }
 
@@ -598,6 +655,7 @@ export class CloudStorage {
     }
     const res = await this.#sendCommand({ op: 'delete', key })
     if (res.error) throw new Error(`CloudStorage.delete: ${res.error}`)
+    this.#events.emit('cloud-storage:delete-completed', { bucket: this.#bucket, key })
     return { deleted: true }
   }
 
@@ -631,6 +689,7 @@ export class CloudStorage {
   async becomeAdmin() {
     await this.#grantLogApi.bootstrapAdmin()
     await this.#grantLogApi.grant(this.#node.podId, SELF_GRANT_ACTIONS)
+    this.#events.emit('cloud-storage:admin-bootstrapped', { bucket: this.#bucket })
     for (const pubKey of this.#replicaPeers) {
       await this.designateReplica(pubKey)
     }
@@ -671,6 +730,7 @@ export class CloudStorage {
       if (delayMs > 0) await new Promise((r) => setTimeout(r, delayMs))
       await this.#manifestSyncApi.syncWith(pubKey)
     }
+    this.#events.emit('cloud-storage:grant-issued', { bucket: this.#bucket, pubKey, scopes: list })
   }
 
   /**
@@ -732,6 +792,7 @@ export class CloudStorage {
       }
     }
     await this.#backend.close()
+    this.#events.closeAll()
   }
 }
 
