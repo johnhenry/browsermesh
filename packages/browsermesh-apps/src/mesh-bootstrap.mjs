@@ -87,6 +87,19 @@
  * `node.healthCheck` (the `attachService()` handle -- also reachable at
  * `node.services.get('keepalive')`, same as any other opt-in service).
  *
+ * **Multi-hop mesh routing is opt-in via `{ enableRouting: true,
+ * routingOptions }`** (issue #121). When set, this function attaches
+ * `peer-routing.mjs`'s `createMeshRoutingService()` -- wiring `MeshRouter`'s
+ * `forwardFn` onto `ctx.sendTo()` and its inbound dispatch onto
+ * `ctx.onIncomingData()`, so this node can forward messages to peers it has
+ * no direct connection to, via any intermediate peer(s) with a known route
+ * (see `peer-routing.mjs`'s own header for the full multi-hop design). If
+ * `routingOptions.fetchFn` is supplied (even `null`), `ServerSharing` is
+ * also wired, letting other peers proxy HTTP requests to a local server this
+ * node has `expose()`d. Attached to the returned node as `node.router` (the
+ * `attachService()` handle -- also reachable at
+ * `node.services.get('mesh-routing')`, same as any other opt-in service).
+ *
  * **Mesh-native services are opt-in via `{ services: [...] }`** (Phase C).
  * Each entry is a `MeshService` descriptor (`mesh-service.mjs`) attached via
  * `attachService()`, mirroring the `enableRelayHost`/`relayHostServices`
@@ -164,6 +177,7 @@ import { AuditChain } from './audit.mjs'
 import { createHardenedNegotiator } from './mesh-hardening.mjs'
 import { createMeshDht, shareTransport } from './mesh-dht.mjs'
 import { createMeshKeepaliveService } from './mesh-keepalive.mjs'
+import { createMeshRoutingService } from './peer-routing.mjs'
 
 /**
  * Build and boot a real, WebRTC-capable `PeerNode`.
@@ -331,6 +345,17 @@ import { createMeshKeepaliveService } from './mesh-keepalive.mjs'
  * @param {number} [options.healthCheckOptions.intervalMs] - See `hardening.mjs` (default 10000).
  * @param {number} [options.healthCheckOptions.timeoutMs] - See `hardening.mjs` (default 5000).
  * @param {number} [options.healthCheckOptions.maxMissed] - See `hardening.mjs` (default 3).
+ * @param {boolean} [options.enableRouting=false] - Attach `peer-routing.mjs`'s
+ *   `createMeshRoutingService()` (issue #121): real multi-hop message
+ *   forwarding via `MeshRouter` (`forwardFn` -> `ctx.sendTo()`), plus
+ *   `ServerSharing` if `routingOptions.fetchFn` is supplied. Attached to the
+ *   returned node as `node.router` (the `attachService()` handle -- also
+ *   reachable via `node.services.get('mesh-routing')`).
+ * @param {object} [options.routingOptions] - Only used when `enableRouting`.
+ *   Passed straight through to `createMeshRoutingService()`
+ *   (`maxTTL`/`routeCacheMs`/`envelopeType`/`fetchFn`/
+ *   `serverShareEnvelopeType`/`proxyTimeoutMs`) -- see that function's own
+ *   doc comment.
  * @returns {Promise<PeerNode>} A booted (unless `skipBoot`) PeerNode, with
  *   `node.meshManager` (`WebRTCMeshManager`), `node.signaling`
  *   (`MeshSignalingChannel`), and `node.transportNegotiator` (the real,
@@ -348,7 +373,10 @@ import { createMeshKeepaliveService } from './mesh-keepalive.mjs'
  *   `enableHardening`, `node.dht` (`DhtDiscoveryStrategy`, see
  *   `mesh-dht.mjs`) attached when `enableDht`, and `node.healthCheck`
  *   (`attachService()`'s handle for `mesh-keepalive.mjs`, also reachable via
- *   `node.services.get('keepalive')`) attached when `enableHealthCheck`.
+ *   `node.services.get('keepalive')`) attached when `enableHealthCheck`, and
+ *   `node.router` (`attachService()`'s handle for `peer-routing.mjs`'s
+ *   `createMeshRoutingService()`, also reachable via
+ *   `node.services.get('mesh-routing')`) attached when `enableRouting`.
  */
 export async function createMeshNode(options = {}) {
   const {
@@ -389,6 +417,8 @@ export async function createMeshNode(options = {}) {
     dhtMessageType,
     enableHealthCheck = false,
     healthCheckOptions,
+    enableRouting = false,
+    routingOptions,
   } = options
 
   if (!signalingTransport) {
@@ -642,6 +672,22 @@ export async function createMeshNode(options = {}) {
     const keepaliveHandle = attachService(node, servicesNetwork, keepaliveDescriptor)
     node.services.set(keepaliveHandle.name, keepaliveHandle)
     node.healthCheck = keepaliveHandle
+  }
+
+  // -- Multi-hop mesh routing (opt-in, issue #121) ---------------------------
+  // Attached the same way options.services/enableHealthCheck entries are
+  // (attachService()), just after -- so node.services already has whatever
+  // the caller listed in options.services (plus 'keepalive', if enabled)
+  // before this one is added under createMeshRoutingService()'s own
+  // 'mesh-routing' name.
+  if (enableRouting) {
+    const routingDescriptor = createMeshRoutingService({
+      ...routingOptions,
+      onLog: routingOptions?.onLog ?? onLog,
+    })
+    const routingHandle = attachService(node, servicesNetwork, routingDescriptor)
+    node.services.set(routingHandle.name, routingHandle)
+    node.router = routingHandle
   }
 
   return node
