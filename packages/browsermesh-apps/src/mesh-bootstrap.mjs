@@ -100,6 +100,23 @@
  * `attachService()` handle -- also reachable at
  * `node.services.get('mesh-routing')`, same as any other opt-in service).
  *
+ * **Mesh-local IPFS-style content storage is opt-in via `{ enableIpfs: true,
+ * ipfsOptions }`** (issue #123). When set, this function attaches
+ * `peer-ipfs.mjs`'s `createIpfsService()` -- wrapping a fresh `IPFSStore`
+ * (content-addressed `add`/`get`/`pin`/`unpin`/`remove`/`listCids`/
+ * `getStats`/`close`, `ChunkStore`-compatible SHA-256 CIDs) as a
+ * `MeshService`, bridging its own `on`/`off` events through `ctx.emit()`.
+ * **Despite the name, this is NOT wired to a real IPFS network today** --
+ * see `peer-ipfs.mjs`'s own header comment ("HONEST STATUS OF HELIA/IPFS")
+ * for the full, verified explanation: `helia` is not a dependency anywhere
+ * in this repo, and even when `ensureLoaded()`'s CDN-loaded Helia instance
+ * succeeds, no storage operation actually calls into it. Each node's store
+ * is also entirely local -- `createIpfsService()` adds no wire protocol, so
+ * content is never visible across peers, unlike `CloudStorage`'s replicated
+ * chunks. Attached to the returned node as `node.ipfs` (the
+ * `attachService()` handle -- also reachable via
+ * `node.services.get('peer-ipfs')`).
+ *
  * **Mesh-native services are opt-in via `{ services: [...] }`** (Phase C).
  * Each entry is a `MeshService` descriptor (`mesh-service.mjs`) attached via
  * `attachService()`, mirroring the `enableRelayHost`/`relayHostServices`
@@ -195,6 +212,7 @@ import { createMeshKeepaliveService } from './mesh-keepalive.mjs'
 import { createMeshRoutingService } from './peer-routing.mjs'
 import { createTimestampService } from './mesh-timestamp.mjs'
 import { createHealthMonitorService } from './mesh-health.mjs'
+import { createIpfsService } from './peer-ipfs.mjs'
 
 /**
  * Build and boot a real, WebRTC-capable `PeerNode`.
@@ -392,6 +410,15 @@ import { createHealthMonitorService } from './mesh-health.mjs'
  *   `enableHealthMonitor`. Passed straight through to
  *   `createHealthMonitorService()` (`trust`/`orchestrator`/
  *   `resolveWorkload`/`intervalMs`/`thresholds`).
+ * @param {boolean} [options.enableIpfs=false] - Attach `peer-ipfs.mjs`'s
+ *   `createIpfsService()` (issue #123): mesh-LOCAL content-addressed storage
+ *   wrapping a fresh `IPFSStore`. Despite the name, NOT real IPFS-network
+ *   interop -- see `peer-ipfs.mjs`'s own header comment. Attached to the
+ *   returned node as `node.ipfs` (the `attachService()` handle -- also
+ *   reachable via `node.services.get('peer-ipfs')`).
+ * @param {object} [options.ipfsOptions] - Only used when `enableIpfs`.
+ *   Passed straight through to `createIpfsService()`
+ *   (`enabled`/`maxStorageMb`).
  * @returns {Promise<PeerNode>} A booted (unless `skipBoot`) PeerNode, with
  *   `node.meshManager` (`WebRTCMeshManager`), `node.signaling`
  *   (`MeshSignalingChannel`), and `node.transportNegotiator` (the real,
@@ -418,7 +445,9 @@ import { createHealthMonitorService } from './mesh-health.mjs'
  *   `enableTimestamp`, and `node.healthMonitor` (`attachService()`'s handle
  *   for `mesh-health.mjs`, also reachable via
  *   `node.services.get('health-monitor')`) attached when
- *   `enableHealthMonitor`.
+ *   `enableHealthMonitor`, and `node.ipfs` (`attachService()`'s handle for
+ *   `peer-ipfs.mjs`'s `createIpfsService()`, also reachable via
+ *   `node.services.get('peer-ipfs')`) attached when `enableIpfs`.
  */
 export async function createMeshNode(options = {}) {
   const {
@@ -465,6 +494,8 @@ export async function createMeshNode(options = {}) {
     timestampOptions,
     enableHealthMonitor = false,
     healthMonitorOptions,
+    enableIpfs = false,
+    ipfsOptions,
   } = options
 
   if (!signalingTransport) {
@@ -770,6 +801,21 @@ export async function createMeshNode(options = {}) {
     const healthMonitorHandle = attachService(node, servicesNetwork, healthMonitorDescriptor)
     node.services.set(healthMonitorHandle.name, healthMonitorHandle)
     node.healthMonitor = healthMonitorHandle
+  }
+
+  // -- Mesh-local IPFS-style content storage (opt-in, Phase 6, issue #123) --
+  // Attached the same way the other opt-in services above are
+  // (attachService()) -- see peer-ipfs.mjs's own header comment for why this
+  // is NOT real IPFS-network interop despite the name.
+  if (enableIpfs) {
+    const ipfsDescriptor = createIpfsService({
+      enabled: ipfsOptions?.enabled,
+      maxStorageMb: ipfsOptions?.maxStorageMb,
+      onLog: ipfsOptions?.onLog ?? onLog,
+    })
+    const ipfsHandle = attachService(node, servicesNetwork, ipfsDescriptor)
+    node.services.set(ipfsHandle.name, ipfsHandle)
+    node.ipfs = ipfsHandle
   }
 
   return node
