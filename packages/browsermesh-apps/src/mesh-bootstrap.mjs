@@ -71,10 +71,21 @@
  * `{ metrics, failovers, retries }` bundle) and `node.transportMetrics`
  * (alias for `node.hardening.metrics`, matching `node.sync`/`node.relayHost`'s
  * convention of exposing the opt-in subsystem directly on the node).
- * `TransportHealthCheck` and `ConnectionPool` are *not* wired here -- see
- * `mesh-hardening.mjs`'s own header comment for why (a genuine health check
- * needs a keepalive envelope protocol both peers speak, and `ConnectionPool`
- * has no call site under `PeerNode`'s current one-session-per-peer model).
+ * `ConnectionPool` is *not* wired here -- see `mesh-hardening.mjs`'s own
+ * header comment for why (no call site under `PeerNode`'s current
+ * one-session-per-peer model; deliberately deferred, see issue #110).
+ *
+ * **`TransportHealthCheck` IS wired, opt-in via `{ enableHealthCheck: true,
+ * healthCheckOptions }`** (issue #110, follow-up to the above). Unlike
+ * `enableHardening`, this doesn't wrap the negotiator -- it attaches
+ * `mesh-keepalive.mjs`'s `createMeshKeepaliveService()` as a `MeshService`
+ * (Phase C's `attach()`/`ctx` convention), which runs a real ping/pong
+ * keepalive envelope protocol per connected peer and feeds `'unhealthy'`
+ * transitions into `enableHardening`'s `TransportFailover` (if also on) and
+ * into `ctx.emit()` for observability. See `mesh-keepalive.mjs`'s own header
+ * comment for the full wire-protocol/lifecycle writeup. Exposed as
+ * `node.healthCheck` (the `attachService()` handle -- also reachable at
+ * `node.services.get('keepalive')`, same as any other opt-in service).
  *
  * **Mesh-native services are opt-in via `{ services: [...] }`** (Phase C).
  * Each entry is a `MeshService` descriptor (`mesh-service.mjs`) attached via
@@ -152,6 +163,7 @@ import { attachService } from './mesh-service.mjs'
 import { AuditChain } from './audit.mjs'
 import { createHardenedNegotiator } from './mesh-hardening.mjs'
 import { createMeshDht, shareTransport } from './mesh-dht.mjs'
+import { createMeshKeepaliveService } from './mesh-keepalive.mjs'
 
 /**
  * Build and boot a real, WebRTC-capable `PeerNode`.
@@ -305,6 +317,20 @@ import { createMeshDht, shareTransport } from './mesh-dht.mjs'
  *   to distinguish DHT wire messages sharing `signalingTransport` with
  *   WebRTC signaling traffic (default `'dht-relay'`). Only used when
  *   `enableDht`.
+ * @param {boolean} [options.enableHealthCheck=false] - Attach
+ *   `mesh-keepalive.mjs`'s `createMeshKeepaliveService()` (issue #110): a
+ *   real ping/pong keepalive envelope protocol, one
+ *   `@johnhenry/browsermesh-core` `TransportHealthCheck` per connected peer.
+ *   `'unhealthy'` transitions feed `enableHardening`'s `TransportFailover`
+ *   (if also on -- gracefully skipped otherwise) and `ctx.emit()` for
+ *   observability. Attached to the returned node as `node.healthCheck` (the
+ *   `attachService()` handle).
+ * @param {object} [options.healthCheckOptions] - Only used when
+ *   `enableHealthCheck`. Passed straight through to each per-peer
+ *   `TransportHealthCheck`.
+ * @param {number} [options.healthCheckOptions.intervalMs] - See `hardening.mjs` (default 10000).
+ * @param {number} [options.healthCheckOptions.timeoutMs] - See `hardening.mjs` (default 5000).
+ * @param {number} [options.healthCheckOptions.maxMissed] - See `hardening.mjs` (default 3).
  * @returns {Promise<PeerNode>} A booted (unless `skipBoot`) PeerNode, with
  *   `node.meshManager` (`WebRTCMeshManager`), `node.signaling`
  *   (`MeshSignalingChannel`), and `node.transportNegotiator` (the real,
@@ -319,8 +345,10 @@ import { createMeshDht, shareTransport } from './mesh-dht.mjs'
  *   omitted), `node.auditChain` (`AuditChain`, see `audit.mjs`) attached
  *   when `enableAudit` or `options.auditChain` is supplied (left unset
  *   otherwise), `node.hardening`/`node.transportMetrics` attached when
- *   `enableHardening`, and `node.dht` (`DhtDiscoveryStrategy`, see
- *   `mesh-dht.mjs`) attached when `enableDht`.
+ *   `enableHardening`, `node.dht` (`DhtDiscoveryStrategy`, see
+ *   `mesh-dht.mjs`) attached when `enableDht`, and `node.healthCheck`
+ *   (`attachService()`'s handle for `mesh-keepalive.mjs`, also reachable via
+ *   `node.services.get('keepalive')`) attached when `enableHealthCheck`.
  */
 export async function createMeshNode(options = {}) {
   const {
@@ -359,6 +387,8 @@ export async function createMeshNode(options = {}) {
     dhtBootstrapPeers = [],
     dhtK,
     dhtMessageType,
+    enableHealthCheck = false,
+    healthCheckOptions,
   } = options
 
   if (!signalingTransport) {
@@ -590,6 +620,28 @@ export async function createMeshNode(options = {}) {
   if (hardening) {
     node.hardening = hardening
     node.transportMetrics = hardening.metrics
+  }
+
+  // -- Transport health check / keepalive (opt-in, issue #110) --------------
+  // Attached the same way options.services entries are (attachService()),
+  // just after -- so node.services already has whatever the caller listed
+  // in options.services before this one is added under the 'keepalive' key.
+  // Passing the local `hardening` variable (not node.hardening) directly:
+  // both are the same value when enableHardening is on, and mesh-keepalive.mjs
+  // itself handles `hardening` being undefined (enableHardening off) by
+  // skipping failover integration entirely -- see that file's own header
+  // comment.
+  if (enableHealthCheck) {
+    const keepaliveDescriptor = createMeshKeepaliveService({
+      intervalMs: healthCheckOptions?.intervalMs,
+      timeoutMs: healthCheckOptions?.timeoutMs,
+      maxMissed: healthCheckOptions?.maxMissed,
+      hardening,
+      onLog,
+    })
+    const keepaliveHandle = attachService(node, servicesNetwork, keepaliveDescriptor)
+    node.services.set(keepaliveHandle.name, keepaliveHandle)
+    node.healthCheck = keepaliveHandle
   }
 
   return node
