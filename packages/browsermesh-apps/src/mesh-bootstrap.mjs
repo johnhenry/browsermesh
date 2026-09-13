@@ -143,6 +143,21 @@
  * explanation of what this does and does not solve. The constructed
  * strategy is attached as `node.dht`.
  *
+ * **`peer-timestamp.mjs`/`peer-health.mjs` are opt-in via `{ enableTimestamp,
+ * timestampOptions }`/`{ enableHealthMonitor, healthMonitorOptions }`**
+ * (Phase 1 of the browsermesh-app-layer-migration plan, issue #120). Both
+ * follow the exact `enableHealthCheck`/`healthCheckOptions` shape just
+ * above: `mesh-timestamp.mjs`'s `createTimestampService()` and
+ * `mesh-health.mjs`'s `createHealthMonitorService()` are each attached via
+ * `attachService()` the same way `mesh-keepalive.mjs`'s descriptor is,
+ * stored in `node.services` under their own descriptor names (`'timestamp'`/
+ * `'health-monitor'`) and ALSO exposed directly as `node.timestamp`/
+ * `node.healthMonitor`, mirroring `node.healthCheck`'s "reachable both ways"
+ * convention. See those two files' own header comments for the full
+ * wire-protocol/design writeup -- both are near-trivial wrappers, per the
+ * migration plan's own Phase 1 note, since `TimestampAuthority`/
+ * `HealthMonitor` already duck-type against `PeerNode.listSessions()`.
+ *
  * No browser-only imports at module level.
  */
 
@@ -178,6 +193,8 @@ import { createHardenedNegotiator } from './mesh-hardening.mjs'
 import { createMeshDht, shareTransport } from './mesh-dht.mjs'
 import { createMeshKeepaliveService } from './mesh-keepalive.mjs'
 import { createMeshRoutingService } from './peer-routing.mjs'
+import { createTimestampService } from './mesh-timestamp.mjs'
+import { createHealthMonitorService } from './mesh-health.mjs'
 
 /**
  * Build and boot a real, WebRTC-capable `PeerNode`.
@@ -356,6 +373,25 @@ import { createMeshRoutingService } from './peer-routing.mjs'
  *   (`maxTTL`/`routeCacheMs`/`envelopeType`/`fetchFn`/
  *   `serverShareEnvelopeType`/`proxyTimeoutMs`) -- see that function's own
  *   doc comment.
+ * @param {boolean} [options.enableTimestamp=false] - Attach
+ *   `mesh-timestamp.mjs`'s `createTimestampService()` (issue #120): signed
+ *   consensus timestamping wrapping `peer-timestamp.mjs`'s
+ *   `TimestampAuthority`. Attached to the returned node as `node.timestamp`
+ *   (the `attachService()` handle -- also reachable via
+ *   `node.services.get('timestamp')`).
+ * @param {object} [options.timestampOptions] - Only used when
+ *   `enableTimestamp`. Passed straight through to `createTimestampService()`
+ *   (`identity`/`clockSkewMs`/`witnessTimeoutMs`/`envelopeType`).
+ * @param {boolean} [options.enableHealthMonitor=false] - Attach
+ *   `mesh-health.mjs`'s `createHealthMonitorService()` (issue #120): peer
+ *   heartbeat liveness tracking (+ opt-in auto-migration) wrapping
+ *   `peer-health.mjs`'s `HealthMonitor`/`AutoMigrator`. Attached to the
+ *   returned node as `node.healthMonitor` (the `attachService()` handle --
+ *   also reachable via `node.services.get('health-monitor')`).
+ * @param {object} [options.healthMonitorOptions] - Only used when
+ *   `enableHealthMonitor`. Passed straight through to
+ *   `createHealthMonitorService()` (`trust`/`orchestrator`/
+ *   `resolveWorkload`/`intervalMs`/`thresholds`).
  * @returns {Promise<PeerNode>} A booted (unless `skipBoot`) PeerNode, with
  *   `node.meshManager` (`WebRTCMeshManager`), `node.signaling`
  *   (`MeshSignalingChannel`), and `node.transportNegotiator` (the real,
@@ -371,12 +407,18 @@ import { createMeshRoutingService } from './peer-routing.mjs'
  *   when `enableAudit` or `options.auditChain` is supplied (left unset
  *   otherwise), `node.hardening`/`node.transportMetrics` attached when
  *   `enableHardening`, `node.dht` (`DhtDiscoveryStrategy`, see
- *   `mesh-dht.mjs`) attached when `enableDht`, and `node.healthCheck`
+ *   `mesh-dht.mjs`) attached when `enableDht`, `node.healthCheck`
  *   (`attachService()`'s handle for `mesh-keepalive.mjs`, also reachable via
- *   `node.services.get('keepalive')`) attached when `enableHealthCheck`, and
+ *   `node.services.get('keepalive')`) attached when `enableHealthCheck`,
  *   `node.router` (`attachService()`'s handle for `peer-routing.mjs`'s
  *   `createMeshRoutingService()`, also reachable via
- *   `node.services.get('mesh-routing')`) attached when `enableRouting`.
+ *   `node.services.get('mesh-routing')`) attached when `enableRouting`,
+ *   `node.timestamp` (`attachService()`'s handle for `mesh-timestamp.mjs`,
+ *   also reachable via `node.services.get('timestamp')`) attached when
+ *   `enableTimestamp`, and `node.healthMonitor` (`attachService()`'s handle
+ *   for `mesh-health.mjs`, also reachable via
+ *   `node.services.get('health-monitor')`) attached when
+ *   `enableHealthMonitor`.
  */
 export async function createMeshNode(options = {}) {
   const {
@@ -419,6 +461,10 @@ export async function createMeshNode(options = {}) {
     healthCheckOptions,
     enableRouting = false,
     routingOptions,
+    enableTimestamp = false,
+    timestampOptions,
+    enableHealthMonitor = false,
+    healthMonitorOptions,
   } = options
 
   if (!signalingTransport) {
@@ -688,6 +734,42 @@ export async function createMeshNode(options = {}) {
     const routingHandle = attachService(node, servicesNetwork, routingDescriptor)
     node.services.set(routingHandle.name, routingHandle)
     node.router = routingHandle
+  }
+
+  // -- Signed consensus timestamping (opt-in, Phase 1, issue #120) ----------
+  // Attached the same way enableHealthCheck's keepalive service is above --
+  // see mesh-timestamp.mjs's own header comment for the full design.
+  if (enableTimestamp) {
+    const timestampDescriptor = createTimestampService({
+      identity: timestampOptions?.identity,
+      clockSkewMs: timestampOptions?.clockSkewMs,
+      witnessTimeoutMs: timestampOptions?.witnessTimeoutMs,
+      envelopeType: timestampOptions?.envelopeType,
+      onLog,
+    })
+    const timestampHandle = attachService(node, servicesNetwork, timestampDescriptor)
+    node.services.set(timestampHandle.name, timestampHandle)
+    node.timestamp = timestampHandle
+  }
+
+  // -- Peer health monitoring / auto-migration (opt-in, Phase 1, issue #120) -
+  // Attached the same way enableHealthCheck's keepalive service is above --
+  // see mesh-health.mjs's own header comment for the full design. Distinct
+  // from enableHealthCheck's transport-level keepalive: this is
+  // application-level heartbeat liveness (peer-health.mjs's HealthMonitor),
+  // with opt-in workload auto-migration on failure.
+  if (enableHealthMonitor) {
+    const healthMonitorDescriptor = createHealthMonitorService({
+      trust: healthMonitorOptions?.trust,
+      orchestrator: healthMonitorOptions?.orchestrator,
+      resolveWorkload: healthMonitorOptions?.resolveWorkload,
+      intervalMs: healthMonitorOptions?.intervalMs,
+      thresholds: healthMonitorOptions?.thresholds,
+      onLog,
+    })
+    const healthMonitorHandle = attachService(node, servicesNetwork, healthMonitorDescriptor)
+    node.services.set(healthMonitorHandle.name, healthMonitorHandle)
+    node.healthMonitor = healthMonitorHandle
   }
 
   return node
