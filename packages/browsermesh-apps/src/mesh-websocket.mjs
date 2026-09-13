@@ -182,6 +182,28 @@
  * IANA-registered meaning it doesn't have) and whatever `reason` the
  * responder's `ws-reject` carried.
  *
+ * ---------------------------------------------------------------------------
+ * Observability events (`ctx.emit()`, Phase 1 of the mesh-KV-and-
+ * observability plan -- see `mesh-service.mjs`'s module doc comment for the
+ * full convention this follows). Only meaningful on the ACCEPTING side
+ * (`createMeshWebSocketService()`'s `attach()`) -- a standalone,
+ * client-originated `BrowserMeshWebSocket` has no `ctx` of its own (see
+ * "NOTE" above: it deliberately doesn't need `createMeshWebSocketService`
+ * attached at all), so it cannot emit anything through this convention.
+ * Three curated events:
+ *
+ *   - `mesh-websocket:connection-opened` `{from, path, connectionId}` -- an
+ *     inbound `ws-open` was accepted and the session handle was handed to
+ *     `onIncomingConnection` (before the ack is even sent -- see that
+ *     handler's own ordering comment).
+ *   - `mesh-websocket:connection-rejected` `{from, path, connectionId, reason}`
+ *     -- an inbound `ws-open` was rejected, whether by a real `onConnection`
+ *     decision, a thrown `onConnection`, or the "no handler registered"
+ *     default.
+ *   - `mesh-websocket:connection-closed` `{from, path, connectionId, code,
+ *     reason}` -- an accepted session transitioned to `CLOSED`, from either
+ *     side (this peer's own `close()` or a received `ws-close`).
+ *
  * No browser-only imports at module level.
  */
 
@@ -633,6 +655,7 @@ export function createMeshWebSocketService({
         }
 
         if (!accepted) {
+          ctx.emit('mesh-websocket:connection-rejected', { from: fromPubKey, path, connectionId, reason: rejectReason })
           await ctx.sendTo(fromPubKey, envelopeType, { kind: 'ws-reject', connectionId, code: 4403, reason: rejectReason }).catch((err) => {
             log('mesh-websocket:reject-send-failed', { to: fromPubKey, connectionId, error: err?.message || String(err) })
           })
@@ -640,6 +663,10 @@ export function createMeshWebSocketService({
         }
 
         const session = createAcceptedSession({ peerNode, envelopeType, connectionId, remotePodId: fromPubKey, path })
+        session.addEventListener('close', (event) => {
+          ctx.emit('mesh-websocket:connection-closed', { from: fromPubKey, path, connectionId, code: event.code, reason: event.reason })
+        })
+        ctx.emit('mesh-websocket:connection-opened', { from: fromPubKey, path, connectionId })
 
         // `onIncomingConnection` is called BEFORE the ack is sent (not
         // after), and synchronously -- deliberately. Sending the ack first

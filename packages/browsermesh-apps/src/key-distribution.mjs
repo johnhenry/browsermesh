@@ -146,6 +146,24 @@
  * this plan. This is a fundamental property of any such scheme, not a bug to
  * fix later.
  *
+ * ---------------------------------------------------------------------------
+ * Observability events (`ctx.emit()`, Phase 1 of the mesh-KV-and-
+ * observability plan -- see `mesh-service.mjs`'s module doc comment for the
+ * full convention this follows). Three curated events, not a mechanical
+ * conversion of this file's `onLog` calls:
+ *
+ *   - `key-distribution:key-sent` `{resource, to}` -- this peer successfully
+ *     pushed the bucket key to a newly-announced/newly-granted peer.
+ *   - `key-distribution:key-received` `{resource, from}` -- this peer
+ *     accepted and imported a `deliver` record (full trust-model
+ *     verification above already passed by this point).
+ *   - `key-distribution:delivery-rejected` `{resource, from, reason}` -- a
+ *     `deliver` record was discarded (`reason` is one of
+ *     `'malformed'`/`'identity-mismatch'`/`'bad-signature'`/
+ *     `'unauthorized-sender'`); this is this file's core security property
+ *     (see "Trust model for deliver" above), so its rejections are exactly
+ *     the kind of transition worth a dashboard being able to see.
+ *
  * No browser-only imports at module level.
  */
 
@@ -343,6 +361,7 @@ export function createKeyDistributionService({
           const record = await buildDeliverRecord(rawKey, recipientKey)
           await ctx.sendTo(targetPodId, envelopeType, record)
           log('key-distribution:sent', { to: targetPodId, resource })
+          ctx.emit('key-distribution:key-sent', { resource, to: targetPodId })
         } catch (err) {
           log('key-distribution:send-error', { to: targetPodId, resource, error: err?.message || String(err) })
         }
@@ -389,12 +408,14 @@ export function createKeyDistributionService({
         if (!envelope || typeof envelope.ephemeralPublicKey !== 'string' ||
           typeof envelope.wrappedKey !== 'string' || typeof envelope.iv !== 'string') {
           log('key-distribution:reject-malformed-deliver', { from: fromPubKey, resource })
+          ctx.emit('key-distribution:delivery-rejected', { resource, from: fromPubKey, reason: 'malformed' })
           return
         }
         if (typeof at !== 'number' || !Number.isFinite(at) ||
           typeof signedBy !== 'string' || !signedBy ||
           typeof signedByPubKeyBytes !== 'string' || typeof signature !== 'string') {
           log('key-distribution:reject-malformed-deliver', { from: fromPubKey, resource })
+          ctx.emit('key-distribution:delivery-rejected', { resource, from: fromPubKey, reason: 'malformed' })
           return
         }
 
@@ -405,6 +426,7 @@ export function createKeyDistributionService({
           sigBytes = decodeBase64url(signature)
         } catch {
           log('key-distribution:reject-malformed-deliver', { from: fromPubKey, resource })
+          ctx.emit('key-distribution:delivery-rejected', { resource, from: fromPubKey, reason: 'malformed' })
           return
         }
 
@@ -413,6 +435,7 @@ export function createKeyDistributionService({
         const derivedPodId = await podIdFromRawPublicKey(rawPubKeyBytes)
         if (derivedPodId !== signedBy) {
           log('key-distribution:reject-identity-mismatch', { from: fromPubKey, resource, signedBy })
+          ctx.emit('key-distribution:delivery-rejected', { resource, from: fromPubKey, reason: 'identity-mismatch' })
           return
         }
 
@@ -426,6 +449,7 @@ export function createKeyDistributionService({
         }
         if (!validSig) {
           log('key-distribution:reject-bad-signature', { from: fromPubKey, resource, signedBy })
+          ctx.emit('key-distribution:delivery-rejected', { resource, from: fromPubKey, reason: 'bad-signature' })
           return
         }
 
@@ -434,6 +458,7 @@ export function createKeyDistributionService({
         // but unauthorized (non-admin/non-key-holder) claim.
         if (!hasAnyGrant(signedBy, getEffective())) {
           log('key-distribution:reject-unauthorized-sender', { from: fromPubKey, resource, signedBy })
+          ctx.emit('key-distribution:delivery-rejected', { resource, from: fromPubKey, reason: 'unauthorized-sender' })
           return
         }
 
@@ -449,6 +474,7 @@ export function createKeyDistributionService({
 
         await setReceivedKey(rawKeyBytes)
         log('key-distribution:received', { from: fromPubKey, resource })
+        ctx.emit('key-distribution:key-received', { resource, from: fromPubKey })
       }
 
       const unsubscribe = ctx.onIncomingData(envelopeType, (fromPubKey, msg) => {

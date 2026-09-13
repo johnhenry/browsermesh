@@ -192,6 +192,28 @@
  * convention for optional constructor-injected callbacks (`onLog`) rather than
  * introducing a new event-emitter dependency.
  *
+ * ---------------------------------------------------------------------------
+ * Observability events (`ctx.emit()`, Phase 1 of the mesh-KV-and-
+ * observability plan -- see `mesh-service.mjs`'s module doc comment for the
+ * full convention this follows): `createGrantLogService()`'s `attach()`
+ * wraps the `onGrantChange` hook above (already the one place every
+ * effective grant/revoke transition is detected) to additionally emit:
+ *
+ *   - `grant-log:grant-applied` `{resource, pubKey, added}` -- at least one
+ *     new scope became effective for `pubKey` on this resource.
+ *   - `grant-log:revoke-applied` `{resource, pubKey, removed}` -- at least
+ *     one previously-effective scope stopped being effective for `pubKey`.
+ *   - `grant-log:admin-changed` `{resource, pubKey, action}` (`action` is
+ *     `'granted'` or `'revoked'`) -- fired IN ADDITION to the above when the
+ *     specific scope that changed is this resource's admin scope, since an
+ *     admin-authority change (including the very first bootstrap) is a
+ *     materially more significant transition than an ordinary capability
+ *     grant and is worth a dashboard being able to distinguish.
+ *
+ * These three are a deliberately small, curated set -- not a mechanical
+ * conversion of this file's `onLog` calls (which stay exactly what they are:
+ * reject/error-path debug logging for malformed or forged remote records).
+ *
  * No browser-only imports at module level.
  */
 
@@ -763,7 +785,26 @@ export function createGrantLogService({ resource, envelopeType = DEFAULT_ENVELOP
         wallet: peerNode.wallet,
         registry: ctx.registry,
         onLog,
-        onGrantChange,
+        // Wrap the caller-supplied onGrantChange (if any) so Phase E's
+        // key-distribution wiring keeps working unmodified, while also
+        // publishing this file's own curated ctx.emit() vocabulary -- see
+        // module doc comment's "Observability events" section.
+        onGrantChange(change) {
+          const { pubKey, added, removed } = change
+          if (added.length > 0) {
+            ctx.emit('grant-log:grant-applied', { resource, pubKey, added })
+            if (added.includes(grantLog.adminScope)) {
+              ctx.emit('grant-log:admin-changed', { resource, pubKey, action: 'granted' })
+            }
+          }
+          if (removed.length > 0) {
+            ctx.emit('grant-log:revoke-applied', { resource, pubKey, removed })
+            if (removed.includes(grantLog.adminScope)) {
+              ctx.emit('grant-log:admin-changed', { resource, pubKey, action: 'revoked' })
+            }
+          }
+          if (typeof onGrantChange === 'function') onGrantChange(change)
+        },
       })
 
       const unsubscribe = ctx.onIncomingData(envelopeType, (fromPubKey, data) => {

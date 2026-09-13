@@ -51,11 +51,166 @@
  * from `onIncomingData()`, release any internal state); a registered
  * `Backend` stays routable on `network` until `network.close()`.
  *
+ * ---------------------------------------------------------------------------
+ * Observability events (`ctx.emit()`) -- Phase 1 of the mesh-KV-and-
+ * observability plan (`mesh-kv-and-observability.md`, "Design decisions").
+ *
+ * `ctx.emit(event, data)` is a NEW hook, separate from and additional to
+ * `onLog` (which every service already accepts as its own constructor
+ * option and which stays exactly what it is: free-form, mostly error/
+ * reject-path debug logging with no fixed vocabulary). `emit` is for a
+ * small, curated set of MEANINGFUL STATE TRANSITIONS a service deliberately
+ * chooses to publish for something else to consume (a dashboard,
+ * `visualizations.mjs` in a later phase, a test assertion) -- not every
+ * debug line. Event names follow the same `<service>:<kebab-description>`
+ * grammar `onLog` already established (e.g. `grant-log:grant-applied`,
+ * `chunk-replication:chunk-replicated`); each service documents its own
+ * chosen vocabulary in its own module doc comment, exactly like `onLog`'s
+ * existing per-service convention.
+ *
+ * The event bus lives on `attachService()`'s handle, NOT on
+ * `createMeshNode()`'s aggregate: each attached service gets its own
+ * independent bus (mirroring how each service already gets its own `ctx`),
+ * and a caller that wants a node-wide view subscribes to each service's
+ * handle individually (or a later composition layer, e.g. Phase 2's
+ * observability bridge, does that fan-in) rather than this file inventing a
+ * global event namespace up front.
+ *
+ * Subscription API, on the object `attachService()` returns:
+ *   - `handle.on(event, callback)` -- `callback(data)` fires only for that
+ *     exact `event` string. Returns an unsubscribe function.
+ *   - `handle.onEvent(callback)` -- `callback(event, data)` fires for EVERY
+ *     event this service emits, regardless of name (a "firehose"
+ *     subscription, useful for a generic bridge/dashboard that doesn't want
+ *     to enumerate every event name a service might ever add). Also returns
+ *     an unsubscribe function.
+ *
+ * `ctx.emit()` fires SYNCHRONOUSLY: calling it invokes every
+ * currently-registered `on()`/`onEvent()` callback immediately, in
+ * registration order, before `emit()` returns -- there is no queueing or
+ * microtask hop, matching `ctx.onIncomingData()`'s own synchronous dispatch
+ * (a service reacting to an emitted event sees it happen exactly when the
+ * emitting code ran, not "eventually").
+ *
+ * A THROWING SUBSCRIBER never crashes the emitting service, the shared
+ * `onIncomingData()` dispatch loop, or any OTHER subscriber: each
+ * callback invocation is individually wrapped in try/catch and swallowed.
+ * This mirrors two already-established precedents in this exact family
+ * rather than inventing a third convention: `mesh-rpc.mjs`'s `onRequest`
+ * handler is caught and turned into a clean response so a throwing handler
+ * can never become an unhandled rejection or break request/response
+ * correlation for other in-flight callers, and `mesh-websocket.mjs`'s
+ * `#dispatch()` (its `onopen`/`onmessage`/`onerror`/`onclose`/
+ * `addEventListener()` fan-out) wraps every individual handler call in its
+ * own try/catch specifically so "a throwing listener does not stop other
+ * listeners" (that file's own comment, quoted because it's the same
+ * property this bus needs). There is no `onLog` hook available inside the
+ * bus itself to report a swallowed subscriber error -- `ctx.emit()` has no
+ * log sink of its own, by design (see the module's overall `onLog`/`emit`
+ * split above) -- a subscriber that needs to observe its own failures must
+ * catch internally.
+ *
+ * `handle.teardown()` also stops all further event delivery: it clears
+ * every registered `on()`/`onEvent()` subscriber and makes subsequent
+ * `ctx.emit()` calls (if a torn-down service's own code somehow still calls
+ * one) a silent no-op rather than reaching stale subscriber references.
+ *
+ * `createEventBus()` (below, exported) is the small, dependency-free helper
+ * backing all of the above. It is exported so a composed, non-`MeshService`
+ * class that has no `ctx` of its own -- e.g. `cloud-storage.mjs`'s
+ * `CloudStorage`, which calls `attachService()` internally four times but
+ * is not itself attached by anything -- can build a bus with the exact same
+ * `{emit, on, onEvent, closeAll}` shape for its OWN higher-level events,
+ * rather than that file reinventing a differently-shaped emitter.
+ *
  * No browser-only imports at module level.
  */
 
 /** Default scheme a descriptor's `createBackend` backend is registered under, if `backendScheme` is omitted. */
 const DEFAULT_BACKEND_SCHEME = 'svc'
+
+// ---------------------------------------------------------------------------
+// Event bus -- backs ctx.emit() / attachService()'s handle.on()/.onEvent().
+// See module doc comment's "Observability events" section for the full
+// design (synchronous dispatch, throwing-subscriber isolation, teardown
+// semantics). Exported standalone (not only used internally) so a composed,
+// non-MeshService class with no ctx of its own can build one with the same
+// shape -- see cloud-storage.mjs's own use of this for its higher-level
+// put/get/grant events.
+// ---------------------------------------------------------------------------
+
+/**
+ * @typedef {object} EventBus
+ * @property {(event: string, data?: object) => void} emit - Synchronous
+ *   fan-out to every current `on(event, ...)` and `onEvent(...)` subscriber.
+ *   No-op once `closeAll()` has been called.
+ * @property {(event: string, callback: (data: object) => void) => (() => void)} on
+ *   Subscribe to exactly one event name. Returns an unsubscribe function.
+ * @property {(callback: (event: string, data: object) => void) => (() => void)} onEvent
+ *   Subscribe to every event this bus ever emits, regardless of name.
+ *   Returns an unsubscribe function.
+ * @property {() => void} closeAll - Clears every subscriber and makes all
+ *   future `emit()` calls silent no-ops. Idempotent.
+ */
+
+/**
+ * @returns {EventBus}
+ */
+function createEventBus() {
+  /** @type {Map<string, Set<Function>>} */
+  const byEvent = new Map()
+  /** @type {Set<Function>} */
+  const wildcard = new Set()
+  let closed = false
+
+  /**
+   * Invoke one subscriber, swallowing anything it throws -- see module doc
+   * comment: a throwing subscriber must never crash the emitting service,
+   * the shared dispatch loop, or any other subscriber. There is no log sink
+   * available at this layer (see doc comment for why); a subscriber that
+   * needs to observe its own failures must catch internally.
+   * @param {Function} callback
+   * @param {*[]} args
+   */
+  function safeInvoke(callback, args) {
+    try {
+      callback(...args)
+    } catch {
+      // Deliberately swallowed -- see this function's own doc comment.
+    }
+  }
+
+  return {
+    emit(event, data) {
+      if (closed) return
+      const specific = byEvent.get(event)
+      if (specific) {
+        for (const callback of [...specific]) safeInvoke(callback, [data, event])
+      }
+      for (const callback of [...wildcard]) safeInvoke(callback, [event, data])
+    },
+    on(event, callback) {
+      if (typeof callback !== 'function') return () => {}
+      let set = byEvent.get(event)
+      if (!set) {
+        set = new Set()
+        byEvent.set(event, set)
+      }
+      set.add(callback)
+      return () => { set.delete(callback) }
+    },
+    onEvent(callback) {
+      if (typeof callback !== 'function') return () => {}
+      wildcard.add(callback)
+      return () => { wildcard.delete(callback) }
+    },
+    closeAll() {
+      closed = true
+      byEvent.clear()
+      wildcard.clear()
+    },
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Typedefs (documentation only -- `MeshService` is a plain-object
@@ -73,6 +228,13 @@ const DEFAULT_BACKEND_SCHEME = 'svc'
  *   whose `.type` is in `types`. Returns an unsubscribe function.
  * @property {(pubKey: string, type: string, payload?: object) => Promise<void>} sendTo
  *   Sends `{ type, ...payload }` to `pubKey` via `peerNode.sendTo()`.
+ * @property {(event: string, data?: object) => void} emit
+ *   Publishes a curated, meaningful state-transition event for anything
+ *   subscribed via `attachService()`'s returned handle (`handle.on()`/
+ *   `handle.onEvent()`). Fires synchronously; a throwing subscriber is
+ *   caught and never propagates back into the emitting service. See the
+ *   module doc comment's "Observability events" section for the full
+ *   design (separate from, and additional to, `onLog`).
  */
 
 /**
@@ -113,9 +275,10 @@ const DEFAULT_BACKEND_SCHEME = 'svc'
  * @param {object} opts
  * @param {import('./peer-node.mjs').PeerNode} opts.peerNode
  * @param {import('@johnhenry/browsermesh-netway').VirtualNetwork} [opts.network]
+ * @param {EventBus} opts.eventBus
  * @returns {MeshServiceContext}
  */
-function createServiceContext({ peerNode, network }) {
+function createServiceContext({ peerNode, network, eventBus }) {
   return {
     peerNode,
     registry: peerNode.registry,
@@ -132,6 +295,11 @@ function createServiceContext({ peerNode, network }) {
     async sendTo(pubKey, type, payload = {}) {
       await peerNode.sendTo(pubKey, { type, ...payload })
     },
+
+    emit(event, data) {
+      if (typeof event !== 'string' || !event) return
+      eventBus.emit(event, data)
+    },
   }
 }
 
@@ -146,12 +314,18 @@ function createServiceContext({ peerNode, network }) {
  * @param {import('@johnhenry/browsermesh-netway').VirtualNetwork} [network]
  *   Required only if `descriptor.createBackend` is present.
  * @param {MeshService} descriptor
- * @returns {{ name: string, backendScheme: string|null, api: object|undefined, teardown: () => Promise<void> }}
+ * @returns {{ name: string, backendScheme: string|null, api: object|undefined,
+ *   on: (event: string, callback: (data: object) => void) => (() => void),
+ *   onEvent: (callback: (event: string, data: object) => void) => (() => void),
+ *   teardown: () => Promise<void> }}
  *   `api` is `descriptor.attach()`'s returned `{api}` field, if it returned
- *   that shape (undefined otherwise). `teardown()` calls whatever teardown
- *   function `descriptor.attach()` returned (bare-function or `{teardown}`
- *   shape). Does not (cannot -- see module doc comment) remove a registered
- *   `createBackend` backend from `network`.
+ *   that shape (undefined otherwise). `on()`/`onEvent()` subscribe to this
+ *   service's `ctx.emit()` output -- see module doc comment's "Observability
+ *   events" section. `teardown()` calls whatever teardown function
+ *   `descriptor.attach()` returned (bare-function or `{teardown}` shape) and
+ *   then stops all further event delivery via `on()`/`onEvent()`. Does not
+ *   (cannot -- see module doc comment) remove a registered `createBackend`
+ *   backend from `network`.
  */
 export function attachService(peerNode, network, descriptor) {
   if (!peerNode) throw new Error('attachService: peerNode is required')
@@ -165,7 +339,8 @@ export function attachService(peerNode, network, descriptor) {
     throw new Error('attachService: descriptor.name is required')
   }
 
-  const ctx = createServiceContext({ peerNode, network })
+  const eventBus = createEventBus()
+  const ctx = createServiceContext({ peerNode, network, eventBus })
   const attachResult = descriptor.attach(peerNode, ctx)
 
   let attachTeardown
@@ -194,12 +369,19 @@ export function attachService(peerNode, network, descriptor) {
     name: descriptor.name,
     backendScheme,
     api,
+    on(event, callback) {
+      return eventBus.on(event, callback)
+    },
+    onEvent(callback) {
+      return eventBus.onEvent(callback)
+    },
     async teardown() {
       if (typeof attachTeardown === 'function') {
         await attachTeardown()
       }
+      eventBus.closeAll()
     },
   }
 }
 
-export { DEFAULT_BACKEND_SCHEME }
+export { DEFAULT_BACKEND_SCHEME, createEventBus }
