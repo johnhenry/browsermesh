@@ -236,6 +236,34 @@
  * pubKey, and why signature verification keys off each message's real
  * sender instead of one fixed constructor-time key).
  *
+ * **Federated compute (dispatching code to a remote peer to run) is opt-in
+ * via `{ enableCompute: true, computeOptions: { executeFn } }`** (Phase 11 of
+ * the browsermesh-app-layer-migration plan, issue #118 -- the last of the
+ * two modules that stayed blocked on issue #86's execution-gating design
+ * pass, alongside `peer-terminal.mjs`). Attaches `mesh-compute.mjs`'s
+ * `createComputeService()`: a real request/response wire protocol
+ * (`'compute-request'`/`'compute-response'`) wrapping `peer-compute.mjs`'s
+ * `FederatedCompute`, so this node can split a job (via `computeOptions
+ * .splitFn` or a per-call `jobSpec.splitFn`), dispatch chunks to connected
+ * peers, and merge their results (via `computeOptions.mergeFn`/
+ * `jobSpec.mergeFn`). Follows the exact `enableVerification`/
+ * `verificationOptions` shape just above -- see `mesh-compute.mjs`'s own
+ * header comment for the full design (in particular, why answering an
+ * inbound compute-chunk request requires both `ctx.registry.checkAccess()`
+ * authorization AND a caller-supplied `computeOptions.executeFn`, never
+ * invented by this file, matching issue #86's resolved "bring-your-own,
+ * required, no default execution backend" decision). Unlike
+ * `enableVerification` (where `executeFn` is optional -- a node can submit
+ * verification jobs without ever answering them), `enableCompute` REQUIRES
+ * `computeOptions.executeFn` up front: this function throws if it's missing,
+ * mirroring `enableEscrow`'s required `escrowOptions.creditLedger` check,
+ * since (per issue #86's design pass) there is no real execution backend
+ * anywhere in this repo to fall back to, and a compute-only node with no
+ * ability to ever serve a chunk has little practical use compared to
+ * verification's legitimate "submit-only" role. Attached to the returned
+ * node as `node.compute` (the `attachService()` handle -- also reachable via
+ * `node.services.get('compute')`).
+ *
  * No browser-only imports at module level.
  */
 
@@ -279,6 +307,7 @@ import { createVerificationService } from './mesh-verification.mjs'
 import { createTorrentService } from './mesh-torrent.mjs'
 import { createEscrowService } from './peer-escrow.mjs'
 import { createChatService } from './peer-chat.mjs'
+import { createComputeService } from './mesh-compute.mjs'
 
 /**
  * Build and boot a real, WebRTC-capable `PeerNode`.
@@ -547,6 +576,26 @@ import { createChatService } from './peer-chat.mjs'
  * @param {object} [options.chatOptions] - Only used when `enableChat`.
  *   Passed straight through to `createChatService()`
  *   (`signFn`/`verifyFn`/`maxHistory`/`autoResponder`/`onLog`).
+ * @param {boolean} [options.enableCompute=false] - Attach `mesh-compute.mjs`'s
+ *   `createComputeService()` (issue #118, Phase 11): federated compute
+ *   orchestration -- split a job into chunks, dispatch each to a connected
+ *   peer over a real `'compute-request'`/`'compute-response'` wire protocol,
+ *   retry on failure, merge completed results -- wrapping `peer-compute.mjs`'s
+ *   `FederatedCompute`. Peer-initiated inbound chunk-execution requests are
+ *   individually authorized via `registry.checkAccess()` -- see that
+ *   function's own doc comment for the full authorization model. Attached to
+ *   the returned node as `node.compute` (the `attachService()` handle --
+ *   also reachable via `node.services.get('compute')`).
+ * @param {object} [options.computeOptions] - Required when `enableCompute`.
+ *   Passed straight through to `createComputeService()`
+ *   (`scheduler`/`listAvailablePeers`/`splitFn`/`mergeFn`/`executeFn`/
+ *   `dispatchTimeoutMs`/`envelopeType`/`accessResource`/`accessAction`/
+ *   `onLog`) -- see that function's own doc comment.
+ *   `computeOptions.executeFn` is REQUIRED (unlike `verificationOptions
+ *   .executeFn`, which is merely recommended) for this node to usefully
+ *   serve as a compute worker for other peers' jobs; this function throws if
+ *   `enableCompute` is set without it -- see `mesh-compute.mjs`'s header for
+ *   why, settled by issue #86's resolved design pass.
  * @returns {Promise<PeerNode>} A booted (unless `skipBoot`) PeerNode, with
  *   `node.meshManager` (`WebRTCMeshManager`), `node.signaling`
  *   (`MeshSignalingChannel`), and `node.transportNegotiator` (the real,
@@ -590,6 +639,9 @@ import { createChatService } from './peer-chat.mjs'
  *   `node.chat` (`attachService()`'s handle for `peer-chat.mjs`'s
  *   `createChatService()`, also reachable via `node.services.get('chat')`)
  *   attached when `enableChat`.
+ *   `node.compute` (`attachService()`'s handle for `mesh-compute.mjs`'s
+ *   `createComputeService()`, also reachable via `node.services.get('compute')`)
+ *   attached when `enableCompute`.
  */
 export async function createMeshNode(options = {}) {
   const {
@@ -648,6 +700,8 @@ export async function createMeshNode(options = {}) {
     escrowOptions,
     enableChat = false,
     chatOptions,
+    enableCompute = false,
+    computeOptions,
   } = options
 
   if (!signalingTransport) {
@@ -1072,6 +1126,41 @@ export async function createMeshNode(options = {}) {
     const chatHandle = attachService(node, servicesNetwork, chatDescriptor)
     node.services.set(chatHandle.name, chatHandle)
     node.chat = chatHandle
+  }
+
+  // -- Federated compute (opt-in, Phase 11 of the browsermesh-app-layer-
+  // migration plan, issue #118) ----------------------------------------------
+  // Attached the same way options.services/enableEscrow/enableVerification
+  // entries are (attachService()), just after -- see mesh-compute.mjs's own
+  // header comment for the full design (in particular why executeFn is
+  // REQUIRED here, unlike enableVerification's optional executeFn). Mirrors
+  // enableEscrow's required-dependency check for escrowOptions.creditLedger:
+  // there is no default execution backend anywhere in this repo (issue #86's
+  // resolved design pass), so a compute-only node with no way to ever serve
+  // a chunk has little practical use.
+  if (enableCompute) {
+    if (typeof computeOptions?.executeFn !== 'function') {
+      throw new Error(
+        'createMeshNode: options.computeOptions.executeFn is required when enableCompute is true ' +
+        '(a function (job) => Promise<result> that actually runs an inbound, authorized compute ' +
+        'chunk -- see mesh-compute.mjs\'s createComputeService() for why this is never defaulted).',
+      )
+    }
+    const computeDescriptor = createComputeService({
+      scheduler: computeOptions?.scheduler,
+      listAvailablePeers: computeOptions?.listAvailablePeers,
+      splitFn: computeOptions?.splitFn,
+      mergeFn: computeOptions?.mergeFn,
+      executeFn: computeOptions?.executeFn,
+      dispatchTimeoutMs: computeOptions?.dispatchTimeoutMs,
+      envelopeType: computeOptions?.envelopeType,
+      accessResource: computeOptions?.accessResource,
+      accessAction: computeOptions?.accessAction,
+      onLog: computeOptions?.onLog ?? onLog,
+    })
+    const computeHandle = attachService(node, servicesNetwork, computeDescriptor)
+    node.services.set(computeHandle.name, computeHandle)
+    node.compute = computeHandle
   }
 
   return node

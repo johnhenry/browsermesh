@@ -1,10 +1,19 @@
 /**
-// STATUS: INTEGRATED — wired into ClawserPod lifecycle, proven via E2E testing
  * clawser-peer-compute.js — Federated compute orchestration.
  *
  * Split large compute jobs across multiple peers (map/reduce pattern).
  * Combines scheduling, verification, escrow, and result merging.
  * Enables "nomadic supercomputer" and "compute marketplace" scenarios.
+ *
+ * `FederatedCompute` itself is plain and dependency-injected (`{scheduler,
+ * onLog}`), with no `PeerNode`/mesh-transport awareness of its own -- see
+ * `mesh-compute.mjs`'s `createComputeService()` (issue #118,
+ * `mesh-service.mjs`'s `MeshService` convention) for the wrapper that wires
+ * it onto a real `PeerNode`'s `ctx.sendTo()`/`ctx.onIncomingData()`/
+ * `ctx.registry.checkAccess()`, plus the required-but-not-provided
+ * `executeFn` an operator must supply for this node to actually run a
+ * remote peer's compute chunks (see that file's header for the full design,
+ * settled by issue #86's resolved design pass).
  *
  * Run tests:
  *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-peer-compute.test.mjs
