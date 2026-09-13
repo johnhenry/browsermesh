@@ -265,6 +265,85 @@ describe('CloudStorage: unauthorized peer', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Phase K: revoke denies a FORMERLY-authorized peer's next write -- the
+// write-side counterpart to test/real-peer/cloud-storage.test.mjs's
+// "revoke denies the next read" proof (which runs over a real WebRTC
+// connection). This half is deliberately kept here, over the cheap
+// in-memory bus, rather than duplicated into the real-peer suite -- see
+// that file's own header comment for the full rationale. Short version:
+// this is an ACL/architecture property (does manifest-sync's "gate before
+// merge" check the CURRENT, post-revoke registry state, or something
+// stale/cached), not a transport property -- proving it needs a peer whose
+// write attempt genuinely reaches another peer and gets rejected, not a
+// real DataChannel underneath that attempt.
+//
+// Structural note (same one test 4 of the real-peer suite documents):
+// `CloudStorage.grant()` only makes the GRANTING peer watch (broadcast
+// future manifest changes to) the grantee -- a plain granted peer's own
+// writes are never broadcast anywhere on their own. So for bob's write to
+// ever have a chance of reaching alice at all (authorized or not), bob must
+// also be a co-admin who calls his OWN `grant()` on alice (a legitimate
+// multi-admin bucket setup, not a test-only shortcut) -- otherwise this
+// test would trivially "pass" for the wrong reason (bob's write was never
+// going anywhere in the first place, authorized or not), the same trap the
+// module doc comment for the real-peer suite calls out explicitly.
+// ---------------------------------------------------------------------------
+
+describe('CloudStorage: revoke also denies a revoked peer\'s writes from ever reaching the shared bucket', () => {
+  it("a key bob writes AFTER being revoked never becomes visible to alice, even though bob's own write attempt genuinely reaches her", async () => {
+    const bus = createBus()
+    const alice = await createPeer('alice')
+    const bob = await createPeer('bob')
+
+    const storeA = new CloudStorage({ bucket: BUCKET, node: bus.nodeFor(alice), dbName: freshDbName('alice'), manifestWaitMs: 500 })
+    const storeB = new CloudStorage({ bucket: BUCKET, node: bus.nodeFor(bob), dbName: freshDbName('bob'), manifestWaitMs: 1500 })
+
+    try {
+      await storeA.becomeAdmin()
+      markConnected(bob, alice)
+      markConnected(alice, bob)
+
+      // Promote bob to a co-admin and have HIM grant alice in turn, so
+      // bob's own writes are actually broadcast toward alice (see the
+      // describe block's doc comment for why this step is load-bearing,
+      // not incidental).
+      await storeA.grant(bob.podId, ['read', 'write', 'list', 'admin'])
+      await storeB.grant(alice.podId, ['read', 'write', 'list'])
+
+      // Sanity: while bob is still authorized, his write really does reach
+      // alice -- otherwise the "after revoke" half below would be vacuous.
+      await storeB.put('before-revoke.txt', 'bob wrote this while authorized')
+      await waitFor(async () => {
+        const keys = (await storeA.list()).map((e) => e.key)
+        return keys.includes('before-revoke.txt')
+      }, 2000, "alice to observe bob's pre-revoke write")
+      assert.equal(dec.decode(await storeA.get('before-revoke.txt')), 'bob wrote this while authorized')
+
+      await storeA.revoke(bob.podId, ['read', 'write', 'list', 'admin'])
+
+      // Bob's own manifest-sync watchTarget for alice is untouched by
+      // alice's revoke() (that only clears ALICE's own watch of BOB) -- so
+      // this write is still actually SENT to alice, and must be rejected by
+      // HER OWN manifest-sync ACL gate re-checking bob's now-revoked access,
+      // not merely never attempted.
+      const putRes = await storeB.put('after-revoke.txt', 'bob must never see this land in the real bucket')
+      assert.equal(putRes.stored, true, "bob's own local write never fails -- see cloud-storage.mjs's KNOWN LIMITATION section")
+      assert.equal(putRes.durability, 'local-only')
+
+      // Give the (rejected) propagation attempt a real chance to land, then
+      // confirm alice's manifest never accepted it.
+      await new Promise((r) => setTimeout(r, 300))
+      const aliceKeys = (await storeA.list()).map((e) => e.key)
+      assert.ok(!aliceKeys.includes('after-revoke.txt'), "the revoked peer's post-revoke write must never become visible in the shared bucket")
+      assert.ok(aliceKeys.includes('before-revoke.txt'), 'the pre-revoke write remains visible -- revoke is not retroactive')
+    } finally {
+      await storeA.close()
+      await storeB.close()
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
 // put()'s durability flag, through the public API -- mirrors
 // chunk-replication.test.mjs's own "eager push on put()" suite, but proven
 // end-to-end through CloudStorage rather than the raw service.
