@@ -80,12 +80,35 @@
  *
  * Manifest: an `LWWMap` (`@johnhenry/browsermesh-primitives`) persisted via
  * `IndexedDBSyncStorage`'s `save(docs)`/`load()` for local durability of this
- * single peer's state -- NOT wired into `MeshSyncEngine`/cross-peer sync yet
- * (that's Phase F). Manifest value shape:
+ * single peer's state. Manifest value shape:
  *   { chunks: [{ cid, iv }], size, contentType, metadata, version, updatedAt }
  * Deletes are tombstoned via `LWWMap.delete()`, never a chunk-store removal
  * (another key might reference the same content-addressed chunk; garbage
  * collection of orphaned chunks is out of scope for the whole plan).
+ *
+ * Phase F (`manifest-sync.mjs`) wires this manifest into `MeshSyncEngine` for
+ * cross-peer replication. This file's contribution to that phase is a small,
+ * deliberately narrow surface -- `getManifestSnapshot()`,
+ * `mergeManifestEntries()`, `onManifestChange()` -- that hands the *raw*
+ * `LWWMap` wire shape (`{entries: {key: {value, timestamp, nodeId,
+ * tombstone}}}`) up to the caller and accepts already-vetted entries back
+ * down. This file performs NO authorization itself: `manifest-sync.mjs` is
+ * responsible for filtering out any remote entry whose implied writer
+ * (`entry.nodeId`) fails `PeerRegistry.checkAccess()` BEFORE ever calling
+ * `mergeManifestEntries()` -- by the time an entry reaches this file's merge
+ * path, trusting it is assumed to already be correct. See that file's module
+ * doc comment for the full ACL-gate design and the reasoning for why the
+ * gate lives one layer up, not here.
+ *
+ * IMPORTANT for cross-peer use: local writes are attributed to this
+ * instance's `#nodeId` (the LWWMap tiebreak/attribution field for that
+ * write). For a bucket's manifest to be meaningfully ACL-checked by other
+ * peers, `nodeId` MUST be constructed as the local peer's own identity
+ * (`peerNode.podId`), not the random-UUID default this class falls back to
+ * when unset -- a receiving peer's `checkAccess(nodeId, ...)` call is
+ * meaningless against a random UUID that matches no real identity. Single-
+ * peer (Phase B) callers are unaffected either way since nothing ever reads
+ * that attribution back out locally.
  *
  * Crypto conventions match `peer-encrypted-store.mjs`'s established
  * AES-256-GCM usage exactly (small, self-contained per-file helpers,
@@ -276,6 +299,9 @@ export class CloudStorageBackend extends Backend {
   /** @type {number} monotonic clock backing manifest write timestamps (see #nextTimestamp) */
   #clock = 0
 
+  /** @type {Set<Function>} subscribers to local/merged manifest changes -- see onManifestChange() */
+  #manifestChangeListeners = new Set()
+
   /** @type {Function} */
   #onLog
 
@@ -416,6 +442,7 @@ export class CloudStorageBackend extends Backend {
 
     this.#manifest.set(cmd.key, entry, this.#nextTimestamp(), this.#nodeId)
     await this.#saveManifest()
+    this.#fireManifestChange()
 
     return { stored: true, key: cmd.key, size: entry.size }
   }
@@ -442,6 +469,7 @@ export class CloudStorageBackend extends Backend {
 
     this.#manifest.delete(cmd.key, this.#nextTimestamp(), this.#nodeId)
     await this.#saveManifest()
+    this.#fireManifestChange()
 
     return { deleted: true }
   }
@@ -678,6 +706,69 @@ export class CloudStorageBackend extends Backend {
     const now = Date.now()
     this.#clock = now > this.#clock ? now : this.#clock + 1
     return this.#clock
+  }
+
+  // -----------------------------------------------------------------------
+  // Manifest sync surface (Phase F, `manifest-sync.mjs`)
+  //
+  // Deliberately narrow: this class hands out/accepts raw LWWMap wire JSON
+  // and never itself decides whether a remote entry is authorized -- see
+  // this file's module doc comment and `manifest-sync.mjs`'s module doc
+  // comment for the full design.
+  // -----------------------------------------------------------------------
+
+  /**
+   * The current manifest CRDT state, in the exact shape `LWWMap.toJSON()`/
+   * `LWWMap.fromJSON()` use (`{entries: {key: {value, timestamp, nodeId,
+   * tombstone}}}`), including tombstoned keys (needed so a peer merging this
+   * snapshot can correctly resolve a delete that raced a concurrent put on
+   * another peer).
+   * @returns {Promise<object>}
+   */
+  async getManifestSnapshot() {
+    await this.#ensureReady()
+    return this.#manifest.toJSON()
+  }
+
+  /**
+   * Merge externally-vetted manifest entries into the local manifest and
+   * persist the result. `sanitizedCrdtJSON` must already have had any
+   * unauthorized entries filtered out by the caller (`manifest-sync.mjs`) --
+   * this method performs the LWWMap merge and nothing else, exactly the same
+   * per-key last-write-wins resolution `LWWMap.merge()` always uses (see the
+   * module doc comment's "known limitation" note). Fires the same
+   * `onManifestChange()` notification a local `put`/`delete` does, so an
+   * accepted remote change is eligible to be re-broadcast onward (multi-hop
+   * propagation) exactly like a local write.
+   * @param {{entries: Record<string, {value: *, timestamp: number, nodeId: string, tombstone?: boolean}>}} sanitizedCrdtJSON
+   * @returns {Promise<void>}
+   */
+  async mergeManifestEntries(sanitizedCrdtJSON) {
+    await this.#ensureReady()
+    const remote = LWWMap.fromJSON(sanitizedCrdtJSON)
+    this.#manifest = this.#manifest.merge(remote)
+    await this.#saveManifest()
+    this.#fireManifestChange()
+  }
+
+  /**
+   * Subscribe to manifest changes -- fired after every local `put`/`delete`
+   * AND after `mergeManifestEntries()`. `manifest-sync.mjs` uses this to
+   * know when to refresh its `MeshSyncEngine` copy and broadcast the
+   * bucket's current state to watching peers.
+   * @param {() => void} cb
+   * @returns {() => void} Unsubscribe.
+   */
+  onManifestChange(cb) {
+    this.#manifestChangeListeners.add(cb)
+    return () => this.#manifestChangeListeners.delete(cb)
+  }
+
+  /** Notify all `onManifestChange()` subscribers. Never throws -- a subscriber's own error is swallowed. */
+  #fireManifestChange() {
+    for (const cb of this.#manifestChangeListeners) {
+      try { cb() } catch { /* subscriber errors do not propagate */ }
+    }
   }
 
   // -----------------------------------------------------------------------
