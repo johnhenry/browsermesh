@@ -477,6 +477,29 @@ export class PeerNode {
       })
     }
 
+    // Bonus wiring for issue #110: surface a transport's own native
+    // close/error signal (e.g. WebRTC's connectionState -- see
+    // WebRTCTransportAdapter's onClose()/onError() in
+    // @johnhenry/browsermesh-transport's webrtc.mjs, which both ultimately
+    // derive from RTCPeerConnection.connectionState -- but this is generic
+    // duck-typing against MeshTransport's onClose()/onError(), not
+    // webrtc-specific) as a PeerNode-level event, the same way onMessage()
+    // is already fanned out above. Before this, nothing in this file ever
+    // called onError()/onClose() on a session's transportInstance -- a
+    // transport reporting itself dead had no path to PeerNode at all.
+    // mesh-keepalive.mjs (issue #110) listens for these as a stronger,
+    // immediate complement to its own ping/pong liveness probing.
+    if (transportInstance && typeof transportInstance.onClose === 'function') {
+      transportInstance.onClose(() => {
+        this.#emit('peer:transport-close', { pubKey, sessionId, transport: transportType })
+      })
+    }
+    if (transportInstance && typeof transportInstance.onError === 'function') {
+      transportInstance.onError((err) => {
+        this.#emit('peer:transport-error', { pubKey, sessionId, transport: transportType, error: err?.message || String(err) })
+      })
+    }
+
     return session
   }
 
@@ -679,8 +702,16 @@ export class PeerNode {
    * Register a callback for a node event.
    *
    * Supported events:
-   *   - 'peer:connect'    — fired when a peer connects
-   *   - 'peer:disconnect' — fired when a peer disconnects
+   *   - 'peer:connect'         — fired when a peer connects
+   *   - 'peer:disconnect'      — fired when a peer disconnects
+   *   - 'peer:transport-close' — fired when a session's transportInstance
+   *     reports itself closed via its own onClose() (duck-typed against
+   *     MeshTransport -- e.g. WebRTC's connectionState going
+   *     failed/disconnected/closed). Payload: `{pubKey, sessionId, transport}`.
+   *     Only fires for transports that implement onClose(); a no-op for
+   *     those that don't. See issue #110.
+   *   - 'peer:transport-error' — same, for onError(). Payload:
+   *     `{pubKey, sessionId, transport, error}`.
    *   - 'boot'            — fired after successful boot
    *   - 'shutdown'        — fired after shutdown
    *

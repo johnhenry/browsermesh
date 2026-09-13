@@ -77,10 +77,16 @@ const DEFAULT_METRICS_KEY = 'unknown'
  * Derive a stable key for an `endpoints` map (`{ webrtc: 'peer-pod-id', ... }`)
  * to scope per-peer `RetryWithBackoff`/`TransportFailover`/metrics state.
  *
+ * Exported (not just used internally) so `mesh-keepalive.mjs` (issue #110)
+ * can derive the SAME key to look up this file's `failovers` map for a given
+ * peer's pubKey -- see that file's own header comment for why this is a
+ * best-effort, webrtc-convention-specific correlation rather than a real
+ * shared index keyed by pubKey.
+ *
  * @param {object} [endpoints]
  * @returns {string}
  */
-function endpointsKey(endpoints) {
+export function endpointsKey(endpoints) {
   if (!endpoints) return DEFAULT_METRICS_KEY
   const values = Object.keys(endpoints)
     .sort()
