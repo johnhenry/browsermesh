@@ -176,6 +176,45 @@ describe('mesh-service: attachService()', () => {
     await handle.teardown()
   })
 
+  it('attach() may return { teardown, api } instead of a bare function; api surfaces on the handle', async () => {
+    const registryA = createRegistry(ALICE)
+    const { nodeA } = createNodePair(ALICE, BOB, { registryA })
+
+    let torn = false
+    const fakeApi = { greet: () => 'hi' }
+    const descriptor = {
+      name: 'api-shaped',
+      attach() {
+        return {
+          teardown: () => { torn = true },
+          api: fakeApi,
+        }
+      },
+    }
+    const handle = attachService(nodeA, undefined, descriptor)
+
+    assert.equal(handle.api, fakeApi, 'attachService() surfaces attach()\'s returned api on the handle')
+    assert.equal(handle.api.greet(), 'hi')
+
+    await handle.teardown()
+    assert.equal(torn, true, 'teardown from the { teardown, api } shape is still invoked')
+  })
+
+  it('attach() returning a bare teardown function still works with no api (backward compatible)', async () => {
+    const registryA = createRegistry(ALICE)
+    const { nodeA } = createNodePair(ALICE, BOB, { registryA })
+
+    const descriptor = {
+      name: 'bare-teardown',
+      attach() {
+        return () => {}
+      },
+    }
+    const handle = attachService(nodeA, undefined, descriptor)
+    assert.equal(handle.api, undefined)
+    await handle.teardown()
+  })
+
   it('ctx.onIncomingData accepts an array of types', async () => {
     const registryA = createRegistry(ALICE)
     const { nodeA, nodeB } = createNodePair(ALICE, BOB, { registryA })
