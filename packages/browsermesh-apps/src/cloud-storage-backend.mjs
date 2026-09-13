@@ -118,6 +118,27 @@
  * isn't available) so a later phase relying on the same bucket-key byte
  * format (Phase E's key distribution) can interoperate without translation.
  *
+ * Phase G (`chunk-replication.mjs`) additions, kept narrow and additive
+ * exactly like Phase E's/F's own surfaces above:
+ *   - `hasChunkRaw()`/`getChunkRaw()`/`putChunkRaw()` -- opaque ciphertext
+ *     chunk read/write access (bypassing encryption/decryption and the
+ *     manifest entirely), so a replica peer can serve/store/verify chunk
+ *     bytes it may not even hold the bucket key for yet. `putChunkRaw()`
+ *     verifies the supplied bytes actually hash to the claimed CID before
+ *     ever writing them, exactly like `#encryptAndChunk()`'s own
+ *     content-addressing -- a chunk-replication peer must never persist a
+ *     wire-supplied (cid, bytes) pair without that check.
+ *   - `setReplicationHook()` -- a post-construction setter (not a
+ *     constructor option, since a backend is always constructed standalone
+ *     and mesh concerns wire themselves in afterward, matching how
+ *     `manifest-sync.mjs`/`key-distribution.mjs` both already compose on
+ *     top of an already-constructed instance) that lets `#opPut()` await a
+ *     real replication attempt before responding, populating `put()`'s
+ *     JSON-command response with `{durability: 'local-only'|'replicated',
+ *     replicatedTo: string[]}` per the plan's durability contract. When no
+ *     hook is installed (every earlier phase's tests), `put()`'s response
+ *     is byte-for-byte identical to before this phase existed.
+ *
  * No browser-only imports at module level.
  */
 
@@ -302,6 +323,13 @@ export class CloudStorageBackend extends Backend {
   /** @type {Set<Function>} subscribers to local/merged manifest changes -- see onManifestChange() */
   #manifestChangeListeners = new Set()
 
+  /**
+   * @type {((info: {key: string, entry: object}) => Promise<{durability: string, replicatedTo: string[]}>)|null}
+   * Phase G (`chunk-replication.mjs`) replication hook -- see
+   * `setReplicationHook()`'s doc comment.
+   */
+  #replicationHook = null
+
   /** @type {Function} */
   #onLog
 
@@ -444,7 +472,25 @@ export class CloudStorageBackend extends Backend {
     await this.#saveManifest()
     this.#fireManifestChange()
 
-    return { stored: true, key: cmd.key, size: entry.size }
+    const response = { stored: true, key: cmd.key, size: entry.size }
+
+    // Phase G durability contract: the local write above is ALREADY durable
+    // by this point -- everything from here on is a best-effort attempt to
+    // also report replication status, and must never delay this response
+    // indefinitely or turn a successful local write into a thrown error.
+    if (this.#replicationHook) {
+      try {
+        const result = await this.#replicationHook({ key: cmd.key, entry })
+        response.durability = result?.durability === 'replicated' ? 'replicated' : 'local-only'
+        response.replicatedTo = Array.isArray(result?.replicatedTo) ? result.replicatedTo : []
+      } catch (err) {
+        this.#onLog('cloud-storage-backend:replication-hook-error', { key: cmd.key, error: err?.message || String(err) })
+        response.durability = 'local-only'
+        response.replicatedTo = []
+      }
+    }
+
+    return response
   }
 
   async #opGet(cmd) {
@@ -687,6 +733,104 @@ export class CloudStorageBackend extends Backend {
 
     this.#bucketKey = rawKeyBytes.slice()
     await this.#keyStorage.save([{ id: KEY_DOC_ID, key: toBase64(this.#bucketKey) }])
+  }
+
+  // -----------------------------------------------------------------------
+  // Raw chunk access (Phase G: chunk-replication.mjs)
+  //
+  // Opaque ciphertext chunk read/write access, bypassing encryption/
+  // decryption and the manifest entirely -- a replica peer stores/serves
+  // ciphertext bytes it may not even hold the bucket key for yet (Phase E's
+  // key delivery and Phase G's chunk replication are independent and can
+  // complete in either order), and content-addressing (the CID is computed
+  // over ciphertext, per this file's Design Decisions) lets any peer verify
+  // a chunk's integrity without ever decrypting it.
+  // -----------------------------------------------------------------------
+
+  /**
+   * Whether this backend's chunk store already holds ciphertext for `cid`,
+   * without touching the manifest or bucket key. Used by chunk-replication
+   * to answer "who has X" queries and to skip re-pushing chunks a replica
+   * already has.
+   * @param {string} cid
+   * @returns {Promise<boolean>}
+   */
+  async hasChunkRaw(cid) {
+    return this.#chunkStore.has(cid)
+  }
+
+  /**
+   * Read a chunk's raw ciphertext bytes by CID, or `null` if not held
+   * locally. Never decrypts -- callers (chunk-replication, serving a
+   * `chunk-fetch-request`, or eagerly pushing after a local `put()`) deal
+   * exclusively in opaque ciphertext bytes, exactly like `IndexedDBChunkStore`
+   * itself.
+   * @param {string} cid
+   * @returns {Promise<Uint8Array|null>}
+   */
+  async getChunkRaw(cid) {
+    const bytes = await this.#chunkStore.get(cid)
+    return bytes ?? null
+  }
+
+  /**
+   * Store received ciphertext bytes under `cid`, having first verified the
+   * bytes actually hash to the claimed CID (`IndexedDBChunkStore.computeCid`,
+   * the same content-addressing `#encryptAndChunk()` uses) -- a
+   * chunk-replication peer must never trust a wire-supplied (cid, bytes)
+   * pair blindly, or a malicious/buggy sender could poison this peer's
+   * chunk store with bytes that don't match the CID a manifest entry
+   * elsewhere points to. Idempotent: writing already-identical bytes for a
+   * CID this store already holds is a harmless no-op write.
+   * @param {string} cid
+   * @param {Uint8Array} bytes
+   * @returns {Promise<void>}
+   * @throws {Error} if `bytes` does not hash to `cid`, or the arguments are malformed.
+   */
+  async putChunkRaw(cid, bytes) {
+    if (typeof cid !== 'string' || !cid) {
+      throw new Error('CloudStorageBackend.putChunkRaw: cid is required')
+    }
+    if (!(bytes instanceof Uint8Array)) {
+      throw new Error('CloudStorageBackend.putChunkRaw: bytes must be a Uint8Array')
+    }
+    const computed = await IndexedDBChunkStore.computeCid(bytes)
+    if (computed !== cid) {
+      throw new Error(`CloudStorageBackend.putChunkRaw: bytes do not hash to claimed cid (expected ${cid}, computed ${computed})`)
+    }
+    await this.#chunkStore.save(cid, bytes)
+  }
+
+  // -----------------------------------------------------------------------
+  // Replication hook (Phase G: chunk-replication.mjs)
+  // -----------------------------------------------------------------------
+
+  /**
+   * Install (or clear, passing `null`/omitting) a hook that `put()`'s
+   * JSON-command response awaits before replying to the client, so `put()`'s
+   * returned `{durability, replicatedTo}` reflects a REAL attempt to push
+   * the just-written chunks to connected, admin-designated replica peers --
+   * not just "the local write succeeded". See `#opPut()`'s call site for the
+   * exact contract: the hook receives `{key, entry}` (the just-written
+   * manifest entry) and must resolve to `{durability:
+   * 'local-only'|'replicated', replicatedTo: string[]}`. The hook itself
+   * should never throw or hang indefinitely, but `#opPut()` also
+   * defensively catches a misbehaving hook and falls back to
+   * `{durability: 'local-only', replicatedTo: []}` regardless, so a
+   * replication-layer bug can never turn an already-durable local write
+   * into a thrown error or an indefinite hang.
+   *
+   * Deliberately a post-construction setter, not a constructor option: a
+   * `CloudStorageBackend` is constructed standalone (Phase B) and
+   * `chunk-replication.mjs`'s `MeshService.attach()` (Phase G) wires itself
+   * in afterward, exactly like every other cross-cutting mesh concern in
+   * this plan (manifest sync, key distribution) composes on top of an
+   * already-constructed backend instance, never inside it.
+   *
+   * @param {((info: {key: string, entry: object}) => Promise<{durability: string, replicatedTo: string[]}>)|null} [hook]
+   */
+  setReplicationHook(hook) {
+    this.#replicationHook = typeof hook === 'function' ? hook : null
   }
 
   /**
