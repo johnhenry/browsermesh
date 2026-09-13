@@ -79,13 +79,30 @@ const DEFAULT_BACKEND_SCHEME = 'svc'
  * @typedef {object} MeshService
  * @property {string} name - Unique service name (used as the lookup key in
  *   `createMeshNode({ services })`'s resulting `node.services` map).
- * @property {(peerNode: import('./peer-node.mjs').PeerNode, ctx: MeshServiceContext) => (() => (void|Promise<void>))} attach
- *   Wire the service to `peerNode`/`ctx` and return a `teardown()` function.
+ * @property {(peerNode: import('./peer-node.mjs').PeerNode, ctx: MeshServiceContext) => (MeshServiceAttachResult)} attach
+ *   Wire the service to `peerNode`/`ctx`. May return either a bare
+ *   `teardown()` function (the original shape, still supported) or
+ *   `{ teardown?, api? }`, where `api` is whatever handle/instance the
+ *   service wants exposed to its own caller later (e.g. a class instance
+ *   with methods beyond attach/teardown) -- surfaced on `attachService()`'s
+ *   returned handle as `.api`. Added after Phase D (`grant-log.mjs`) needed
+ *   to hand back a live `GrantLog` instance and had no field for it; that
+ *   phase's own `onReady(api)` callback workaround still works unmodified
+ *   (this is additive, not breaking), but new services should prefer
+ *   returning `{ teardown, api }` directly. NOTE: `attach()`'s return value
+ *   is read synchronously by `attachService()` -- it is NOT awaited. A
+ *   service needing async setup (e.g. signing that requires
+ *   `crypto.subtle`) should expose that as a separately-awaitable method on
+ *   `api`, not assume `attach()` itself is ever awaited by callers.
  * @property {(ctx: MeshServiceContext) => import('@johnhenry/browsermesh-netway').Backend} [createBackend]
  *   OPTIONAL. If present, `attachService()` registers the returned `Backend`
  *   onto the supplied `network` under `backendScheme`.
  * @property {string} [backendScheme='svc'] - URI scheme the `createBackend`
  *   backend is registered under. Only consulted when `createBackend` is present.
+ */
+
+/**
+ * @typedef {(() => (void|Promise<void>))|{teardown?: (() => (void|Promise<void>)), api?: object}} MeshServiceAttachResult
  */
 
 // ---------------------------------------------------------------------------
@@ -129,9 +146,11 @@ function createServiceContext({ peerNode, network }) {
  * @param {import('@johnhenry/browsermesh-netway').VirtualNetwork} [network]
  *   Required only if `descriptor.createBackend` is present.
  * @param {MeshService} descriptor
- * @returns {{ name: string, backendScheme: string|null, teardown: () => Promise<void> }}
- *   `teardown()` calls `descriptor.attach()`'s returned teardown (if any).
- *   Does not (cannot -- see module doc comment) remove a registered
+ * @returns {{ name: string, backendScheme: string|null, api: object|undefined, teardown: () => Promise<void> }}
+ *   `api` is `descriptor.attach()`'s returned `{api}` field, if it returned
+ *   that shape (undefined otherwise). `teardown()` calls whatever teardown
+ *   function `descriptor.attach()` returned (bare-function or `{teardown}`
+ *   shape). Does not (cannot -- see module doc comment) remove a registered
  *   `createBackend` backend from `network`.
  */
 export function attachService(peerNode, network, descriptor) {
@@ -147,7 +166,16 @@ export function attachService(peerNode, network, descriptor) {
   }
 
   const ctx = createServiceContext({ peerNode, network })
-  const attachTeardown = descriptor.attach(peerNode, ctx)
+  const attachResult = descriptor.attach(peerNode, ctx)
+
+  let attachTeardown
+  let api
+  if (typeof attachResult === 'function') {
+    attachTeardown = attachResult
+  } else if (attachResult && typeof attachResult === 'object') {
+    attachTeardown = attachResult.teardown
+    api = attachResult.api
+  }
 
   let backendScheme = null
   if (typeof descriptor.createBackend === 'function') {
@@ -165,6 +193,7 @@ export function attachService(peerNode, network, descriptor) {
   return {
     name: descriptor.name,
     backendScheme,
+    api,
     async teardown() {
       if (typeof attachTeardown === 'function') {
         await attachTeardown()

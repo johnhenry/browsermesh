@@ -205,7 +205,7 @@ import { attachService } from './mesh-service.mjs'
  *   (`MeshSyncBinding`, see `mesh-sync.mjs`) attached when `enableSync`,
  *   `node.relayHost` (`MeshRelayHost`, see `mesh-relay-host.mjs`) attached
  *   when `enableRelayHost`, and `node.services` (a `Map<string, { name,
- *   backendScheme, teardown }>`, see `mesh-service.mjs`) populated from
+ *   backendScheme, api, teardown }>`, see `mesh-service.mjs`) populated from
  *   `options.services` (always present, empty when `options.services` is
  *   omitted).
  */
