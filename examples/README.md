@@ -19,12 +19,14 @@ Run one with `npm run example:01` (etc.), or all of them with `npm run examples`
 | [`07-full-mesh-pipeline.mjs`](./07-full-mesh-pipeline.mjs) | The full story in one script: two peers discover each other, connect, converge on shared CRDT state (`MeshSyncEngine`), run kernel-gated application code over that connection (`Kernel`'s mesh capability), and relay through to a shared local service (`MeshRelayHost`/`MeshRelayBackend`) — all riding the SAME connection at once. See `packages/browsermesh-apps/test/real-peer/full-pipeline.test.mjs` for the identical composition proved over a real WebRTC connection. |
 | [`08-mesh-fetch-websocket.mjs`](./08-mesh-fetch-websocket.mjs) | `browserMeshFetch()` (a `fetch()`-shaped request/response round trip to a real mesh-RPC handler, including a non-2xx route resolving as a real `Response` rather than rejecting) and `BrowserMeshWebSocket` (a persistent duplex channel, including both the accept and reject halves of its open handshake) — the two web-standard-API-shaped wrappers over a mesh connection. |
 | [`09-cloud-storage.mjs`](./09-cloud-storage.mjs) | `CloudStorage`, an S3-like object store with no server anywhere: encrypted-at-rest content (AES-256-GCM), a signed replicated ACL (`GrantLog`), bucket-key distribution, and CRDT manifest sync + chunk replication, all behind `put`/`get`/`delete`/`list`/`grant`/`revoke`/`designateReplica` — an unauthorized peer denied cleanly, and a revoked peer's next read denied too (with the permanent "already-delivered content stays readable" limitation shown, not hidden). See `packages/browsermesh-apps/test/real-peer/cloud-storage.test.mjs` for the identical composition proved over a real WebRTC connection, and `packages/browsermesh-apps/docs/building-mesh-services.md` for the reusable design pattern this example is the worked example of. |
+| [`10-mesh-kv-and-observability.mjs`](./10-mesh-kv-and-observability.mjs) | `MeshKv`, a small mesh-native key-value store (`get`/`set`/`delete`/`keys`, no chunking, no encryption-at-rest), doing real ACL-gated multi-peer work — an admin grant, an authorized peer writing back, an unauthorized peer's write refused — while a live `ctx.emit()` event stream feeds an `observability-bridge` instance in real time. Ends by printing the bridge's `VisualizationExporter` topology and trust-heatmap JSON, built entirely from real emitted events, not mock data. See `packages/browsermesh-apps/docs/building-mesh-services.md` (§7-8) for the `ctx.emit()` convention and this service's own retrospective against `09-cloud-storage.mjs`. |
 
 These cover the five foundational packages (`browsermesh-primitives`,
 `-pod`, `-netway`, `-kernel`, `-sync`) plus `browsermesh-apps`'s mesh-relay
 composition (`06`), its full discovery+sync+kernel+relay composition (`07`),
-its `fetch()`/`WebSocket`-shaped mesh wrappers (`08`), and its mesh-native
-CloudStorage service (`09`). The higher-level packages built on top of them
+its `fetch()`/`WebSocket`-shaped mesh wrappers (`08`), its mesh-native
+CloudStorage service (`09`), and its mesh-native KV store plus observability
+bridge (`10`). The higher-level packages built on top of them
 — `browsermesh-core`,
 `-transport`, `-discovery`, most of `-apps`, `browsermesh-embed` — are
 exercised end-to-end in a real browser by

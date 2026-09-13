@@ -123,7 +123,39 @@
  *     policy event (an `onConnection` hook said no), same reasoning as the
  *     chunk-replication failure events above.
  *
- * A handle whose `.name` doesn't match any of the three patterns above is
+ * `mesh-kv:` (any handle whose `.name` starts with `'mesh-kv:'`, i.e.
+ * `createMeshKvService()`'s own low-level handle -- see `mesh-kv.mjs`'s
+ * module doc comment for the full event vocabulary. Phase 3 shipped after
+ * this file, so this bucket is a Phase 4 addition to the same curation
+ * exercise, not part of the original Phase 2 pass):
+ *   - WIRED: `mesh-kv:watching`/`mesh-kv:unwatching` -- the store-level
+ *     analogue of `mesh-websocket`'s open/close pair above: `watching`
+ *     upserts a node + edge FROM the local node TO the watched peer
+ *     (`status: 'watching'`, this store's `storeId` recorded on the edge);
+ *     `unwatching` removes that edge. A `MeshKv.grant()` call always
+ *     triggers a `watch()` immediately after applying the grant (see
+ *     `mesh-kv.mjs`), so in practice this is the topology-level trace of
+ *     "who currently has live access to this store."
+ *   - WIRED: `mesh-kv:entry-set`/`mesh-kv:entry-deleted` -- only when
+ *     `data.from !== ` this bridge's own `localId()` (i.e. only for an
+ *     ACCEPTED REMOTE merge, not a local write): upserts an edge FROM the
+ *     writing peer (`from`) TO the local node and increments its `activity`
+ *     counter by 1, the same "how much traffic flowed on this edge"
+ *     semantic `chunk-replication:chunk-replicated` uses above. A LOCAL
+ *     `set()`/`delete()` (`from === localId()`) is deliberately NOT wired to
+ *     an edge: the event payload carries no counterpart peer id for a local
+ *     write (it could be broadcast to zero, one, or many watchers), so there
+ *     is no single edge a local write could unambiguously update -- a
+ *     caller that wants to see the LOCAL side of that same activity can read
+ *     it directly off `mesh-kv:entry-set`/`entry-deleted` itself (this
+ *     bridge does not need to be the only consumer of a service's events).
+ *   - LEFT OUT: `mesh-kv:write-rejected` -- a security-relevant rejection,
+ *     not a topology-state change (nothing about the mesh's shape or an
+ *     edge's activity actually changed because a write was refused), same
+ *     reasoning as `chunk-replication:push-rejected`/
+ *     `mesh-websocket:connection-rejected` above.
+ *
+ * A handle whose `.name` doesn't match any of the four patterns above is
  * accepted by `observe()` without throwing (a caller passing in every
  * attached service's handle indiscriminately shouldn't have to filter
  * first) but nothing is wired for it -- `onLog` (if supplied) is told via
@@ -324,10 +356,44 @@ export function createObservabilityBridge({ peerNode, snapshot, heatmap, exporte
     }))
   }
 
+  /** @param {{on: Function}} handle */
+  function observeMeshKv(handle) {
+    serviceUnsubscribes.push(handle.on('mesh-kv:watching', (data) => {
+      const { pubKey, storeId } = data || {}
+      if (!pubKey) return
+      upsertNode(topology, pubKey, { label: pubKey, type: 'peer' })
+      upsertLink(topology, localId(), pubKey, { status: 'watching', storeId })
+      log('observability-bridge:mesh-kv-watching', { pubKey, storeId })
+    }))
+    serviceUnsubscribes.push(handle.on('mesh-kv:unwatching', (data) => {
+      const { pubKey } = data || {}
+      if (!pubKey) return
+      removeLink(topology, localId(), pubKey)
+      log('observability-bridge:mesh-kv-unwatching', { pubKey })
+    }))
+
+    /** @param {boolean} tombstone @param {object} data */
+    function handleEntryChange(tombstone, data) {
+      const { from, key, storeId } = data || {}
+      // Only an accepted REMOTE merge has a meaningful counterpart edge --
+      // see module doc comment's "mesh-kv:" section for why a local write
+      // is deliberately not wired to any single edge.
+      if (!from || from === localId()) return
+      upsertNode(topology, from, { label: from, type: 'peer' })
+      const idx = findLinkIndex(topology, from, localId())
+      const activity = (idx !== -1 ? topology.links[idx].activity || 0 : 0) + 1
+      upsertLink(topology, from, localId(), { status: 'connected', activity, storeId, lastKey: key })
+      log('observability-bridge:mesh-kv-activity', { from, key, storeId, tombstone })
+    }
+    serviceUnsubscribes.push(handle.on('mesh-kv:entry-set', (data) => handleEntryChange(false, data)))
+    serviceUnsubscribes.push(handle.on('mesh-kv:entry-deleted', (data) => handleEntryChange(true, data)))
+  }
+
   const WIRERS = [
     { test: (name) => name.startsWith('grant-log:'), wire: observeGrantLog },
     { test: (name) => name.startsWith('chunk-replication:'), wire: observeChunkReplication },
     { test: (name) => name === 'mesh-websocket', wire: observeMeshWebsocket },
+    { test: (name) => name.startsWith('mesh-kv:'), wire: observeMeshKv },
   ]
 
   /**

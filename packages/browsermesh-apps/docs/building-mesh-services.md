@@ -13,6 +13,14 @@ scratch. This guide is that writeup. It is not a tutorial in the sense of
 merged code that made each one, and to `examples/09-cloud-storage.mjs` /
 `test/real-peer/cloud-storage.test.mjs` as the worked, runnable proof.
 
+`MeshKv` (`src/mesh-kv.mjs`) is the second, built by the mesh-KV-and-
+observability plan (`mesh-kv-and-observability.md`) specifically to find out
+whether the patterns below actually generalize, or whether they were
+accidentally CloudStorage-specific. Sections 7 and 8 below are that plan's
+own capstone phase, added once `MeshKv` and its companion
+`observability-bridge.mjs` had shipped and could be checked against reality
+rather than guessed at in advance.
+
 There is no `Service` base class to extend. Every pattern below is a
 convention — a shape your code follows — not an inheritance hierarchy to
 plug into. That is itself the first, and maybe most important, lesson this
@@ -254,7 +262,139 @@ descriptor plus a `ctx` object that hands the service exactly the
 capabilities it needs, nothing more. Worth knowing about; not a dependency,
 not integrated.
 
-## Worked example
+## 7. The `ctx.emit()` observability convention
+
+Every service documented above answers "how do I move bytes/state between
+peers." None of them answer a different, equally real question: "how does
+*anything outside this service* — a dashboard, `visualizations.mjs`, a test
+assertion — find out something meaningful just happened?" Before the
+mesh-KV-and-observability plan, the only answer was `onLog(event, data)` —
+free-form, mostly error/reject-path debug logging, no fixed vocabulary, and
+(by convention, not enforcement) not something a caller should build real
+behavior on top of. `ctx.emit()` is the deliberate second answer, added to
+`mesh-service.mjs` alongside `ctx.sendTo()`/`ctx.onIncomingData()`:
+
+- **`onLog` and `emit` are separate hooks with separate jobs, not two ways
+  to do the same thing.** `onLog` stays exactly what it always was. `emit`
+  is for a small, *curated* set of meaningful state transitions a service
+  deliberately chooses to publish — grant applied, chunk replicated, entry
+  set, connection opened — typically 3-5 per service, not a mechanical
+  onLog-to-emit conversion of every line. If you're tempted to `emit()`
+  something whose only audience is "future-me debugging a failure," that's
+  an `onLog` call, not an `emit()` call.
+- **Event naming grammar**: `<service-name>:<kebab-case-description>`,
+  matching the `<service>:<event>` shape `onLog` already established across
+  every file in this guide (`grant-log:grant-applied`,
+  `chunk-replication:chunk-replicated`, `mesh-kv:entry-set`). Document your
+  service's chosen vocabulary in its own module doc comment — every service
+  in this repo that emits anything does this (see `mesh-kv.mjs`'s
+  "Observability events" section for a worked example of the format:
+  event name, payload shape, one sentence on when it fires).
+- **Subscription lives on `attachService()`'s returned handle**, not on
+  `createMeshNode()`'s aggregate — each attached service gets its own
+  independent event bus, the same way each already gets its own `ctx`:
+  - `handle.on(event, callback)` — `callback(data)` fires only for that
+    exact event name. Returns an unsubscribe function.
+  - `handle.onEvent(callback)` — `callback(event, data)` fires for every
+    event that service ever emits, regardless of name — the "firehose"
+    subscription a generic bridge/dashboard wants instead of enumerating
+    every event name a service might add later.
+  - A composed, non-`MeshService` class with no `ctx` of its own (like
+    `MeshKv`, which internally calls `attachService()` twice but isn't
+    itself attached by anything) can build its own bus with the identical
+    shape via the separately-exported `createEventBus()` — see `mesh-kv.mjs`
+    for how `MeshKv.on()`/`.onEvent()` forward `createMeshKvService()`'s own
+    vocabulary unchanged onto the wrapper's public surface.
+  - `emit()` fires synchronously (no queueing, no microtask hop) and a
+    throwing subscriber is caught and swallowed — it can never crash the
+    emitting service or break another subscriber. See `mesh-service.mjs`'s
+    own module doc comment for the full contract, including why there is
+    deliberately no log sink inside the bus itself.
+- **A curated consumer, not a rewrite of what it consumes**:
+  `observability-bridge.mjs` is the reference example of building on top of
+  `ctx.emit()` — it subscribes to `handle.on()`/`handle.onEvent()` for
+  whichever services a caller passes to `bridge.observe(handle)`, and turns
+  a hand-picked subset of events into `visualizations.mjs`'s
+  `TopologySnapshot`/`TrustHeatmap`, then exports them as JSON via the
+  *unmodified* `VisualizationExporter`. It is deliberately conservative
+  about which events it wires (documented per-service, with reasons, in its
+  own module doc comment) rather than mechanically wiring everything — the
+  same "curate, don't dump" principle `ctx.emit()` itself asks of a service
+  choosing what to publish, applied one layer up by whatever consumes it.
+
+## 8. Second service, worked: what generalized from CloudStorage, what didn't
+
+`MeshKv` (`src/mesh-kv.mjs`) is smaller than CloudStorage on purpose — an
+`LWWMap`-backed KV store with no chunking, no content-addressing, no
+encryption-at-rest requirement — precisely so it could stress-test *this
+guide's* claims without a second phase's worth of unrelated complexity
+(encryption, bucket-key distribution) obscuring which lessons actually
+transfer. The honest accounting:
+
+**Reused near-verbatim: the ACL-gate-before-merge pattern.**
+`manifest-sync.mjs`'s core property — sanitize the raw wire payload against
+`PeerRegistry.checkAccess()` *before* any byte reaches a CRDT merge, not
+after — transferred to `mesh-kv.mjs` almost unchanged. Both files walk
+inbound entries, check `nodeId === fromPubKey` (no multi-hop relay trust),
+check `checkAccess(writer, resource, 'write')`, and only merge what survives
+both checks. This is the one piece of `manifest-sync.mjs` this guide
+predicted would generalize (§3, "the one to reuse verbatim for any future
+CRDT-synced, multi-writer, access-controlled document"), and it did, exactly
+as predicted — worth noting since not every prediction below held up as
+cleanly.
+
+**NOT reused: the second-source-of-truth-mirroring machinery.** This is the
+concrete lesson, not a gestured-at one. `manifest-sync.mjs` exists because
+CloudStorage's manifest is a *pointer* into a separately, independently
+durable backend (`CloudStorageBackend`, its own `IndexedDBSyncStorage` and
+encryption pipeline) — the CRDT document has to be kept in sync with that
+other, already-authoritative copy: `getManifestSnapshot()` to read it,
+`onManifestChange()` to hear about local writes to it, `mergeManifestEntries()`
+to write merged remote state back into it, plus real ordering questions
+("did the backend's mutation land before I broadcast the CRDT change?").
+`MeshKv` has no such second source: its `MeshSyncEngine`'s own `LWWMap`
+(`InMemorySyncStorage`-backed) *is* the store's authoritative state, full
+stop. A local `set()`/`delete()` calls `engine.update()` directly, and
+`MeshSyncEngine`'s own subscriber notification on that update *is* the
+local-write-triggers-broadcast path — no bridging code in between, because
+there is nothing on the other side of a bridge to keep in sync with.
+
+**The general question for your own next service**: does the CRDT document
+*point at* some other already-durable, already-authoritative store (a
+chunked blob backend, a filesystem, an external database), or does the CRDT
+document *hold* the actual state? If it points elsewhere, you need
+`manifest-sync.mjs`'s shape — a mirror, with the ordering/staleness
+questions that implies. If the CRDT document holds the state itself, you
+need `mesh-kv.mjs`'s much shorter shape — no mirror, because there's nothing
+to mirror. Guessing wrong here doesn't fail loudly; it just means either
+building unnecessary bridging code (if you copy `manifest-sync.mjs`'s shape
+when you didn't need it) or silently having two copies of "the truth" that
+can drift (if you copy `mesh-kv.mjs`'s shape when you actually needed a
+mirror) — decide this explicitly, in your own service's module doc comment,
+the way both files here do.
+
+**A real implementation pitfall worth flagging, found while building
+`examples/10-mesh-kv-and-observability.mjs`**: `MeshSyncEngine.merge()`
+(`packages/browsermesh-sync/src/sync.mjs`) notifies subscribers
+unconditionally — even when a merge changes nothing (an already-known
+entry, re-delivered). Combined with `mesh-kv.mjs`'s `watch()` (broadcast on
+every document-changed notification to every watched peer), two peers that
+both `watch()` each other *and* have each authored at least one entry can
+enter an unbounded broadcast/re-merge/re-notify cycle: each side's own
+authored entries always pass the *other* side's "attribution must match the
+immediate sender" check on every hop, so nothing ever breaks the loop, and
+because delivery here rides `queueMicrotask()`, it starves the event loop's
+macrotask queue rather than merely running hot. The fix is not to touch
+`MeshSyncEngine` (a shared primitive four other services depend on) but to
+avoid *mutual, persistent* `watch()` between exactly two peers: have one
+side hold a standing `watch()`, and have the other side push its own
+changes with a one-shot `syncWith(pubKey)` call instead (exactly the
+pattern `MeshKv.grant()` already uses for its push-with-retry). If your own
+next service composes `watch()`-shaped broadcast in more than one direction
+between the same two peers, check for this before you assume a hang is your
+new code's bug.
+
+## Worked examples
 
 `examples/09-cloud-storage.mjs` is the full `new CloudStorage(...)` story
 end to end, runnable with plain `node`. `test/real-peer/cloud-storage.test.mjs`
@@ -266,3 +406,14 @@ several real gaps the plan's original brief left open and exactly how/why
 each was resolved during implementation, which is the same kind of
 first-hand record this guide is trying to save your next service from
 having to rediscover.
+
+`examples/10-mesh-kv-and-observability.mjs` is the `MeshKv` counterpart —
+three real peers, `MeshKv`'s underlying services composed by hand
+(`createGrantLogService()` + `createMeshKvService()`, the same composition
+`MeshKv`'s own constructor performs, done explicitly here so both services'
+`attachService()` handles are available to observe), an `observability-bridge`
+watching live `ctx.emit()` output, and its `VisualizationExporter` JSON
+printed as the payoff — the real grant that raised a trust value, the real
+authorized write that bumped an edge's activity counter, and the real
+unauthorized write that got refused, all visible in one exported JSON
+object at the end, not asserted in a test file no one reads.

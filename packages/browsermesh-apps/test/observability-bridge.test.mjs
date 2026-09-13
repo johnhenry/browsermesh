@@ -45,6 +45,7 @@ import { PeerRegistry } from '../src/peer-registry.mjs'
 import { attachService } from '../src/mesh-service.mjs'
 import { createGrantLogService } from '../src/grant-log.mjs'
 import { createChunkReplicationService } from '../src/chunk-replication.mjs'
+import { createMeshKvService } from '../src/mesh-kv.mjs'
 import { CloudStorageBackend } from '../src/cloud-storage-backend.mjs'
 import { createObservabilityBridge } from '../src/observability-bridge.mjs'
 import {
@@ -298,6 +299,89 @@ describe('createObservabilityBridge: grant-log + chunk-replication events -> Tru
     const bridge = createObservabilityBridge({ peerNode: nodeA })
     assert.throws(() => bridge.observe({}), /requires an attachService\(\) handle/)
     assert.throws(() => bridge.observe(null), /requires an attachService\(\) handle/)
+    bridge.teardown()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// mesh-kv: watching/unwatching + entry-set/entry-deleted -> TopologySnapshot
+// edges (Phase 4 addition to this bridge -- mesh-kv.mjs shipped after this
+// file's original Phase 2 pass, see observability-bridge.mjs's module doc
+// comment's "mesh-kv:" section for the full curation rationale).
+// ---------------------------------------------------------------------------
+
+describe('createObservabilityBridge: mesh-kv events -> TopologySnapshot edges', () => {
+  /** @type {any} */ let alice
+  /** @type {any} */ let bob
+  /** @type {PeerNode} */ let nodeA
+  /** @type {PeerNode} */ let nodeB
+
+  beforeEach(async () => {
+    alice = await createPeer('alice')
+    bob = await createPeer('bob')
+    nodeA = new PeerNode({ wallet: alice.wallet, registry: alice.registry })
+    nodeB = new PeerNode({ wallet: bob.wallet, registry: bob.registry })
+    await nodeA.boot()
+    await nodeB.boot()
+    await linkRealNodes(nodeA, nodeB)
+  })
+
+  it('watch()/unwatch() add and remove an edge, and an authorized remote write bumps the edge activity counter', async () => {
+    const STORE = 'obs-bridge-kv-store'
+    const RESOURCE = `kv:${STORE}`
+    // Bob's own registry must trust alice's writes for bob's merge gate to
+    // accept them -- mirrors mesh-kv.test.mjs's own authorization setup.
+    bob.registry.grantCapabilities(alice.podId, [`${RESOURCE}:write`])
+
+    const aliceKvHandle = attachService(nodeA, undefined, createMeshKvService({ storeId: STORE }))
+    const bobKvHandle = attachService(nodeB, undefined, createMeshKvService({ storeId: STORE }))
+
+    const bridge = createObservabilityBridge({ peerNode: nodeB })
+    bridge.observe(bobKvHandle)
+
+    aliceKvHandle.api.watch(bob.podId)
+    aliceKvHandle.api.set('greeting', 'hi from alice')
+
+    await waitFor(
+      () => bridge.snapshot.links.some((l) => l.from === alice.podId && l.to === bob.podId && l.activity >= 1),
+      1000,
+      "a real mesh-kv:entry-set event (from alice's accepted remote merge) bumped bob's topology edge activity",
+    )
+
+    const exported = bridge.exportTopology()
+    const edge = exported.links.find((l) => l.from === alice.podId && l.to === bob.podId)
+    assert.ok(edge, 'the alice -> bob edge is present in the exported topology')
+    assert.equal(edge.activity, 1)
+    assert.equal(edge.storeId, STORE)
+    assert.equal(edge.lastKey, 'greeting')
+
+    bobKvHandle.api.watch(alice.podId)
+    const watchEdge = bridge.snapshot.links.find((l) => l.from === bob.podId && l.to === alice.podId)
+    assert.ok(watchEdge, "bob's own mesh-kv:watching event added an outbound edge to alice")
+    assert.equal(watchEdge.status, 'watching')
+
+    bobKvHandle.api.unwatch(alice.podId)
+    assert.equal(
+      bridge.snapshot.links.find((l) => l.from === bob.podId && l.to === alice.podId),
+      undefined,
+      "bob's own mesh-kv:unwatching event removed that outbound edge",
+    )
+
+    bridge.teardown()
+  })
+
+  it("a local set()/delete() (from === the observed peer's own podId) does not create or update any edge", async () => {
+    const STORE = 'obs-bridge-kv-local-store'
+    const bobKvHandle = attachService(nodeB, undefined, createMeshKvService({ storeId: STORE }))
+
+    const bridge = createObservabilityBridge({ peerNode: nodeB })
+    bridge.observe(bobKvHandle)
+
+    bobKvHandle.api.set('local-only', 1)
+    bobKvHandle.api.delete('local-only')
+
+    assert.deepEqual(bridge.snapshot.links, [], 'a purely local write/delete has no counterpart peer, so no edge is created')
+
     bridge.teardown()
   })
 })
