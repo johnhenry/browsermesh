@@ -232,6 +232,7 @@ import { createTimestampService } from './mesh-timestamp.mjs'
 import { createHealthMonitorService } from './mesh-health.mjs'
 import { createIpfsService } from './peer-ipfs.mjs'
 import { createVerificationService } from './mesh-verification.mjs'
+import { createTorrentService } from './mesh-torrent.mjs'
 
 /**
  * Build and boot a real, WebRTC-capable `PeerNode`.
@@ -451,6 +452,15 @@ import { createVerificationService } from './mesh-verification.mjs'
  *   see that function's own doc comment. `executeFn` is REQUIRED for this
  *   node to usefully serve as a verifier for other peers' jobs (see
  *   `mesh-verification.mjs`'s header for why it is never defaulted).
+ * @param {boolean} [options.enableTorrent=false] - Attach
+ *   `mesh-torrent.mjs`'s `createTorrentService()` (Phase 5, issue #122): a
+ *   real mesh-native swarm piece-exchange protocol wrapping
+ *   `peer-torrent.mjs`'s `TorrentManager`. Attached to the returned node as
+ *   `node.torrent` (the `attachService()` handle -- also reachable via
+ *   `node.services.get('torrent')`).
+ * @param {object} [options.torrentOptions] - Only used when `enableTorrent`.
+ *   Passed straight through to `createTorrentService()`
+ *   (`trackerUrl`/`chunkSize`/`envelopeType`/`manifestTimeoutMs`/`chunkTimeoutMs`).
  * @returns {Promise<PeerNode>} A booted (unless `skipBoot`) PeerNode, with
  *   `node.meshManager` (`WebRTCMeshManager`), `node.signaling`
  *   (`MeshSignalingChannel`), and `node.transportNegotiator` (the real,
@@ -483,6 +493,8 @@ import { createVerificationService } from './mesh-verification.mjs'
  *   `node.verification` (`attachService()`'s handle for
  *   `mesh-verification.mjs`, also reachable via
  *   `node.services.get('verification')`) attached when `enableVerification`.
+ *   `node.torrent` (`attachService()`'s handle for `mesh-torrent.mjs`, also
+ *   reachable via `node.services.get('torrent')`) attached when `enableTorrent`.
  */
 export async function createMeshNode(options = {}) {
   const {
@@ -533,6 +545,8 @@ export async function createMeshNode(options = {}) {
     ipfsOptions,
     enableVerification = false,
     verificationOptions,
+    enableTorrent = false,
+    torrentOptions,
   } = options
 
   if (!signalingTransport) {
@@ -874,6 +888,23 @@ export async function createMeshNode(options = {}) {
     const verificationHandle = attachService(node, servicesNetwork, verificationDescriptor)
     node.services.set(verificationHandle.name, verificationHandle)
     node.verification = verificationHandle
+  }
+
+  // -- Mesh-native swarm torrent distribution (opt-in, Phase 5, issue #122) --
+  // Attached the same way enableHealthCheck's keepalive service is above --
+  // see mesh-torrent.mjs's own header comment for the full design.
+  if (enableTorrent) {
+    const torrentDescriptor = createTorrentService({
+      trackerUrl: torrentOptions?.trackerUrl,
+      chunkSize: torrentOptions?.chunkSize,
+      envelopeType: torrentOptions?.envelopeType,
+      manifestTimeoutMs: torrentOptions?.manifestTimeoutMs,
+      chunkTimeoutMs: torrentOptions?.chunkTimeoutMs,
+      onLog,
+    })
+    const torrentHandle = attachService(node, servicesNetwork, torrentDescriptor)
+    node.services.set(torrentHandle.name, torrentHandle)
+    node.torrent = torrentHandle
   }
 
   return node
