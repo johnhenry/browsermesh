@@ -192,6 +192,16 @@
  * invented by this file), mirroring the same restraint `peer-compute.mjs`
  * already shows while that module (and `peer-terminal.mjs`) stay blocked on
  * issue #86's still-open execution-gating design pass.
+ * **Remote file access is opt-in via `{ enableFileShare: true,
+ * fileShareOptions }`** (Phase 8 of the app-layer migration plan, issue
+ * #84). `peer-files.mjs`'s `createFileShareService()` is attached via
+ * `attachService()`, the same as every other opt-in service above --
+ * `FileHost`/`FileClient` now run on `ctx.sendTo()`/`ctx.onIncomingData()`
+ * instead of the `peer-session.mjs`/`PeerSession` dependency that module
+ * used to have before this migration (see `peer-files.mjs`'s own header for
+ * the full writeup). Stored in `node.services` under `'file-share'` and
+ * ALSO exposed directly as `node.fileShare`, mirroring `node.router`/
+ * `node.healthCheck`'s "reachable both ways" convention.
  *
  * No browser-only imports at module level.
  */
@@ -228,6 +238,7 @@ import { createHardenedNegotiator } from './mesh-hardening.mjs'
 import { createMeshDht, shareTransport } from './mesh-dht.mjs'
 import { createMeshKeepaliveService } from './mesh-keepalive.mjs'
 import { createMeshRoutingService } from './peer-routing.mjs'
+import { createFileShareService } from './peer-files.mjs'
 import { createTimestampService } from './mesh-timestamp.mjs'
 import { createHealthMonitorService } from './mesh-health.mjs'
 import { createIpfsService } from './peer-ipfs.mjs'
@@ -330,6 +341,22 @@ import { createTorrentService } from './mesh-torrent.mjs'
  *   is attached in array order; the resulting per-service handle (`{ name,
  *   backendScheme, teardown }`) is stored in the returned node's
  *   `node.services` map, keyed by `descriptor.name`.
+ * @param {boolean} [options.enableFileShare=false] - Attach `peer-files.mjs`'s
+ *   `createFileShareService()` (issue #84, Phase 8): real, `PeerRegistry`-
+ *   gated remote file access -- `FileHost` serves `fileShareOptions.fs` (if
+ *   supplied) to any peer holding `files:read`/`files:write`/`files:delete`
+ *   capabilities, and `FileClient` (always available once attached) can
+ *   request files from any other peer running this service, via `node
+ *   .fileShare.api.listFiles(pubKey, path)`/`.readFile()`/`.writeFile()`/
+ *   `.deleteFile()`/`.stat()`. Attached to the returned node as
+ *   `node.fileShare` (the `attachService()` handle -- also reachable via
+ *   `node.services.get('file-share')`).
+ * @param {object} [options.fileShareOptions] - Only used when
+ *   `enableFileShare`. Passed straight through to `createFileShareService()`
+ *   (`fs`/`maxFileSize`/`timeout`/`resource`/`requestEnvelopeType`/
+ *   `responseEnvelopeType`) -- see that function's own doc comment. Omitting
+ *   `fileShareOptions.fs` means this node only acts as a client (no local
+ *   filesystem is exposed to other peers).
  * @param {import('@johnhenry/browsermesh-netway').VirtualNetwork} [options.servicesNetwork]
  *   `VirtualNetwork` passed through to `attachService()` for each entry in
  *   `options.services`. Only required if at least one descriptor declares
@@ -495,6 +522,9 @@ import { createTorrentService } from './mesh-torrent.mjs'
  *   `node.services.get('verification')`) attached when `enableVerification`.
  *   `node.torrent` (`attachService()`'s handle for `mesh-torrent.mjs`, also
  *   reachable via `node.services.get('torrent')`) attached when `enableTorrent`.
+ *   `node.fileShare` (`attachService()`'s handle for `peer-files.mjs`'s
+ *   `createFileShareService()`, also reachable via
+ *   `node.services.get('file-share')`) attached when `enableFileShare`.
  */
 export async function createMeshNode(options = {}) {
   const {
@@ -547,6 +577,8 @@ export async function createMeshNode(options = {}) {
     verificationOptions,
     enableTorrent = false,
     torrentOptions,
+    enableFileShare = false,
+    fileShareOptions,
   } = options
 
   if (!signalingTransport) {
@@ -905,6 +937,27 @@ export async function createMeshNode(options = {}) {
     const torrentHandle = attachService(node, servicesNetwork, torrentDescriptor)
     node.services.set(torrentHandle.name, torrentHandle)
     node.torrent = torrentHandle
+  }
+
+  // -- Remote file access (opt-in, Phase 8, issue #84) -----------------------
+  // Attached the same way every other opt-in service above is
+  // (attachService()) -- see peer-files.mjs's own header comment for the
+  // full migration writeup (this used to depend on peer-session.mjs's
+  // PeerSession, now runs on ctx.sendTo()/ctx.onIncomingData() like
+  // everything else here).
+  if (enableFileShare) {
+    const fileShareDescriptor = createFileShareService({
+      fs: fileShareOptions?.fs,
+      maxFileSize: fileShareOptions?.maxFileSize,
+      timeout: fileShareOptions?.timeout,
+      resource: fileShareOptions?.resource,
+      requestEnvelopeType: fileShareOptions?.requestEnvelopeType,
+      responseEnvelopeType: fileShareOptions?.responseEnvelopeType,
+      onLog,
+    })
+    const fileShareHandle = attachService(node, servicesNetwork, fileShareDescriptor)
+    node.services.set(fileShareHandle.name, fileShareHandle)
+    node.fileShare = fileShareHandle
   }
 
   return node

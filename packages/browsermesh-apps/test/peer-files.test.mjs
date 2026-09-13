@@ -1,5 +1,19 @@
 /**
- * Tests for FileHost and FileClient — remote file access over peer sessions.
+ * Tests for peer-files.mjs -- FileHost, FileClient, and createFileShareService
+ * (the MeshService wrapper).
+ *
+ * Matches this family's established pattern for this kind of test
+ * (mesh-rpc.test.mjs / chunk-replication.test.mjs / manifest-sync.test.mjs
+ * are the direct precedents): real `PeerRegistry`s wired to real `MeshACL`
+ * (`@johnhenry/browsermesh-core`), real Ed25519 `IdentityWallet`/
+ * `MeshIdentityManager` identities, connected via a minimal duck-typed
+ * in-memory bus (not real WebRTC -- that's a later phase's job).
+ *
+ * `FileHost#handleRequest()` (pure compute, no transport) is also tested
+ * directly, independent of the mesh transport layer, for the file-operation
+ * logic itself (list/read/write/delete/stat correctness, size limits, error
+ * cases) -- porting forward the meaningful coverage the old
+ * `PeerSession`-based test file had, adapted to the new pure-function shape.
  *
  * Run:
  *   node --import ./test/_setup-globals.mjs --test test/peer-files.test.mjs
@@ -8,74 +22,108 @@
 import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 
-// Provide crypto.randomUUID if not available
-if (!globalThis.crypto) globalThis.crypto = {}
-if (!crypto.randomUUID) crypto.randomUUID = () => `uuid-${Math.random().toString(36).slice(2)}`
-
+import { PeerRegistry } from '../src/peer-registry.mjs'
+import { attachService } from '../src/mesh-service.mjs'
 import {
   FileHost,
   FileClient,
+  createFileShareService,
   FILE_DEFAULTS,
   FILE_ACTIONS,
   FILE_CAPABILITIES,
+  FILE_RESOURCE,
 } from '../src/peer-files.mjs'
+import {
+  IdentityWallet,
+  MeshIdentityManager,
+  MeshPeerManager,
+  TrustGraph,
+  MeshACL,
+} from '@johnhenry/browsermesh-core'
 
 // ---------------------------------------------------------------------------
-// Mock transport
+// Test fixtures (mirrors mesh-rpc.test.mjs's own)
 // ---------------------------------------------------------------------------
 
-function createMockTransport() {
-  const handlers = {}
-  const sent = []
+/** A real Ed25519 identity + wallet + registry bundle for one "peer". */
+async function createPeer(label) {
+  const identityManager = new MeshIdentityManager({})
+  const wallet = new IdentityWallet({ identityManager })
+  const { podId } = await wallet.createIdentity(label)
+  const registry = new PeerRegistry({
+    localPodId: podId,
+    peerManager: new MeshPeerManager({}),
+    trustGraph: new TrustGraph(),
+    acl: new MeshACL({ owner: podId }),
+  })
+  return { podId, wallet, registry }
+}
+
+/**
+ * A minimal duck-typed `PeerNode` pair, matching mesh-rpc.test.mjs's own
+ * `wireNodes()` exactly: `podId`/`wallet`/`registry` plus an async
+ * `sendTo()`/`onIncomingData()` bus.
+ */
+function wireNodes(peerA, peerB) {
+  const listenersA = new Set()
+  const listenersB = new Set()
+
+  const nodeA = {
+    podId: peerA.podId,
+    wallet: peerA.wallet,
+    registry: peerA.registry,
+    onIncomingData(cb) {
+      listenersA.add(cb)
+      return () => listenersA.delete(cb)
+    },
+    async sendTo(pubKey, data) {
+      queueMicrotask(() => {
+        for (const cb of listenersB) cb(peerA.podId, data)
+      })
+    },
+  }
+  const nodeB = {
+    podId: peerB.podId,
+    wallet: peerB.wallet,
+    registry: peerB.registry,
+    onIncomingData(cb) {
+      listenersB.add(cb)
+      return () => listenersB.delete(cb)
+    },
+    async sendTo(pubKey, data) {
+      queueMicrotask(() => {
+        for (const cb of listenersA) cb(peerB.podId, data)
+      })
+    },
+  }
+  return { nodeA, nodeB }
+}
+
+/**
+ * A "black hole" node: sendTo() never delivers anything to anyone. Used for
+ * the timeout test, where the host side must never respond.
+ */
+function wireBlackHole(peerA) {
+  const listenersA = new Set()
   return {
-    send(data) { sent.push(typeof data === 'string' ? JSON.parse(data) : data) },
-    on(event, cb) { (handlers[event] ??= []).push(cb) },
-    onMessage(cb) { (handlers.message ??= []).push(cb) },
-    onClose(cb) { (handlers.close ??= []).push(cb) },
-    onError(cb) { (handlers.error ??= []).push(cb) },
-    close() { for (const cb of handlers.close || []) cb() },
-    _receive(data) { for (const cb of handlers.message || []) cb(data) },
-    sent,
-    get type() { return 'mock' },
-    get connected() { return true },
+    podId: peerA.podId,
+    wallet: peerA.wallet,
+    registry: peerA.registry,
+    onIncomingData(cb) {
+      listenersA.add(cb)
+      return () => listenersA.delete(cb)
+    },
+    async sendTo() {
+      // Never delivered -- the "peer" this points at doesn't exist.
+    },
   }
 }
 
-// ---------------------------------------------------------------------------
-// Mock session
-// ---------------------------------------------------------------------------
-
-function createMockSession(localPodId = 'local', remotePodId = 'remote', capabilities = ['fs:read', 'fs:write', 'fs:delete']) {
-  const handlers = {}
-  const transport = createMockTransport()
-  return {
-    send(type, payload) { transport.send({ type, payload, from: localPodId }) },
-    registerHandler(type, handler) { handlers[type] = handler },
-    removeHandler(type) { delete handlers[type] },
-    hasCapability(scope) {
-      return capabilities.some(c =>
-        c === scope || c === '*' || (c.endsWith(':*') && scope.startsWith(c.slice(0, -1)))
-      )
-    },
-    requireCapability(scope) {
-      if (!this.hasCapability(scope)) throw new Error(`Missing capability: ${scope}`)
-    },
-    get localPodId() { return localPodId },
-    get remotePodId() { return remotePodId },
-    get sessionId() { return 'session-f1' },
-    _simulateIncoming(payload) { handlers.files?.(payload) },
-    _transport: transport,
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Mock fs
-// ---------------------------------------------------------------------------
-
+/** In-memory fs fixture matching FileHost's duck-typed interface. */
 function createMockFs() {
   const files = new Map([['test.txt', { data: 'hello', size: 5 }]])
   return {
-    async list(path) {
+    async list() {
       return [...files.entries()].map(([name, f]) => ({ name, type: 'file', size: f.size }))
     },
     async read(path) {
@@ -128,10 +176,11 @@ describe('FILE_ACTIONS', () => {
 })
 
 describe('FILE_CAPABILITIES', () => {
-  it('has correct values', () => {
-    assert.equal(FILE_CAPABILITIES.READ, 'fs:read')
-    assert.equal(FILE_CAPABILITIES.WRITE, 'fs:write')
-    assert.equal(FILE_CAPABILITIES.DELETE, 'fs:delete')
+  it('aligns with browsermesh-core acl.mjs DEFAULT_TEMPLATES vocabulary', () => {
+    assert.equal(FILE_CAPABILITIES.READ, 'files:read')
+    assert.equal(FILE_CAPABILITIES.WRITE, 'files:write')
+    assert.equal(FILE_CAPABILITIES.DELETE, 'files:delete')
+    assert.equal(FILE_RESOURCE, 'files')
   })
 
   it('is frozen', () => {
@@ -140,336 +189,391 @@ describe('FILE_CAPABILITIES', () => {
 })
 
 // ---------------------------------------------------------------------------
-// Tests — FileHost
+// Tests — FileHost (direct, no transport -- pure request/response logic)
 // ---------------------------------------------------------------------------
 
-describe('FileHost', () => {
-  let session, fs, host
+describe('FileHost#handleRequest (direct, no transport)', () => {
+  let fs, host
 
   beforeEach(() => {
-    session = createMockSession()
     fs = createMockFs()
-    host = new FileHost({ session, fs })
+    // No checkAccess supplied -- permissive default (see class doc comment).
+    host = new FileHost({ fs })
   })
 
-  describe('constructor', () => {
-    it('registers files handler on session', () => {
-      // Verify by simulating incoming list request
-      session._simulateIncoming({
-        payload: { action: 'list', path: '/', requestId: 'r1' },
-      })
-      return new Promise((resolve) => {
-        setTimeout(() => {
-          assert.ok(session._transport.sent.length >= 1)
-          resolve()
-        }, 20)
-      })
-    })
-
-    it('throws when session is missing', () => {
-      assert.throws(() => new FileHost({ fs }), /session is required/)
-    })
-
-    it('throws when fs is missing', () => {
-      assert.throws(() => new FileHost({ session }), /fs.*list/)
-    })
+  it('throws when fs is missing', () => {
+    assert.throws(() => new FileHost({}), /fs.*list/)
   })
 
-  describe('handles list action', () => {
-    it('returns file listing', async () => {
-      session._simulateIncoming({
-        payload: { action: 'list', path: '/', requestId: 'req-list' },
-      })
-
-      await new Promise((r) => setTimeout(r, 20))
-
-      const sent = session._transport.sent
-      const response = sent.find(s => s.payload?.requestId === 'req-list')
-      assert.ok(response)
-      assert.equal(response.payload.success, true)
-      assert.ok(Array.isArray(response.payload.result))
-      assert.equal(response.payload.result[0].name, 'test.txt')
-    })
+  it('handles list action', async () => {
+    const response = await host.handleRequest('peerA', { action: 'list', path: '/', requestId: 'req-list' })
+    assert.equal(response.success, true)
+    assert.equal(response.requestId, 'req-list')
+    assert.ok(Array.isArray(response.result))
+    assert.equal(response.result[0].name, 'test.txt')
   })
 
-  describe('handles read action', () => {
-    it('returns file content', async () => {
-      session._simulateIncoming({
-        payload: { action: 'read', path: 'test.txt', requestId: 'req-read' },
-      })
-
-      await new Promise((r) => setTimeout(r, 20))
-
-      const sent = session._transport.sent
-      const response = sent.find(s => s.payload?.requestId === 'req-read')
-      assert.ok(response)
-      assert.equal(response.payload.success, true)
-      assert.equal(response.payload.result.data, 'hello')
-      assert.equal(response.payload.result.size, 5)
-    })
+  it('handles read action', async () => {
+    const response = await host.handleRequest('peerA', { action: 'read', path: 'test.txt', requestId: 'req-read' })
+    assert.equal(response.success, true)
+    assert.equal(response.result.data, 'hello')
+    assert.equal(response.result.size, 5)
   })
 
-  describe('handles write action', () => {
-    it('writes data and returns success', async () => {
-      session._simulateIncoming({
-        payload: { action: 'write', path: 'new.txt', data: 'new content', requestId: 'req-write' },
-      })
-
-      await new Promise((r) => setTimeout(r, 20))
-
-      const sent = session._transport.sent
-      const response = sent.find(s => s.payload?.requestId === 'req-write')
-      assert.ok(response)
-      assert.equal(response.payload.success, true)
-      assert.equal(response.payload.result.size, 11)
-    })
+  it('handles read action for a missing file as an error', async () => {
+    const response = await host.handleRequest('peerA', { action: 'read', path: 'missing.txt', requestId: 'req-read2' })
+    assert.equal(response.success, false)
+    assert.equal(response.error, 'Not found')
   })
 
-  describe('handles delete action', () => {
-    it('deletes file and returns success', async () => {
-      session._simulateIncoming({
-        payload: { action: 'delete', path: 'test.txt', requestId: 'req-del' },
-      })
-
-      await new Promise((r) => setTimeout(r, 20))
-
-      const sent = session._transport.sent
-      const response = sent.find(s => s.payload?.requestId === 'req-del')
-      assert.ok(response)
-      assert.equal(response.payload.success, true)
-    })
+  it('handles write action', async () => {
+    const response = await host.handleRequest('peerA', { action: 'write', path: 'new.txt', data: 'new content', requestId: 'req-write' })
+    assert.equal(response.success, true)
+    assert.equal(response.result.size, 11)
   })
 
-  describe('handles stat action', () => {
-    it('returns file metadata', async () => {
-      session._simulateIncoming({
-        payload: { action: 'stat', path: 'test.txt', requestId: 'req-stat' },
-      })
-
-      await new Promise((r) => setTimeout(r, 20))
-
-      const sent = session._transport.sent
-      const response = sent.find(s => s.payload?.requestId === 'req-stat')
-      assert.ok(response)
-      assert.equal(response.payload.success, true)
-      assert.equal(response.payload.result.name, 'test.txt')
-      assert.equal(response.payload.result.type, 'file')
-      assert.equal(response.payload.result.size, 5)
-    })
-
-    it('returns null for non-existent file', async () => {
-      session._simulateIncoming({
-        payload: { action: 'stat', path: 'missing.txt', requestId: 'req-stat2' },
-      })
-
-      await new Promise((r) => setTimeout(r, 20))
-
-      const sent = session._transport.sent
-      const response = sent.find(s => s.payload?.requestId === 'req-stat2')
-      assert.ok(response)
-      assert.equal(response.payload.success, true)
-      assert.equal(response.payload.result, null)
-    })
+  it('rejects write with null/undefined data', async () => {
+    const response = await host.handleRequest('peerA', { action: 'write', path: 'new.txt', requestId: 'req-write-nodata' })
+    assert.equal(response.success, false)
+    assert.equal(response.error, 'Write data is required')
   })
 
-  describe('rejects oversized writes', () => {
-    it('returns error for files exceeding maxFileSize', async () => {
-      const smallHost = new FileHost({ session: createMockSession(), fs, maxFileSize: 10 })
-      const smallSession = createMockSession()
-      new FileHost({ session: smallSession, fs, maxFileSize: 10 })
-
-      smallSession._simulateIncoming({
-        payload: { action: 'write', path: 'big.txt', data: 'x'.repeat(100), requestId: 'req-big' },
-      })
-
-      await new Promise((r) => setTimeout(r, 20))
-
-      const sent = smallSession._transport.sent
-      const response = sent.find(s => s.payload?.requestId === 'req-big')
-      assert.ok(response)
-      assert.equal(response.payload.success, false)
-      assert.ok(response.payload.error.includes('exceeds'))
-    })
+  it('handles delete action', async () => {
+    const response = await host.handleRequest('peerA', { action: 'delete', path: 'test.txt', requestId: 'req-del' })
+    assert.equal(response.success, true)
+    assert.equal(response.result.success, true)
   })
 
-  describe('checks capabilities', () => {
-    it('rejects write without fs:write capability', async () => {
-      const readOnlySession = createMockSession('local', 'remote', ['fs:read'])
-      new FileHost({ session: readOnlySession, fs })
-
-      readOnlySession._simulateIncoming({
-        payload: { action: 'write', path: 'new.txt', data: 'test', requestId: 'req-noperm' },
-      })
-
-      await new Promise((r) => setTimeout(r, 20))
-
-      const sent = readOnlySession._transport.sent
-      const response = sent.find(s => s.payload?.requestId === 'req-noperm')
-      assert.ok(response)
-      assert.ok(response.payload.error)
-      assert.ok(response.payload.error.includes('capability'))
-    })
-
-    it('rejects delete without fs:delete capability', async () => {
-      const readOnlySession = createMockSession('local', 'remote', ['fs:read'])
-      new FileHost({ session: readOnlySession, fs })
-
-      readOnlySession._simulateIncoming({
-        payload: { action: 'delete', path: 'test.txt', requestId: 'req-nodelperm' },
-      })
-
-      await new Promise((r) => setTimeout(r, 20))
-
-      const sent = readOnlySession._transport.sent
-      const response = sent.find(s => s.payload?.requestId === 'req-nodelperm')
-      assert.ok(response)
-      assert.ok(response.payload.error)
-    })
+  it('handles stat action', async () => {
+    const response = await host.handleRequest('peerA', { action: 'stat', path: 'test.txt', requestId: 'req-stat' })
+    assert.equal(response.success, true)
+    assert.equal(response.result.name, 'test.txt')
+    assert.equal(response.result.type, 'file')
+    assert.equal(response.result.size, 5)
   })
 
-  describe('close', () => {
-    it('removes handler from session', () => {
-      host.close()
-      session._simulateIncoming({
-        payload: { action: 'list', path: '/', requestId: 'after-close' },
+  it('returns null result for stat of a non-existent file (still success)', async () => {
+    const response = await host.handleRequest('peerA', { action: 'stat', path: 'missing.txt', requestId: 'req-stat2' })
+    assert.equal(response.success, true)
+    assert.equal(response.result, null)
+  })
+
+  it('rejects an unknown action', async () => {
+    const response = await host.handleRequest('peerA', { action: 'destroy', path: 'x', requestId: 'req-bad' })
+    assert.equal(response.success, false)
+    assert.match(response.error, /Unknown action/)
+  })
+
+  it('rejects a missing/empty path', async () => {
+    const response = await host.handleRequest('peerA', { action: 'list', path: '', requestId: 'req-nopath' })
+    assert.equal(response.success, false)
+    assert.match(response.error, /path must be/)
+  })
+
+  it('rejects oversized writes', async () => {
+    const smallHost = new FileHost({ fs, maxFileSize: 10 })
+    const response = await smallHost.handleRequest('peerA', { action: 'write', path: 'big.txt', data: 'x'.repeat(100), requestId: 'req-big' })
+    assert.equal(response.success, false)
+    assert.match(response.error, /exceeds/)
+  })
+
+  describe('checkAccess gating', () => {
+    it('rejects write when checkAccess denies', async () => {
+      const gatedHost = new FileHost({
+        fs,
+        checkAccess: (fromPubKey, action) => ({ allowed: action === 'read', reason: 'no write grant' }),
       })
-      assert.equal(session._transport.sent.length, 0)
+      const response = await gatedHost.handleRequest('peerA', { action: 'write', path: 'new.txt', data: 'x', requestId: 'req-noperm' })
+      assert.equal(response.success, false)
+      assert.match(response.error, /Capability/)
+      assert.match(response.error, /no write grant/)
+    })
+
+    it('rejects delete when checkAccess denies', async () => {
+      const gatedHost = new FileHost({
+        fs,
+        checkAccess: (fromPubKey, action) => ({ allowed: action === 'read' }),
+      })
+      const response = await gatedHost.handleRequest('peerA', { action: 'delete', path: 'test.txt', requestId: 'req-nodelperm' })
+      assert.equal(response.success, false)
+      assert.ok(response.error)
+    })
+
+    it('allows read when checkAccess allows', async () => {
+      const gatedHost = new FileHost({
+        fs,
+        checkAccess: (fromPubKey, action) => ({ allowed: action === 'read' }),
+      })
+      const response = await gatedHost.handleRequest('peerA', { action: 'list', path: '/', requestId: 'req-ok' })
+      assert.equal(response.success, true)
+    })
+
+    it('passes the requesting pubKey and capability action to checkAccess', async () => {
+      const seen = []
+      const gatedHost = new FileHost({
+        fs,
+        checkAccess: (fromPubKey, action) => {
+          seen.push({ fromPubKey, action })
+          return { allowed: true }
+        },
+      })
+      await gatedHost.handleRequest('peer-xyz', { action: 'write', path: 'a.txt', data: 'x', requestId: 'r1' })
+      assert.deepEqual(seen, [{ fromPubKey: 'peer-xyz', action: 'write' }])
     })
   })
 })
 
 // ---------------------------------------------------------------------------
-// Tests — FileClient
+// Tests — createFileShareService, wired over a real mesh transport
 // ---------------------------------------------------------------------------
 
-describe('FileClient', () => {
-  let session, client
+describe('createFileShareService: mesh-wired FileHost/FileClient', () => {
+  /** @type {any} */ let alice
+  /** @type {any} */ let bob
+  /** @type {any} */ let nodeA
+  /** @type {any} */ let nodeB
 
-  beforeEach(() => {
-    session = createMockSession()
-    client = new FileClient({ session, timeout: 500 })
+  beforeEach(async () => {
+    alice = await createPeer('alice')
+    bob = await createPeer('bob')
+    ;({ nodeA, nodeB } = wireNodes(alice, bob))
   })
 
-  describe('constructor', () => {
-    it('throws when session is missing', () => {
-      assert.throws(() => new FileClient({}), /session is required/)
-    })
+  it('a client (alice) can list/read/write/delete/stat files hosted by bob, once granted capabilities', async () => {
+    // bob hosts, alice requests -- it's bob's registry that gates requests
+    // arriving from alice.
+    bob.registry.grantCapabilities(alice.podId, [FILE_CAPABILITIES.READ, FILE_CAPABILITIES.WRITE, FILE_CAPABILITIES.DELETE])
+
+    const fs = createMockFs()
+    attachService(nodeB, undefined, createFileShareService({ fs }))
+    const { api } = attachService(nodeA, undefined, createFileShareService({}))
+
+    const listed = await api.listFiles(bob.podId, '/')
+    assert.ok(Array.isArray(listed))
+    assert.equal(listed[0].name, 'test.txt')
+
+    const read = await api.readFile(bob.podId, 'test.txt')
+    assert.equal(read.data, 'hello')
+
+    const written = await api.writeFile(bob.podId, 'new.txt', 'created by alice')
+    assert.equal(written.success, true)
+
+    const stat = await api.stat(bob.podId, 'new.txt')
+    assert.equal(stat.name, 'new.txt')
+
+    const deleted = await api.deleteFile(bob.podId, 'new.txt')
+    assert.equal(deleted.success, true)
   })
 
-  describe('listFiles', () => {
-    it('sends list request', async () => {
-      const promise = client.listFiles('/docs')
-      const sent = session._transport.sent
-      assert.equal(sent.length, 1)
-      assert.equal(sent[0].payload.action, 'list')
-      assert.equal(sent[0].payload.path, '/docs')
-      const requestId = sent[0].payload.requestId
+  it('rejects a write from a peer with only read capability, via a real PeerRegistry/MeshACL check', async () => {
+    bob.registry.grantCapabilities(alice.podId, [FILE_CAPABILITIES.READ])
 
-      session._simulateIncoming({
-        payload: { requestId, action: 'list', success: true, result: [{ name: 'a.txt' }] },
-      })
+    const fs = createMockFs()
+    attachService(nodeB, undefined, createFileShareService({ fs }))
+    const { api } = attachService(nodeA, undefined, createFileShareService({}))
 
-      const result = await promise
-      assert.deepEqual(result, [{ name: 'a.txt' }])
-    })
+    await assert.rejects(
+      () => api.writeFile(bob.podId, 'new.txt', 'nope'),
+      /Capability/,
+    )
   })
 
-  describe('readFile', () => {
-    it('sends read request', async () => {
-      const promise = client.readFile('test.txt')
-      const sent = session._transport.sent
-      const requestId = sent[0].payload.requestId
+  it('a peer hosting no fs (client-only) replies with a clean "not hosting" error instead of dropping the request', async () => {
+    // nodeB attaches with no `fs` at all -- client-only.
+    attachService(nodeB, undefined, createFileShareService({}))
+    const { api } = attachService(nodeA, undefined, createFileShareService({}))
 
-      session._simulateIncoming({
-        payload: { requestId, action: 'read', success: true, result: { data: 'hello', size: 5 } },
-      })
-
-      const result = await promise
-      assert.equal(result.data, 'hello')
-      assert.equal(result.size, 5)
-    })
+    await assert.rejects(
+      () => api.listFiles(bob.podId, '/'),
+      /not hosting files/,
+    )
   })
 
-  describe('writeFile', () => {
-    it('sends write request with data', async () => {
-      const promise = client.writeFile('out.txt', 'content')
-      const sent = session._transport.sent
-      assert.equal(sent[0].payload.action, 'write')
-      assert.equal(sent[0].payload.data, 'content')
-      const requestId = sent[0].payload.requestId
+  it('concurrent requests to the same peer do not cross-correlate', async () => {
+    bob.registry.grantCapabilities(alice.podId, [FILE_CAPABILITIES.READ])
+    const fs = createMockFs()
+    await fs.write('a.txt', 'AAA')
+    await fs.write('b.txt', 'BBBBB')
 
-      session._simulateIncoming({
-        payload: { requestId, action: 'write', success: true, result: { success: true, size: 7 } },
-      })
+    attachService(nodeB, undefined, createFileShareService({ fs }))
+    const { api } = attachService(nodeA, undefined, createFileShareService({}))
 
-      const result = await promise
-      assert.equal(result.success, true)
-      assert.equal(result.size, 7)
-    })
+    const [a, b] = await Promise.all([
+      api.readFile(bob.podId, 'a.txt'),
+      api.readFile(bob.podId, 'b.txt'),
+    ])
+    assert.equal(a.data, 'AAA')
+    assert.equal(b.data, 'BBBBB')
   })
 
-  describe('deleteFile', () => {
-    it('sends delete request', async () => {
-      const promise = client.deleteFile('old.txt')
-      const sent = session._transport.sent
-      assert.equal(sent[0].payload.action, 'delete')
-      const requestId = sent[0].payload.requestId
+  it('a response from a different peer than the one requested is ignored (not cross-correlated)', async () => {
+    // Three-party setup: alice requests from bob, but a malicious/confused
+    // carol sends a files-response claiming alice's requestId. It must be
+    // ignored -- only bob's genuine reply resolves the promise (bob never
+    // replies here, so the real result is a timeout).
+    const carol = await createPeer('carol')
+    const listenersA = new Set()
+    const listenersB = new Set()
+    const listenersC = new Set()
 
-      session._simulateIncoming({
-        payload: { requestId, action: 'delete', success: true, result: { success: true } },
-      })
+    const nA = {
+      podId: alice.podId, wallet: alice.wallet, registry: alice.registry,
+      onIncomingData(cb) { listenersA.add(cb); return () => listenersA.delete(cb) },
+      async sendTo(pubKey, data) {
+        const target = pubKey === bob.podId ? listenersB : listenersC
+        queueMicrotask(() => { for (const cb of target) cb(alice.podId, data) })
+      },
+    }
+    const nB = {
+      podId: bob.podId, wallet: bob.wallet, registry: bob.registry,
+      onIncomingData(cb) { listenersB.add(cb); return () => listenersB.delete(cb) },
+      async sendTo() { /* bob deliberately never replies in this test */ },
+    }
 
-      const result = await promise
-      assert.equal(result.success, true)
+    bob.registry.grantCapabilities(alice.podId, [FILE_CAPABILITIES.READ])
+
+    const { api: aliceApi } = attachService(nA, undefined, createFileShareService({ timeout: 150 }))
+    attachService(nB, undefined, createFileShareService({})) // never responds
+
+    const promise = aliceApi.readFile(bob.podId, 'test.txt')
+
+    // Snoop the outbound request from alice to bob to steal its requestId,
+    // then have carol forge a response using that id.
+    let requestId
+    listenersB.add((fromPubKey, msg) => { requestId = msg.requestId })
+    await new Promise((r) => setTimeout(r, 10))
+    assert.ok(requestId, 'expected to observe the outbound requestId')
+
+    queueMicrotask(() => {
+      for (const cb of listenersA) {
+        cb(carol.podId, { type: 'files-response', requestId, action: 'read', success: true, result: { data: 'FORGED', size: 6 } })
+      }
     })
+
+    // The forged response must be ignored; the real timeout must still fire.
+    await assert.rejects(() => promise, /timed out/)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Tests — timeout (host never responds)
+// ---------------------------------------------------------------------------
+
+describe('createFileShareService: timeout', () => {
+  it('rejects when the target peer never responds', async () => {
+    const alice = await createPeer('alice')
+    const bob = await createPeer('bob')
+    const nodeA = wireBlackHole(alice)
+
+    const { api } = attachService(nodeA, undefined, createFileShareService({ timeout: 50 }))
+
+    await assert.rejects(
+      () => api.readFile(bob.podId, 'slow.txt'),
+      /timed out/,
+    )
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Tests — teardown
+// ---------------------------------------------------------------------------
+
+describe('createFileShareService: teardown', () => {
+  it('rejects pending requests on teardown', async () => {
+    const alice = await createPeer('alice')
+    const bob = await createPeer('bob')
+    const { nodeA, nodeB } = wireNodes(alice, bob)
+
+    bob.registry.grantCapabilities(alice.podId, [FILE_CAPABILITIES.READ])
+    const fs = createMockFs()
+    attachService(nodeB, undefined, createFileShareService({ fs }))
+    const { api, teardown } = attachService(nodeA, undefined, createFileShareService({ timeout: 200 }))
+
+    const pending = api.readFile(bob.podId, 'test.txt')
+    await teardown()
+    await assert.rejects(() => pending, /closed/)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Tests — FileClient direct unit tests (sendRequest injected directly,
+// no mesh-service layer -- for the correlation/timeout mechanism itself)
+// ---------------------------------------------------------------------------
+
+describe('FileClient (direct, injected sendRequest)', () => {
+  it('throws when sendRequest is missing', () => {
+    assert.throws(() => new FileClient({}), /sendRequest/)
   })
 
-  describe('stat', () => {
-    it('sends stat request', async () => {
-      const promise = client.stat('test.txt')
-      const sent = session._transport.sent
-      assert.equal(sent[0].payload.action, 'stat')
-      const requestId = sent[0].payload.requestId
-
-      session._simulateIncoming({
-        payload: { requestId, action: 'stat', success: true, result: { name: 'test.txt', type: 'file', size: 5, modified: 1000 } },
-      })
-
-      const result = await promise
-      assert.equal(result.name, 'test.txt')
-      assert.equal(result.size, 5)
+  it('resolves listFiles when a matching response arrives from the right peer', async () => {
+    let capturedRequestId
+    const client = new FileClient({
+      sendRequest: (pubKey, payload) => { capturedRequestId = payload.requestId },
     })
+    const promise = client.listFiles('peerB', '/docs')
+    await new Promise((r) => setTimeout(r, 0))
+    client.handleResponse('peerB', { requestId: capturedRequestId, action: 'list', success: true, result: [{ name: 'a.txt' }] })
+    const result = await promise
+    assert.deepEqual(result, [{ name: 'a.txt' }])
   })
 
-  describe('close', () => {
-    it('rejects pending requests', async () => {
-      const promise = client.listFiles('/foo')
-      client.close()
-      await assert.rejects(() => promise, /FileClient closed/)
+  it('rejects on remote error', async () => {
+    let capturedRequestId
+    const client = new FileClient({
+      sendRequest: (pubKey, payload) => { capturedRequestId = payload.requestId },
     })
+    const promise = client.readFile('peerB', 'bad.txt')
+    await new Promise((r) => setTimeout(r, 0))
+    client.handleResponse('peerB', { requestId: capturedRequestId, action: 'read', success: false, error: 'Not found' })
+    await assert.rejects(() => promise, /Not found/)
   })
 
-  describe('timeout', () => {
-    it('rejects on timeout', async () => {
-      const shortClient = new FileClient({ session: createMockSession(), timeout: 50 })
-      await assert.rejects(
-        () => shortClient.readFile('slow.txt'),
-        /timed out/,
-      )
-    })
+  it('rejects on timeout when no response ever arrives', async () => {
+    const client = new FileClient({ sendRequest: () => {}, timeout: 30 })
+    await assert.rejects(() => client.readFile('peerB', 'slow.txt'), /timed out/)
   })
 
-  describe('remote error', () => {
-    it('rejects when server returns error', async () => {
-      const promise = client.readFile('bad.txt')
-      const sent = session._transport.sent
-      const requestId = sent[0].payload.requestId
-
-      session._simulateIncoming({
-        payload: { requestId, action: 'read', success: false, error: 'Not found' },
-      })
-
-      await assert.rejects(() => promise, /Not found/)
+  it('two concurrent requests to different peers resolve independently', async () => {
+    const sent = []
+    const client = new FileClient({
+      sendRequest: (pubKey, payload) => { sent.push({ pubKey, payload }) },
     })
+    const p1 = client.readFile('peerB', 'x.txt')
+    const p2 = client.readFile('peerC', 'y.txt')
+    await new Promise((r) => setTimeout(r, 0))
+    assert.equal(sent.length, 2)
+
+    client.handleResponse('peerC', { requestId: sent[1].payload.requestId, action: 'read', success: true, result: { data: 'Y' } })
+    client.handleResponse('peerB', { requestId: sent[0].payload.requestId, action: 'read', success: true, result: { data: 'X' } })
+
+    const [r1, r2] = await Promise.all([p1, p2])
+    assert.equal(r1.data, 'X')
+    assert.equal(r2.data, 'Y')
+  })
+
+  it('ignores a response whose requestId matches but the sender does not', async () => {
+    const sent = []
+    const client = new FileClient({
+      sendRequest: (pubKey, payload) => { sent.push({ pubKey, payload }) },
+      timeout: 40,
+    })
+    const promise = client.readFile('peerB', 'x.txt')
+    await new Promise((r) => setTimeout(r, 0))
+    // Wrong sender -- ignored.
+    client.handleResponse('peerC', { requestId: sent[0].payload.requestId, action: 'read', success: true, result: { data: 'WRONG' } })
+    await assert.rejects(() => promise, /timed out/)
+  })
+
+  it('close() rejects all pending requests', async () => {
+    const client = new FileClient({ sendRequest: () => {} })
+    const promise = client.listFiles('peerB', '/foo')
+    client.close()
+    await assert.rejects(() => promise, /FileClient closed/)
+  })
+
+  it('validates pubKey and path', async () => {
+    const client = new FileClient({ sendRequest: () => {} })
+    await assert.rejects(() => client.readFile('', 'x.txt'), /pubKey/)
+    await assert.rejects(() => client.readFile('peerB', ''), /path/)
   })
 })
