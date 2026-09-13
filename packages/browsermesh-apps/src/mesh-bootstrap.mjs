@@ -56,6 +56,15 @@
  * `MeshRelayBackend`, constructed directly (not via this function) and
  * registered on the *client's own* `VirtualNetwork`.
  *
+ * **Mesh-native services are opt-in via `{ services: [...] }`** (Phase C).
+ * Each entry is a `MeshService` descriptor (`mesh-service.mjs`) attached via
+ * `attachService()`, mirroring the `enableRelayHost`/`relayHostServices`
+ * opt-in shape exactly -- this is the generic version of that pattern, for
+ * services beyond mesh-relay (the first consumer is the CloudStorage plan's
+ * later phases). Results are stored in `node.services`, a `Map<string,
+ * { name, backendScheme, teardown }>` keyed by descriptor name, always
+ * present (empty if `services` is omitted).
+ *
  * No browser-only imports at module level.
  */
 
@@ -85,6 +94,7 @@ import { MeshSignalingChannel } from './signaling.mjs'
 import { createWebRTCTransportFactory } from './webrtc-negotiator.mjs'
 import { createMeshSync } from './mesh-sync.mjs'
 import { MeshRelayHost } from './mesh-relay-host.mjs'
+import { attachService } from './mesh-service.mjs'
 
 /**
  * Build and boot a real, WebRTC-capable `PeerNode`.
@@ -176,13 +186,28 @@ import { MeshRelayHost } from './mesh-relay-host.mjs'
  * @param {string} [options.relayHostEnvelopeType] - Overrides the
  *   `envelope.type` the relay host routes/sends on `PeerNode`'s dispatch bus
  *   (default `'mesh-relay'`).
+ * @param {import('./mesh-service.mjs').MeshService[]} [options.services] -
+ *   Optional array of `MeshService` descriptors (Phase C, see
+ *   `mesh-service.mjs`) to attach immediately via `attachService()`,
+ *   mirroring the `relayHostServices` opt-in shape exactly. Each descriptor
+ *   is attached in array order; the resulting per-service handle (`{ name,
+ *   backendScheme, teardown }`) is stored in the returned node's
+ *   `node.services` map, keyed by `descriptor.name`.
+ * @param {import('@johnhenry/browsermesh-netway').VirtualNetwork} [options.servicesNetwork]
+ *   `VirtualNetwork` passed through to `attachService()` for each entry in
+ *   `options.services`. Only required if at least one descriptor declares
+ *   `createBackend`; `attachService()` throws for any such descriptor if
+ *   this is omitted.
  * @returns {Promise<PeerNode>} A booted (unless `skipBoot`) PeerNode, with
  *   `node.meshManager` (`WebRTCMeshManager`) and `node.signaling`
  *   (`MeshSignalingChannel`) attached for callers/tests that need lower-level
  *   access beyond what `PeerNode`'s own API exposes, `node.sync`
- *   (`MeshSyncBinding`, see `mesh-sync.mjs`) attached when `enableSync`, and
+ *   (`MeshSyncBinding`, see `mesh-sync.mjs`) attached when `enableSync`,
  *   `node.relayHost` (`MeshRelayHost`, see `mesh-relay-host.mjs`) attached
- *   when `enableRelayHost`.
+ *   when `enableRelayHost`, and `node.services` (a `Map<string, { name,
+ *   backendScheme, teardown }>`, see `mesh-service.mjs`) populated from
+ *   `options.services` (always present, empty when `options.services` is
+ *   omitted).
  */
 export async function createMeshNode(options = {}) {
   const {
@@ -211,6 +236,8 @@ export async function createMeshNode(options = {}) {
     relayHostNetwork,
     relayHostServices,
     relayHostEnvelopeType,
+    services,
+    servicesNetwork,
   } = options
 
   if (!signalingTransport) {
@@ -355,6 +382,18 @@ export async function createMeshNode(options = {}) {
       for (const [name, targetAddress] of Object.entries(relayHostServices)) {
         node.relayHost.exposeService(name, targetAddress)
       }
+    }
+  }
+
+  // -- Mesh-native services (opt-in, Phase C) --------------------------------
+  // `node.services` is always present (empty when `services` is omitted) so
+  // callers never need to null-check it before looking up an attached
+  // service by name.
+  node.services = new Map()
+  if (services) {
+    for (const descriptor of services) {
+      const handle = attachService(node, servicesNetwork, descriptor)
+      node.services.set(handle.name, handle)
     }
   }
 
