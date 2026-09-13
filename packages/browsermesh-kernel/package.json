@@ -1,6 +1,6 @@
 {
   "name": "@johnhenry/browsermesh-kernel",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Capability-secure browser microkernel with resource handles, IPC, tracing, and chaos engineering",
   "type": "module",
   "main": "src/index.mjs",

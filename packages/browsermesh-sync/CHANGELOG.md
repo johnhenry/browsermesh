@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.0
+
+### Minor Changes
+
+- `MeshSyncEngine` only shipped `InMemorySyncStorage`, so CRDT/workspace state was lost on reload unless a caller wrote their own durable adapter.
+
+  Add `IndexedDBSyncStorage`, a drop-in save/load/clear adapter modeled on `browsermesh-core`'s `IndexedDBIdentityStorage` pattern, self-contained within `browsermesh-sync` (no new cross-package dependency). Configurable `dbName`/`storeName` let multiple sync engines share a page without colliding. Exported from `src/index.mjs` alongside `InMemorySyncStorage`.
+
 ## 0.0.1
 
 ### Patch Changes

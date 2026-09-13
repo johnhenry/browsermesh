@@ -1,6 +1,6 @@
 {
   "name": "@johnhenry/browsermesh-embed",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Embeddable browsermesh-pod-backed agent workspace widget — drop an interactive agent pod into any web app",
   "type": "module",
   "main": "./src/index.mjs",
