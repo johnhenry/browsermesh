@@ -346,6 +346,7 @@ import { createChatService } from './peer-chat.mjs'
 import { createComputeService } from './mesh-compute.mjs'
 import { createTerminalService } from './peer-terminal.mjs'
 import { createSwarmService } from './mesh-swarm.mjs'
+import { createAgentSwarmService } from './mesh-agent-swarm.mjs'
 
 /**
  * Build and boot a real, WebRTC-capable `PeerNode`.
@@ -664,6 +665,31 @@ import { createSwarmService } from './mesh-swarm.mjs'
  *   (`heartbeatMs`/`electionTimeoutMs`/`swimOptions`/`swimEnvelopeType`/
  *   `heartbeatEnvelopeType`/`membershipEnvelopeType`/`taskEnvelopeType`/
  *   `accessResource`/`requestTimeoutMs`) -- see that function's own doc comment.
+ * @param {boolean} [options.enableAgentSwarm=false] - Attach
+ *   `mesh-agent-swarm.mjs`'s `createAgentSwarmService()` (issue #124): real
+ *   multi-agent goal decomposition/assignment/execution wrapping
+ *   `peer-agent-swarm.mjs`'s `AgentSwarmCoordinator`, with `executeSubTask()`
+ *   now genuinely reaching a REMOTE assignee over a real
+ *   `'agent-swarm-request'`/`'agent-swarm-response'` wire protocol (self-
+ *   assigned subtasks stay local, no network round-trip). Peer-initiated
+ *   inbound execute requests are individually authorized via
+ *   `registry.checkAccess()` -- see that function's own doc comment for the
+ *   full design. Distinct from, and independently wireable from,
+ *   `enableSwarm`/`enableCompute` -- `AgentSwarmCoordinator` has no code
+ *   dependency on either `SwarmCoordinator` or `FederatedCompute` (see
+ *   `mesh-agent-swarm.mjs`'s header for the corrected grounding). Attached to
+ *   the returned node as `node.agentSwarm` (the `attachService()` handle --
+ *   also reachable via `node.services.get('agent-swarm')`).
+ * @param {object} [options.agentSwarmOptions] - Required when `enableAgentSwarm`.
+ *   Passed straight through to `createAgentSwarmService()`
+ *   (`agentProxy`/`dispatchTimeoutMs`/`envelopeType`/`accessResource`/
+ *   `accessAction`/`onLog`) -- see that function's own doc comment.
+ *   `agentSwarmOptions.agentProxy` (must implement `async chat(podId,
+ *   message) -> string`) is required; this function throws if it's missing
+ *   (issue #86's resolved "bring-your-own, required, no default" execution-
+ *   backend decision -- see `mesh-agent-swarm.mjs`'s header for why this one
+ *   is checked twice, once here and once inside `createAgentSwarmService()`
+ *   itself).
  * @returns {Promise<PeerNode>} A booted (unless `skipBoot`) PeerNode, with
  *   `node.meshManager` (`WebRTCMeshManager`), `node.signaling`
  *   (`MeshSignalingChannel`), and `node.transportNegotiator` (the real,
@@ -774,6 +800,8 @@ export async function createMeshNode(options = {}) {
     terminalOptions,
     enableSwarm = false,
     swarmOptions,
+    enableAgentSwarm = false,
+    agentSwarmOptions,
   } = options
 
   if (!signalingTransport) {
@@ -1295,6 +1323,40 @@ export async function createMeshNode(options = {}) {
     const swarmHandle = attachService(node, servicesNetwork, swarmDescriptor)
     node.services.set(swarmHandle.name, swarmHandle)
     node.swarm = swarmHandle
+  }
+
+  // -- Multi-agent goal decomposition/assignment/execution (opt-in,
+  // issue #124) --------------------------------------------------------------
+  // Attached the same way every other opt-in service above is
+  // (attachService()) -- see mesh-agent-swarm.mjs's own header comment for
+  // the full design (the meshAgentProxy local-vs-remote wrapper that gives
+  // executeSubTask() a real cross-peer dispatch path, and why agentProxy is
+  // required unconditionally, unlike enableVerification's optional
+  // executeFn). Mirrors enableCompute's/enableTerminal's required-dependency
+  // check: AgentSwarmCoordinator's own constructor throws on a missing
+  // agentProxy, but this file always hands it an always-truthy
+  // meshAgentProxy wrapper, so that check alone can never catch a caller who
+  // omitted the real one -- check explicitly here too, before any service is
+  // attached.
+  if (enableAgentSwarm) {
+    if (!agentSwarmOptions?.agentProxy) {
+      throw new Error(
+        'createMeshNode: options.agentSwarmOptions.agentProxy is required when enableAgentSwarm is true ' +
+        '(must implement async chat(podId, message) -> string -- see peer-agent-swarm.mjs\'s AgentSwarmCoordinator). ' +
+        'No default agentProxy is provided by this package.',
+      )
+    }
+    const agentSwarmDescriptor = createAgentSwarmService({
+      agentProxy: agentSwarmOptions.agentProxy,
+      dispatchTimeoutMs: agentSwarmOptions?.dispatchTimeoutMs,
+      envelopeType: agentSwarmOptions?.envelopeType,
+      accessResource: agentSwarmOptions?.accessResource,
+      accessAction: agentSwarmOptions?.accessAction,
+      onLog: agentSwarmOptions?.onLog ?? onLog,
+    })
+    const agentSwarmHandle = attachService(node, servicesNetwork, agentSwarmDescriptor)
+    node.services.set(agentSwarmHandle.name, agentSwarmHandle)
+    node.agentSwarm = agentSwarmHandle
   }
 
   return node
