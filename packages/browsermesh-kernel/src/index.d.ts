@@ -395,11 +395,33 @@ export interface MeshCapabilityView {
   onReceive(cb: (peerId: string, data: unknown, meta: { sessionId: string; transport: string }) => void): () => void;
 }
 
+/**
+ * A tenant-scoped view of a real network provider, returned by `Kernel#networkFor()`.
+ * For a real `@johnhenry/browsermesh-netway` provider, this is a `ScopedNetwork` --
+ * a policy-checked wrapper enforcing `PolicyEngine` capability tags (e.g.
+ * `'tcp:connect'`, `'loopback'`) on every operation, throwing `PolicyDeniedError`
+ * for anything outside the granted tag set. `browsermesh-kernel` has zero
+ * dependency on `browsermesh-netway`, so this is intentionally typed as a loose
+ * duck-typed shape rather than importing `ScopedNetwork` directly.
+ */
+export interface NetworkCapabilityView {
+  connect(address: string): Promise<unknown>;
+  listen(address: string): Promise<unknown>;
+  sendDatagram(address: string, data: Uint8Array): Promise<void>;
+  bindDatagram(address: string): Promise<unknown>;
+  resolve(name: string, type?: string): Promise<string[]>;
+}
+
 /** Frozen capabilities object returned by buildCaps(). */
 export interface Caps {
   readonly clock?: Clock;
   readonly rng?: RNG;
-  readonly net?: true;
+  /**
+   * `true` (bare marker) when the kernel has no network provider wired, or a
+   * {@link NetworkCapabilityView} when it does (see `Kernel`'s `network` constructor
+   * option and `Kernel#networkFor()`).
+   */
+  readonly net?: true | NetworkCapabilityView;
   readonly fs?: true;
   readonly ipc?: ServiceRegistry;
   readonly stdio?: true;
@@ -415,12 +437,28 @@ export interface Caps {
   readonly _granted: readonly string[];
 }
 
+/** Options accepted by `buildCaps()` beyond the kernel/grantedCaps/tenantId triple. */
+export interface BuildCapsOptions {
+  /**
+   * Network provider capability tags to request via `Kernel#networkFor()` for a
+   * granted NET capability. Defaults to `['loopback']` when omitted -- deliberately
+   * narrow; never defaults to `CAPABILITY.ALL`.
+   */
+  networkCapabilities?: string[];
+}
+
 /**
  * Build a frozen capabilities object from granted capability tags.
  * Each granted tag maps to the corresponding kernel subsystem reference.
- * @param tenantId - Threaded through to `Kernel#meshFor()` for a granted MESH capability.
+ * @param tenantId - Threaded through to `Kernel#meshFor()`/`Kernel#networkFor()` for
+ *   granted MESH/NET capabilities.
  */
-export declare function buildCaps(kernel: Kernel, grantedCaps: string[], tenantId?: string): Readonly<Caps>;
+export declare function buildCaps(
+  kernel: Kernel,
+  grantedCaps: string[],
+  tenantId?: string,
+  opts?: BuildCapsOptions
+): Readonly<Caps>;
 
 /**
  * Require that a capability tag is present in a caps object.
@@ -828,6 +866,12 @@ export interface CreateTenantOptions {
   env?: Record<string, string>;
   /** Tenant stdio streams. */
   stdio?: StdioOptions;
+  /**
+   * Network provider capability tags to request when the NET capability is granted
+   * and a network provider is wired -- see `Kernel#networkFor()` and `buildCaps()`.
+   * Defaults to `['loopback']`.
+   */
+  networkCapabilities?: string[];
 }
 
 /**
@@ -844,6 +888,16 @@ export interface KernelMeshProvider {
   };
 }
 
+/**
+ * Duck-typed network provider accepted by `Kernel`'s `network` constructor option.
+ * Deliberately not imported from any `@johnhenry/browsermesh-*` package -- same
+ * zero-dependency philosophy as `KernelMeshProvider`. `browsermesh-netway`'s
+ * `VirtualNetwork` already satisfies this shape as-is.
+ */
+export interface KernelNetworkProvider {
+  scope(opts: { capabilities?: string[]; policy?: Function }): NetworkCapabilityView;
+}
+
 /** Options for the Kernel constructor. */
 export interface KernelOptions {
   /** Clock instance (defaults to real clock). */
@@ -858,6 +912,8 @@ export interface KernelOptions {
   resourceOpts?: ResourceTableOptions;
   /** Real mesh provider backing the MESH capability. Omit to leave MESH as a bare boolean marker. */
   mesh?: KernelMeshProvider;
+  /** Real network provider backing the NET capability. Omit to leave NET as a bare boolean marker. */
+  network?: KernelNetworkProvider;
 }
 
 /** The Kernel facade. Creates and wires all subsystems. */
@@ -885,6 +941,15 @@ export declare class Kernel {
    * if no mesh provider was injected via the constructor.
    */
   meshFor(tenantId: string): MeshCapabilityView | null;
+
+  /** The raw injected network provider, or `null`. Ambient/trusted access -- see `networkFor()`. */
+  readonly network: KernelNetworkProvider | null;
+
+  /**
+   * Get a tenant-scoped view of the network capability, scoped to exactly the requested
+   * capability tags. Returns `null` if no network provider was injected via the constructor.
+   */
+  networkFor(tenantId: string, opts?: { capabilities?: string[]; policy?: Function }): NetworkCapabilityView | null;
 
   /** The kernel clock. */
   readonly clock: Clock;

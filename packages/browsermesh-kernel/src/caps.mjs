@@ -18,13 +18,21 @@ import { CapabilityDeniedError } from './errors.mjs';
  * @param {Object} kernel - Kernel instance with subsystem accessors.
  * @param {string[]} grantedCaps - Array of KERNEL_CAP tags to grant.
  * @param {string} [tenantId] - Tenant identifier, threaded through to
- *   {@link Kernel#meshFor} (if present on `kernel`) so a granted MESH
- *   capability resolves to a tenant-scoped mesh view rather than ambient
- *   access. Safe to omit for callers/mocks that don't wire mesh support --
- *   `caps.mesh` then falls back to the pre-Phase-4 bare boolean marker.
+ *   {@link Kernel#meshFor} and {@link Kernel#networkFor} (if present on `kernel`)
+ *   so a granted MESH/NET capability resolves to a tenant-scoped view rather than
+ *   ambient access. Safe to omit for callers/mocks that don't wire mesh/network
+ *   support -- `caps.mesh`/`caps.net` then fall back to their bare boolean markers.
+ * @param {Object} [opts={}]
+ * @param {string[]} [opts.networkCapabilities] - Network provider capability tags
+ *   (e.g. `browsermesh-netway`'s `CAPABILITY.TCP_CONNECT`/`CAPABILITY.LOOPBACK`/etc.)
+ *   to request via {@link Kernel#networkFor} for a granted NET capability. Defaults
+ *   to `['loopback']` when omitted -- a deliberately narrow default (real outbound
+ *   TCP/UDP/DNS access is NOT implied just by holding NET; a caller must opt in with
+ *   a wider tag set, e.g. via `Kernel#createTenant`'s `networkCapabilities` option --
+ *   never defaults to `CAPABILITY.ALL`, which would defeat the point of scoping).
  * @returns {Readonly<Object>} Frozen capabilities object.
  */
-export function buildCaps(kernel, grantedCaps, tenantId) {
+export function buildCaps(kernel, grantedCaps, tenantId, { networkCapabilities } = {}) {
   const caps = {};
   const granted = new Set(grantedCaps);
   const hasAll = granted.has(KERNEL_CAP.ALL);
@@ -36,7 +44,17 @@ export function buildCaps(kernel, grantedCaps, tenantId) {
     caps.rng = kernel.rng;
   }
   if (hasAll || granted.has(KERNEL_CAP.NET)) {
-    caps.net = true; // Network access marker — actual net object provided by netway
+    // When the kernel was constructed with a real network provider (see
+    // Kernel's `network` constructor option / `networkFor()`), hand the tenant a
+    // real, policy-checked ScopedNetwork instead of a bare marker -- narrowed to
+    // exactly `networkCapabilities` (default `['loopback']`, NOT `CAPABILITY.ALL`).
+    // Falls back to the historical bare boolean marker when no network provider is
+    // wired (e.g. plain `new Kernel()`, or a duck-typed mock kernel in tests), so
+    // existing callers that only check truthiness are unaffected.
+    const netView = typeof kernel.networkFor === 'function'
+      ? kernel.networkFor(tenantId, { capabilities: networkCapabilities || ['loopback'] })
+      : null;
+    caps.net = netView || true;
   }
   if (hasAll || granted.has(KERNEL_CAP.FS)) {
     caps.fs = true; // FS access marker

@@ -11,6 +11,16 @@
  * obtain a {@link ScopedNetwork} that enforces capability-based policies on
  * every operation.
  *
+ * This module is purely a LOCAL, same-process capability gate: `.scope()` checks
+ * protocol-operation tags (`'tcp:connect'`, `'udp:bind'`, `'loopback'`, etc.) against
+ * an opaque caller-held `scopeId` -- there is no concept of peer identity here (contrast
+ * with `browsermesh-apps`'s `PeerRegistry.checkAccess()`, which gates mesh send/receive
+ * per remote peer). The wired entry point is `@johnhenry/browsermesh-kernel`'s
+ * `Kernel#networkFor(tenantId, {capabilities})`, which calls `.scope()` on an injected
+ * `VirtualNetwork` to hand sandboxed tenant code a real, narrowed `ScopedNetwork` as the
+ * `caps.net` capability view -- the same shape `Kernel#meshFor()` established for
+ * `caps.mesh`. See `browsermesh-kernel/src/kernel.mjs` and `caps.mjs`.
+ *
  * @module virtual-network
  */
 

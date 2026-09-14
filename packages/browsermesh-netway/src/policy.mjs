@@ -13,6 +13,11 @@
  * request and capability set and makes the final allow/deny decision, enabling
  * dynamic rules like rate limiting or address filtering.
  *
+ * Scopes are keyed by an opaque `scopeId`, not by peer identity -- this engine has no
+ * awareness of remote peers at all. It's the wired implementation behind
+ * `@johnhenry/browsermesh-kernel`'s `Kernel#networkFor()`, which creates one scope per
+ * `caps.net` view handed to sandboxed tenant code.
+ *
  * @module policy
  */
 

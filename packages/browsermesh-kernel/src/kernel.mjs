@@ -34,6 +34,7 @@ export class Kernel {
   #services;
   #signals;
   #mesh;
+  #network;
   #tenants = new Map();
   #tenantCounter = 0;
   #startTime;
@@ -56,8 +57,18 @@ export class Kernel {
    *   `browsermesh-apps/src/kernel-mesh.mjs`, the composition helper that
    *   wires a real `PeerNode` in). Omit to leave the MESH capability as the
    *   pre-Phase-4 bare boolean marker.
+   * @param {Object} [opts.network] - Optional real network provider backing the NET
+   *   capability. Same zero-dependency philosophy as `opts.mesh`: this is
+   *   deliberately a duck-typed interface, not an imported class, so the kernel
+   *   has no static dependency on `@johnhenry/browsermesh-netway`. Callers must
+   *   pass an object shaped like:
+   *   `{ scope({capabilities, policy}): { connect, listen, sendDatagram,
+   *      bindDatagram, resolve } }`.
+   *   `browsermesh-netway`'s `VirtualNetwork` already satisfies this shape as-is
+   *   (its `.scope()` returns a `ScopedNetwork`). Omit to leave the NET
+   *   capability as the historical bare boolean marker.
    */
-  constructor({ clock, rng, tracerOpts, loggerOpts, resourceOpts, mesh } = {}) {
+  constructor({ clock, rng, tracerOpts, loggerOpts, resourceOpts, mesh, network } = {}) {
     this.#clock = clock || new Clock();
     this.#rng = rng || new RNG();
     this.#resources = new ResourceTable(resourceOpts);
@@ -67,6 +78,7 @@ export class Kernel {
     this.#services = new ServiceRegistry();
     this.#signals = new SignalController();
     this.#mesh = mesh || null;
+    this.#network = network || null;
     this.#startTime = this.#clock.nowWall();
   }
 
@@ -156,6 +168,50 @@ export class Kernel {
     });
   }
 
+  /**
+   * The raw injected network provider, or `null` if none was supplied to the constructor.
+   *
+   * This is ambient, trusted access -- like {@link Kernel#mesh}, it does NOT apply any
+   * capability policy. It exists for kernel-internal use and trusted composition code.
+   * Tenant-facing code should use {@link Kernel#networkFor} instead, which returns a
+   * narrowed, policy-checked view scoped to a specific set of capability tags.
+   */
+  get network() { return this.#network; }
+
+  /**
+   * Get a tenant-scoped view of the network capability, scoped to exactly the requested
+   * capability tags.
+   *
+   * Returns `null` if no network provider was injected via the constructor (the NET
+   * capability then falls back to a bare boolean marker in {@link buildCaps} -- the same
+   * fallback shape {@link Kernel#meshFor} uses for MESH). When a provider IS present, this
+   * delegates directly to the provider's own `scope({capabilities, policy})` -- for a real
+   * `browsermesh-netway` `VirtualNetwork`, that returns a `ScopedNetwork` which enforces its
+   * `PolicyEngine` capability checks (e.g. `'tcp:connect'`, `'loopback'`) on every socket
+   * operation, throwing `PolicyDeniedError` for anything outside the granted tag set. Unlike
+   * {@link Kernel#meshFor}, which always exposes the same fixed `{send, onReceive}` shape,
+   * the exact capability tags are caller-supplied per call -- the kernel itself has no
+   * opinion on what a `'net'`-tag string means, only the injected provider does.
+   *
+   * @param {string} tenantId - Tenant identifier the view is being created for. Not
+   *   currently used to gate access here (grant-vs-not-granted is enforced by
+   *   {@link buildCaps}, which only calls this when NET was actually granted) -- accepted
+   *   for API symmetry with {@link Kernel#meshFor} and to leave room for future
+   *   tenant-attributed error/audit context.
+   * @param {Object} [opts={}]
+   * @param {string[]} [opts.capabilities=[]] - Capability tags to scope the view to (values
+   *   depend on the injected provider; for `browsermesh-netway` these are `CAPABILITY.*`
+   *   tags like `'tcp:connect'`, `'udp:bind'`, `'loopback'`).
+   * @param {Function} [opts.policy] - Optional custom policy callback, forwarded as-is to
+   *   the provider's `scope()`.
+   * @returns {Object|null} A policy-checked scoped network view, or `null` if no provider
+   *   was injected.
+   */
+  networkFor(tenantId, { capabilities = [], policy } = {}) {
+    if (!this.#network) return null;
+    return this.#network.scope({ capabilities, policy });
+  }
+
   /** The kernel clock. */
   get clock() { return this.#clock; }
 
@@ -193,11 +249,17 @@ export class Kernel {
    * @param {string[]} [opts.capabilities=[]] - KERNEL_CAP tags to grant.
    * @param {Record<string,string>} [opts.env={}] - Tenant environment variables.
    * @param {Object} [opts.stdio] - Tenant stdio streams ({stdin, stdout, stderr}).
+   * @param {string[]} [opts.networkCapabilities] - Network provider capability tags
+   *   (e.g. `browsermesh-netway`'s `CAPABILITY.*`) to request when the NET capability
+   *   is granted and a network provider is wired -- see {@link buildCaps}. Defaults to
+   *   `['loopback']` (least-privilege: real TCP/UDP/DNS access requires explicitly
+   *   opting in tenant-by-tenant, rather than every NET-capable tenant silently getting
+   *   `CAPABILITY.ALL`).
    * @returns {{ id: string, caps: Readonly<Object>, env: Environment, stdio: Stdio, signals: SignalController }}
    */
-  createTenant({ capabilities = [], env = {}, stdio } = {}) {
+  createTenant({ capabilities = [], env = {}, stdio, networkCapabilities } = {}) {
     const id = `tenant_${++this.#tenantCounter}`;
-    const caps = buildCaps(this, capabilities, id);
+    const caps = buildCaps(this, capabilities, id, { networkCapabilities });
     const tenantEnv = new Environment(env);
     const tenantStdio = new Stdio(stdio || {});
     const tenantSignals = new SignalController();
