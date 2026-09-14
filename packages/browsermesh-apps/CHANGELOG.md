@@ -1,5 +1,56 @@
 # Changelog
 
+## 0.3.0
+
+### Minor Changes
+
+- **Mesh-native CloudStorage**: a full S3-like, encrypted, replicated object store with no server, built entirely from mesh primitives.
+
+  - `src/mesh-service.mjs` (new): the `MeshService` attach convention (`{name, attach(peerNode, ctx) -> {teardown, api}}`) every service below is built on, plus an observability event bus (`ctx.emit()`/`handle.on()`/`handle.onEvent()`) and async-rejection isolation on `ctx.onIncomingData()` (a throwing/rejecting handler can no longer crash the shared dispatch loop or produce an unhandled rejection).
+  - `src/cloud-storage-backend.mjs` (new): local encrypted (AES-256-GCM) object storage — `put`/`get`/`delete`/`list`/`head` over content-addressed, chunked (256KB) ciphertext, backed by `@johnhenry/browsermesh-sync`'s new `IndexedDBChunkStore`.
+  - `src/grant-log.mjs` (new): a signed, replicated append-log for multi-peer bucket authorization (`s3:<bucket>:{read,write,delete,list,admin}` scopes), replaying into each peer's own unmodified `PeerRegistry`.
+  - `src/key-distribution.mjs` (new): per-recipient encrypted bucket-key delivery on grant, built on `@johnhenry/browsermesh-core`'s existing `wrapKeyForMember()`/`unwrapKeyForMember()` (X25519 ECDH + AES-GCM).
+  - `src/manifest-sync.mjs` (new): ACL-gated cross-peer manifest CRDT sync — a remote write is verified against the live `GrantLog` state before it's ever merged, not after.
+  - `src/chunk-replication.mjs` (new): real cross-peer chunk push/pull with a `{durability: 'local-only'|'replicated', replicatedTo}` contract — `put()` never blocks or throws on an offline replica.
+  - `src/cloud-storage.mjs` (new): the ergonomic `CloudStorage` SDK class composing all of the above behind `put`/`get`/`delete`/`list` plus `grant`/`revoke`/`designateReplica`.
+  - `packages/browsermesh-sync/src/storage-indexeddb-chunks.mjs` (new, `browsermesh-sync` package): `IndexedDBChunkStore`, a durable, drop-in-compatible counterpart to the existing in-memory `ChunkStore`.
+  - Proven over real WebRTC in `test/real-peer/cloud-storage.test.mjs`, not just mocked transport.
+
+- **`fetch()`/`WebSocket`-shaped mesh access**: familiar Web APIs for reaching mesh-addressable resources.
+
+  - `src/mesh-rpc.mjs` (new): request/response mesh-RPC transport (`createMeshRpcService()`), correlation IDs + timeouts, a clean `501` for an unregistered handler rather than a silent drop.
+  - `src/mesh-fetch.mjs` (new): `createBrowserMeshFetch(meshRpcApi)` — a `fetch(url, init)`-shaped function for `mesh://podId/path` addresses, matching real `fetch()`'s reject-on-network-failure/resolve-on-HTTP-error semantics.
+  - `src/mesh-websocket.mjs` (new): `BrowserMeshWebSocket`, a persistent duplex channel over the mesh with the standard `WebSocket` instance surface (`readyState`/`onopen`/`onmessage`/`send()`/`close()`), plus `createMeshWebSocketService()` for the accepting side.
+
+- **Mesh-native key-value store and observability**: a second, smaller `MeshService` to prove the pattern generalizes, plus real event visibility.
+
+  - `src/mesh-kv.mjs` (new): `MeshKv`, a small CRDT-backed replicated key-value store — no chunking, no encryption, reusing `GrantLog`'s ACL-gate-before-merge pattern directly.
+  - `src/observability-bridge.mjs` (new): gives the previously-dormant `visualizations.mjs` (`TopologySnapshot`/`TrustHeatmap`/`VisualizationExporter`) a real data source — grants, replication activity, and connection events now flow into it live via `ctx.emit()`.
+
+- **Nine previously-unwired application-layer modules wired as real `MeshService`s**, and three more migrated off the dead `PeerSession`/`SessionManager` architecture (now deleted):
+
+  - `src/mesh-timestamp.mjs`, `src/mesh-health.mjs`, `src/peer-routing.mjs` (`createMeshRoutingService`, real multi-hop forwarding), `src/peer-escrow.mjs` (`createEscrowService`), `src/mesh-verification.mjs`, `src/mesh-torrent.mjs`, `src/peer-ipfs.mjs` — all wired for the first time.
+  - `src/peer-files.mjs`, `src/peer-chat.mjs`, `src/peer-terminal.mjs` — migrated from the unwired `PeerSession` class onto `MeshService`; `src/peer-session.mjs` deleted entirely once nothing referenced it.
+  - `src/mesh-compute.mjs`, `src/mesh-agent-swarm.mjs` — wired with a required, caller-supplied executor (`executeFn`/`agentProxy.chat`) rather than any default remote-code-execution backend.
+  - `src/mesh-swarm.mjs` (new): the real SWIM failure-detection algorithm, leader election, and task distribution — `swarm.mjs`'s `SWARM_JOIN`/`SWARM_LEAVE`/`SWARM_HEARTBEAT`/`SWARM_TASK_ASSIGN` constants get their first real use.
+  - `src/mesh-hardening.mjs`, `src/mesh-dht.mjs`, `src/mesh-keepalive.mjs` — real transport retry/backoff/failover, DHT peer discovery, and ping/pong liveness detection, all opt-in via `createMeshNode()`.
+  - `src/audit.mjs`'s `AuditChain` wired into `createMeshNode({enableAudit})` — real, verifiable signed session audit entries.
+
+- **A minimal, bring-your-own-LLM agent tool-calling runtime**: no LLM SDK dependency added, ever.
+
+  - `src/agent-runtime.mjs` (new): `createAgentRuntime({registry, llmFn})` — a real tool-selection/dispatch loop; `llmFn` is required and caller-supplied (matching `mesh-compute.mjs`'s `executeFn`/`mesh-agent-swarm.mjs`'s `agentProxy` precedent).
+  - `src/compat.mjs`: added `BrowserToolRegistry`, referenced in JSDoc across three files for a long time but never actually defined until now.
+  - `src/mesh-orchestrator.mjs` (new): `MeshOrchestrator` (pod deploy/drain/discovery across the mesh) wired as a real, `checkAccess()`-gated `MeshService`.
+  - `src/mesh-orchestrator-tools.mjs` (new): registers the 8 real `Meshctl*Tool` classes into a `BrowserToolRegistry`, gating risky actions through the service's checked `api`, not the raw class.
+  - `src/kernel.mjs`'s `caps.net` (`@johnhenry/browsermesh-kernel`) upgraded from a bare boolean to a real, capability-scoped `ScopedNetwork` view via the new `Kernel#networkFor()`, mirroring `caps.mesh`/`meshFor()`.
+
+### Patch Changes
+
+- Fixed an unhandled-promise-rejection gap in `ctx.onIncomingData()`: it only caught synchronous throws, but every real handler in this package is `async`, so a failing handler could crash the dispatch loop instead of being isolated and logged like every other error path already was.
+- Fixed a real open-ack/`onIncomingConnection` ordering race in `BrowserMeshWebSocket`: the accepting side could send its ack before the application had a chance to attach message handlers to the new session, silently losing a fast peer's first message.
+- Fixed `FederatedCompute`'s dispatch retry loop continuing to run after `mesh-compute.mjs`'s `teardown()` — added a real `FederatedCompute#destroy()` cancellation path.
+- Corrected `peer-ipfs.mjs`'s `IPFSStore` doc claims: it constructs a Helia instance but never actually used it for any storage operation — now documented as mesh-local content-addressed storage, not real IPFS-network interop.
+
 ## 0.2.0
 
 ### Minor Changes

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.0.4
+
+### Patch Changes
+
+- Documentation only: corrected `sw-routing.mjs`'s stale `STATUS: INTEGRATED — wired into ClawserPod lifecycle` header comment now that `parseMeshRequest()`/`MeshFetchRouter` has a real caller — `@johnhenry/browsermesh-apps`'s `browserMeshFetch()` reuses `parseMeshRequest()` directly. No code/behavior change in this package.
+
 ## 0.0.3
 
 ### Patch Changes

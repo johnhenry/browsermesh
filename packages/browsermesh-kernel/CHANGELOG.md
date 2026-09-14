@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.0
+
+### Minor Changes
+
+- `caps.net` was a bare boolean marker — tenant code could check whether networking was allowed, but got no actual usable network object, unlike `caps.mesh`, which already returns a real, capability-scoped view.
+
+  `Kernel` now accepts an optional, duck-typed `network` constructor option (a `VirtualNetwork` or anything shaped like `{ scope({capabilities, policy}) }`), and `Kernel#networkFor(tenantId, {capabilities})` mirrors `meshFor()`'s shape exactly: returns `null` when no provider is wired, otherwise delegates to the provider's `scope()` to hand back a real, policy-checked `ScopedNetwork`. `buildCaps()` wires `caps.net` to `networkFor()` the same way `caps.mesh` already wires to `meshFor()`, falling back to the historical bare `true` marker when no provider exists. Capability tags default to `['loopback']` (never unscoped `ALL`) unless a tenant explicitly opts into a wider set via `createTenant()`'s new `networkCapabilities` option, so granting `NET` never silently hands out unscoped network access.
+
 ## 0.1.0
 
 ### Minor Changes
