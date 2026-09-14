@@ -1,17 +1,40 @@
 /**
- * clawser-mesh-marketplace.js -- Service marketplace for BrowserMesh.
+ * marketplace.mjs -- Service marketplace for BrowserMesh.
  *
  * Publish, discover, and review services offered by mesh peers. Includes
  * text search, category/tag filtering, rating aggregation, and an efficient
  * inverted index for O(1) lookups.
  *
- * No browser-only imports at module level.
+ * ---------------------------------------------------------------------------
+ * `Marketplace` predated this package's `MeshService` convention
+ * (`mesh-service.mjs`) and, until now, stayed purely local: no
+ * `sendTo`/`onIncomingData`/`attachService()` anywhere, used by nothing
+ * else in this package. Its observability surface used three hand-rolled
+ * callback-array methods (`onPublish`/`onUnpublish`/`onReview`, no
+ * unsubscribe). Modernized to use `mesh-service.mjs`'s `createEventBus()`
+ * instead -- `on(event, cb)`/`onEvent(cb)` replace the three named methods
+ * outright (not shimmed: nothing outside this file's own tests ever called
+ * them, and no other modernized class in this family -- `CloudStorage`,
+ * `MeshKv` -- has per-event named methods either; adding them back here
+ * would be a new, inconsistent pattern, not a restored one).
  *
- * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-mesh-marketplace.test.mjs
+ * The `LISTING_*`/`REVIEW_*` constants below are `browsermesh-primitives`
+ * wire-registry codes, re-exported but never used as an `envelope.type` --
+ * `MeshService`'s `ctx.onIncomingData()` filters on a plain string, which
+ * this numeric registry is structurally incompatible with. Real mesh
+ * wiring (network-searchable listings) is a later addition to this file,
+ * not part of this pass, and will mint its own string envelope type rather
+ * than repurpose these, matching `mesh-swarm.mjs`'s identical precedent
+ * for the same situation.
+ *
+ * `Marketplace` itself is, and stays, a fully open directory: no
+ * `GrantLog`/ACL on publish, search, or review-read.
+ *
+ * No browser-only imports at module level.
  */
 
 import { MESH_TYPE } from '@johnhenry/browsermesh-primitives';
+import { createEventBus } from './mesh-service.mjs';
 
 // ---------------------------------------------------------------------------
 // Wire constants (re-exported from canonical registry)
@@ -276,11 +299,8 @@ export class Marketplace {
   #reviewIds = new Set();
   /** @type {MarketplaceIndex} */
   #index = new MarketplaceIndex();
-
-  // Callbacks
-  #onPublish = [];
-  #onUnpublish = [];
-  #onReview = [];
+  /** @type {import('./mesh-service.mjs').EventBus} */
+  #events = createEventBus();
 
   /**
    * @param {object} opts
@@ -311,7 +331,7 @@ export class Marketplace {
     }
     this.#listings.set(listing.id, listing);
     this.#index.addListing(listing);
-    for (const cb of this.#onPublish) cb(listing);
+    this.#events.emit('marketplace:listing-published', listing);
     return listing.id;
   }
 
@@ -328,7 +348,7 @@ export class Marketplace {
     }
     this.#listings.delete(listingId);
     this.#index.removeListing(listingId);
-    for (const cb of this.#onUnpublish) cb(listingId);
+    this.#events.emit('marketplace:listing-unpublished', listingId);
     return true;
   }
 
@@ -454,7 +474,7 @@ export class Marketplace {
     this.#reviews.get(review.listingId).push(review);
     this.#reviewIds.add(review.id);
 
-    for (const cb of this.#onReview) cb(review);
+    this.#events.emit('marketplace:review-added', review);
   }
 
   /**
@@ -510,27 +530,30 @@ export class Marketplace {
     return active.slice(0, limit).map(e => e.listing);
   }
 
-  // -- Callbacks ------------------------------------------------------------
+  // -- Observability ----------------------------------------------------------
 
   /**
-   * @param {function(ServiceListing)} cb
+   * Subscribe to exactly one event name: `'marketplace:listing-published'`
+   * (data: the `ServiceListing`), `'marketplace:listing-unpublished'`
+   * (data: the `listingId` string), or `'marketplace:review-added'`
+   * (data: the `ServiceReview`) -- the same payloads the old
+   * `onPublish`/`onUnpublish`/`onReview` callbacks received, now delivered
+   * through `mesh-service.mjs`'s generic bus.
+   * @param {string} event
+   * @param {(data: object, event: string) => void} cb
+   * @returns {() => void} unsubscribe
    */
-  onPublish(cb) {
-    this.#onPublish.push(cb);
+  on(event, cb) {
+    return this.#events.on(event, cb);
   }
 
   /**
-   * @param {function(string)} cb - receives listingId
+   * Subscribe to every `marketplace:*` event, regardless of name.
+   * @param {(event: string, data: object) => void} cb
+   * @returns {() => void} unsubscribe
    */
-  onUnpublish(cb) {
-    this.#onUnpublish.push(cb);
-  }
-
-  /**
-   * @param {function(ServiceReview)} cb
-   */
-  onReview(cb) {
-    this.#onReview.push(cb);
+  onEvent(cb) {
+    return this.#events.onEvent(cb);
   }
 
   // -- Stats ----------------------------------------------------------------

@@ -655,30 +655,53 @@ describe('Marketplace', () => {
     assert.equal(mp.getFeatured().length, 0);
   });
 
-  // -- callbacks ------------------------------------------------------------
+  // -- events (mesh-service.mjs's createEventBus(), replacing the old
+  // onPublish/onUnpublish/onReview callback-array methods) ------------------
 
-  it('onPublish fires when listing is published', () => {
+  it("on('marketplace:listing-published', ...) fires when a listing is published", () => {
     let fired = null;
-    mp.onPublish((listing) => { fired = listing; });
+    mp.on('marketplace:listing-published', (listing) => { fired = listing; });
     const l = makeListing({ id: 'cb1' });
     mp.publish(l);
     assert.equal(fired.id, 'cb1');
   });
 
-  it('onUnpublish fires when listing is unpublished', () => {
+  it("on('marketplace:listing-unpublished', ...) fires with the listingId when a listing is unpublished", () => {
     let fired = null;
-    mp.onUnpublish((listingId) => { fired = listingId; });
+    mp.on('marketplace:listing-unpublished', (listingId) => { fired = listingId; });
     mp.publish(makeListing({ id: 'cb2', providerPodId: 'local-pod' }));
     mp.unpublish('cb2');
     assert.equal(fired, 'cb2');
   });
 
-  it('onReview fires when review is added', () => {
+  it("on('marketplace:review-added', ...) fires when a review is added", () => {
     let fired = null;
-    mp.onReview((review) => { fired = review; });
+    mp.on('marketplace:review-added', (review) => { fired = review; });
     mp.publish(makeListing({ id: 'svc-1', providerPodId: 'pod-x' }));
     mp.addReview(makeReview({ id: 'rcb', listingId: 'svc-1', reviewerPodId: 'pod-y' }));
     assert.equal(fired.id, 'rcb');
+  });
+
+  it('on() returns an unsubscribe function', () => {
+    let count = 0;
+    const unsubscribe = mp.on('marketplace:listing-published', () => { count++; });
+    mp.publish(makeListing({ id: 'unsub-1' }));
+    unsubscribe();
+    mp.publish(makeListing({ id: 'unsub-2' }));
+    assert.equal(count, 1);
+  });
+
+  it('onEvent() sees every marketplace:* event regardless of name', () => {
+    const seen = [];
+    mp.onEvent((event) => { seen.push(event); });
+    mp.publish(makeListing({ id: 'fh-1', providerPodId: 'local-pod' }));
+    mp.addReview(makeReview({ id: 'fh-r1', listingId: 'fh-1', reviewerPodId: 'pod-y' }));
+    mp.unpublish('fh-1');
+    assert.deepEqual(seen, [
+      'marketplace:listing-published',
+      'marketplace:review-added',
+      'marketplace:listing-unpublished',
+    ]);
   });
 
   // -- getStats -------------------------------------------------------------
