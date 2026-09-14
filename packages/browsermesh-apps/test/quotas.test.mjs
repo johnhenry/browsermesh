@@ -453,6 +453,47 @@ describe('QuotaEnforcer', () => {
       assert.equal(e.listViolations().length, 1);
     });
 
+    it("on('quota:violation-detected', ...) fires with the same shape as the old onViolation callback", () => {
+      let captured = null;
+      enforcer.on('quota:violation-detected', (v) => { captured = v; });
+      mgr.setQuota('pod1', { cpuMs: 50 });
+      enforcer.recordUsage('pod1', 'cpuMs', 100);
+      assert.ok(captured);
+      assert.equal(captured.podId, 'pod1');
+      assert.equal(captured.resource, 'cpuMs');
+    });
+
+    it('supports multiple listeners on the same event (real fan-out, unlike the old single-callback opts.onViolation)', () => {
+      const seen = [];
+      enforcer.on('quota:violation-detected', (v) => seen.push('a:' + v.podId));
+      enforcer.on('quota:violation-detected', (v) => seen.push('b:' + v.podId));
+      mgr.setQuota('pod1', { cpuMs: 10 });
+      enforcer.recordUsage('pod1', 'cpuMs', 20);
+      assert.deepEqual(seen, ['a:pod1', 'b:pod1']);
+    });
+
+    it('on() returns an unsubscribe function, and swallows a throwing listener the same way the old opts.onViolation did', () => {
+      let count = 0;
+      const unsubscribe = enforcer.on('quota:violation-detected', () => {
+        count++;
+        throw new Error('boom');
+      });
+      mgr.setQuota('pod1', { cpuMs: 10 });
+      enforcer.recordUsage('pod1', 'cpuMs', 20); // should not throw
+      unsubscribe();
+      enforcer.recordUsage('pod1', 'cpuMs', 30); // violation again, but unsubscribed
+      assert.equal(count, 1);
+      assert.equal(enforcer.listViolations().length, 2);
+    });
+
+    it("onEvent() sees 'quota:violation-detected' via the firehose subscription", () => {
+      const seen = [];
+      enforcer.onEvent((event) => seen.push(event));
+      mgr.setQuota('pod1', { cpuMs: 10 });
+      enforcer.recordUsage('pod1', 'cpuMs', 20);
+      assert.deepEqual(seen, ['quota:violation-detected']);
+    });
+
     it('listViolations returns all when no podId filter', () => {
       mgr.setQuota('pod1', { cpuMs: 10 });
       mgr.setQuota('pod2', { cpuMs: 10 });

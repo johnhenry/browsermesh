@@ -1,18 +1,40 @@
 /**
- * clawser-mesh-quotas.js -- Per-identity resource quotas with enforcement.
+ * quotas.mjs -- Per-identity resource quotas with enforcement.
  *
  * Provides QuotaRule definitions, usage tracking (UsageRecord), a
  * QuotaManager for CRUD on per-pod quota rules, and a QuotaEnforcer
  * for recording usage, checking limits, and tracking violations.
  *
- * No browser-only imports at module level.
+ * ---------------------------------------------------------------------------
+ * `QuotaEnforcer` predated this package's `MeshService` convention
+ * (`mesh-service.mjs`) and, until now, stayed purely local: no
+ * `sendTo`/`onIncomingData`/`attachService()` anywhere, used by nothing
+ * else in this package. Its observability surface was a single
+ * constructor-injected `opts.onViolation` callback (one listener only,
+ * manually wrapped in `try/catch` + `silentCatch()` to swallow a throwing
+ * listener). Modernized to use `mesh-service.mjs`'s `createEventBus()`
+ * instead: `on(event, cb)`/`onEvent(cb)` support real multi-listener
+ * fan-out and get the bus's own swallow-on-throw guarantee for free,
+ * making the old manual `silentCatch()` call dead code (removed).
+ * `opts.onViolation` is kept as constructor sugar -- it subscribes the
+ * given function to the bus as listener #1, unchanged in payload shape --
+ * since existing callers already construct enforcers this way and it's
+ * genuinely additive, not a compatibility shim for anything removed.
  *
- * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-mesh-quotas.test.mjs
+ * The `QUOTA_*`/`USAGE_REPORT` constants below are `browsermesh-primitives`
+ * wire-registry codes, re-exported but never used as an `envelope.type` --
+ * `MeshService`'s `ctx.onIncomingData()` filters on a plain string, which
+ * this numeric registry is structurally incompatible with. Real mesh
+ * wiring (cross-peer usage reporting) is a later addition to this file,
+ * not part of this pass, and will mint its own string envelope type rather
+ * than repurpose these, matching `mesh-swarm.mjs`'s identical precedent
+ * for the same situation.
+ *
+ * No browser-only imports at module level.
  */
 
 import { MESH_TYPE } from '@johnhenry/browsermesh-primitives';
-import { silentCatch } from './silent-catch.mjs'
+import { createEventBus } from './mesh-service.mjs';
 
 // ---------------------------------------------------------------------------
 // Wire constants — imported from canonical registry
@@ -383,17 +405,19 @@ export class QuotaEnforcer {
   /** @type {Array<{podId: string, resource: string, limit: number, actual: number, policy: string, timestamp: number}>} */
   #violations = [];
 
-  /** @type {Function|null} */
-  #onViolation;
+  /** @type {import('./mesh-service.mjs').EventBus} */
+  #events = createEventBus();
 
   /**
    * @param {QuotaManager} quotaManager
    * @param {object} [opts]
-   * @param {Function} [opts.onViolation] - Called with violation info on limit breach
+   * @param {Function} [opts.onViolation] - Sugar for `on('quota:violation-detected', onViolation)`; called with violation info on limit breach.
    */
   constructor(quotaManager, opts = {}) {
     this.#manager = quotaManager;
-    this.#onViolation = opts.onViolation || null;
+    if (typeof opts.onViolation === 'function') {
+      this.#events.on('quota:violation-detected', opts.onViolation);
+    }
   }
 
   // -- Usage key helpers ----------------------------------------------------
@@ -455,9 +479,7 @@ export class QuotaEnforcer {
         timestamp: Date.now(),
       };
       this.#violations.push(violation);
-      if (this.#onViolation) {
-        try { this.#onViolation(violation); } catch (e) { silentCatch('clawser-mesh-quotas', 'swallow-listener-errors', e) }
-      }
+      this.#events.emit('quota:violation-detected', violation);
     }
   }
 
@@ -539,6 +561,30 @@ export class QuotaEnforcer {
     const p = period ?? UsageRecord.currentPeriod();
     const key = QuotaEnforcer._key(podId, p);
     this.#usage.delete(key);
+  }
+
+  // -- Observability ----------------------------------------------------------
+
+  /**
+   * Subscribe to exactly one event name -- currently only
+   * `'quota:violation-detected'` (data: `{podId, resource, limit, actual,
+   * policy, timestamp}`, the same shape the old constructor-only
+   * `onViolation` callback received).
+   * @param {string} event
+   * @param {(data: object, event: string) => void} cb
+   * @returns {() => void} unsubscribe
+   */
+  on(event, cb) {
+    return this.#events.on(event, cb);
+  }
+
+  /**
+   * Subscribe to every `quota:*` event this enforcer emits, regardless of name.
+   * @param {(event: string, data: object) => void} cb
+   * @returns {() => void} unsubscribe
+   */
+  onEvent(cb) {
+    return this.#events.onEvent(cb);
   }
 
   // -- Violations -----------------------------------------------------------
