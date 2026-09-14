@@ -540,4 +540,75 @@ describe('FederatedCompute', () => {
     const result = await fc.cancel('nonexistent')
     assert.equal(result, false)
   })
+
+  // -- destroy() (issue #136) --
+
+  it('destroy() stops #dispatchChunk()\'s retry loop from issuing another scheduler.dispatch() call once an in-flight attempt is rejected', async () => {
+    let dispatchCalls = 0
+    let rejectCurrent
+    const neverSettlingScheduler = {
+      dispatch() {
+        dispatchCalls++
+        return new Promise((_resolve, reject) => { rejectCurrent = reject })
+      },
+      listAvailablePeers() { return ['peer-a', 'peer-b', 'peer-c'] },
+    }
+    const destroyableFc = new FederatedCompute({ scheduler: neverSettlingScheduler })
+
+    const jobPromise = destroyableFc.submit({
+      payload: { items: ['a'] },
+      splitFn: simpleSplit,
+      mergeFn: (results) => results[0],
+    })
+
+    // Let the first dispatch attempt actually start.
+    await new Promise((r) => setTimeout(r, 5))
+    assert.equal(dispatchCalls, 1)
+
+    destroyableFc.destroy()
+    // Simulate a caller that owns/wraps the scheduler forcing the in-flight
+    // dispatch to reject -- exactly what mesh-compute.mjs's teardown() does
+    // to its own pendingDispatches entries. Without this fix,
+    // #dispatchChunk()'s retry loop would see this rejection and
+    // immediately call scheduler.dispatch() again (issue #136's leak).
+    rejectCurrent(new Error('forced teardown'))
+
+    const job = await jobPromise
+    assert.equal(job.status, 'failed')
+    assert.equal(dispatchCalls, 1, 'destroy() prevented any retry dispatch call after the in-flight one was rejected')
+  })
+
+  it('destroy() prevents a not-yet-started chunk (e.g. a later pipeline stage) from ever dispatching', async () => {
+    const dispatched = []
+    let destroyAfterFirst
+    const pipeScheduler = {
+      async dispatch(peerId, job) {
+        dispatched.push({ peerId, index: job.index })
+        if (job.index === 0) destroyAfterFirst()
+        return { output: `stage-${job.index}-done` }
+      },
+      listAvailablePeers() { return ['peer-a', 'peer-b'] },
+    }
+    const pipeFc = new FederatedCompute({ scheduler: pipeScheduler })
+    destroyAfterFirst = () => pipeFc.destroy()
+
+    await pipeFc.submit({
+      type: COMPUTE_TYPES.PIPELINE,
+      payload: { items: ['stage0', 'stage1', 'stage2'] },
+      splitFn: (payload) => payload.items.map((s, i) => ({ stage: i, data: s })),
+      mergeFn: (results) => results.join(' -> '),
+    })
+
+    // Stage 0 dispatched and completed (destroy() was called synchronously
+    // from inside its own dispatch()); stages 1 and 2 never got a chance to
+    // dispatch at all -- destroy() stopped the pipeline before either
+    // started, proving the flag is checked even for a chunk whose FIRST
+    // attempt hasn't happened yet, not just retries of an already-started one.
+    assert.equal(dispatched.length, 1, 'only the first stage dispatched -- destroy() stopped the pipeline before stage 1 ever started')
+  })
+
+  it('destroy() is idempotent', () => {
+    fc.destroy()
+    assert.doesNotThrow(() => fc.destroy())
+  })
 })

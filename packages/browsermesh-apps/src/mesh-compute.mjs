@@ -363,6 +363,19 @@ export function createComputeService({
       return {
         api,
         teardown() {
+          // Stop FederatedCompute's own #dispatchChunk() retry loop FIRST
+          // (issue #136): compute.destroy() makes every in-flight/queued
+          // chunk's retry loop bail out instead of calling
+          // effectiveScheduler.dispatch() again, so rejecting the
+          // currently-pending dispatches below can't trigger a brand-new
+          // setTimeout()-backed entry that this teardown() has no further
+          // chance to clear. Order relative to the rejection loop doesn't
+          // matter for correctness (both run synchronously before any
+          // pending promise's .catch continuation gets a turn), but
+          // destroying first documents the causality: no more retries can
+          // be issued, THEN the ones already in flight are force-settled.
+          compute.destroy()
+
           for (const [event, handler] of bridgeHandlers) compute.off(event, handler)
           unsubscribe()
           for (const pending of pendingDispatches.values()) {
