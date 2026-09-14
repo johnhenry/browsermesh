@@ -208,6 +208,111 @@ describe('CloudStorage: end-to-end put/get across a granted peer', () => {
 })
 
 // ---------------------------------------------------------------------------
+// getObject()/stat(): Phase 0 of the BrowserMesh Serverless plan
+// (/Users/johnhenry/.claude/plans/at-some-point-within-joyful-dove.md) --
+// the backend's `get`/`head` ops already return `contentType`/`metadata`,
+// but the old public `get()` discarded everything except raw bytes. Confirm
+// the new accessors actually surface what `put()` stored, round-tripped
+// through the real manifest-sync + chunk-replication stack (not a mock).
+// ---------------------------------------------------------------------------
+
+describe('CloudStorage: getObject()/stat() surface contentType/metadata', () => {
+  it("getObject() returns put()'s exact contentType/metadata alongside the bytes, on both the writer and a synced reader", async () => {
+    const bus = createBus()
+    const alice = await createPeer('alice')
+    const bob = await createPeer('bob')
+
+    const storeA = new CloudStorage({ bucket: BUCKET, node: bus.nodeFor(alice), dbName: freshDbName('alice'), manifestWaitMs: 500 })
+    const storeB = new CloudStorage({ bucket: BUCKET, node: bus.nodeFor(bob), dbName: freshDbName('bob'), manifestWaitMs: 1500 })
+
+    try {
+      await storeA.becomeAdmin()
+      markConnected(bob, alice)
+      await storeA.grant(bob.podId, ['read', 'write', 'list', 'delete'])
+
+      const plaintext = '<html><body>hi</body></html>'
+      await storeA.put('index.html', plaintext, { contentType: 'text/html', metadata: { author: 'alice' } })
+
+      // Writer's own getObject() must round-trip contentType/metadata.
+      const ownObj = await storeA.getObject('index.html')
+      assert.equal(dec.decode(ownObj.data), plaintext)
+      assert.equal(ownObj.contentType, 'text/html')
+      assert.deepEqual(ownObj.metadata, { author: 'alice' })
+
+      // A synced peer's getObject() must see the same fields, not just bytes.
+      const remoteObj = await storeB.getObject('index.html')
+      assert.equal(dec.decode(remoteObj.data), plaintext)
+      assert.equal(remoteObj.contentType, 'text/html')
+      assert.deepEqual(remoteObj.metadata, { author: 'alice' })
+
+      // get() must still return exactly the same bytes as before this refactor.
+      const plainBytes = await storeB.get('index.html')
+      assert.equal(dec.decode(plainBytes), plaintext)
+    } finally {
+      await storeA.close()
+      await storeB.close()
+    }
+  })
+
+  it('stat() returns size/contentType/metadata/updatedAt/version without needing chunk bytes locally', async () => {
+    const bus = createBus()
+    const alice = await createPeer('alice')
+    const bob = await createPeer('bob')
+
+    const storeA = new CloudStorage({ bucket: BUCKET, node: bus.nodeFor(alice), dbName: freshDbName('alice'), manifestWaitMs: 500 })
+    const storeB = new CloudStorage({ bucket: BUCKET, node: bus.nodeFor(bob), dbName: freshDbName('bob'), manifestWaitMs: 1500 })
+
+    try {
+      await storeA.becomeAdmin()
+      markConnected(bob, alice)
+      await storeA.grant(bob.podId, ['read', 'write', 'list', 'delete'])
+
+      const plaintext = 'stat me'
+      await storeA.put('file.txt', plaintext, { contentType: 'text/plain', metadata: { v: 1 } })
+
+      const statA = await storeA.stat('file.txt')
+      assert.equal(statA.size, enc.encode(plaintext).length)
+      assert.equal(statA.contentType, 'text/plain')
+      assert.deepEqual(statA.metadata, { v: 1 })
+      assert.equal(typeof statA.updatedAt, 'number')
+      assert.equal(typeof statA.version, 'number')
+
+      // Bob's stat() only needs the manifest entry to have synced -- NOT the
+      // chunk bytes -- so it must resolve even though bob never called get()
+      // (never fetched/replicated any chunk for this key).
+      let statB = null
+      await waitFor(async () => {
+        try {
+          statB = await storeB.stat('file.txt')
+          return true
+        } catch {
+          return false
+        }
+      }, 2000, "bob's stat() to observe alice's synced manifest entry")
+      assert.equal(statB.size, statA.size)
+      assert.equal(statB.contentType, 'text/plain')
+      assert.deepEqual(statB.metadata, { v: 1 })
+    } finally {
+      await storeA.close()
+      await storeB.close()
+    }
+  })
+
+  it('getObject()/stat() throw CloudStorageNotFoundError for a missing key, matching get()', async () => {
+    const bus = createBus()
+    const alice = await createPeer('alice')
+    const storeA = new CloudStorage({ bucket: BUCKET, node: bus.nodeFor(alice), dbName: freshDbName('alice'), manifestWaitMs: 50 })
+    try {
+      await storeA.becomeAdmin()
+      await assert.rejects(() => storeA.getObject('nope'), CloudStorageNotFoundError)
+      await assert.rejects(() => storeA.stat('nope'), CloudStorageNotFoundError)
+    } finally {
+      await storeA.close()
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Authorization: an unauthorized third peer must never be able to read the
 // real bucket, and its own writes must never reach it either.
 // ---------------------------------------------------------------------------

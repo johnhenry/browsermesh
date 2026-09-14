@@ -587,22 +587,17 @@ export class CloudStorage {
   }
 
   /**
-   * Read `key`'s content. Falls back to a remote peer request (Phase G's
-   * lazy pull/read-repair) for any chunk not already held locally. See
-   * module doc comment, point 2, for exactly how "the manifest entry itself
-   * isn't here yet" is handled.
+   * Wait (up to `waitMs`) for `key`'s manifest entry to be present, per the
+   * module doc comment's point 2 ("the manifest entry itself isn't here
+   * yet"). Shared by `getObject()` and `stat()` so both honor the same
+   * manifest-sync-wait/tombstone contract as each other.
    *
    * @param {string} key
-   * @param {object} [opts]
-   * @param {number} [opts.manifestWaitMs] - Overrides the constructor default for this call only.
-   * @returns {Promise<Uint8Array>}
+   * @param {number} waitMs
+   * @returns {Promise<object>} the manifest registration entry
    * @throws {CloudStorageNotFoundError}
    */
-  async get(key, opts = {}) {
-    if (!key || typeof key !== 'string') {
-      throw new Error('CloudStorage.get: key is required and must be a non-empty string')
-    }
-    const waitMs = opts.manifestWaitMs ?? this.#manifestWaitMs
+  async #awaitManifestEntry(key, waitMs) {
     const deadline = Date.now() + waitMs
 
     let reg = null
@@ -620,6 +615,29 @@ export class CloudStorage {
     if (reg.tombstone) {
       throw new CloudStorageNotFoundError(key, { reason: 'deleted' })
     }
+    return reg
+  }
+
+  /**
+   * Read `key`'s content plus the `contentType`/`metadata` it was `put()`
+   * with. The backend's `get` op already returns these fields
+   * (`cloud-storage-backend.mjs`'s `#opGet()`) -- `get()` below is a thin
+   * wrapper around this that returns only `data`, for callers that don't
+   * need the rest. Falls back to a remote peer request (Phase G's lazy
+   * pull/read-repair) for any chunk not already held locally.
+   *
+   * @param {string} key
+   * @param {object} [opts]
+   * @param {number} [opts.manifestWaitMs] - Overrides the constructor default for this call only.
+   * @returns {Promise<{data: Uint8Array, contentType: (string|undefined), metadata: (object|undefined)}>}
+   * @throws {CloudStorageNotFoundError}
+   */
+  async getObject(key, opts = {}) {
+    if (!key || typeof key !== 'string') {
+      throw new Error('CloudStorage.getObject: key is required and must be a non-empty string')
+    }
+    const waitMs = opts.manifestWaitMs ?? this.#manifestWaitMs
+    const reg = await this.#awaitManifestEntry(key, waitMs)
 
     // Ensure every chunk this entry references is present locally BEFORE
     // asking the backend to decrypt+assemble it -- the backend itself has
@@ -640,7 +658,49 @@ export class CloudStorage {
       throw new CloudStorageNotFoundError(key, { reason: 'deleted' })
     }
     this.#events.emit('cloud-storage:get-completed', { bucket: this.#bucket, key })
-    return fromBase64(res.data)
+    return { data: fromBase64(res.data), contentType: res.contentType, metadata: res.metadata }
+  }
+
+  /**
+   * Read `key`'s content. See `getObject()` for the `contentType`/`metadata`-
+   * preserving variant this delegates to.
+   *
+   * @param {string} key
+   * @param {object} [opts]
+   * @param {number} [opts.manifestWaitMs] - Overrides the constructor default for this call only.
+   * @returns {Promise<Uint8Array>}
+   * @throws {CloudStorageNotFoundError}
+   */
+  async get(key, opts = {}) {
+    const { data } = await this.getObject(key, opts)
+    return data
+  }
+
+  /**
+   * Return `key`'s metadata (`size`, `contentType`, `metadata`, `updatedAt`,
+   * `version`) without reading or decrypting its content. Thin wrapper
+   * around the backend's existing `head` op (`cloud-storage-backend.mjs`'s
+   * `#opHead()`), which was already implemented but never called from this
+   * class.
+   *
+   * @param {string} key
+   * @param {object} [opts]
+   * @param {number} [opts.manifestWaitMs] - Overrides the constructor default for this call only.
+   * @returns {Promise<{size: number, contentType: (string|undefined), metadata: (object|undefined), updatedAt: number, version: number}>}
+   * @throws {CloudStorageNotFoundError}
+   */
+  async stat(key, opts = {}) {
+    if (!key || typeof key !== 'string') {
+      throw new Error('CloudStorage.stat: key is required and must be a non-empty string')
+    }
+    const waitMs = opts.manifestWaitMs ?? this.#manifestWaitMs
+    await this.#awaitManifestEntry(key, waitMs)
+
+    const res = await this.#sendCommand({ op: 'head', key })
+    if (res.error) {
+      throw new CloudStorageNotFoundError(key, { reason: 'deleted' })
+    }
+    return { size: res.size, contentType: res.contentType, metadata: res.metadata, updatedAt: res.updatedAt, version: res.version }
   }
 
   /**
