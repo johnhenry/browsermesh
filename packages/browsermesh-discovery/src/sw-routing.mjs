@@ -9,12 +9,18 @@
  * `browsermesh-fetch-websocket.md` plan), which uses it directly to power
  * `createBrowserMeshFetch()` -- a directly-callable `fetch(url, init)`-shaped
  * function bound to a live `mesh-rpc` service (`mesh-rpc.mjs`, Phase 1).
- * `MeshFetchRouter` in THIS file remains the separate Service-Worker
- * `fetch`-event-interceptor shape (`Request` in, `Response|null` out) and is
- * not itself used by `mesh-fetch.mjs` (its `Request`-in shape doesn't fit a
- * direct `browserMeshFetch(url, init)` call; see that file's module doc
- * comment) -- it has no wired caller of its own yet, only this module's own
- * `onRpc` gap being unblocked at the transport layer.
+ * `MeshFetchRouter` in THIS file remained the separate Service-Worker
+ * `fetch`-event-interceptor shape (`Request` in, `Response|null` out), not
+ * itself used by `mesh-fetch.mjs` (its `Request`-in shape doesn't fit a
+ * direct `browserMeshFetch(url, init)` call) -- it had no wired caller of
+ * its own until `browsermesh-apps`' `serverless-fetch.mjs` (Phase 2 of
+ * `/Users/johnhenry/.claude/plans/at-some-point-within-joyful-dove.md`),
+ * which resolves the `podId` token to a site name (falling back to a
+ * literal podId) before delegating to a `mesh-rpc` request. That phase also
+ * fixed `route()`'s Response-building below to pass a binary
+ * (`Uint8Array`/`ArrayBuffer`) `result.body` straight to `new Response()`
+ * instead of `JSON.stringify`-ing it -- a bug this file's lack of any real
+ * caller had left latent.
  *
  * No browser-only imports at module level.
  *
@@ -124,8 +130,22 @@ export class MeshFetchRouter {
     try {
       const result = await this.#onRpc({ podId, method, path, headers, body })
       const status = result.status ?? 200
-      const resHeaders = result.headers ?? { 'content-type': 'application/json' }
-      const resBody = typeof result.body === 'string' ? result.body : JSON.stringify(result.body)
+      let resHeaders = result.headers
+      let resBody
+      if (result.body instanceof Uint8Array || result.body instanceof ArrayBuffer) {
+        // Binary body (e.g. a static asset's raw bytes, from the
+        // BrowserMesh Serverless plan's serverless-fetch.mjs) -- Response
+        // accepts BufferSource directly; JSON.stringify-ing it here would
+        // silently mangle it into `{"0":.., "1":..}` instead of real bytes.
+        resBody = result.body
+        resHeaders = resHeaders ?? {}
+      } else if (typeof result.body === 'string') {
+        resBody = result.body
+        resHeaders = resHeaders ?? { 'content-type': 'application/json' }
+      } else {
+        resBody = JSON.stringify(result.body)
+        resHeaders = resHeaders ?? { 'content-type': 'application/json' }
+      }
       return new Response(resBody, { status, headers: resHeaders })
     } catch (err) {
       return new Response(JSON.stringify({ error: err.message }), {
