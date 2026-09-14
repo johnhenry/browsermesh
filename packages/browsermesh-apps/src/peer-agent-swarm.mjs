@@ -1,9 +1,20 @@
 /**
-// STATUS: INTEGRATED — wired into ClawserPod lifecycle, proven via E2E testing
  * clawser-peer-agent-swarm.js — Multi-agent coordination protocol.
  *
  * Agents share goals, decompose tasks, divide work, merge results,
  * and achieve collective objectives across the mesh.
+ *
+ * `AgentSwarmCoordinator` itself is plain and dependency-injected
+ * (`{agentProxy, onLog}`), with no `PeerNode`/mesh-transport awareness of its
+ * own -- see `mesh-agent-swarm.mjs`'s `createAgentSwarmService()` (issue
+ * #124, `mesh-service.mjs`'s `MeshService` convention) for the wrapper that
+ * wires it onto a real `PeerNode`'s `ctx.sendTo()`/`ctx.onIncomingData()`/
+ * `ctx.registry.checkAccess()`, giving `executeSubTask()` a real path to
+ * reach a REMOTE assignee (this class's own `executeSubTask()` always calls
+ * `agentProxy.chat(assignee, ...)` directly and locally, with no notion of
+ * "assignee lives on another peer" -- see that file's header for the full
+ * design and why a `meshAgentProxy` wrapper, not a rewrite of this class, is
+ * what makes remote dispatch real).
  *
  * Run tests:
  *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-peer-agent-swarm.test.mjs
