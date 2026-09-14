@@ -26,7 +26,8 @@
     "example:07": "node examples/07-full-mesh-pipeline.mjs",
     "example:08": "node examples/08-mesh-fetch-websocket.mjs",
     "example:09": "node examples/09-cloud-storage.mjs",
-    "example:10": "node examples/10-mesh-kv-and-observability.mjs"
+    "example:10": "node examples/10-mesh-kv-and-observability.mjs",
+    "example:11": "node examples/11-agent-tool-calling.mjs"
   },
   "devDependencies": {
     "@changesets/cli": "^2.27.0",

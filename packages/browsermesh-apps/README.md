@@ -21,6 +21,10 @@ Extracted from the private `clawser` monorepo (previously `packages/browsermesh-
 | scheduler | `MeshScheduler`, `TaskQueue` |
 | consensus | `ConsensusManager`, `Proposal`, `Ballot` |
 | orchestrator | `MeshOrchestrator` + meshctl BrowserTool subclasses |
+| mesh-orchestrator | `createOrchestratorService` (`MeshService` wrapper: real, gated wire dispatch for `execOnPod`/`deploySkill`/`drainPod`, ungated local aggregation for `listPods`/`getPodStatus`/`topPods`) |
+| compat | `BrowserTool`, `BrowserToolRegistry` (base class + registry an LLM-drivable agent loop dispatches tool calls through) |
+| agent-runtime | `createAgentRuntime` (the LLM tool-calling dispatch loop: bring-your-own `llmFn`, real registry-backed tool execution) |
+| mesh-orchestrator-tools | `registerOrchestratorTools`, `createOrchestratorToolRegistry` (wires the 8 real `Meshctl*Tool`s into a `BrowserToolRegistry` against a real, attached `MeshOrchestrator`) |
 | audit | `AuditChain`, `AuditStore`, `detectFork`, `buildMerkleRoot` |
 | visualizations | `TopologyLayout`, `TrustGraphLayout`, `TrustHeatmap` |
 | devtools | `MeshInspector`, `MeshInspectTool` |
@@ -461,6 +465,40 @@ wrapper" treatment to `WebTransport`/`RTCDataChannel` was evaluated and
 deliberately not scoped here -- see `browsermesh-fetch-websocket.md`'s own
 "Considered, deferred" section for the reasoning (mostly: avoid adding more
 unconsumed wrapper surface before these two have a real caller).
+
+## LLM tool-calling: `BrowserToolRegistry` and `createAgentRuntime`
+
+A second, deliberately different composition pattern from `MeshService`:
+where `MeshService`/`attachService()` (above) is "how a capability attaches
+to a `PeerNode`," `BrowserTool`/`BrowserToolRegistry`/`createAgentRuntime`
+is "how you expose local OR mesh-backed capabilities to an LLM-driven agent
+loop." `compat.mjs`'s `BrowserToolRegistry` holds any number of `BrowserTool`
+instances (`register`/`get`/`list`/`listSpecs`/`unregister`); `agent-runtime.mjs`'s
+`createAgentRuntime({registry, llmFn})` is the actual conversation loop —
+**browsermesh never calls a real LLM API itself** (no Anthropic/OpenAI SDK
+dependency anywhere in this family); `llmFn(messages, toolSpecs) ->
+{content?, toolCalls?}` is a required, caller-supplied callback, matching
+`mesh-compute.mjs`'s `executeFn`/`mesh-agent-swarm.mjs`'s `agentProxy`
+"bring your own X" precedent.
+
+`mesh-orchestrator-tools.mjs`'s `registerOrchestratorTools()` is the worked
+example of wiring a *mesh-backed* capability into this pattern: it
+constructs `orchestrator.mjs`'s 8 real `Meshctl*Tool`s
+(`meshctl_pods`/`meshctl_status`/`meshctl_exec`/`meshctl_deploy`/
+`meshctl_top`/`meshctl_compute`/`meshctl_expose`/`meshctl_drain`) against a
+real, attached `mesh-orchestrator.mjs` service, so an LLM-requested
+`meshctl_exec` tool call really dispatches through that service's
+`checkAccess()`-gated wire protocol to a real remote peer.
+`createMeshNode({enableAgentRuntime: true, enableOrchestrator: true})` wires
+all of this for you, returning `node.toolRegistry` pre-populated and ready
+to drive `createAgentRuntime({registry: node.toolRegistry, llmFn})`.
+
+`examples/11-agent-tool-calling.mjs` runs the whole story end to end over
+two real `createMeshNode()` peers, with a deterministic test `llmFn`. See
+`docs/building-mesh-services.md`'s own "`BrowserTool`/`BrowserToolRegistry`/
+agent runtime" section for the full design writeup, including two real bugs
+found while building it and the recommended DI pattern for new tools going
+forward.
 
 ## License
 
