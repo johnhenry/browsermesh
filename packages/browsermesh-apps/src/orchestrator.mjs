@@ -11,13 +11,26 @@
  *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-mesh-orchestrator.test.mjs
  */
 
-// Stub BrowserTool base class for Node.js testing
-const BrowserTool = globalThis.BrowserTool || class {
-  constructor() {}
-}
-
 import { MESH_TYPE } from '@johnhenry/browsermesh-primitives'
 import { ComputeRequest, ResourceDescriptor, ResourceScorer } from './resources.mjs'
+import { BrowserTool as CompatBrowserTool } from './compat.mjs'
+
+// A real browser environment (clawser's web/clawser-tools.js) may already
+// have defined a real, richer `globalThis.BrowserTool` -- honored first, as
+// before. Otherwise (plain Node, e.g. this package's own tests, or any
+// standalone use of this file), fall back to compat.mjs's real `BrowserTool`
+// (Phase 1 of the agent-runtime plan, issue #90) rather than the do-nothing
+// stub this used to fall back to (`class { constructor() {} }`, with no
+// `.spec` getter at all). That stub silently broke `BrowserToolRegistry
+// .register()` (Phase 4, `mesh-orchestrator-tools.mjs`) for every Meshctl*Tool
+// below in Node -- `.spec` composes `{name, description, parameters,
+// required_permission}` from each subclass's own overridden getters, which
+// only exists on compat.mjs's real `BrowserTool`, not the old stub. Using the
+// real class changes nothing about the 8 Meshctl*Tool subclasses' own bodies
+// below (their name/description/parameters/permission getters and execute()
+// methods are all still their own overrides) -- only what `.spec` (and the
+// default `execute()`/`permission` a subclass doesn't override) resolves to.
+const BrowserTool = globalThis.BrowserTool || CompatBrowserTool
 
 // ---------------------------------------------------------------------------
 // Wire constants (re-exported from canonical registry)

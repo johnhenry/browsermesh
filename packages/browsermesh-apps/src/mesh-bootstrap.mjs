@@ -348,6 +348,8 @@ import { createTerminalService } from './peer-terminal.mjs'
 import { createSwarmService } from './mesh-swarm.mjs'
 import { createAgentSwarmService } from './mesh-agent-swarm.mjs'
 import { createOrchestratorService } from './mesh-orchestrator.mjs'
+import { BrowserToolRegistry } from './compat.mjs'
+import { registerOrchestratorTools } from './mesh-orchestrator-tools.mjs'
 
 /**
  * Build and boot a real, WebRTC-capable `PeerNode`.
@@ -719,6 +721,30 @@ import { createOrchestratorService } from './mesh-orchestrator.mjs'
  *   function's own doc comment. `router` defaults to `node.router?.api`
  *   when `enableRouting` is also set and `orchestratorOptions.router` is
  *   omitted; explicitly pass `router: null` to opt out.
+ * @param {boolean} [options.enableAgentRuntime=false] - Attach a real
+ *   `BrowserToolRegistry` (`compat.mjs`, Phase 1 of the agent-runtime plan,
+ *   issue #90) to the returned node as `node.toolRegistry`, ready to drive
+ *   `agent-runtime.mjs`'s `createAgentRuntime({registry: node.toolRegistry,
+ *   llmFn})` (Phase 2). Deliberately decoupled from `enableOrchestrator`: a
+ *   caller may want an agent runtime for entirely non-orchestrator tools (its
+ *   own `BrowserTool` subclasses registered directly via
+ *   `node.toolRegistry.register(...)` after `createMeshNode()` returns), so
+ *   this flag alone always produces an EMPTY registry, never throwing just
+ *   because `enableOrchestrator` was left off. When BOTH `enableAgentRuntime`
+ *   AND `enableOrchestrator` are set, this function additionally calls
+ *   `mesh-orchestrator-tools.mjs`'s `registerOrchestratorTools(node.toolRegistry,
+ *   node.orchestrator.api)` (Phase 4, issue #92), pre-populating the registry
+ *   with the 8 real `Meshctl*Tool`s (`meshctl_pods`/`meshctl_status`/
+ *   `meshctl_exec`/`meshctl_deploy`/`meshctl_top`/`meshctl_compute`/
+ *   `meshctl_expose`/`meshctl_drain`) wired against this node's own attached
+ *   orchestrator -- see `mesh-orchestrator-tools.mjs`'s own doc comment for
+ *   exactly which of those 8 route through the orchestrator service's gated
+ *   wire dispatch (`meshctl_exec`/`meshctl_deploy`/`meshctl_drain`) vs.
+ *   straight to the raw `MeshOrchestrator` instance (the rest -- including
+ *   `meshctl_compute`/`meshctl_expose`, which have no gated equivalent at
+ *   all, since Phase 3 never built one for either). `enableOrchestrator` set
+ *   WITHOUT `enableAgentRuntime` is unaffected -- `node.toolRegistry` is only
+ *   ever created when `enableAgentRuntime` itself is set.
  * @returns {Promise<PeerNode>} A booted (unless `skipBoot`) PeerNode, with
  *   `node.meshManager` (`WebRTCMeshManager`), `node.signaling`
  *   (`MeshSignalingChannel`), and `node.transportNegotiator` (the real,
@@ -768,6 +794,10 @@ import { createOrchestratorService } from './mesh-orchestrator.mjs'
  *   `node.orchestrator` (`attachService()`'s handle for `mesh-orchestrator.mjs`'s
  *   `createOrchestratorService()`, also reachable via
  *   `node.services.get('orchestrator')`) attached when `enableOrchestrator`.
+ *   `node.toolRegistry` (a `BrowserToolRegistry`, `compat.mjs`) attached when
+ *   `enableAgentRuntime` -- empty unless `enableOrchestrator` is ALSO set, in
+ *   which case it is pre-populated with the 8 `Meshctl*Tool`s (see
+ *   `enableAgentRuntime` above and `mesh-orchestrator-tools.mjs`).
  */
 export async function createMeshNode(options = {}) {
   const {
@@ -836,6 +866,7 @@ export async function createMeshNode(options = {}) {
     agentSwarmOptions,
     enableOrchestrator = false,
     orchestratorOptions,
+    enableAgentRuntime = false,
   } = options
 
   if (!signalingTransport) {
@@ -1427,6 +1458,23 @@ export async function createMeshNode(options = {}) {
     const orchestratorHandle = attachService(node, servicesNetwork, orchestratorDescriptor)
     node.services.set(orchestratorHandle.name, orchestratorHandle)
     node.orchestrator = orchestratorHandle
+  }
+
+  // -- Agent tool registry (opt-in, Phase 4 of the agent-runtime plan,
+  // issues #90/#92) -----------------------------------------------------
+  // Deliberately independent of enableOrchestrator -- see enableAgentRuntime's
+  // own doc comment above for the full rationale. node.toolRegistry always
+  // exists (and is always empty at minimum) when this flag is set, so a
+  // caller wanting only its own non-orchestrator BrowserTools never has to
+  // opt into orchestrator wiring it doesn't want. Only pre-populated with the
+  // 8 real Meshctl*Tools when enableOrchestrator was ALSO set -- see
+  // mesh-orchestrator-tools.mjs's own doc comment for exactly which of those
+  // route through the orchestrator service's gated wire dispatch.
+  if (enableAgentRuntime) {
+    node.toolRegistry = new BrowserToolRegistry()
+    if (enableOrchestrator) {
+      registerOrchestratorTools(node.toolRegistry, node.orchestrator.api)
+    }
   }
 
   return node

@@ -63,6 +63,7 @@ export * from './peer-verification.mjs';
 export * from './marketplace-ui.mjs';
 export { BrowserTool, BrowserToolRegistry } from './compat.mjs';
 export * from './agent-runtime.mjs';
+export * from './mesh-orchestrator-tools.mjs';
 
 // `CreditLedger` is defined in both payments.mjs and peer-payments.mjs;
 // `EscrowManager` is defined in both payments.mjs and peer-escrow.mjs.
