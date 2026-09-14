@@ -347,6 +347,7 @@ import { createComputeService } from './mesh-compute.mjs'
 import { createTerminalService } from './peer-terminal.mjs'
 import { createSwarmService } from './mesh-swarm.mjs'
 import { createAgentSwarmService } from './mesh-agent-swarm.mjs'
+import { createOrchestratorService } from './mesh-orchestrator.mjs'
 
 /**
  * Build and boot a real, WebRTC-capable `PeerNode`.
@@ -690,6 +691,34 @@ import { createAgentSwarmService } from './mesh-agent-swarm.mjs'
  *   backend decision -- see `mesh-agent-swarm.mjs`'s header for why this one
  *   is checked twice, once here and once inside `createAgentSwarmService()`
  *   itself).
+ * @param {boolean} [options.enableOrchestrator=false] - Attach
+ *   `mesh-orchestrator.mjs`'s `createOrchestratorService()` (issue #92,
+ *   Phase 3 of the agent-runtime plan): wires a real `MeshOrchestrator`
+ *   (`orchestrator.mjs`) onto this node, with `execOnPod`/`deploySkill`/
+ *   `drainPod` gated via `registry.checkAccess(fromPubKey, 'orchestrator',
+ *   action)` when triggered by an inbound peer request, over a real
+ *   `'orchestrator-request'`/`'orchestrator-response'` wire protocol
+ *   (self-targeted calls stay local, no network round-trip, mirroring
+ *   `enableAgentSwarm`'s own local-self-assignment shortcut). `listPods`/
+ *   `getPodStatus`/`topPods` are local-only aggregation, left ungated --
+ *   see `mesh-orchestrator.mjs`'s own doc comment for the full design
+ *   (including why `serviceAdvertiser`/`serviceBrowser` stay `null` and the
+ *   confirmed non-relationship with `enableSwarm`). When `enableRouting` is
+ *   also set, `node.router.api` (shape-compatible -- `MeshOrchestrator`
+ *   only ever calls `addRoute()` on its `router`) is passed straight
+ *   through as `MeshOrchestrator`'s own `router` dependency. Attached to
+ *   the returned node as `node.orchestrator` (the `attachService()` handle
+ *   -- also reachable via `node.services.get('orchestrator')`); the raw
+ *   `MeshOrchestrator` instance itself is `node.orchestrator.api.orchestrator`,
+ *   for a later phase's `Meshctl*Tool` registration.
+ * @param {object} [options.orchestratorOptions] - Only used when
+ *   `enableOrchestrator`. Passed straight through to
+ *   `createOrchestratorService()` (`router`/`runtimeRegistry`/
+ *   `remoteSessionBroker`/`resourceRegistry`/`auditRecorder`/
+ *   `dispatchTimeoutMs`/`envelopeType`/`accessResource`/`onLog`) -- see that
+ *   function's own doc comment. `router` defaults to `node.router?.api`
+ *   when `enableRouting` is also set and `orchestratorOptions.router` is
+ *   omitted; explicitly pass `router: null` to opt out.
  * @returns {Promise<PeerNode>} A booted (unless `skipBoot`) PeerNode, with
  *   `node.meshManager` (`WebRTCMeshManager`), `node.signaling`
  *   (`MeshSignalingChannel`), and `node.transportNegotiator` (the real,
@@ -736,6 +765,9 @@ import { createAgentSwarmService } from './mesh-agent-swarm.mjs'
  *   `node.compute` (`attachService()`'s handle for `mesh-compute.mjs`'s
  *   `createComputeService()`, also reachable via `node.services.get('compute')`)
  *   attached when `enableCompute`.
+ *   `node.orchestrator` (`attachService()`'s handle for `mesh-orchestrator.mjs`'s
+ *   `createOrchestratorService()`, also reachable via
+ *   `node.services.get('orchestrator')`) attached when `enableOrchestrator`.
  */
 export async function createMeshNode(options = {}) {
   const {
@@ -802,6 +834,8 @@ export async function createMeshNode(options = {}) {
     swarmOptions,
     enableAgentSwarm = false,
     agentSwarmOptions,
+    enableOrchestrator = false,
+    orchestratorOptions,
   } = options
 
   if (!signalingTransport) {
@@ -1357,6 +1391,42 @@ export async function createMeshNode(options = {}) {
     const agentSwarmHandle = attachService(node, servicesNetwork, agentSwarmDescriptor)
     node.services.set(agentSwarmHandle.name, agentSwarmHandle)
     node.agentSwarm = agentSwarmHandle
+  }
+
+  // -- Pod orchestration (opt-in, Phase 3 of the agent-runtime plan,
+  // issue #92) --------------------------------------------------------------
+  // Attached the same way every other opt-in service above is
+  // (attachService()) -- see mesh-orchestrator.mjs's own header comment for
+  // the full design (the local-vs-remote dispatch shortcut for
+  // execOnPod/deploySkill/drainPod, the checkAccess() gate, why
+  // listPods/getPodStatus/topPods stay ungated, the router
+  // shape-compatibility finding, and the confirmed non-relationship with
+  // enableSwarm). Unlike enableCompute/enableTerminal/enableAgentSwarm,
+  // MeshOrchestrator has no required bring-your-own execution backend --
+  // its own constructor already defaults every collaborator (router,
+  // runtimeRegistry, remoteSessionBroker, resourceRegistry, auditRecorder)
+  // to null and stays usable (local-only) with none of them wired -- so
+  // there is nothing to throw on here. `router` defaults to `node.router?.api`
+  // when enableRouting also attached one and the caller didn't already
+  // supply (or explicitly null out) orchestratorOptions.router.
+  if (enableOrchestrator) {
+    const orchestratorRouter = orchestratorOptions && 'router' in orchestratorOptions
+      ? orchestratorOptions.router
+      : (node.router?.api ?? null)
+    const orchestratorDescriptor = createOrchestratorService({
+      router: orchestratorRouter,
+      runtimeRegistry: orchestratorOptions?.runtimeRegistry,
+      remoteSessionBroker: orchestratorOptions?.remoteSessionBroker,
+      resourceRegistry: orchestratorOptions?.resourceRegistry,
+      auditRecorder: orchestratorOptions?.auditRecorder,
+      dispatchTimeoutMs: orchestratorOptions?.dispatchTimeoutMs,
+      envelopeType: orchestratorOptions?.envelopeType,
+      accessResource: orchestratorOptions?.accessResource,
+      onLog: orchestratorOptions?.onLog ?? onLog,
+    })
+    const orchestratorHandle = attachService(node, servicesNetwork, orchestratorDescriptor)
+    node.services.set(orchestratorHandle.name, orchestratorHandle)
+    node.orchestrator = orchestratorHandle
   }
 
   return node
