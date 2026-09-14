@@ -24,11 +24,13 @@
  * about what that token conceptually means, unified only by "falls back to
  * a literal podId either way."
  *
- * `opts.resolveSite` is optional and, as of this phase, there is no
- * `SiteRegistry` yet to pass (that's Phase 5) -- omitting it makes this file
- * behave identically to a single-peer-per-site deployment addressed by
- * literal podId, which is a completely valid, already-useful configuration
- * on its own.
+ * `opts.resolveSite` is optional. Omitting it makes this file behave
+ * identically to a single-peer-per-site deployment addressed by literal
+ * podId, which is a completely valid, already-useful configuration on its
+ * own. For multi-peer sites, pass `siteRegistry.selectPeer.bind(siteRegistry)`
+ * (`serverless-sites.mjs`'s `SiteRegistry`, Phase 5) directly -- its
+ * `selectPeer(siteId) -> podId|null` signature already matches this
+ * option's shape exactly, no adapter needed.
  *
  * @module serverless-fetch
  */
@@ -48,8 +50,8 @@ import { decodeWireResponse } from './serverless-wire.mjs'
  * @param {(siteOrPodId: string) => (string|null|undefined)} [opts.resolveSite]
  *   Optional. Resolves the `parseMeshRequest()`-extracted token to a target
  *   podId. Omit for direct single-peer-per-site addressing (the token is
- *   used as a literal podId). Phase 5's `SiteRegistry#selectPeer()` is
- *   designed to be passed here directly once it exists.
+ *   used as a literal podId). `serverless-sites.mjs`'s `SiteRegistry#selectPeer()`
+ *   (Phase 5) matches this shape exactly and can be passed here directly.
  * @returns {import('@johnhenry/browsermesh-discovery').MeshFetchRouter}
  */
 export function createServerlessFetchRouter(meshRpcApi, { resolveSite } = {}) {
