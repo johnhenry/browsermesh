@@ -24,17 +24,61 @@
  * The `QUOTA_*`/`USAGE_REPORT` constants below are `browsermesh-primitives`
  * wire-registry codes, re-exported but never used as an `envelope.type` --
  * `MeshService`'s `ctx.onIncomingData()` filters on a plain string, which
- * this numeric registry is structurally incompatible with. Real mesh
- * wiring (cross-peer usage reporting) is a later addition to this file,
- * not part of this pass, and will mint its own string envelope type rather
- * than repurpose these, matching `mesh-swarm.mjs`'s identical precedent
- * for the same situation.
+ * this numeric registry is structurally incompatible with.
+ * `createQuotaReportingService()` mints its own string envelope type
+ * (`'quota-reporting'`) instead of repurposing them, matching
+ * `mesh-swarm.mjs`'s identical precedent for the same situation. They stay
+ * exactly as they are: unused as routing.
+ *
+ * ---------------------------------------------------------------------------
+ * `createQuotaReportingService()` establishes a host/authority model: any
+ * peer running it accepts `USAGE_REPORT`s from other peers and enforces
+ * quotas on their behalf, replying `QUOTA_VIOLATION` when a report trips
+ * one. Built directly on `ctx.sendTo()`/`ctx.onIncomingData()`, NOT
+ * wrapped around `mesh-rpc.mjs` -- unlike `marketplace.mjs`'s network
+ * search (genuinely request/response-shaped), a usage report has no
+ * synchronous reply worth awaiting (a violation reply is async-maybe-
+ * never), so this is a push, matching `mesh-kv.mjs`'s broadcast shape,
+ * not `mesh-rpc.mjs`'s request/response shape.
+ *
+ * **Security-relevant, non-negotiable**: the wire shape for a usage report
+ * carries no `podId` field. The authority attributes usage to the
+ * connection-authenticated `fromPubKey` unconditionally, never to a self-
+ * declared identity in a payload -- without this, a peer could frame
+ * another peer (drive its usage over quota) or evade its own quota
+ * (attribute its usage to someone else). Same class of gap `mesh-kv.mjs`'s
+ * `attribution-mismatch` check and `chunk-replication.mjs`'s write-access
+ * gate already close elsewhere in this family; treated as baseline
+ * hygiene here too, not optional ACL.
+ *
+ * **No ACL on who may act as, or report to, a quota authority.** A peer
+ * decides who to trust as its authority (whose `QUOTA_VIOLATION`/
+ * `QUOTA_UPDATE` it listens to) entirely by its own wiring choices outside
+ * this service, mirroring `mesh-rpc.mjs`/`mesh-websocket.mjs`'s own
+ * explicit "authorization is the handler's job, not the transport's"
+ * stance. An authority accepts `USAGE_REPORT`s from any peer that can
+ * reach it; unknown senders fall back to `QuotaManager`'s existing
+ * `DEFAULT_LIMITS`, not to unlimited enforcement.
+ *
+ * **`quota-update` never self-applies to a receiving peer's own local
+ * `QuotaManager`.** Delivered as a notification event only
+ * (`quota:rule-update-received`); a caller that wants to actually trust a
+ * given authority's pushed rule changes must opt in explicitly at the
+ * call site (e.g. `meshQuotaEnforcer.on('quota:rule-update-received', rule
+ * => { if (trusted(rule)) manager.setQuota(...) })`). This is the one
+ * place a remote peer could otherwise silently mutate local enforcement
+ * state, and it stays closed by design, not by a forgettable check.
+ *
+ * `MeshQuotaEnforcer` is the ergonomic wrapper -- the same two-layer split
+ * `mesh-kv.mjs`/`marketplace.mjs`'s `MeshMarketplace` already established.
+ * `QuotaEnforcer`/`QuotaManager` never gain a `PeerNode` reference; only
+ * `MeshQuotaEnforcer` does.
  *
  * No browser-only imports at module level.
  */
 
 import { MESH_TYPE } from '@johnhenry/browsermesh-primitives';
-import { createEventBus } from './mesh-service.mjs';
+import { createEventBus, attachService } from './mesh-service.mjs';
 
 // ---------------------------------------------------------------------------
 // Wire constants — imported from canonical registry
@@ -663,5 +707,214 @@ export class QuotaEnforcer {
       enforcer.#violations.push(...data.violations);
     }
     return enforcer;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Quota network reporting
+// ---------------------------------------------------------------------------
+
+/** Default `envelope.type` for a quota authority's mesh attach -- see module doc comment. */
+export const DEFAULT_QUOTA_ENVELOPE_TYPE = 'quota-reporting';
+
+/**
+ * Build a `MeshService` descriptor (`mesh-service.mjs`) implementing the
+ * host/authority side of cross-peer usage reporting -- see module doc
+ * comment for the full wire-protocol/security writeup (attribution via
+ * `fromPubKey`, no ACL on who may report, `quota-update` never self-
+ * applying).
+ *
+ * @param {object} opts
+ * @param {QuotaEnforcer} opts.enforcer
+ * @param {string} [opts.envelopeType='quota-reporting']
+ * @param {Function} [opts.onLog]
+ * @returns {import('./mesh-service.mjs').MeshService}
+ */
+export function createQuotaReportingService({ enforcer, envelopeType = DEFAULT_QUOTA_ENVELOPE_TYPE, onLog } = {}) {
+  if (!enforcer || typeof enforcer.recordUsage !== 'function') {
+    throw new Error('createQuotaReportingService: opts.enforcer (a QuotaEnforcer instance) is required');
+  }
+  const log = onLog || (() => {});
+
+  return {
+    name: 'quota-reporting',
+
+    attach(peerNode, ctx) {
+      /** @param {string} fromPubKey @param {{resource: string, amount: number}} msg */
+      async function handleUsageReport(fromPubKey, msg) {
+        const { resource, amount } = msg;
+
+        // recordUsage() emits 'quota:violation-detected' synchronously
+        // (before returning) if -- and only if -- THIS call trips a
+        // violation, so a temporary listener scoped tightly around the
+        // call captures exactly that outcome, deterministically, with no
+        // timestamp heuristics or races against concurrent reports.
+        let triggeredViolation = null;
+        const unsubscribeOnce = enforcer.on('quota:violation-detected', (v) => {
+          triggeredViolation = v;
+        });
+        try {
+          // Attribution: always the connection-authenticated sender, never
+          // a self-declared identity in the payload -- see module doc
+          // comment's "Security-relevant, non-negotiable" section.
+          enforcer.recordUsage(fromPubKey, resource, amount);
+        } finally {
+          unsubscribeOnce();
+        }
+
+        ctx.emit('quota:usage-report-received', { from: fromPubKey, resource, amount });
+
+        if (triggeredViolation) {
+          try {
+            await ctx.sendTo(fromPubKey, envelopeType, { kind: 'quota-violation', violation: triggeredViolation });
+          } catch (err) {
+            log('quota-reporting:violation-send-failed', { to: fromPubKey, error: err?.message || String(err) });
+          }
+        }
+      }
+
+      const unsubscribe = ctx.onIncomingData(envelopeType, (fromPubKey, msg) => {
+        if (!msg || typeof msg.kind !== 'string') return;
+        if (msg.kind === 'usage-report') {
+          handleUsageReport(fromPubKey, msg).catch((err) => {
+            log('quota-reporting:usage-report-handling-failed', { from: fromPubKey, error: err?.message || String(err) });
+          });
+        } else if (msg.kind === 'quota-violation') {
+          ctx.emit('quota:violation-notified', { from: fromPubKey, violation: msg.violation });
+        } else if (msg.kind === 'quota-update') {
+          // Informational only -- never self-applies to this peer's own
+          // QuotaManager. See module doc comment.
+          ctx.emit('quota:rule-update-received', { from: fromPubKey, rule: msg.rule });
+        }
+      });
+
+      /**
+       * Report this peer's own usage to a remote quota authority.
+       * Fire-and-forget: does not await a reply, since the only possible
+       * reply (a `quota-violation`) is async-maybe-never, not a
+       * synchronous ack -- see module doc comment.
+       * @param {string} authorityPodId
+       * @param {string} resource
+       * @param {number} amount
+       */
+      async function reportUsage(authorityPodId, resource, amount) {
+        await ctx.sendTo(authorityPodId, envelopeType, { kind: 'usage-report', resource, amount });
+      }
+
+      /**
+       * Push a `QuotaRule` change to a specific peer as a notification --
+       * the receiving side never self-applies it (see module doc comment).
+       * @param {string} peerId
+       * @param {QuotaRule} rule
+       */
+      async function pushQuotaUpdate(peerId, rule) {
+        await ctx.sendTo(peerId, envelopeType, { kind: 'quota-update', rule: rule.toJSON ? rule.toJSON() : rule });
+      }
+
+      return {
+        api: { reportUsage, pushQuotaUpdate },
+        teardown() {
+          unsubscribe();
+        },
+      };
+    },
+  };
+}
+
+/**
+ * Ergonomic wrapper composing a `QuotaEnforcer` with
+ * `createQuotaReportingService()` -- the same two-layer split `mesh-kv.mjs`/
+ * `marketplace.mjs`'s `MeshMarketplace` already established:
+ * `QuotaEnforcer`/`QuotaManager` never gain a `PeerNode` reference, only
+ * `MeshQuotaEnforcer` does.
+ */
+export class MeshQuotaEnforcer {
+  /** @type {QuotaManager} */
+  #manager;
+  /** @type {QuotaEnforcer} */
+  #enforcer;
+  /** @type {ReturnType<import('./mesh-service.mjs').attachService>} */
+  #handle;
+  /** @type {import('./mesh-service.mjs').EventBus} */
+  #events = createEventBus();
+  /** @type {() => void} */
+  #unsubscribeEnforcerEvents;
+  /** @type {() => void} */
+  #unsubscribeServiceEvents;
+
+  /**
+   * @param {object} opts
+   * @param {import('./peer-node.mjs').PeerNode} opts.node - duck-typed: needs `podId`.
+   * @param {import('@johnhenry/browsermesh-netway').VirtualNetwork} [opts.network] - unused today, accepted for forward compatibility with `attachService()`'s own signature.
+   * @param {QuotaManager} [opts.manager] - defaults to a fresh `new QuotaManager()`.
+   * @param {QuotaEnforcer} [opts.enforcer] - defaults to a fresh `new QuotaEnforcer(manager)`.
+   * @param {string} [opts.envelopeType]
+   * @param {Function} [opts.onLog]
+   */
+  constructor({ node, network, manager, enforcer, envelopeType, onLog } = {}) {
+    if (!node || typeof node.podId !== 'string') {
+      throw new Error('MeshQuotaEnforcer: opts.node (a PeerNode-like object with a podId) is required');
+    }
+    this.#manager = manager ?? new QuotaManager();
+    this.#enforcer = enforcer ?? new QuotaEnforcer(this.#manager);
+    this.#handle = attachService(node, network, createQuotaReportingService({
+      enforcer: this.#enforcer,
+      envelopeType,
+      onLog,
+    }));
+    // Two independent sources forward onto this class's own bus: the
+    // enforcer's own local 'quota:violation-detected' (fired by
+    // recordUsage() itself, whether called locally or via an inbound
+    // usage-report), and the network service's own ctx.emit()'d events
+    // ('quota:usage-report-received'/'quota:violation-notified'/
+    // 'quota:rule-update-received') -- same forwarding convention
+    // MeshMarketplace/MeshKv use, just two emitters instead of one since
+    // this phase's own service has events the composed local class does not.
+    this.#unsubscribeEnforcerEvents = this.#enforcer.onEvent((event, data) => this.#events.emit(event, data));
+    this.#unsubscribeServiceEvents = this.#handle.onEvent((event, data) => this.#events.emit(event, data));
+  }
+
+  /** @returns {QuotaManager} */
+  get manager() { return this.#manager; }
+
+  /** @returns {QuotaEnforcer} */
+  get enforcer() { return this.#enforcer; }
+
+  // -- Local pass-throughs (delegate to the composed QuotaEnforcer) --------
+
+  recordUsage(podId, resource, amount) { return this.#enforcer.recordUsage(podId, resource, amount); }
+  checkQuota(podId, resource, requestedAmount) { return this.#enforcer.checkQuota(podId, resource, requestedAmount); }
+  listViolations(podId) { return this.#enforcer.listViolations(podId); }
+
+  /**
+   * @param {string} authorityPodId
+   * @param {string} resource
+   * @param {number} amount
+   */
+  async reportUsage(authorityPodId, resource, amount) {
+    return this.#handle.api.reportUsage(authorityPodId, resource, amount);
+  }
+
+  /**
+   * Push a `QuotaRule` change to a specific peer as a notification -- the
+   * receiving side never self-applies it. See module doc comment.
+   * @param {string} peerId
+   * @param {QuotaRule} rule
+   */
+  async pushQuotaUpdate(peerId, rule) {
+    return this.#handle.api.pushQuotaUpdate(peerId, rule);
+  }
+
+  // -- Observability (forwards the enforcer's events, plus this phase's own) --
+
+  on(event, cb) { return this.#events.on(event, cb); }
+  onEvent(cb) { return this.#events.onEvent(cb); }
+
+  /** Tears down the composed network service and stops event forwarding. */
+  async close() {
+    this.#unsubscribeEnforcerEvents();
+    this.#unsubscribeServiceEvents();
+    await this.#handle.teardown();
+    this.#events.closeAll();
   }
 }
