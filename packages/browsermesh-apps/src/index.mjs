@@ -60,7 +60,7 @@ export * from './peer-timestamp.mjs';
 export * from './peer-torrent.mjs';
 export * from './peer-verification.mjs';
 export * from './marketplace-ui.mjs';
-export { BrowserTool } from './compat.mjs';
+export { BrowserTool, BrowserToolRegistry } from './compat.mjs';
 
 // `CreditLedger` is defined in both payments.mjs and peer-payments.mjs;
 // `EscrowManager` is defined in both payments.mjs and peer-escrow.mjs.

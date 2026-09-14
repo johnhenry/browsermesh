@@ -22,7 +22,7 @@ import {
   IdentitySelector,
 } from '../src/identity.mjs';
 import { MeshKeyring } from '../src/keyring.mjs';
-import { BrowserTool } from '../src/compat.mjs';
+import { BrowserTool, BrowserToolRegistry } from '../src/compat.mjs';
 
 // ---------------------------------------------------------------------------
 // IdentityToolsContext
@@ -413,5 +413,24 @@ describe('registerIdentityTools', () => {
     assert.ok(registered.has('identity_delete'));
     assert.ok(registered.has('identity_link'));
     assert.ok(registered.has('identity_select_rule'));
+  });
+
+  it('registers all 8 tools into a real BrowserToolRegistry', async () => {
+    const registry = new BrowserToolRegistry();
+
+    const storage = new InMemoryIdentityStorage();
+    const idMgr = new MeshIdentityManager({ storage });
+    const autoMgr = new AutoIdentityManager(idMgr, storage);
+    await autoMgr.boot('ws-test');
+    const keyring = new MeshKeyring();
+    const selector = new IdentitySelector(autoMgr);
+
+    registerIdentityTools(registry, autoMgr, keyring, selector);
+
+    assert.equal(registry.list().length, 8);
+    assert.ok(registry.get('identity_create') instanceof IdentityCreateTool);
+    assert.ok(registry.get('identity_list') instanceof IdentityListTool);
+    const specs = registry.listSpecs();
+    assert.ok(specs.some((s) => s.name === 'identity_create'));
   });
 });

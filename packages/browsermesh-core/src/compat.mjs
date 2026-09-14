@@ -8,6 +8,12 @@
  * assign `this.name = ...` in the constructor, which threw
  * "Cannot set property name of #<Tool> which has only a getter" for
  * every real subclass, since none of them define a setter.
+ *
+ * Also exports BrowserToolRegistry, BrowserTool's counterpart: a
+ * name-keyed collection of constructed tool instances used to dispatch
+ * LLM-requested tool calls (see `registerIdentityTools`/
+ * `registerMeshPeerTools` in this package, and `registerMeshTools` in
+ * browsermesh-apps, all of which call `registry.register(...)`).
  */
 export class BrowserTool {
   /** @returns {object} ToolSpec-compatible object */
@@ -26,4 +32,95 @@ export class BrowserTool {
   get permission() { return 'internal'; }
 
   async execute(_params) { throw new Error('Not implemented'); }
+}
+
+/**
+ * Returns true if `tool` looks like a BrowserTool: it exposes a working
+ * `.spec` getter (with a non-empty string `.name`) and an `.execute`
+ * method. Duck-typed rather than `instanceof BrowserTool` on purpose —
+ * see the module header: multiple packages in this monorepo (e.g.
+ * browsermesh-apps) vendor their own copy of the `BrowserTool` shim for
+ * standalone use, so a tool built against one package's `BrowserTool`
+ * class is not `instanceof` another package's class even though it has
+ * the identical shape. Duck-typing lets `BrowserToolRegistry` accept any
+ * of them.
+ * @param {unknown} tool
+ * @returns {boolean}
+ */
+function looksLikeBrowserTool(tool) {
+  if (!tool || (typeof tool !== 'object' && typeof tool !== 'function')) return false;
+  if (typeof tool.execute !== 'function') return false;
+  let spec;
+  try {
+    spec = tool.spec;
+  } catch {
+    return false;
+  }
+  return !!spec && typeof spec.name === 'string' && spec.name.length > 0;
+}
+
+/**
+ * BrowserToolRegistry -- holds constructed BrowserTool instances, keyed by
+ * `.name`, and exposes the `.spec` list an `llmFn` (see the agent-runtime
+ * plan) needs for tool-calling.
+ *
+ * `register()` duck-types its argument (see `looksLikeBrowserTool` above)
+ * rather than requiring `instanceof BrowserTool`, for the same
+ * cross-package "standalone use" reason `BrowserTool` itself avoids hard
+ * class-identity assumptions.
+ *
+ * Registering a second tool under a name that's already registered
+ * throws (it does not silently overwrite) — a name collision usually
+ * means two unrelated tools accidentally share a name, and silently
+ * dropping one would be a confusing, hard-to-debug failure mode. Call
+ * `unregister(name)` first if replacing a tool is genuinely intended.
+ */
+export class BrowserToolRegistry {
+  #tools = new Map();
+
+  /**
+   * @param {BrowserTool | { spec: object, execute: Function }} tool
+   * @returns {BrowserTool} the same tool, for chaining
+   */
+  register(tool) {
+    if (!looksLikeBrowserTool(tool)) {
+      throw new TypeError(
+        'BrowserToolRegistry.register(tool): tool must implement the BrowserTool shape ' +
+        '(a `.spec` getter and an `.execute()` method) — got ' +
+        (tool && tool.constructor ? tool.constructor.name : String(tool))
+      );
+    }
+    const { name } = tool;
+    if (this.#tools.has(name)) {
+      throw new Error(`BrowserToolRegistry.register(tool): a tool named "${name}" is already registered; call unregister("${name}") first to replace it`);
+    }
+    this.#tools.set(name, tool);
+    return tool;
+  }
+
+  /**
+   * @param {string} name
+   * @returns {BrowserTool | undefined}
+   */
+  get(name) {
+    return this.#tools.get(name);
+  }
+
+  /** @returns {BrowserTool[]} all registered tool instances */
+  list() {
+    return [...this.#tools.values()];
+  }
+
+  /** @returns {object[]} the `.spec` of every registered tool */
+  listSpecs() {
+    return this.list().map((tool) => tool.spec);
+  }
+
+  /**
+   * @param {string} name
+   * @returns {boolean} true if a tool with that name was registered and removed
+   */
+  unregister(name) {
+    return this.#tools.delete(name);
+  }
 }
