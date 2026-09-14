@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.0.5
+
+### Patch Changes
+
+- `sw-routing.mjs`'s `MeshFetchRouter.route()` got its first real caller (`@johnhenry/browsermesh-apps`'s new `serverless-fetch.mjs`, part of BrowserMesh Serverless), which surfaced a real, previously-latent bug: a non-string `result.body` was always `JSON.stringify()`'d before building the `Response`, silently mangling a `Uint8Array`/`ArrayBuffer` into a `{"0":..,"1":..}` object dump instead of real bytes — never caught before because nothing called this router for real. Fixed to pass binary bodies straight to `new Response()`, which accepts `BufferSource` natively.
+
 ## 0.0.4
 
 ### Patch Changes
