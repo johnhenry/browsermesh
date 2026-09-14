@@ -12,4 +12,4 @@ export * from './trust.mjs';
 export * from './hardening.mjs';
 export * from './identity-base.mjs';
 export * from './identity-wallet.mjs';
-export { BrowserTool } from './compat.mjs';
+export { BrowserTool, BrowserToolRegistry } from './compat.mjs';

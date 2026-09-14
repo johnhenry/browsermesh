@@ -15,7 +15,7 @@ import {
 } from '../src/tools.mjs';
 import { StreamMultiplexer } from '@johnhenry/browsermesh-transport';
 import { MeshFileTransfer, TransferOffer } from '@johnhenry/browsermesh-sync';
-import { BrowserTool } from '../src/compat.mjs';
+import { BrowserTool, BrowserToolRegistry } from '../src/compat.mjs';
 
 // ---------------------------------------------------------------------------
 // MeshToolsContext
@@ -415,5 +415,14 @@ describe('registerMeshTools', () => {
     registerMeshTools(registry, mux, ft);
     assert.equal(meshToolsContext.getMultiplexer(), mux);
     assert.equal(meshToolsContext.getFileTransfer(), ft);
+  });
+
+  it('registers all 15 tools into a real BrowserToolRegistry', () => {
+    const registry = new BrowserToolRegistry();
+    registerMeshTools(registry);
+    assert.equal(registry.list().length, 15);
+    assert.ok(registry.get('mesh_stream_open') instanceof MeshStreamOpenTool);
+    const specs = registry.listSpecs();
+    assert.ok(specs.some((s) => s.name === 'iot_telemetry'));
   });
 });

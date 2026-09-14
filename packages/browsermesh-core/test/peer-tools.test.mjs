@@ -38,6 +38,7 @@ import {
   DeltaSyncStatusTool,
   registerMeshPeerTools,
 } from '../src/peer-tools.mjs'
+import { BrowserToolRegistry } from '../src/compat.mjs'
 
 describe('MeshPeerToolsContext', () => {
   it('is exported as a singleton', () => {
@@ -316,5 +317,14 @@ describe('registerMeshPeerTools', () => {
     assert.equal(peerToolsContext.getMeshChat(), deps.meshChat)
     assert.equal(peerToolsContext.getMeshScheduler(), deps.meshScheduler)
     assert.equal(peerToolsContext.getHealthMonitor(), deps.healthMonitor)
+  })
+
+  it('registers all 29 tools into a real BrowserToolRegistry', () => {
+    const registry = new BrowserToolRegistry()
+    registerMeshPeerTools(registry, {})
+    assert.equal(registry.list().length, 29)
+    assert.ok(registry.get('mesh_chat_create_room') instanceof MeshChatCreateRoomTool)
+    const specs = registry.listSpecs()
+    assert.ok(specs.some((s) => s.name === 'federated_compute_submit'))
   })
 })
