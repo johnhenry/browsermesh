@@ -283,6 +283,23 @@
  * as `node.terminal` (the `attachService()` handle -- also reachable at
  * `node.services.get('terminal')`, same as any other opt-in service).
  *
+ * **SWIM cluster membership + leader election + task distribution is
+ * opt-in via `{ enableSwarm: true, swarmOptions }`** (issue #88). When set,
+ * this function attaches `mesh-swarm.mjs`'s `createSwarmService()` --
+ * wrapping `@johnhenry/browsermesh-discovery`'s `SwarmCoordinator` with an
+ * internally-constructed `SwimMembership`, so swarm membership becomes real
+ * and SWIM-driven (direct ping -> indirect ping-req -> suspect -> dead, with
+ * piggybacked membership dissemination), plus a genuinely new leader-election
+ * heartbeat pump and a real `SWARM_TASK_ASSIGN` wire notification when a task
+ * is assigned to a remote peer. Peer-initiated join requests and task
+ * submissions are individually authorized via `registry.checkAccess()` --
+ * see `mesh-swarm.mjs`'s own header comment for the full design (in
+ * particular why `SwimMembership`'s single-slot `onJoin`/`onDead` callbacks
+ * are composed rather than overwritten, and the SWARM_JOIN/SWARM_LEAVE
+ * admission-control design distinct from SWIM's own dead-via-timeout
+ * detection). Attached to the returned node as `node.swarm` (the
+ * `attachService()` handle -- also reachable via `node.services.get('swarm')`).
+ *
  * No browser-only imports at module level.
  */
 
@@ -328,6 +345,7 @@ import { createEscrowService } from './peer-escrow.mjs'
 import { createChatService } from './peer-chat.mjs'
 import { createComputeService } from './mesh-compute.mjs'
 import { createTerminalService } from './peer-terminal.mjs'
+import { createSwarmService } from './mesh-swarm.mjs'
 
 /**
  * Build and boot a real, WebRTC-capable `PeerNode`.
@@ -632,6 +650,20 @@ import { createTerminalService } from './peer-terminal.mjs'
  *   {output, exitCode}`) is required; this function throws if it's missing
  *   (issue #86's resolved "bring-your-own, required, no default" execution-
  *   backend decision).
+ * @param {boolean} [options.enableSwarm=false] - Attach `mesh-swarm.mjs`'s
+ *   `createSwarmService()` (issue #88): real SWIM failure detection +
+ *   leader election + task distribution, wrapping
+ *   `@johnhenry/browsermesh-discovery`'s `SwarmCoordinator`/`SwimMembership`.
+ *   Peer-initiated join requests and task submissions are individually
+ *   authorized via `registry.checkAccess()` -- see `mesh-swarm.mjs`'s own
+ *   doc comment for the full design. Attached to the returned node as
+ *   `node.swarm` (the `attachService()` handle -- also reachable via
+ *   `node.services.get('swarm')`).
+ * @param {object} [options.swarmOptions] - Only used when `enableSwarm`.
+ *   Passed straight through to `createSwarmService()`
+ *   (`heartbeatMs`/`electionTimeoutMs`/`swimOptions`/`swimEnvelopeType`/
+ *   `heartbeatEnvelopeType`/`membershipEnvelopeType`/`taskEnvelopeType`/
+ *   `accessResource`/`requestTimeoutMs`) -- see that function's own doc comment.
  * @returns {Promise<PeerNode>} A booted (unless `skipBoot`) PeerNode, with
  *   `node.meshManager` (`WebRTCMeshManager`), `node.signaling`
  *   (`MeshSignalingChannel`), and `node.transportNegotiator` (the real,
@@ -740,6 +772,8 @@ export async function createMeshNode(options = {}) {
     computeOptions,
     enableTerminal = false,
     terminalOptions,
+    enableSwarm = false,
+    swarmOptions,
   } = options
 
   if (!signalingTransport) {
@@ -1236,6 +1270,31 @@ export async function createMeshNode(options = {}) {
     const terminalHandle = attachService(node, servicesNetwork, terminalDescriptor)
     node.services.set(terminalHandle.name, terminalHandle)
     node.terminal = terminalHandle
+  }
+
+  // -- SWIM cluster membership + leader election + task distribution
+  // (opt-in, issue #88) -----------------------------------------------------
+  // Attached the same way every other opt-in service above is
+  // (attachService()) -- see mesh-swarm.mjs's own header comment for the
+  // full design (SWIM bridge, single-slot callback composition, the leader
+  // election heartbeat pump, and the SWARM_JOIN/SWARM_LEAVE/SWARM_TASK_ASSIGN
+  // wire use).
+  if (enableSwarm) {
+    const swarmDescriptor = createSwarmService({
+      heartbeatMs: swarmOptions?.heartbeatMs,
+      electionTimeoutMs: swarmOptions?.electionTimeoutMs,
+      swimOptions: swarmOptions?.swimOptions,
+      swimEnvelopeType: swarmOptions?.swimEnvelopeType,
+      heartbeatEnvelopeType: swarmOptions?.heartbeatEnvelopeType,
+      membershipEnvelopeType: swarmOptions?.membershipEnvelopeType,
+      taskEnvelopeType: swarmOptions?.taskEnvelopeType,
+      accessResource: swarmOptions?.accessResource,
+      requestTimeoutMs: swarmOptions?.requestTimeoutMs,
+      onLog: swarmOptions?.onLog ?? onLog,
+    })
+    const swarmHandle = attachService(node, servicesNetwork, swarmDescriptor)
+    node.services.set(swarmHandle.name, swarmHandle)
+    node.swarm = swarmHandle
   }
 
   return node
