@@ -12,7 +12,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createComputeService } from '../src/mesh-compute.mjs';
+import { createComputeService, DEFAULT_COMPUTE_DISPATCH_TIMEOUT_MS } from '../src/mesh-compute.mjs';
 import { attachService } from '../src/mesh-service.mjs';
 import { PeerRegistry } from '../src/peer-registry.mjs';
 import { createMeshNode } from '../src/mesh-bootstrap.mjs';
@@ -281,21 +281,25 @@ describe('createComputeService: teardown', () => {
     // bob's executeFn never resolves -- alice's dispatch stays pending.
     attachService(nodeB, undefined, createComputeService({ executeFn: () => new Promise(() => {}) }));
 
-    // A small dispatchTimeoutMs matters here: FederatedCompute's own
-    // #dispatchChunk() retry loop (COMPUTE_DEFAULTS.maxRetries) is NOT
-    // reset or cancelled by this service's teardown() -- only the ALREADY
-    // in-flight pending dispatch is rejected. Any retry attempt issued
-    // AFTER teardown() creates a brand-new real setTimeout() that this test
-    // has no way to short-circuit, so it must actually elapse. Keeping the
-    // timeout tiny keeps that unavoidable real wait (up to maxRetries
-    // further timeouts) well under a second instead of many seconds.
+    // issue #136 fix: a realistic dispatchTimeoutMs (the actual default,
+    // not an artificially tiny one) is safe to use here now. Before the
+    // fix, FederatedCompute's own #dispatchChunk() retry loop
+    // (COMPUTE_DEFAULTS.maxRetries) was NOT cancelled by this service's
+    // teardown() -- only the ALREADY in-flight pending dispatch was
+    // rejected, and the retry issued right after that created a brand-new,
+    // uncancellable setTimeout() that had to actually elapse, forcing this
+    // test to shrink dispatchTimeoutMs to 50ms just to stay fast.
+    // compute.destroy() (called first inside teardown()) now stops that
+    // retry loop from ever issuing another dispatch() once torn down --
+    // see the dedicated "genuinely cancels" test below, which proves this
+    // directly with a large dispatchTimeoutMs and a sendTo spy.
     const events = [];
     const {
       api: aliceApi, on: aliceOn, teardown,
     } = attachService(nodeA, undefined, createComputeService({
       splitFn: (payload) => [payload],
       mergeFn: (results) => results[0],
-      dispatchTimeoutMs: 50,
+      dispatchTimeoutMs: DEFAULT_COMPUTE_DISPATCH_TIMEOUT_MS,
     }));
     aliceOn('compute:failed', (data) => events.push(data));
 
@@ -308,6 +312,66 @@ describe('createComputeService: teardown', () => {
 
     // Event bus closed by teardown() -- nothing further reaches on().
     assert.equal(events.length, 0);
+  });
+
+  it('genuinely cancels FederatedCompute\'s retry loop -- no new dispatch attempt is issued after teardown, and the in-flight submit() settles promptly despite a large dispatchTimeoutMs', async () => {
+    const alice = await createComputeTestPeer('alice');
+    const bob = await createComputeTestPeer('bob');
+    const mesh = wireFullMesh([alice, bob]);
+    const { [alice.podId]: nodeA, [bob.podId]: nodeB } = mesh;
+
+    nodeB.registry.grantCapabilities(alice.podId, ['compute:execute']);
+
+    // bob's executeFn never resolves -- bob never sends back a
+    // 'compute-response', so alice's default scheduler.dispatch() stays
+    // pending until either its own timeout fires or teardown() forces it.
+    attachService(nodeB, undefined, createComputeService({ executeFn: () => new Promise(() => {}) }));
+
+    // Spy on nodeA.sendTo to count outbound 'compute-request' envelopes --
+    // proves (rather than just asserts) that FederatedCompute's
+    // #dispatchChunk() retry loop really stops issuing new dispatch
+    // attempts once teardown() runs, mirroring mesh-keepalive.test.mjs's
+    // own "no leaked timers" precedent (spy on sendTo, wait past several
+    // would-be cycles, assert the count stays put).
+    const originalSendTo = nodeA.sendTo.bind(nodeA);
+    let requestsSent = 0;
+    nodeA.sendTo = async (pubKey, data) => {
+      if (data && data.kind === 'compute-request') requestsSent += 1;
+      return originalSendTo(pubKey, data);
+    };
+
+    const {
+      api: aliceApi, teardown,
+    } = attachService(nodeA, undefined, createComputeService({
+      splitFn: (payload) => [payload],
+      mergeFn: (results) => results[0],
+      // A large, realistic timeout on purpose: before the fix this alone
+      // would have made a leaked post-teardown retry take up to this long
+      // (times COMPUTE_DEFAULTS.maxRetries) to finally settle.
+      dispatchTimeoutMs: DEFAULT_COMPUTE_DISPATCH_TIMEOUT_MS,
+    }));
+
+    const pending = aliceApi.submit({ payload: 1, peers: [bob.podId] });
+    await waitFor(() => requestsSent >= 1, 1000, 'first compute-request to be sent');
+
+    const requestsAtTeardown = requestsSent;
+    const teardownStart = Date.now();
+    await teardown();
+
+    // The in-flight submit() resolves promptly -- NOT after waiting out
+    // dispatchTimeoutMs, let alone maxRetries * dispatchTimeoutMs, which is
+    // exactly the leak issue #136 describes.
+    const job = await pending;
+    const elapsed = Date.now() - teardownStart;
+    assert.ok(elapsed < 2000, `submit() should resolve promptly after teardown(), took ${elapsed}ms`);
+    assert.equal(job.status, 'failed');
+
+    // No further 'compute-request' was sent after teardown, even after
+    // waiting well past what would have been a retry cycle -- proof the
+    // retry loop's timer/dispatch activity genuinely stopped, not just
+    // that this one promise happened to settle.
+    await new Promise((r) => setTimeout(r, 200));
+    assert.equal(requestsSent, requestsAtTeardown, 'no new dispatch attempt was issued after teardown()');
   });
 });
 

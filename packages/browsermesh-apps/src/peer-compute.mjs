@@ -323,6 +323,21 @@ export class FederatedCompute {
   #listeners = new Map()
 
   /**
+   * Set once `destroy()` has been called. Checked at the top of every
+   * `#dispatchChunk()` retry attempt (see that method) so that no NEW
+   * `scheduler.dispatch()` call -- and therefore no new timer/resource a
+   * caller-supplied scheduler may allocate per dispatch (e.g.
+   * `mesh-compute.mjs`'s per-request `setTimeout`) -- is ever issued once
+   * this instance has been destroyed. `destroy()` cannot itself cancel an
+   * *already in-flight* `scheduler.dispatch()` promise -- that promise is
+   * entirely the scheduler's own to settle (or for a caller who owns that
+   * scheduler, such as `mesh-compute.mjs`'s `teardown()`, to reject
+   * directly) -- it only guarantees no further ones start.
+   * @type {boolean}
+   */
+  #destroyed = false
+
+  /**
    * @param {object} opts
    * @param {object} opts.scheduler - Must have dispatch(peerId, job) and listAvailablePeers()
    * @param {Function} [opts.onLog] - Logging callback (level, msg)
@@ -500,6 +515,34 @@ export class FederatedCompute {
     return true
   }
 
+  // ── Destroy ────────────────────────────────────────────────────
+
+  /**
+   * Permanently stop this instance's background dispatch activity.
+   *
+   * Unlike `cancel(jobId)` (which only marks a single job's bookkeeping),
+   * `destroy()` sets an instance-wide flag that `#dispatchChunk()`'s retry
+   * loop checks before every attempt (including the very first one for a
+   * chunk that hasn't dispatched yet, e.g. a not-yet-reached pipeline
+   * stage): once destroyed, no chunk of any job -- in-flight or still
+   * queued -- will trigger another `scheduler.dispatch()` call. Any attempt
+   * already awaiting `scheduler.dispatch()` when `destroy()` is called
+   * keeps awaiting that specific promise (this class has no way to abort a
+   * promise it doesn't own); once it settles -- either normally, or via a
+   * caller who owns/wraps the scheduler forcing it to reject (e.g.
+   * `mesh-compute.mjs`'s `teardown()`, which rejects its own
+   * `pendingDispatches`) -- the retry loop sees `#destroyed` and stops
+   * instead of dispatching again, so no new timer/resource the scheduler
+   * allocates per call is ever created after this returns.
+   *
+   * Idempotent. Safe to call with no jobs outstanding.
+   */
+  destroy() {
+    if (this.#destroyed) return
+    this.#destroyed = true
+    this.#onLog('info', 'FederatedCompute destroyed -- no further dispatch attempts will be issued')
+  }
+
   // ── Queries ────────────────────────────────────────────────────
 
   /**
@@ -644,6 +687,17 @@ export class FederatedCompute {
     let lastError = null
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      // Checked before EVERY attempt (first try and every retry) -- see
+      // #destroyed's own doc comment. This is the fix for issue #136: stop
+      // issuing new scheduler.dispatch() calls (and therefore new
+      // per-dispatch resources a scheduler may allocate, e.g.
+      // mesh-compute.mjs's per-request setTimeout) once destroy() has been
+      // called, instead of retrying blindly until maxRetries is exhausted.
+      if (this.#destroyed) {
+        lastError = lastError ?? new Error('FederatedCompute destroyed')
+        break
+      }
+
       chunk.attempts = attempt + 1
       chunk.status = 'running'
 
@@ -664,7 +718,7 @@ export class FederatedCompute {
         lastError = err
         this.#onLog('warn', `Chunk ${chunk.id} attempt ${attempt + 1} failed: ${err.message}`)
 
-        if (attempt < maxRetries) {
+        if (attempt < maxRetries && !this.#destroyed) {
           // Retry on a different peer if available
           const currentIdx = peers.indexOf(chunk.assignee)
           const nextPeer = peers[(currentIdx + 1) % peers.length]
@@ -673,7 +727,7 @@ export class FederatedCompute {
       }
     }
 
-    // All retries exhausted
+    // All retries exhausted (or destroyed mid-flight)
     chunk.status = 'failed'
     chunk.error = lastError?.message ?? 'unknown error'
     this.#emit('chunk-failed', { jobId: job.id, chunkId: chunk.id, error: chunk.error })
