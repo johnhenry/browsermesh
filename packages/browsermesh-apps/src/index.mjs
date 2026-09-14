@@ -37,6 +37,7 @@ export * from './mesh-health.mjs';
 export * from './mesh-verification.mjs';
 export * from './mesh-torrent.mjs';
 export * from './mesh-compute.mjs';
+export * from './mesh-swarm.mjs';
 export * from './cloud-storage-backend.mjs';
 export * from './grant-log.mjs';
 export * from './key-distribution.mjs';
