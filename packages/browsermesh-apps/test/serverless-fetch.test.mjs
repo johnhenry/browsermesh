@@ -20,6 +20,7 @@ import assert from 'node:assert/strict'
 
 import { createServerlessFetchRouter } from '../src/serverless-fetch.mjs'
 import { encodeWireResponse } from '../src/serverless-wire.mjs'
+import { SiteRegistry } from '../src/serverless-sites.mjs'
 
 const enc = new TextEncoder()
 const dec = new TextDecoder()
@@ -114,5 +115,28 @@ describe('createServerlessFetchRouter: binary body round-trips through a real Re
     const res = await router.route(new Request('mesh://site-pod/file.txt'))
     assert.equal(res.headers.get('x-mesh-serverless-body-encoding'), null)
     assert.equal(dec.decode(await res.arrayBuffer()), 'hi')
+  })
+})
+
+describe('createServerlessFetchRouter: SiteRegistry#selectPeer plugs in directly as resolveSite (Phase 5)', () => {
+  it('routes a site-name request to whichever peer SiteRegistry currently selects', async () => {
+    const meshRpcApi = fakeMeshRpcApi({ 'pod-a': encodeWireResponse({ status: 200, headers: {}, body: 'served by pod-a' }) })
+    const peerNode = { listPeers: () => [{ fingerprint: 'pod-a', status: 'connected' }] }
+    const siteRegistry = new SiteRegistry({ peerNode })
+    siteRegistry.registerSitePeer('my-blog', 'pod-a')
+
+    const router = createServerlessFetchRouter(meshRpcApi, { resolveSite: siteRegistry.selectPeer.bind(siteRegistry) })
+    const res = await router.route(new Request('mesh://my-blog/'))
+    assert.equal(await res.text(), 'served by pod-a')
+    assert.equal(meshRpcApi.calls[0].podId, 'pod-a')
+  })
+
+  it('falls back to literal podId addressing when the site has no connected peers registered', async () => {
+    const meshRpcApi = fakeMeshRpcApi({ 'literal-pod': encodeWireResponse({ status: 200, headers: {}, body: 'direct' }) })
+    const siteRegistry = new SiteRegistry({ peerNode: { listPeers: () => [] } })
+
+    const router = createServerlessFetchRouter(meshRpcApi, { resolveSite: siteRegistry.selectPeer.bind(siteRegistry) })
+    const res = await router.route(new Request('mesh://literal-pod/'))
+    assert.equal(await res.text(), 'direct')
   })
 })
