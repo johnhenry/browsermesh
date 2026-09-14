@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.0
+
+### Minor Changes
+
+- **BrowserMesh Serverless**: static sites and serverless functions served across mesh peers, adapted from a local `actually-serverless` reference (a single-machine, multi-tab Service Worker proxy) into a real mesh-native equivalent.
+
+  - `src/cloud-storage.mjs`: added `getObject(key) -> {data, contentType, metadata}` and `stat(key) -> {size, contentType, metadata, updatedAt, version}` — the backend's `get`/`head` ops already returned these fields; the public class was discarding everything but raw bytes.
+  - `src/serverless-static.mjs` (new): `createStaticHandler({store, indexFile, spaFallback, public, checkAccess})` — static-site serving on a `CloudStorage` bucket: index.html/implicit-directory-index resolution, optional SPA fallback, extension-based content-type guessing, HEAD via `stat()` (no chunk bytes pulled over the mesh). "Public" sites skip the read-access gate entirely at this layer (no wildcard-peer grant primitive exists anywhere in this repo's ACL stack); gated sites take an injected `checkAccess`.
+  - `src/serverless-router.mjs` + `src/serverless-fetch.mjs` (new): `createSiteRequestHandler()` chains static → functions → proxy over a dedicated `'mesh-serverless'` `mesh-rpc` envelope type; `createServerlessFetchRouter()` finally gives `@johnhenry/browsermesh-discovery`'s `MeshFetchRouter` its first real caller.
+  - `src/serverless-wire.mjs` (new): base64-encodes binary response bodies for the `mesh-rpc` wire hop, matching `cloud-storage-backend.mjs`'s existing chunk-byte convention.
+  - `src/serverless-executor-andbox.mjs` + `src/serverless-functions.mjs` (new): `createAndboxExecutor()`, the light/default function-execution backend on `@johnhenry/andbox`'s Worker-isolated JS runtime — one fresh sandbox per invocation, never pooled (concurrent inbound requests are real, and andbox's own Worker-realm sharing plus collateral-timeout hazard makes pooling unsafe). `createFunctionsHandler()` is the backend-agnostic route matcher adapting any `executor(job) -> Promise<result>` into the router.
+  - `src/serverless-proxy.mjs` (new): `createProxyHandler({targetOrigin, spaFallback})` — plain `fetch()` reverse proxy to an external URL with SPA fallback, not built on `GatewayBackend` (a different, transport-layer concern).
+  - `src/serverless-peer-select.mjs` + `src/serverless-sites.mjs` (new): `selectPeer()`, a pure peer-selection function extracted from `scheduler.mjs`'s own inlined policy switch; `SiteRegistry` tracks which connected, admin-designated peers can serve a given site (mirroring `CloudStorage`'s own `replicaPeers` precedent).
+
+  `andbox` is imported lazily (inside the executor, not a top-level static import) since it's a genuinely separate, not-yet-published package, not a workspace sibling like this package's other optional peer dependencies.
+
 ## 0.3.0
 
 ### Minor Changes
