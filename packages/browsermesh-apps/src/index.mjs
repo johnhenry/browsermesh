@@ -54,6 +54,7 @@ export * from './serverless-wire.mjs';
 export * from './serverless-static.mjs';
 export * from './serverless-router.mjs';
 export * from './serverless-fetch.mjs';
+export * from './serverless-proxy.mjs';
 export * from './observability-bridge.mjs';
 export * from './mesh-kv.mjs';
 export * from './peer-payments.mjs';
