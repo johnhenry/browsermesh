@@ -21,20 +21,44 @@
  * The `LISTING_*`/`REVIEW_*` constants below are `browsermesh-primitives`
  * wire-registry codes, re-exported but never used as an `envelope.type` --
  * `MeshService`'s `ctx.onIncomingData()` filters on a plain string, which
- * this numeric registry is structurally incompatible with. Real mesh
- * wiring (network-searchable listings) is a later addition to this file,
- * not part of this pass, and will mint its own string envelope type rather
- * than repurpose these, matching `mesh-swarm.mjs`'s identical precedent
- * for the same situation.
+ * this numeric registry is structurally incompatible with. `createMarketplaceNetworkService()`
+ * below mints its own string envelope type (`'mesh-marketplace'`) instead
+ * of repurposing them, matching `mesh-swarm.mjs`'s identical precedent for
+ * the same situation. They stay exactly as they are: unused as routing,
+ * re-exported for whatever documentation/continuity value they still have.
  *
  * `Marketplace` itself is, and stays, a fully open directory: no
- * `GrantLog`/ACL on publish, search, or review-read.
+ * `GrantLog`/ACL on publish, search, or review-read, locally or over the
+ * network. The only attribution property that matters (a listing's
+ * `providerPodId` must equal its actual owner) already exists in the
+ * local class and is untouched here -- it protects a remote-*publish*
+ * path (`LISTING_PUBLISH`/`REVIEW_SUBMIT`/`LISTING_PURCHASE`) this file
+ * still does not build, deliberately deferred pending its own payment/
+ * reputation design. `createMarketplaceNetworkService()`'s `SEARCH`/
+ * `REVIEWS` methods are read-only and need no such check.
+ *
+ * ---------------------------------------------------------------------------
+ * `createMarketplaceNetworkService()` reuses `mesh-rpc.mjs`'s
+ * `createMeshRpcService()` directly (under a dedicated `envelopeType` so
+ * it never collides with a pod's own general-purpose `mesh-rpc` service --
+ * the same reasoning `serverless-router.mjs`'s `createSiteMeshRpcService()`
+ * already established for this identical problem) rather than hand-rolling
+ * request/response correlation and timeouts from scratch: `SEARCH`/
+ * `REVIEWS` are genuinely request/response-shaped, so `mesh-rpc.mjs`'s
+ * machinery is the right fit, not a borrowed one.
+ *
+ * `MeshMarketplace` is the ergonomic wrapper -- the two-layer split
+ * `mesh-kv.mjs` already established (a bare `MeshService` descriptor
+ * factory plus a class that composes it via `attachService()` and exposes
+ * its own forwarding `EventBus`). `Marketplace` itself never gains a
+ * `PeerNode` reference; only `MeshMarketplace` does.
  *
  * No browser-only imports at module level.
  */
 
 import { MESH_TYPE } from '@johnhenry/browsermesh-primitives';
-import { createEventBus } from './mesh-service.mjs';
+import { createEventBus, attachService } from './mesh-service.mjs';
+import { createMeshRpcService } from './mesh-rpc.mjs';
 
 // ---------------------------------------------------------------------------
 // Wire constants (re-exported from canonical registry)
@@ -773,5 +797,222 @@ export class MarketplaceIndex {
     }
 
     return [...matched];
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Marketplace network search
+// ---------------------------------------------------------------------------
+
+/** Default `envelope.type` for a marketplace's mesh-rpc attach -- see module doc comment. */
+export const DEFAULT_MARKETPLACE_ENVELOPE_TYPE = 'mesh-marketplace';
+
+/**
+ * @param {Marketplace} marketplace
+ * @returns {(req: {method: string, body?: object}) => Promise<{status: number, body: object}>}
+ */
+function createMarketplaceRequestHandler(marketplace) {
+  return async function onRequest({ method, body }) {
+    if (method === 'SEARCH') {
+      return { status: 200, body: { listings: marketplace.search(body || {}).map((l) => l.toJSON()) } };
+    }
+    if (method === 'REVIEWS') {
+      const listingId = body && body.listingId;
+      if (!listingId) return { status: 400, body: { error: 'listingId is required' } };
+      return { status: 200, body: { reviews: marketplace.getReviews(listingId).map((r) => r.toJSON()) } };
+    }
+    return { status: 404, body: { error: `unknown marketplace method: ${method}` } };
+  };
+}
+
+/**
+ * Build a `MeshService` descriptor (`mesh-service.mjs`) that answers
+ * incoming `SEARCH`/`REVIEWS` requests against `marketplace`'s own local
+ * listings, over a dedicated `envelopeType` so it never collides with a
+ * pod's general-purpose `mesh-rpc` service. Thin wrapper around
+ * `createMeshRpcService()` -- see module doc comment.
+ *
+ * @param {object} opts
+ * @param {Marketplace} opts.marketplace
+ * @param {string} [opts.envelopeType='mesh-marketplace']
+ * @param {number} [opts.requestTimeoutMs]
+ * @param {Function} [opts.onLog]
+ * @returns {import('./mesh-service.mjs').MeshService}
+ */
+export function createMarketplaceNetworkService({
+  marketplace,
+  envelopeType = DEFAULT_MARKETPLACE_ENVELOPE_TYPE,
+  requestTimeoutMs,
+  onLog,
+} = {}) {
+  if (!marketplace || typeof marketplace.search !== 'function') {
+    throw new Error('createMarketplaceNetworkService: opts.marketplace (a Marketplace instance) is required');
+  }
+  const rpcService = createMeshRpcService({
+    onRequest: createMarketplaceRequestHandler(marketplace),
+    envelopeType,
+    requestTimeoutMs,
+    onLog,
+  });
+  return { ...rpcService, name: 'marketplace-network' };
+}
+
+/**
+ * @param {Promise} promise
+ * @param {number} [timeoutMs]
+ * @returns {Promise}
+ */
+function withTimeout(promise, timeoutMs) {
+  if (timeoutMs === undefined) return promise;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      setTimeout(() => reject(new Error(`marketplace network request timed out after ${timeoutMs}ms`)), timeoutMs);
+    }),
+  ]);
+}
+
+/**
+ * Ergonomic wrapper composing a local `Marketplace` with
+ * `createMarketplaceNetworkService()` -- the same two-layer split
+ * `mesh-kv.mjs` established: `Marketplace` itself never gains a
+ * `PeerNode` reference, only `MeshMarketplace` does.
+ */
+export class MeshMarketplace {
+  /** @type {Marketplace} */
+  #marketplace;
+  /** @type {import('./peer-node.mjs').PeerNode} */
+  #node;
+  /** @type {ReturnType<import('./mesh-service.mjs').attachService>} */
+  #handle;
+  /** @type {import('./mesh-service.mjs').EventBus} */
+  #events = createEventBus();
+  /** @type {() => void} */
+  #unsubscribeForwardedEvents;
+
+  /**
+   * @param {object} opts
+   * @param {import('./peer-node.mjs').PeerNode} opts.node - duck-typed: needs `podId` and `registry.listPeers()`.
+   * @param {import('@johnhenry/browsermesh-netway').VirtualNetwork} [opts.network] - unused today (the network service declares no `createBackend`), accepted for forward compatibility with `attachService()`'s own signature.
+   * @param {string} [opts.localPodId] - defaults to `node.podId`.
+   * @param {string} [opts.envelopeType]
+   * @param {number} [opts.requestTimeoutMs]
+   * @param {Function} [opts.onLog]
+   */
+  constructor({ node, network, localPodId, envelopeType, requestTimeoutMs, onLog } = {}) {
+    if (!node || typeof node.podId !== 'string') {
+      throw new Error('MeshMarketplace: opts.node (a PeerNode-like object with a podId) is required');
+    }
+    this.#node = node;
+    this.#marketplace = new Marketplace({ localPodId: localPodId ?? node.podId });
+    this.#handle = attachService(node, network, createMarketplaceNetworkService({
+      marketplace: this.#marketplace,
+      envelopeType,
+      requestTimeoutMs,
+      onLog,
+    }));
+    // Forward Marketplace's own local events verbatim onto this class's own
+    // bus -- same convention MeshKv already uses for its own composed
+    // service, not a second, differently-named vocabulary.
+    this.#unsubscribeForwardedEvents = this.#marketplace.onEvent((event, data) => this.#events.emit(event, data));
+  }
+
+  /** @returns {string} */
+  get localPodId() {
+    return this.#marketplace.localPodId;
+  }
+
+  // -- Local pass-throughs (delegate to the composed Marketplace) -----------
+
+  publish(listing) { return this.#marketplace.publish(listing); }
+  unpublish(listingId) { return this.#marketplace.unpublish(listingId); }
+  update(listingId, updates) { return this.#marketplace.update(listingId, updates); }
+  search(query) { return this.#marketplace.search(query); }
+  getListingById(id) { return this.#marketplace.getListingById(id); }
+  getListingsByProvider(podId) { return this.#marketplace.getListingsByProvider(podId); }
+  addReview(review) { return this.#marketplace.addReview(review); }
+  getReviews(listingId) { return this.#marketplace.getReviews(listingId); }
+  getAverageRating(listingId) { return this.#marketplace.getAverageRating(listingId); }
+  getCategories() { return this.#marketplace.getCategories(); }
+  getFeatured(limit) { return this.#marketplace.getFeatured(limit); }
+  getStats() { return this.#marketplace.getStats(); }
+
+  /** @returns {string[]} */
+  #connectedPeerIds() {
+    const peers = this.#node.registry && typeof this.#node.registry.listPeers === 'function'
+      ? this.#node.registry.listPeers({ status: 'connected' })
+      : [];
+    return peers.map((p) => p.fingerprint);
+  }
+
+  /**
+   * Search connected peers' own marketplaces, not just this one. A peer
+   * that times out or errors is silently excluded from the result rather
+   * than rejecting the whole call -- partial results, matching
+   * `chunk-replication.mjs`'s "best responder wins, nobody home is not a
+   * hard error" posture.
+   *
+   * @param {object} [query] - `Marketplace#search()`'s own query shape.
+   * @param {object} [opts]
+   * @param {string[]} [opts.peerIds] - defaults to currently-connected peers.
+   * @param {number} [opts.timeoutMs] - per-call override; omit to use the service's own `requestTimeoutMs`.
+   * @returns {Promise<ServiceListing[]>} deduped by listing id across all responding peers.
+   */
+  async searchNetwork(query = {}, { peerIds, timeoutMs } = {}) {
+    const targets = peerIds ?? this.#connectedPeerIds();
+    const settled = await Promise.allSettled(
+      targets.map((peerId) => withTimeout(this.#handle.api.request(peerId, { method: 'SEARCH', body: query }), timeoutMs)),
+    );
+    const byId = new Map();
+    for (const result of settled) {
+      if (result.status !== 'fulfilled') continue;
+      const res = result.value;
+      if (res.status !== 200 || !res.body || !res.body.listings) continue;
+      for (const raw of res.body.listings) {
+        const listing = ServiceListing.fromJSON(raw);
+        if (!byId.has(listing.id)) byId.set(listing.id, listing);
+      }
+    }
+    return [...byId.values()];
+  }
+
+  /**
+   * Fetch reviews for `listingId` from connected peers, same partial-results
+   * posture as `searchNetwork()`.
+   *
+   * @param {string} listingId
+   * @param {object} [opts]
+   * @param {string[]} [opts.peerIds]
+   * @param {number} [opts.timeoutMs]
+   * @returns {Promise<ServiceReview[]>} deduped by review id.
+   */
+  async getReviewsNetwork(listingId, { peerIds, timeoutMs } = {}) {
+    const targets = peerIds ?? this.#connectedPeerIds();
+    const settled = await Promise.allSettled(
+      targets.map((peerId) => withTimeout(this.#handle.api.request(peerId, { method: 'REVIEWS', body: { listingId } }), timeoutMs)),
+    );
+    const byId = new Map();
+    for (const result of settled) {
+      if (result.status !== 'fulfilled') continue;
+      const res = result.value;
+      if (res.status !== 200 || !res.body || !res.body.reviews) continue;
+      for (const raw of res.body.reviews) {
+        const review = ServiceReview.fromJSON(raw);
+        if (!byId.has(review.id)) byId.set(review.id, review);
+      }
+    }
+    return [...byId.values()];
+  }
+
+  // -- Observability (forwards Marketplace's own events, see constructor) --
+
+  on(event, cb) { return this.#events.on(event, cb); }
+  onEvent(cb) { return this.#events.onEvent(cb); }
+
+  /** Tears down the composed network service and stops event forwarding. */
+  async close() {
+    this.#unsubscribeForwardedEvents();
+    await this.#handle.teardown();
+    this.#events.closeAll();
   }
 }
