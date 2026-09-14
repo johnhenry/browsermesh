@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.0.1
+
+### Patch Changes
+
+- Documentation only: `policy.mjs`/`virtual-network.mjs` now document that `VirtualNetwork.scope()`/`ScopedNetwork` finally has a real caller — `@johnhenry/browsermesh-kernel`'s `Kernel#networkFor()` uses it to hand sandboxed tenant code a real, capability-scoped `caps.net` view (previously a bare boolean). No code/behavior change in this package; `.scope()`'s own logic is unmodified.
+
 ## 0.0.0
 
 Imported into the `@johnhenry` npm scope as part of the browsermesh

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0
+
+### Minor Changes
+
+- Add `BrowserToolRegistry` to `compat.mjs`, alongside `BrowserTool`. Referenced in JSDoc type imports across `identity-tools.mjs`/`peer-tools.mjs` (and `@johnhenry/browsermesh-apps`'s `tools.mjs`) for a long time, but never actually defined anywhere — those files' existing `register(tool)` calling convention already matched the real class once it existed, so no other changes were needed. `register(tool)` duck-types the tool (a working `.spec` getter with a non-empty `.name`, plus a `.execute` function) rather than an `instanceof` check, since `@johnhenry/browsermesh-apps` vendors its own separate, structurally-identical `BrowserTool` for standalone use — the same reasoning `compat.mjs`'s own header comment already gives for avoiding hard class-identity assumptions. Duplicate-name registration throws rather than silently overwriting. `get(name)`/`list()`/`listSpecs()`/`unregister(name)` round out the API — `listSpecs()` returns the OpenAI-function-calling-shaped `.spec` array a real LLM tool-calling integration would need.
+
 ## 0.1.1
 
 ### Patch Changes
