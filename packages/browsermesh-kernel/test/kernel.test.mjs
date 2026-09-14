@@ -3,6 +3,16 @@ import assert from 'node:assert/strict';
 import { Kernel } from '../src/kernel.mjs';
 import { KERNEL_CAP } from '../src/constants.mjs';
 import { Clock } from '../src/clock.mjs';
+// Real `browsermesh-netway` primitives, used only by the `networkFor` real-provider
+// test below. Unlike `meshFor`'s real-peer proof (which needs a real WebRTC
+// PeerNode and so lives in browsermesh-apps, the layer that already depends on
+// both browsermesh-kernel and browsermesh-netway), VirtualNetwork is a plain,
+// dependency-free JS class -- no native/browser-only requirements -- so it's
+// pulled in here as a devDependency (see package.json) purely to prove the real
+// PolicyEngine denial path end-to-end. `browsermesh-kernel`'s own SOURCE
+// (kernel.mjs/caps.mjs) still imports nothing from browsermesh-netway; only this
+// test file does.
+import { VirtualNetwork, CAPABILITY } from '@johnhenry/browsermesh-netway';
 
 describe('Kernel', () => {
   it('creates with default subsystems', () => {
@@ -269,6 +279,106 @@ describe('Kernel', () => {
       assert.equal(view.deliver, undefined);
       assert.ok(Object.isFrozen(view));
 
+      kernel.close();
+    });
+  });
+
+  describe('networkFor (tenant-scoped network capability)', () => {
+    it('returns null when no network provider was injected into the kernel', () => {
+      const kernel = new Kernel();
+      const tenant = kernel.createTenant({ capabilities: [] });
+      assert.equal(kernel.networkFor(tenant.id), null);
+      kernel.close();
+    });
+
+    it('kernel.network (ambient) exposes the raw injected provider', () => {
+      const network = new VirtualNetwork();
+      const kernel = new Kernel({ network });
+      assert.equal(kernel.network, network);
+      kernel.close();
+    });
+
+    it('delegates to the injected provider\'s scope(), forwarding capabilities/policy', () => {
+      const calls = [];
+      const fakeNetwork = {
+        scope(opts) {
+          calls.push(opts);
+          return { fake: true };
+        },
+      };
+      const kernel = new Kernel({ network: fakeNetwork });
+      const tenant = kernel.createTenant({ capabilities: [] });
+
+      const view = kernel.networkFor(tenant.id, { capabilities: [CAPABILITY.LOOPBACK] });
+      assert.deepEqual(view, { fake: true });
+      assert.deepEqual(calls, [{ capabilities: [CAPABILITY.LOOPBACK], policy: undefined }]);
+
+      kernel.close();
+    });
+
+    it('a real VirtualNetwork: a view scoped to loopback only can use loopback and is denied tcp:connect with a real PolicyDeniedError', async () => {
+      const network = new VirtualNetwork();
+      const kernel = new Kernel({ network });
+      const tenant = kernel.createTenant({ capabilities: [] });
+
+      const view = kernel.networkFor(tenant.id, { capabilities: [CAPABILITY.LOOPBACK] });
+
+      // Granted: loopback works end-to-end through the real ScopedNetwork/PolicyEngine.
+      const listener = await view.listen('mem://localhost:7000');
+      const client = await view.connect('mem://localhost:7000');
+      const server = await listener.accept();
+      await client.write(new Uint8Array([9]));
+      assert.deepEqual(await server.read(), new Uint8Array([9]));
+      await client.close();
+      await server.close();
+      listener.close();
+
+      // Denied: tcp:connect was never granted -- a real PolicyDeniedError, not a
+      // silent no-op or a generic error.
+      await assert.rejects(
+        () => view.connect('tcp://example.com:443'),
+        { name: 'PolicyDeniedError', capability: CAPABILITY.TCP_CONNECT }
+      );
+
+      await network.close();
+      kernel.close();
+    });
+
+    it('caps.net is a real ScopedNetwork end to end via createTenant() when NET is granted', async () => {
+      const network = new VirtualNetwork();
+      const kernel = new Kernel({ network });
+      const tenant = kernel.createTenant({
+        capabilities: [KERNEL_CAP.NET],
+        networkCapabilities: [CAPABILITY.LOOPBACK],
+      });
+
+      assert.notEqual(tenant.caps.net, true, 'a real network provider is wired, so this must be the real scoped view, not the bare marker');
+      const listener = await tenant.caps.net.listen('mem://localhost:7100');
+      listener.close();
+      await assert.rejects(
+        () => tenant.caps.net.connect('tcp://example.com:443'),
+        { name: 'PolicyDeniedError' }
+      );
+
+      await network.close();
+      kernel.close();
+    });
+
+    it('a tenant not granted NET gets no caps.net view at all, even with a real provider wired', () => {
+      const network = new VirtualNetwork();
+      const kernel = new Kernel({ network });
+      const tenant = kernel.createTenant({ capabilities: [] }); // no KERNEL_CAP.NET
+
+      assert.equal(tenant.caps.net, undefined);
+
+      kernel.close();
+    });
+
+    it('Kernel constructed without any VirtualNetwork degrades gracefully (no throw), matching meshFor()\'s fallback', () => {
+      const kernel = new Kernel();
+      const tenant = kernel.createTenant({ capabilities: [KERNEL_CAP.NET] });
+      assert.equal(tenant.caps.net, true);
+      assert.equal(kernel.network, null);
       kernel.close();
     });
   });

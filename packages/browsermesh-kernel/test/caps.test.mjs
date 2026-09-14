@@ -81,6 +81,59 @@ describe('buildCaps MESH capability wiring (Phase 4)', () => {
   });
 });
 
+describe('buildCaps NET capability wiring', () => {
+  it('caps.net is the bare boolean marker when the kernel has no networkFor()', () => {
+    // mockKernel() (above) has no networkFor -- same shape as a plain `new Kernel()`
+    // constructed without a `network` provider.
+    const caps = buildCaps(mockKernel(), [KERNEL_CAP.NET]);
+    assert.equal(caps.net, true);
+  });
+
+  it('caps.net is the real scoped view, and tenantId + default networkCapabilities are threaded through, when kernel.networkFor() returns one', () => {
+    const netView = Object.freeze({ connect: () => {}, listen: () => {} });
+    const kernel = {
+      ...mockKernel(),
+      networkFor(tenantId, opts) {
+        assert.equal(tenantId, 'tenant_42');
+        // No explicit networkCapabilities was passed to buildCaps, so the
+        // documented default (least-privilege 'loopback', not CAPABILITY.ALL)
+        // must be what's forwarded to the provider.
+        assert.deepEqual(opts, { capabilities: ['loopback'] });
+        return netView;
+      },
+    };
+    const caps = buildCaps(kernel, [KERNEL_CAP.NET], 'tenant_42');
+    assert.equal(caps.net, netView);
+  });
+
+  it('an explicit networkCapabilities option overrides the default', () => {
+    const netView = Object.freeze({ connect: () => {} });
+    const kernel = {
+      ...mockKernel(),
+      networkFor(tenantId, opts) {
+        assert.deepEqual(opts, { capabilities: ['tcp:connect', 'dns:resolve'] });
+        return netView;
+      },
+    };
+    const caps = buildCaps(kernel, [KERNEL_CAP.NET], 'tenant_1', {
+      networkCapabilities: ['tcp:connect', 'dns:resolve'],
+    });
+    assert.equal(caps.net, netView);
+  });
+
+  it('caps.net falls back to the bare boolean marker when kernel.networkFor() itself returns null (no provider injected)', () => {
+    const kernel = { ...mockKernel(), networkFor: () => null };
+    const caps = buildCaps(kernel, [KERNEL_CAP.NET], 'tenant_1');
+    assert.equal(caps.net, true);
+  });
+
+  it('caps.net is absent (not granted) when NET is not in grantedCaps, even with a real provider wired', () => {
+    const kernel = { ...mockKernel(), networkFor: () => Object.freeze({ connect: () => {} }) };
+    const caps = buildCaps(kernel, [KERNEL_CAP.CLOCK], 'tenant_1');
+    assert.equal(caps.net, undefined);
+  });
+});
+
 describe('requireCap', () => {
   it('does not throw for granted cap', () => {
     const caps = buildCaps(mockKernel(), [KERNEL_CAP.CLOCK]);

@@ -32,5 +32,8 @@
   },
   "scripts": {
     "test": "node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "@johnhenry/browsermesh-netway": ">=0.0.0 <1.0.0"
   }
 }
