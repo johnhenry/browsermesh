@@ -26,7 +26,8 @@
     "@johnhenry/browsermesh-sync": ">=0.0.0 <1.0.0",
     "@johnhenry/browsermesh-discovery": ">=0.0.1 <1.0.0",
     "@johnhenry/browsermesh-kernel": ">=0.0.0 <1.0.0",
-    "@johnhenry/browsermesh-netway": ">=0.0.0 <1.0.0"
+    "@johnhenry/browsermesh-netway": ">=0.0.0 <1.0.0",
+    "@johnhenry/andbox": ">=0.0.1 <1.0.0"
   },
   "peerDependenciesMeta": {
     "@johnhenry/browsermesh-transport": {
@@ -42,6 +43,9 @@
       "optional": true
     },
     "@johnhenry/browsermesh-netway": {
+      "optional": true
+    },
+    "@johnhenry/andbox": {
       "optional": true
     }
   },

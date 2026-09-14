@@ -10,6 +10,9 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 
 import { createSiteRequestHandler, createSiteMeshRpcService, DEFAULT_SITE_ENVELOPE_TYPE } from '../src/serverless-router.mjs'
+import { createStaticHandler } from '../src/serverless-static.mjs'
+import { createFunctionsHandler } from '../src/serverless-functions.mjs'
+import { CloudStorageNotFoundError } from '../src/cloud-storage.mjs'
 import { WIRE_ENCODING_HEADER } from '../src/serverless-wire.mjs'
 
 const enc = new TextEncoder()
@@ -127,5 +130,38 @@ describe('createSiteMeshRpcService', () => {
     assert.equal(sent[0].payload.body, 'home')
 
     await result.teardown()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Phase 3 integration: a real createStaticHandler() (miss) chained into a
+// real createFunctionsHandler() (hit) via createSiteRequestHandler() --
+// proves the pieces built in different phases actually compose through the
+// router's static -> functions -> proxy precedence, not just in isolation.
+// ---------------------------------------------------------------------------
+
+describe('createSiteRequestHandler: real static + functions composition (Phase 3)', () => {
+  it('falls through a real static miss into a real functions hit', async () => {
+    const notFoundStore = { getObject: async () => { throw new CloudStorageNotFoundError('key') } }
+    const staticHandler = createStaticHandler({ store: notFoundStore, public: true })
+    const functionsHandler = createFunctionsHandler({
+      routes: [{ path: '/api/greet', code: 'unused-in-this-mock' }],
+      executor: async (job) => ({ greeting: `hi from ${job.request.path}` }),
+    })
+
+    const onRequest = createSiteRequestHandler({ staticHandler, functionsHandler })
+    const res = await onRequest({ method: 'GET', path: '/api/greet' })
+    assert.equal(res.status, 200)
+    assert.deepEqual(res.body, { greeting: 'hi from /api/greet' })
+  })
+
+  it('a path matching neither static nor any function route still 404s cleanly', async () => {
+    const notFoundStore = { getObject: async () => { throw new CloudStorageNotFoundError('key') } }
+    const staticHandler = createStaticHandler({ store: notFoundStore, public: true })
+    const functionsHandler = createFunctionsHandler({ routes: [{ path: '/api/greet', code: '' }], executor: async () => ({}) })
+
+    const onRequest = createSiteRequestHandler({ staticHandler, functionsHandler })
+    const res = await onRequest({ method: 'GET', path: '/nowhere' })
+    assert.equal(res.status, 404)
   })
 })
