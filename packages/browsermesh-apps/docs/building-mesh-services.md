@@ -21,6 +21,14 @@ own capstone phase, added once `MeshKv` and its companion
 `observability-bridge.mjs` had shipped and could be checked against reality
 rather than guessed at in advance.
 
+Section 9 below is a different kind of addition, not another `MeshService`
+worked example: the agent tool-calling runtime plan (issues #90/#92)
+introduced a second, complementary convention — `BrowserTool`/
+`BrowserToolRegistry`/`createAgentRuntime` — for exposing capabilities to an
+LLM-driven agent loop rather than to another peer. It's documented here
+because it reuses this guide's `checkAccess()`-gating lesson directly (§9c),
+not because it's another flavor of `MeshService`.
+
 There is no `Service` base class to extend. Every pattern below is a
 convention — a shape your code follows — not an inheritance hierarchy to
 plug into. That is itself the first, and maybe most important, lesson this
@@ -415,6 +423,158 @@ bob's side (it mirrors `MeshKv.grant()`'s own push-with-retry style and
 remains a perfectly reasonable way to drive a first sync), not because
 mutual `watch()` would be unsafe.
 
+## 9. A different, complementary pattern: `BrowserTool` / `BrowserToolRegistry` / `createAgentRuntime`
+
+Everything above is the `MeshService` pattern: how a capability attaches to
+a `PeerNode` and talks to other peers over the wire. This section documents
+a **different** pattern, built by the agent-runtime plan (issues #90/#92,
+`johnhenry/browsermesh` PRs #141/#143/#144/#145 plus this guide's own
+update) specifically because it answers a different question:
+`MeshService` is "how a capability attaches to a `PeerNode`"; `BrowserTool`/
+`BrowserToolRegistry`/`createAgentRuntime` is "how you expose local OR
+mesh-backed capabilities to an LLM-driven agent loop." Don't reach for this
+pattern to build a new mesh-native service — reach for it when an *agent*
+(LLM-driven code, not a peer) needs a structured way to call into one.
+
+The three pieces, each staying in its own lane:
+
+- **`BrowserTool`** (`compat.mjs`) — a small base class: `.spec`
+  (`{name, description, parameters, required_permission}`, the
+  OpenAI-function-calling-shaped object an `llmFn` translates into its own
+  vendor's tool-definition format) plus `.execute(params)`. This package and
+  `browsermesh-core` each vendor their own copy (the family's established
+  "standalone use" philosophy — see `compat.mjs`'s own header) rather than
+  one depending cross-package on the other for something this small.
+- **`BrowserToolRegistry`** (`compat.mjs`) — holds any number of constructed
+  `BrowserTool` instances: `register`/`get`/`list`/`listSpecs`/`unregister`.
+  Duck-typed validation (a working `.spec` getter + `.execute()` method), not
+  `instanceof` — see the next section for exactly why that matters.
+- **`createAgentRuntime({registry, llmFn, maxTurns?, onLog?})`**
+  (`agent-runtime.mjs`) — the actual conversation loop. **Browsermesh never
+  calls a real LLM API itself** — no Anthropic/OpenAI SDK dependency
+  anywhere in this family, confirmed by grep at the start of this plan.
+  `llmFn(messages, toolSpecs) -> {content?, toolCalls?}` is REQUIRED, with no
+  default implementation shipped, matching `mesh-compute.mjs`'s `executeFn`/
+  `mesh-agent-swarm.mjs`'s `agentProxy` "bring your own X, required, no
+  silent no-op default" precedent this whole family already established. The
+  loop dispatches each requested tool call through `registry`, appends a
+  `{role: 'tool', tool_call_id, name, content: JSON.stringify(result)}`
+  message per call, and calls `llmFn` again — stopping on a `content`-only
+  response, or after `maxTurns` (default 10) round-trips, returning a
+  `{..., truncated: true}` result rather than throwing (a real caller
+  building a chat UI is better served inspecting/resuming a partial result
+  than unwinding a thrown exception — see `agent-runtime.mjs`'s own module
+  doc comment for the full reasoning).
+
+`mesh-orchestrator-tools.mjs`'s `registerOrchestratorTools()` is the worked
+example tying a *mesh-backed* capability into this pattern: it constructs
+`orchestrator.mjs`'s 8 real `Meshctl*Tool`s against a real, attached
+`mesh-orchestrator.mjs` service and registers them into a
+`BrowserToolRegistry` — `createMeshNode({enableAgentRuntime: true,
+enableOrchestrator: true})` wires all of it, handing back
+`node.toolRegistry` pre-populated and ready for
+`createAgentRuntime({registry: node.toolRegistry, llmFn})`.
+
+### Three lessons from building this, for your own next `BrowserTool`
+
+**(a) Two inconsistent dependency-injection patterns already exist across
+this repo's ~50 pre-existing, previously-dormant `BrowserTool` subclasses —
+know which one you're looking at, and use constructor injection for
+anything new.** `peer-tools.mjs`/`tools.mjs` (`browsermesh-core`/`-apps`)
+predate this plan and use a fragile module-singleton "context" object —
+`tools.mjs`'s own `MeshToolsContext`/`meshToolsContext`, a `set*`/`get*`
+grab-bag (`setMultiplexer`/`getMultiplexer`, `setDhtNode`/`getDhtNode`,
+etc.) tool instances reach into at `execute()` time. It works, but it's
+fragile in the ways module-singleton state always is: only one live value
+per dependency process-wide, easy to forget to `set*()` before a tool's
+first `execute()`, and no way to run two independently-configured registries
+of the same tools in one process. `orchestrator.mjs`'s 8 `Meshctl*Tool`s, by
+contrast, use proper constructor injection (`constructor(orchestrator) {
+this.#orchestrator = orchestrator }`) — each instance owns its own
+dependency, no shared mutable module state, trivially supports multiple
+independently-configured registries. **This plan deliberately did not
+rewrite the ~50 existing module-singleton-style tools** — disproportionate
+scope for what was fundamentally a "the registry/runtime didn't exist at
+all" gap (see this plan's own "Design decisions" section) — but
+`BrowserToolRegistry.register()` doesn't care either way (it only needs a
+constructed instance with a working `.spec`/`.execute()`, how that instance
+got its own dependencies is the tool's own business). **Recommendation for
+any new `BrowserTool` you write**: use constructor injection
+(`orchestrator.mjs`'s shape), not the module-singleton-context shape — it
+composes better, and it's what this plan's own new code (the 8
+`Meshctl*Tool`s, already-existing) demonstrates working cleanly end to end.
+
+**(b) A `BrowserTool` extending the wrong environment's stub silently fails
+registry validation — check which `BrowserTool` your class is actually
+extending.** `orchestrator.mjs` predates `compat.mjs`'s real `BrowserTool`
+and was written to interoperate with a real, browser-only, richer
+`globalThis.BrowserTool` (clawser's own, in a real browser), falling back to
+`class { constructor() {} }` — a do-nothing stub, no `.spec` getter at all —
+whenever `globalThis.BrowserTool` was undefined (plain Node, e.g. this
+package's own test suite, or any standalone use of `orchestrator.mjs`). That
+fallback silently broke `BrowserToolRegistry.register()` for all 8
+`Meshctl*Tool`s in Node: `.spec` composes `{name, description, parameters,
+required_permission}` from each subclass's own overridden getters, which
+only exist on `compat.mjs`'s real `BrowserTool` base class — the stub has no
+`.spec` getter to inherit from at all, so `looksLikeBrowserTool()`'s
+`tool.spec` probe threw, and `register()` rejected every one of the 8 tools
+with no explanation beyond a generic `TypeError`. Found and fixed in Phase 4
+(`mesh-orchestrator-tools.mjs`'s own PR): `orchestrator.mjs` now falls back
+to `compat.mjs`'s real `BrowserTool` instead of the do-nothing stub —
+`const BrowserTool = globalThis.BrowserTool || CompatBrowserTool` — real
+`globalThis.BrowserTool` (a real browser) is still honored first, changing
+nothing about the 8 subclasses' own bodies, only what a Node-side
+`.spec`/default `execute()`/`permission` resolves to when no browser-only
+override exists. **The general lesson**: if you're writing (or debugging) a
+`BrowserTool` meant to run in both a real browser and plain Node, check
+which class your file's own environment-detection fallback actually resolves
+to outside a browser — a stub with no `.spec` getter fails
+`BrowserToolRegistry.register()` silently (a generic `TypeError`, not an
+error that names the missing `.spec` getter specifically), exactly the kind
+of gotcha worth a code comment at the fallback itself, the way
+`orchestrator.mjs` now has one.
+
+**(c) Gate risky actions through the `MeshService`'s own
+`checkAccess()`-protected `api`, not the raw underlying class — reachable
+`BrowserTool`s inherit whatever gate (or absence of one) their constructor
+argument has.** `MeshOrchestrator`'s own `execOnPod`/`deploySkill`/
+`drainPod` methods (`orchestrator.mjs`) have no authorization check
+whatsoever built in — calling them directly, in-process, just runs, using
+whatever peer callback happens to be registered via `addPeer()`. The real
+gate lives one layer up, in `mesh-orchestrator.mjs`'s `MeshService` wrapper
+(Phase 3): `api.execOnPod`/`api.deploySkill`/`api.drainPod` always dispatch
+a genuine `'orchestrator-request'` over the wire to the target peer (a
+self-targeted call stays local, no gate needed — there's no peer boundary to
+cross), and *that peer's own* `ctx.registry.checkAccess(fromPubKey,
+'orchestrator', action)` is what actually decides whether to honor it — the
+real authorization boundary this whole "risky, peer-initiated action"
+design exists for. When Phase 4 constructed the 8 `Meshctl*Tool`s
+(`mesh-orchestrator-tools.mjs`), it would have been the more literal reading
+of "construct `Meshctl*Tool(orchestrator)` against the raw instance" to wire
+them straight to `api.orchestrator`'s raw methods — reachable, and exposed
+on `api` precisely so this later phase could do so. **That would have been
+wrong**: `api.orchestrator` doesn't re-add the gate `MeshOrchestrator`'s own
+methods never had, so an LLM-drivable `meshctl_exec` wired that way would
+run any remote command a caller asked for, no authorization check at all.
+Phase 4 instead built a small facade
+(`mesh-orchestrator-tools.mjs`'s `buildToolFacade()`) that routes
+`meshctl_exec`/`meshctl_deploy`/`meshctl_drain` specifically through
+`api.execOnPod`/`api.deploySkill`/`api.drainPod` (the gated wire-dispatch
+methods), while `meshctl_pods`/`meshctl_status`/`meshctl_top` (ungated even
+at the service layer — pure local aggregation, no peer-initiated request
+path exists for them at all) and `meshctl_compute`/`meshctl_expose` (no
+gated equivalent exists at the service layer *at all* — Phase 3's own
+`RISKY_ACTIONS` never included `compute`/`expose`, documented rather than
+silently worked around) still go straight to the raw instance, since there
+is no gated alternative to prefer for those five. **The general lesson for
+your own next tool wired against a `MeshService`**: before handing a
+`BrowserTool` (or anything else reachable by untrusted input) a
+constructor-injected dependency, ask whether that dependency is the gated
+service `api` or the raw underlying class — if the raw class has no
+authorization of its own (most don't; gating is the service wrapper's job,
+not the wrapped class's), a tool built directly against it inherits that
+same absence of a gate, silently.
+
 ## Worked examples
 
 `examples/09-cloud-storage.mjs` is the full `new CloudStorage(...)` story
@@ -438,3 +598,21 @@ printed as the payoff — the real grant that raised a trust value, the real
 authorized write that bumped an edge's activity counter, and the real
 unauthorized write that got refused, all visible in one exported JSON
 object at the end, not asserted in a test file no one reads.
+
+`examples/11-agent-tool-calling.mjs` is §9's worked example — the
+`BrowserTool`/`BrowserToolRegistry`/`createAgentRuntime` pattern, not the
+`MeshService` pattern the examples above demonstrate. Two real
+`createMeshNode()` peers (one with `enableOrchestrator` +
+`enableAgentRuntime`, pre-populating `node.toolRegistry` with all 8 real
+`Meshctl*Tool`s), a deterministic test `llmFn` (no real LLM API call), and a
+real `createAgentRuntime()` loop: the LLM requests `meshctl_pods`, sees the
+real remote peer in the result, requests the genuinely risky
+`checkAccess()`-gated `meshctl_exec` against it, and summarizes both real
+results as its final answer — printed alongside the full message-by-message
+transcript the loop actually produced.
+`packages/browsermesh-apps/test/mesh-orchestrator-tools.test.mjs`'s own
+CAPSTONE describe block proves the identical wiring with `assert`-backed
+coverage (including the denied-vs-authorized `meshctl_exec` contrast this
+example only exercises the authorized half of); this example is the
+narrated, printed-output counterpart for a human reader, the same
+relationship `09`/`10` already have to their own test suites.
