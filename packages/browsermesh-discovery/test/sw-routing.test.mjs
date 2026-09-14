@@ -197,4 +197,30 @@ describe('MeshFetchRouter', () => {
     assert.equal(calls[0].path, '/status')
     assert.equal(res.status, 200)
   })
+
+  it('route passes a Uint8Array body straight to Response instead of JSON.stringify-ing it (browsermesh-apps Phase 2 fix)', async () => {
+    const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47]) // arbitrary binary, not text-decodable as meaningful JSON
+    const router = new MeshFetchRouter({
+      onRpc: async () => ({ status: 200, headers: { 'content-type': 'image/png' }, body: bytes }),
+    })
+
+    const req = new StubRequest('mesh://pod5/logo.png')
+    const res = await router.route(req)
+
+    assert.equal(res.status, 200)
+    assert.equal(res.headers.get('content-type'), 'image/png')
+    const received = new Uint8Array(await res.arrayBuffer())
+    assert.deepEqual([...received], [...bytes], 'binary body must reach the Response unchanged, not JSON.stringify-mangled into {"0":137,...}')
+  })
+
+  it('route passes an ArrayBuffer body straight to Response the same way', async () => {
+    const bytes = new Uint8Array([1, 2, 3, 4])
+    const router = new MeshFetchRouter({
+      onRpc: async () => ({ status: 200, body: bytes.buffer }),
+    })
+    const req = new StubRequest('mesh://pod6/data.bin')
+    const res = await router.route(req)
+    const received = new Uint8Array(await res.arrayBuffer())
+    assert.deepEqual([...received], [1, 2, 3, 4])
+  })
 })
