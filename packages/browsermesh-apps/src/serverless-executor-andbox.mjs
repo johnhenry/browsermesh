@@ -88,12 +88,17 @@
  * this monorepo's own `npm install`/CI regardless of the "optional" marking
  * -- that marking only matters for a standalone external consumer.
  * `@johnhenry/andbox` is a genuinely separate repo/package, not a workspace
- * sibling, and (as of this writing) isn't published to npm yet -- a static
- * top-level import here would make `index.mjs`'s eager `export *` chain
- * fail for the ENTIRE package the moment `@johnhenry/andbox` is absent,
- * breaking every consumer/test, not just ones using this specific executor.
- * A dynamic `import()` inside the executor defers that requirement to
- * "only if this specific executor is actually invoked."
+ * sibling, and is declared as an OPTIONAL peer dependency
+ * (`peerDependenciesMeta`), so npm never attempts to install it
+ * automatically for anyone -- present only for a consumer that explicitly
+ * installs it themselves. (It's been published to npm since 0.0.1; that was
+ * never what made this lazy -- the optional-peer marking is what matters,
+ * and that hasn't changed.) A static top-level import here would make
+ * `index.mjs`'s eager `export *` chain fail for the ENTIRE package the
+ * moment `@johnhenry/andbox` is absent, breaking every consumer/test, not
+ * just ones using this specific executor. A dynamic `import()` inside the
+ * executor defers that requirement to "only if this specific executor is
+ * actually invoked."
  *
  * @module serverless-executor-andbox
  */

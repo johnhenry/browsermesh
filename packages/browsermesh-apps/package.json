@@ -50,6 +50,7 @@
     }
   },
   "devDependencies": {
+    "@johnhenry/andbox": ">=0.0.1 <1.0.0",
     "node-datachannel": "^0.33.4",
     "fake-indexeddb": "^6.2.5",
     "webgpu": "^0.6.1"
