@@ -282,8 +282,10 @@ export class EscrowManager {
   create(opts) {
     const { payerPodId, payeePodId, amount, description, conditions, timeoutMs } = opts
 
-    // Debit payer — throws on insufficient balance
-    this.#creditLedger.charge(payerPodId, amount, `escrow: ${description || 'contract'}`)
+    // Debit payer — throws on insufficient balance. CreditLedger's real
+    // signature is debit(amount, toPodId, memo) -- no charge() method
+    // exists; amount comes first, not the podId.
+    this.#creditLedger.debit(amount, payerPodId, `escrow: ${description || 'contract'}`)
 
     const contract = new EscrowContract({
       payer: payerPodId,
@@ -331,8 +333,9 @@ export class EscrowManager {
       }
     }
 
-    // Credit payee
-    this.#creditLedger.credit(contract.payee, contract.amount, `escrow release: ${contractId}`)
+    // Credit payee. CreditLedger's real signature is credit(amount,
+    // fromPodId, memo) -- amount first, not the podId.
+    this.#creditLedger.credit(contract.amount, contract.payee, `escrow release: ${contractId}`)
     contract.status = 'released'
 
     this.#onLog('info', `Escrow released: ${contractId} (${contract.amount} to ${contract.payee})`)
@@ -358,8 +361,8 @@ export class EscrowManager {
       throw new Error(`Cannot refund contract ${contractId}: not funded (status: ${contract.status})`)
     }
 
-    // Credit payer
-    this.#creditLedger.credit(contract.payer, contract.amount, `escrow refund: ${reason || contractId}`)
+    // Credit payer. Same real signature as release() above: amount first.
+    this.#creditLedger.credit(contract.amount, contract.payer, `escrow refund: ${reason || contractId}`)
     contract.status = 'refunded'
 
     this.#onLog('info', `Escrow refunded: ${contractId} (${contract.amount} to ${contract.payer})`)
@@ -405,10 +408,11 @@ export class EscrowManager {
 
     for (const contract of this.#contracts.values()) {
       if (contract.status === 'funded' && contract.isExpired(ts)) {
-        // Auto-refund expired contracts
+        // Auto-refund expired contracts. Same real signature as release()/
+        // refund() above: credit(amount, fromPodId, memo), amount first.
         this.#creditLedger.credit(
-          contract.payer,
           contract.amount,
+          contract.payer,
           `escrow expired: ${contract.id}`,
         )
         contract.status = 'expired'

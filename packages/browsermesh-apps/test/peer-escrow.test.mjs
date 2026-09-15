@@ -9,6 +9,7 @@ import {
   EscrowManager,
   createEscrowService,
 } from '../src/peer-escrow.mjs'
+import { CreditLedger } from '../src/payments.mjs'
 import { attachService } from '../src/mesh-service.mjs'
 import { PeerRegistry } from '../src/peer-registry.mjs'
 import { createMeshNode } from '../src/mesh-bootstrap.mjs'
@@ -22,16 +23,23 @@ import {
 
 // ── Mock ledger ──────────────────────────────────────────────────
 
+// Matches the REAL CreditLedger's method names and argument order
+// (payments.mjs: credit(amount, fromPodId, memo) / debit(amount, toPodId,
+// memo) -- amount first, no charge() method at all). EscrowManager's own
+// create()/release()/refund()/checkExpired() previously called a
+// charge(podId, amount, ...) that doesn't exist on the real class, and
+// credit(podId, amount, ...) with the args swapped -- undetected because
+// this mock used to match the buggy calls instead of the real API.
 function createMockLedger(initialBalances = {}) {
   const balances = { ...initialBalances }
   const txLog = []
   return {
-    charge(podId, amount, desc) {
+    debit(amount, podId, desc) {
       if ((balances[podId] || 0) < amount) throw new Error('Insufficient balance')
       balances[podId] = (balances[podId] || 0) - amount
-      txLog.push({ type: 'charge', podId, amount, desc })
+      txLog.push({ type: 'debit', podId, amount, desc })
     },
-    credit(podId, amount, desc) {
+    credit(amount, podId, desc) {
       balances[podId] = (balances[podId] || 0) + amount
       txLog.push({ type: 'credit', podId, amount, desc })
     },
@@ -363,6 +371,53 @@ function wireEscrowMesh(peers) {
   }
   return nodesByPodId
 }
+
+// -----------------------------------------------------------------------
+// Regression: EscrowManager against the REAL CreditLedger, not the mock
+// -----------------------------------------------------------------------
+
+describe('EscrowManager against a real CreditLedger (not createMockLedger)', () => {
+  // The mock above used to have charge(podId, amount)/credit(podId,
+  // amount) methods shaped to match EscrowManager's buggy calls, so every
+  // test in this file passed even though the real CreditLedger has no
+  // charge() method at all, and credit()/debit() take amount FIRST
+  // (payments.mjs: credit(amount, fromPodId, memo), debit(amount, toPodId,
+  // memo)). This exercises the real class end to end.
+  it('create/release move real balance on a real CreditLedger', () => {
+    const ledger = new CreditLedger('alice')
+    ledger.credit(100, 'genesis', 'seed balance')
+
+    const mgr = new EscrowManager({ creditLedger: ledger })
+    const contract = mgr.create({ payerPodId: 'alice', payeePodId: 'bob', amount: 30 })
+    assert.equal(ledger.balance, 70)
+
+    mgr.release(contract.id)
+    assert.equal(ledger.balance, 100, 'release credits back into the same single-owner ledger')
+    assert.equal(contract.status, 'released')
+  })
+
+  it('create/refund move real balance on a real CreditLedger', () => {
+    const ledger = new CreditLedger('alice')
+    ledger.credit(100, 'genesis', 'seed balance')
+
+    const mgr = new EscrowManager({ creditLedger: ledger })
+    const contract = mgr.create({ payerPodId: 'alice', payeePodId: 'bob', amount: 40 })
+    assert.equal(ledger.balance, 60)
+
+    mgr.refund(contract.id)
+    assert.equal(ledger.balance, 100)
+    assert.equal(contract.status, 'refunded')
+  })
+
+  it('create throws (not TypeError from a missing charge()) on insufficient balance', () => {
+    const ledger = new CreditLedger('alice') // balance 0
+    const mgr = new EscrowManager({ creditLedger: ledger })
+    assert.throws(
+      () => mgr.create({ payerPodId: 'alice', payeePodId: 'bob', amount: 10 }),
+      /Insufficient balance/,
+    )
+  })
+})
 
 // -----------------------------------------------------------------------
 // Full lifecycle between two real peers: create, release, refund
