@@ -18,10 +18,12 @@
  *
  * This file therefore only tests what genuinely doesn't require a real
  * Worker: input validation, which happens before `createSandbox()` is ever
- * called. A real end-to-end proof (including the mandatory
- * fresh-sandbox-per-invocation concurrency invariant this file's module
- * doc comment documents) needs an actual browser test environment and is
- * intentionally not claimed as covered here.
+ * called, plus (now that `@johnhenry/andbox` is published) that the lazy
+ * `import()` itself actually resolves against the real package and exposes
+ * the shape this file depends on. A real end-to-end proof (including the
+ * mandatory fresh-sandbox-per-invocation concurrency invariant this file's
+ * module doc comment documents) still needs an actual browser test
+ * environment and is intentionally not claimed as covered here.
  *
  * Run:
  *   node --import ./test/_setup-globals.mjs --test test/serverless-executor-andbox.test.mjs
@@ -47,5 +49,12 @@ describe('createAndboxExecutor: input validation (does not require a real Worker
     const executor = createAndboxExecutor()
     await assert.rejects(() => executor(null), /job\.code is required/)
     await assert.rejects(() => executor(undefined), /job\.code is required/)
+  })
+})
+
+describe('createAndboxExecutor: real package resolution (no Worker needed)', () => {
+  it('the lazy import() resolves @johnhenry/andbox and exposes createSandbox', async () => {
+    const mod = await import('@johnhenry/andbox')
+    assert.equal(typeof mod.createSandbox, 'function')
   })
 })
