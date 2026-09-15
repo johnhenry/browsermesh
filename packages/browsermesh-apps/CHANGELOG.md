@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.1
+
+### Patch Changes
+
+- Fixed `EscrowManager`'s internal `CreditLedger` calls: `create()` called a `charge()` method that doesn't exist on the real `CreditLedger` (`payments.mjs`); `release()`/`refund()`/`checkExpired()`'s auto-refund all called `credit()` with the arguments swapped (`credit(podId, amount, ...)` instead of the real `credit(amount, fromPodId, ...)`). Untested until now because the test suite's mock ledger was shaped to match the buggy calls instead of the real class — fixed the mock to match `CreditLedger`'s real API, and added a new suite exercising `EscrowManager` against the real class directly. Same root-cause pattern as the `escrow_create`/`escrow_release`/`torrent_seed` tool-call-site bugs fixed in `@johnhenry/browsermesh-core` 0.0.1 — this is the one call-site bug that fix didn't cover, inside `EscrowManager` itself rather than the tool wrapping it.
+
 ## 0.4.0
 
 ### Minor Changes

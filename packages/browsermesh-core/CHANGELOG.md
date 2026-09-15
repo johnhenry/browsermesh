@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.1
+
+### Patch Changes
+
+- Fixed `mesh_scheduler_submit`'s `ScheduledTask` import: it reached across to the sibling `@johnhenry/browsermesh-apps` package via a monorepo-relative path (`../../browsermesh-apps/src/scheduler.mjs`) that only ever resolved inside this workspace — every standalone consumer (installing both packages via npm, e.g. via esm.sh) hit `ERR_MODULE_NOT_FOUND` on every real invocation. Now a lazy `import('@johnhenry/browsermesh-apps')`, matching the established lazy-optional-peer pattern (`@johnhenry/andbox` in `browsermesh-apps`'s own `serverless-executor-andbox.mjs`). `@johnhenry/browsermesh-apps` is now declared as an optional peer dependency. Added a regression test exercising the real import and real `ScheduledTask` shape — the existing tests only checked tool registration, never the actual call.
+
 ## 0.2.0
 
 ### Minor Changes

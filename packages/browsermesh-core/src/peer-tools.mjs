@@ -209,13 +209,18 @@ export class MeshSchedulerSubmitTool extends BrowserTool {
     if (!sched) return { success: false, output: '', error: 'Mesh scheduler not initialized.' }
     try {
       // ScheduledTask lives in the sibling browsermesh-apps package, which
-      // itself depends on browsermesh-core (peerDependency) — core can't
-      // depend back on apps without a cycle, so this reaches across via a
-      // relative path that only resolves inside this monorepo, pre-existing
-      // from before this package was re-extracted. Contained by the
-      // surrounding try/catch: if apps isn't present, this one tool fails
-      // gracefully rather than crashing the module.
-      const { ScheduledTask } = await import('../../browsermesh-apps/src/scheduler.mjs')
+      // itself depends on browsermesh-core (peerDependency) -- core can't
+      // depend back on apps without a build-time cycle. Reached via a
+      // lazy import of the real package NAME (not a monorepo-relative
+      // path, which only ever resolved inside this workspace and broke
+      // for every standalone consumer via esm.sh) -- matches this
+      // family's established pattern for an optional cross-package reach
+      // (see @johnhenry/andbox's lazy import in browsermesh-apps'
+      // serverless-executor-andbox.mjs). Declared as an optional peer
+      // dependency below; contained by the surrounding try/catch so a
+      // consumer without apps installed still fails this one tool
+      // gracefully instead of crashing the module.
+      const { ScheduledTask } = await import('@johnhenry/browsermesh-apps')
       const task = new ScheduledTask({
         id: crypto.randomUUID(),
         type,

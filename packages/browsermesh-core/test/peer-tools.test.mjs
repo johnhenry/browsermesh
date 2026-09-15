@@ -199,6 +199,46 @@ describe('Tools graceful fallback when context is empty', () => {
   })
 })
 
+describe('MeshSchedulerSubmitTool — real cross-package ScheduledTask import', () => {
+  // Regression test for a real bug: this tool dynamically imported
+  // ScheduledTask via a monorepo-relative path
+  // ('../../browsermesh-apps/src/scheduler.mjs') that only ever resolved
+  // inside this workspace -- any standalone consumer installing both
+  // packages via npm (e.g. clawser) would hit ERR_MODULE_NOT_FOUND on
+  // every real invocation, since esm.sh/node_modules resolution has no
+  // concept of monorepo-relative paths. Fixed to import the real package
+  // NAME (`@johnhenry/browsermesh-apps`), matching the lazy-optional-peer
+  // pattern already established for `@johnhenry/andbox`. This test relies
+  // on browsermesh-apps being a real, installed sibling workspace package
+  // here (which it genuinely is in this monorepo) -- it exercises the
+  // real import and the real ScheduledTask shape, not a mock of it.
+  afterEach(() => {
+    peerToolsContext.setMeshScheduler(null)
+  })
+
+  it('imports the real ScheduledTask and submits it to the scheduler', async () => {
+    const submitted = []
+    const fakeSched = {
+      async submit(task) {
+        submitted.push(task)
+        return 'task-1'
+      },
+    }
+    peerToolsContext.setMeshScheduler(fakeSched)
+
+    const tool = new MeshSchedulerSubmitTool()
+    const result = await tool.execute({ type: 'compute', payload: { x: 1 }, priority: 'high' })
+
+    assert.equal(result.success, true, result.error)
+    assert.ok(result.output.includes('task-1'))
+    assert.equal(submitted.length, 1)
+    assert.equal(submitted[0].constructor.name, 'ScheduledTask')
+    assert.equal(submitted[0].type, 'compute')
+    assert.deepEqual(submitted[0].payload, { x: 1 })
+    assert.equal(submitted[0].priority, 'high')
+  })
+})
+
 describe('EscrowCreateTool / EscrowReleaseTool — real manager API', () => {
   // Regression test for a real bug: these tools called mgr.createEscrow()/
   // mgr.releaseEscrow(), but EscrowManager's actual methods are create()/
