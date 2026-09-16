@@ -19,27 +19,50 @@ import {
   decryptBlob,
   computeCid,
 } from '../src/peer-encrypted-store.mjs'
+import { PeerRegistry } from '../src/peer-registry.mjs'
+import { attachService } from '../src/mesh-service.mjs'
+import { createFileShareService, FILE_CAPABILITIES } from '../src/peer-files.mjs'
+import {
+  IdentityWallet,
+  MeshIdentityManager,
+  MeshPeerManager,
+  TrustGraph,
+  MeshACL,
+} from '@johnhenry/browsermesh-core'
 
 // ---------------------------------------------------------------------------
 // Mock FileClient
 // ---------------------------------------------------------------------------
 
+// Matches the REAL FileClient's method signatures (peer-files.mjs):
+// every operation takes pubKey FIRST (writeFile(pubKey, path, data), etc.)
+// -- EncryptedBlobStore's own internal calls used to omit it entirely
+// (calling writeFile(path, data) etc.), silently shifting every argument
+// by one position. Undetected because this mock used to match the buggy
+// 2-arg calls instead of the real 3-arg API. `_calls` records the pubKey
+// each method was actually invoked with, so tests can assert it's really
+// threaded through.
 function createMockFileClient() {
   const files = new Map()
+  const calls = []
   return {
-    async writeFile(path, data) {
+    async writeFile(pubKey, path, data) {
+      calls.push({ method: 'writeFile', pubKey, path })
       const size = data instanceof Uint8Array ? data.length : data.length
       files.set(path, { data, size })
       return { success: true, size }
     },
-    async readFile(path) {
+    async readFile(pubKey, path) {
+      calls.push({ method: 'readFile', pubKey, path })
       const f = files.get(path)
       if (!f) throw new Error(`Not found: ${path}`)
       return { data: f.data, size: f.size }
     },
-    async deleteFile(path) {
+    async deleteFile(pubKey, path) {
+      calls.push({ method: 'deleteFile', pubKey, path })
       return { success: files.delete(path) }
     },
+    _calls: calls,
     _files: files,
   }
 }
@@ -175,6 +198,13 @@ describe('EncryptedBlobStore', () => {
       assert.equal(manifest.length, 1)
       assert.equal(manifest[0].cid, result.cid)
       assert.equal(manifest[0].peerId, 'peer-A')
+
+      // Regression: fileClient.writeFile() must be called with peerId as
+      // the leading argument (the real FileClient's signature) -- this
+      // used to be silently omitted entirely.
+      assert.equal(fileClient._calls.length, 1)
+      assert.equal(fileClient._calls[0].method, 'writeFile')
+      assert.equal(fileClient._calls[0].pubKey, 'peer-A')
     })
   })
 
@@ -185,6 +215,10 @@ describe('EncryptedBlobStore', () => {
 
       const recovered = await store.retrieve('peer-B', cid, key, iv)
       assert.deepEqual(recovered, plaintext)
+
+      // Regression: readFile() must receive peerId, not just path.
+      const readCall = fileClient._calls.find(c => c.method === 'readFile')
+      assert.equal(readCall.pubKey, 'peer-B')
     })
   })
 
@@ -199,6 +233,10 @@ describe('EncryptedBlobStore', () => {
       const deleted = await store.delete('peer-C', cid)
       assert.equal(deleted, true)
       assert.equal(store.listManifest().length, 0)
+
+      // Regression: deleteFile() must receive peerId, not just path.
+      const deleteCall = fileClient._calls.find(c => c.method === 'deleteFile')
+      assert.equal(deleteCall.pubKey, 'peer-C')
     })
   })
 
@@ -222,6 +260,10 @@ describe('EncryptedBlobStore', () => {
       const result = await store.verify('peer-E', cid)
       assert.equal(result.valid, true)
       assert.ok(result.size > 0)
+
+      // Regression: verify()'s internal readFile() must receive peerId too.
+      const readCalls = fileClient._calls.filter(c => c.method === 'readFile')
+      assert.ok(readCalls.every(c => c.pubKey === 'peer-E'))
     })
   })
 
@@ -300,5 +342,91 @@ describe('ManifestEntry', () => {
     assert.equal(restored.size, entry.size)
     assert.deepEqual(restored.metadata, entry.metadata)
     assert.equal(restored.storedAt, entry.storedAt)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Real end-to-end: EncryptedBlobStore over the REAL FileHost/FileClient wire
+// protocol between two real peers (not the mock above) -- the strongest
+// possible regression guard for the peerId-argument bug: a mock can always
+// be shaped to accidentally match a wrong call, but the real FileHost only
+// answers if it's actually addressed correctly.
+// ---------------------------------------------------------------------------
+
+async function createRealPeer(label) {
+  const identityManager = new MeshIdentityManager({})
+  const wallet = new IdentityWallet({ identityManager })
+  const { podId } = await wallet.createIdentity(label)
+  const registry = new PeerRegistry({
+    localPodId: podId,
+    peerManager: new MeshPeerManager({}),
+    trustGraph: new TrustGraph(),
+    acl: new MeshACL({ owner: podId }),
+  })
+  return { podId, wallet, registry }
+}
+
+function wireRealNodes(peerA, peerB) {
+  const listenersA = new Set()
+  const listenersB = new Set()
+  const nodeA = {
+    podId: peerA.podId, wallet: peerA.wallet, registry: peerA.registry,
+    onIncomingData(cb) { listenersA.add(cb); return () => listenersA.delete(cb) },
+    async sendTo(pubKey, data) { queueMicrotask(() => { for (const cb of listenersB) cb(peerA.podId, data) }) },
+  }
+  const nodeB = {
+    podId: peerB.podId, wallet: peerB.wallet, registry: peerB.registry,
+    onIncomingData(cb) { listenersB.add(cb); return () => listenersB.delete(cb) },
+    async sendTo(pubKey, data) { queueMicrotask(() => { for (const cb of listenersA) cb(peerB.podId, data) }) },
+  }
+  return { nodeA, nodeB }
+}
+
+function createRealMockFs() {
+  const files = new Map()
+  return {
+    async list() { return [...files.entries()].map(([name, f]) => ({ name, type: 'file', size: f.size })) },
+    async read(path) {
+      const f = files.get(path)
+      if (!f) throw new Error('Not found')
+      return { data: f.data, size: f.size }
+    },
+    async write(path, data) {
+      const size = data instanceof Uint8Array ? data.byteLength : data.length
+      files.set(path, { data, size })
+      return { success: true, size }
+    },
+    async delete(path) { return { success: files.delete(path) } },
+    async stat(path) {
+      const f = files.get(path)
+      return f ? { name: path, type: 'file', size: f.size, modified: Date.now() } : null
+    },
+  }
+}
+
+describe('EncryptedBlobStore over a real FileHost/FileClient (two real peers)', () => {
+  it('alice stores an encrypted blob on bob, then retrieves and decrypts it for real', async () => {
+    const alice = await createRealPeer('alice')
+    const bob = await createRealPeer('bob')
+    const { nodeA, nodeB } = wireRealNodes(alice, bob)
+
+    // bob hosts; alice needs read+write capability granted on bob's registry.
+    bob.registry.grantCapabilities(alice.podId, [FILE_CAPABILITIES.READ, FILE_CAPABILITIES.WRITE, FILE_CAPABILITIES.DELETE])
+
+    attachService(nodeB, undefined, createFileShareService({ fs: createRealMockFs() }))
+    const { api } = attachService(nodeA, undefined, createFileShareService({}))
+
+    const store = new EncryptedBlobStore({ fileClient: api })
+    const plaintext = new TextEncoder().encode('genuinely over the wire')
+
+    const { cid, key, iv } = await store.store(bob.podId, plaintext)
+    const recovered = await store.retrieve(bob.podId, cid, key, iv)
+    assert.deepEqual(recovered, plaintext)
+
+    const verified = await store.verify(bob.podId, cid)
+    assert.equal(verified.valid, true)
+
+    const deleted = await store.delete(bob.podId, cid)
+    assert.equal(deleted, true)
   })
 })

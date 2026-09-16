@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.2
+
+### Patch Changes
+
+- Fixed `EncryptedBlobStore`'s internal `FileClient` calls: `store()`/`retrieve()`/`delete()`/`verify()` all called `writeFile()`/`readFile()`/`deleteFile()` without the leading `pubKey` argument the real `FileClient` (`peer-files.mjs`) requires — silently shifting every other argument by one position (the target `path` was being passed as `pubKey`, and the real payload as `path`). Same root-cause pattern as 0.4.1's `EscrowManager` fix: the test suite's mock `FileClient` was shaped to match the buggy 2-arg calls instead of the real 3-arg API. Fixed the mock and added a real end-to-end test — two real peers, real `FileHost`/`FileClient`, real wire protocol, not mocks — storing, retrieving, verifying, and deleting an encrypted blob for real.
+
 ## 0.4.1
 
 ### Patch Changes
