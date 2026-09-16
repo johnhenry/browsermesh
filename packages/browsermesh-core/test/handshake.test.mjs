@@ -163,7 +163,7 @@ describe('SignalingClient', () => {
     assert.equal(reg.type, 'register')
     assert.equal(reg.podId, 'pod-local')
     assert.equal(reg.from, 'pod-local')
-    assert.equal(reg.to, null)
+    assert.equal(reg.target, null)
   })
 
   it('connected returns true after connect', async () => {
@@ -178,7 +178,9 @@ describe('SignalingClient', () => {
     const msg = lastWs.sent.find(m => m.type === 'offer')
     assert.ok(msg)
     assert.equal(msg.from, 'pod-local')
-    assert.equal(msg.to, 'pod-remote')
+    // Regression: the real deployed signaling server forwards by
+    // "target", not "to" -- a `to` field is silently ignored server-side.
+    assert.equal(msg.target, 'pod-remote')
     assert.deepEqual(msg.offer, { sdp: 'offer-sdp' })
   })
 
@@ -187,7 +189,7 @@ describe('SignalingClient', () => {
     client.sendAnswer('pod-remote', { sdp: 'answer-sdp' })
     const msg = lastWs.sent.find(m => m.type === 'answer')
     assert.ok(msg)
-    assert.equal(msg.to, 'pod-remote')
+    assert.equal(msg.target, 'pod-remote')
     assert.deepEqual(msg.answer, { sdp: 'answer-sdp' })
   })
 
@@ -196,15 +198,20 @@ describe('SignalingClient', () => {
     client.sendIceCandidate('pod-remote', { candidate: 'c1' })
     const msg = lastWs.sent.find(m => m.type === 'ice-candidate')
     assert.ok(msg)
-    assert.equal(msg.to, 'pod-remote')
+    assert.equal(msg.target, 'pod-remote')
     assert.deepEqual(msg.candidate, { candidate: 'c1' })
   })
 
+  // Regression: incoming forwarded messages carry the real server's own
+  // "source" field (stamped from the authenticated WebSocket connection
+  // the message actually arrived on), not a self-declared "from" --
+  // matches browsermesh-servers/signaling's real forwarding shape
+  // (`send(targetWs, { ...payload, source: podId })`).
   it('onOffer fires when offer message received', async () => {
     await client.connect()
     const received = []
     client.onOffer((data, fromPodId) => received.push({ data, fromPodId }))
-    lastWs._receive({ type: 'offer', from: 'pod-A', offer: { sdp: 'o1' } })
+    lastWs._receive({ type: 'offer', source: 'pod-A', offer: { sdp: 'o1' } })
     assert.equal(received.length, 1)
     assert.equal(received[0].fromPodId, 'pod-A')
     assert.deepEqual(received[0].data.offer, { sdp: 'o1' })
@@ -214,16 +221,27 @@ describe('SignalingClient', () => {
     await client.connect()
     const received = []
     client.onAnswer((data, fromPodId) => received.push({ data, fromPodId }))
-    lastWs._receive({ type: 'answer', from: 'pod-B', answer: { sdp: 'a1' } })
+    lastWs._receive({ type: 'answer', source: 'pod-B', answer: { sdp: 'a1' } })
     assert.equal(received.length, 1)
     assert.equal(received[0].fromPodId, 'pod-B')
+  })
+
+  it('prefers the server-verified "source" field over a self-declared "from"', async () => {
+    await client.connect()
+    const received = []
+    client.onOffer((data, fromPodId) => received.push(fromPodId))
+    // A malicious/buggy peer could put anything in `from` -- the server
+    // never validates it before forwarding. `source` is the server's
+    // own, trustworthy attribution and must win.
+    lastWs._receive({ type: 'offer', source: 'pod-real', from: 'pod-spoofed', offer: {} })
+    assert.deepEqual(received, ['pod-real'])
   })
 
   it('onIceCandidate fires when ice-candidate message received', async () => {
     await client.connect()
     const received = []
     client.onIceCandidate((data, fromPodId) => received.push({ data, fromPodId }))
-    lastWs._receive({ type: 'ice-candidate', from: 'pod-C', candidate: { c: 1 } })
+    lastWs._receive({ type: 'ice-candidate', source: 'pod-C', candidate: { c: 1 } })
     assert.equal(received.length, 1)
     assert.equal(received[0].fromPodId, 'pod-C')
   })

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.2
+
+### Patch Changes
+
+- Fixed `SignalingClient`'s wire protocol against the real deployed signaling server (`browsermesh-servers/signaling`): `send()` sent a `to` field, but the server's forwarding logic reads `target` (confirmed directly against that server's source — a `to` field is silently ignored, and every real offer/answer/ice-candidate message was rejected with `"forwarded messages require a target field"`). Also: the receiving side (`#fire()`) preferred a self-declared `from` field over the server's own `source` attribution (stamped from the actual authenticated WebSocket connection a message arrived on) — `from` is never validated by the server before forwarding, so trusting it let any peer claim to be anyone. Now prefers `source`, falling back to `from` only for non-forwarded direct server messages. Same root-cause pattern as this session's other fixes: the test suite's mock server was shaped to match the buggy `to`/`from` fields instead of the real protocol.
+
 ## 0.2.1
 
 ### Patch Changes
