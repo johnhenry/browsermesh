@@ -362,7 +362,7 @@ export class EncryptedBlobStore {
 
     // Upload ciphertext to peer
     const path = `.encrypted-blobs/${cid}`
-    await this.#fileClient.writeFile(path, ciphertext)
+    await this.#fileClient.writeFile(peerId, path, ciphertext)
 
     this.#onLog(2, `Uploaded encrypted blob ${cid} to peer ${peerId}`)
 
@@ -405,7 +405,7 @@ export class EncryptedBlobStore {
 
     // Download ciphertext from peer
     const path = `.encrypted-blobs/${cid}`
-    const result = await this.#fileClient.readFile(path)
+    const result = await this.#fileClient.readFile(peerId, path)
     const ciphertext = result.data instanceof Uint8Array
       ? result.data
       : new TextEncoder().encode(result.data)
@@ -440,7 +440,7 @@ export class EncryptedBlobStore {
     this.#onLog(2, `Deleting blob ${cid} from peer ${peerId}`)
 
     const path = `.encrypted-blobs/${cid}`
-    await this.#fileClient.deleteFile(path)
+    await this.#fileClient.deleteFile(peerId, path)
 
     // Remove from manifest
     const deleted = this.#manifest.delete(cid)
@@ -471,7 +471,7 @@ export class EncryptedBlobStore {
     this.#onLog(2, `Verifying blob ${cid} on peer ${peerId}`)
 
     const path = `.encrypted-blobs/${cid}`
-    const result = await this.#fileClient.readFile(path)
+    const result = await this.#fileClient.readFile(peerId, path)
     const ciphertext = result.data instanceof Uint8Array
       ? result.data
       : new TextEncoder().encode(result.data)
