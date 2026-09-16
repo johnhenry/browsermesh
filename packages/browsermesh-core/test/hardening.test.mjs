@@ -492,6 +492,83 @@ describe('ConnectionPool', () => {
     assert.equal(json.pools['peer-1'].length, 1);
     assert.equal(json.pools['peer-1'][0].acquired, false);
   });
+
+  // Issue #116's second open question: "acquire() just returns the first
+  // idle entry, no way to request 'the connection for purpose X'". These
+  // pin the selector that answers it.
+  describe('acquire() selector (issue #116)', () => {
+    it('acquire without a selector still returns the first idle entry (unchanged default)', async () => {
+      const t1 = await makeConnectedMock();
+      const t2 = await makeConnectedMock();
+      pool.add('peer-1', t1, { purpose: 'bulk' });
+      pool.add('peer-1', t2, { purpose: 'control' });
+      assert.equal(pool.acquire('peer-1'), t1);
+    });
+
+    it('acquire({ purpose }) returns the entry tagged with that purpose, not just the first idle one', async () => {
+      const bulk = await makeConnectedMock();
+      const control = await makeConnectedMock();
+      pool.add('peer-1', bulk, { purpose: 'bulk' });
+      pool.add('peer-1', control, { purpose: 'control' });
+
+      // 'control' was added second, so a purpose-blind acquire() would
+      // have returned 'bulk' -- the selector must still find 'control'.
+      assert.equal(pool.acquire('peer-1', { purpose: 'control' }), control);
+      assert.equal(pool.acquire('peer-1', { purpose: 'bulk' }), bulk);
+    });
+
+    it('acquire({ purpose }) returns null when no idle entry has that purpose', async () => {
+      const t = await makeConnectedMock();
+      pool.add('peer-1', t, { purpose: 'bulk' });
+      assert.equal(pool.acquire('peer-1', { purpose: 'control' }), null);
+    });
+
+    it('acquire({ purpose }) does not match an already-acquired entry even if the purpose is right', async () => {
+      const t = await makeConnectedMock();
+      pool.add('peer-1', t, { purpose: 'bulk' });
+      assert.equal(pool.acquire('peer-1', { purpose: 'bulk' }), t);
+      assert.equal(pool.acquire('peer-1', { purpose: 'bulk' }), null, 'the only "bulk" entry is now acquired');
+    });
+
+    it('acquire({ select }) filters by an arbitrary predicate over the transport itself', async () => {
+      const slow = await makeConnectedMock();
+      slow.rttMs = 300;
+      const fast = await makeConnectedMock();
+      fast.rttMs = 10;
+      pool.add('peer-1', slow);
+      pool.add('peer-1', fast);
+
+      const picked = pool.acquire('peer-1', { select: (transport) => transport.rttMs < 50 });
+      assert.equal(picked, fast);
+    });
+
+    it('acquire({ purpose, select }) requires both to pass', async () => {
+      const bulkSlow = await makeConnectedMock();
+      bulkSlow.rttMs = 300;
+      const bulkFast = await makeConnectedMock();
+      bulkFast.rttMs = 10;
+      pool.add('peer-1', bulkSlow, { purpose: 'bulk' });
+      pool.add('peer-1', bulkFast, { purpose: 'bulk' });
+      pool.add('peer-1', await makeConnectedMock(), { purpose: 'control' });
+
+      const picked = pool.acquire('peer-1', { purpose: 'bulk', select: (t) => t.rttMs < 50 });
+      assert.equal(picked, bulkFast);
+    });
+
+    it('add() without a purpose tags the entry with null, distinct from any real purpose', async () => {
+      const untagged = await makeConnectedMock();
+      pool.add('peer-1', untagged);
+      assert.equal(pool.acquire('peer-1', { purpose: 'bulk' }), null, 'an untagged entry does not satisfy a specific purpose request');
+      assert.equal(pool.acquire('peer-1'), untagged, 'but a purpose-blind acquire() still finds it');
+    });
+
+    it('toJSON includes each entry\'s purpose', async () => {
+      const t = await makeConnectedMock();
+      pool.add('peer-1', t, { purpose: 'bulk' });
+      const json = pool.toJSON();
+      assert.equal(json.pools['peer-1'][0].purpose, 'bulk');
+    });
+  });
 });
 
 // ══════════════════════════════════════════════════════════════════════

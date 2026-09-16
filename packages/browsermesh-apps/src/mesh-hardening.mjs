@@ -57,14 +57,30 @@
  *    here without a real peer-side pong responder would just be a timer
  *    that always reports "unhealthy" after `maxMissed` misses no matter how
  *    healthy the connection actually is -- worse than not wiring it.
- *  - `ConnectionPool`: `PeerNode` keeps exactly one active session per peer
- *    today (`#sessions` in peer-node.mjs, keyed by a fresh session per
- *    `connectToPeer()`/`adoptIncomingSession()` call) -- there is no
- *    multiple-connections-per-peer call site for `ConnectionPool`'s
- *    `add()`/`acquire()`/`release()` cycle to attach to without a deeper
- *    change to `PeerNode`'s session model itself.
+ *  - `ConnectionPool`: as of issue #116, `PeerNode` *can* hold more than one
+ *    active session per peer (`connectToPeer()`/`adoptIncomingSession()`
+ *    both take a `connectionId`, tagging the `#sessions` entry they create
+ *    in peer-node.mjs), but those sessions are still named/addressed
+ *    explicitly by the caller, not pooled/acquired opaquely -- `sendTo()`
+ *    picks either "most recently created" or an exact `connectionId`, never
+ *    "whichever idle one `ConnectionPool.acquire()` hands back". Wiring
+ *    `ConnectionPool` itself here would mean layering a second, different
+ *    connection-selection model (acquire/release semantics for reused,
+ *    anonymous pooled connections) on top of the named-session model
+ *    `PeerNode` now has, for no concretely-needed benefit yet.
  * Both remain exported from `@johnhenry/browsermesh-core` for callers who
  * want to build that wiring themselves.
+ *
+ * ## Multiple connections per peer (issue #116)
+ * `endpointsKey(endpoints, auth)` folds `auth.connectionId` into the key
+ * (when present) precisely so two `PeerNode.connectToPeer()` calls for the
+ * same peer with *different* `connectionId`s get their own `RetryWithBackoff`
+ * / `TransportFailover` / metrics instance apiece, each independently
+ * `.connect()`-ing rather than the second call silently reusing the first's
+ * already-active `TransportFailover` and `.failover()`-ing (renegotiating)
+ * *that* connection instead of ever establishing its own. Calls that never
+ * pass `auth.connectionId` are unaffected -- same key as before this was
+ * added.
  *
  * No browser-only imports at module level.
  */
@@ -81,17 +97,26 @@ const DEFAULT_METRICS_KEY = 'unknown'
  * can derive the SAME key to look up this file's `failovers` map for a given
  * peer's pubKey -- see that file's own header comment for why this is a
  * best-effort, webrtc-convention-specific correlation rather than a real
- * shared index keyed by pubKey.
+ * shared index keyed by pubKey. `mesh-keepalive.mjs` only ever calls this
+ * with one argument, correlating against the peer's `DEFAULT_CONNECTION_ID`
+ * connection specifically -- see this file's header comment on `auth`, below.
  *
  * @param {object} [endpoints]
+ * @param {object} [auth] - If `auth.connectionId` is present (issue #116:
+ *   `PeerNode.connectToPeer()`'s `auth.connectionId`, threaded straight
+ *   through to `negotiate(endpoints, auth)`), it's folded into the key so
+ *   independent connections to the same peer get independent retry/failover/
+ *   metrics state. Omitting it (or `connectionId`) reproduces the exact key
+ *   this function returned before that parameter existed.
  * @returns {string}
  */
-export function endpointsKey(endpoints) {
+export function endpointsKey(endpoints, auth) {
   if (!endpoints) return DEFAULT_METRICS_KEY
   const values = Object.keys(endpoints)
     .sort()
     .map((type) => `${type}=${endpoints[type]}`)
-  return values.length > 0 ? values.join('&') : DEFAULT_METRICS_KEY
+  const base = values.length > 0 ? values.join('&') : DEFAULT_METRICS_KEY
+  return auth?.connectionId ? `${base}::connectionId=${auth.connectionId}` : base
 }
 
 /**
@@ -202,7 +227,7 @@ export function createHardenedNegotiator({ negotiator, retryOptions, onLog }) {
   }
 
   async function negotiate(endpoints, auth) {
-    const key = endpointsKey(endpoints)
+    const key = endpointsKey(endpoints, auth)
     const failover = getFailover(key, endpoints, auth)
     const transportMetrics = metrics.getOrCreate(key)
     const startedAt = Date.now()

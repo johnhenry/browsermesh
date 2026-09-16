@@ -540,9 +540,16 @@ export class ConnectionPool {
    *
    * @param {string} peerId
    * @param {object} transport
+   * @param {object} [opts]
+   * @param {*} [opts.purpose] - Opaque tag (issue #116) recorded alongside
+   *   this transport so a later `acquire(peerId, { purpose })` can request
+   *   "the connection for purpose X" specifically, instead of getting
+   *   whichever idle entry happens to be first. Untagged (the default) if
+   *   omitted -- only matches an `acquire()` call that also omits `purpose`/
+   *   `select`, same as every call before this option existed.
    * @returns {boolean} true if added successfully
    */
-  add(peerId, transport) {
+  add(peerId, transport, { purpose } = {}) {
     if (!this.#pools.has(peerId)) {
       this.#pools.set(peerId, []);
     }
@@ -564,6 +571,7 @@ export class ConnectionPool {
       transport,
       lastUsed: this.#nowFn(),
       acquired: false,
+      purpose: purpose ?? null,
     });
 
     return true;
@@ -571,16 +579,37 @@ export class ConnectionPool {
 
   /**
    * Acquire an idle connection for a peer. Marks it as acquired.
-   * Returns null if no idle connections exist.
+   * Returns null if no idle (matching, if a selector is given) connections
+   * exist.
+   *
+   * Without a selector, returns the first idle entry -- opaque round-robin
+   * reuse, exactly the pre-#116 behavior. With one, only an idle entry that
+   * matches is eligible, which is what makes `add()`'s `purpose` tag (or any
+   * property of the transport itself) actually useful for more than that:
+   * a caller that pooled e.g. a "bulk" and a "control" connection can now
+   * `acquire(peerId, { purpose: 'control' })` and reliably get that one
+   * back rather than whichever of the two happened to be idle first.
    *
    * @param {string} peerId
+   * @param {object} [opts]
+   * @param {*} [opts.purpose] - Only consider idle entries `add()` tagged
+   *   with this exact `purpose` (`Object.is` comparison).
+   * @param {(transport: object, purpose: *) => boolean} [opts.select] -
+   *   Only consider idle entries for which this returns true. Combined with
+   *   `purpose` (both must pass) when both are given, so a caller can filter
+   *   by purpose and by the transport's own state/shape at once.
    * @returns {object|null} The transport, or null
    */
-  acquire(peerId) {
+  acquire(peerId, { purpose, select } = {}) {
     const entries = this.#pools.get(peerId);
     if (!entries) return null;
 
-    const entry = entries.find(e => !e.acquired);
+    const entry = entries.find((e) => {
+      if (e.acquired) return false;
+      if (purpose !== undefined && !Object.is(e.purpose, purpose)) return false;
+      if (typeof select === 'function' && !select(e.transport, e.purpose)) return false;
+      return true;
+    });
     if (!entry) return null;
 
     entry.acquired = true;
@@ -724,6 +753,7 @@ export class ConnectionPool {
         acquired: e.acquired,
         lastUsed: e.lastUsed,
         transportType: e.transport.type ?? 'unknown',
+        purpose: e.purpose ?? null,
       }));
     }
     return {

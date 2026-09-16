@@ -874,18 +874,32 @@ export class WebRTCPeerConnection {
 // ---------------------------------------------------------------------------
 
 /**
- * Manages multiple WebRTC peer connections indexed by remotePodId.
+ * Connection identifier used when a caller doesn't ask for a specific one.
+ * `connectToPeer(remotePodId)` (no `connectionId`) always resolves to this
+ * slot, so every pre-existing single-connection-per-peer call site keeps
+ * behaving exactly as before -- multiple independent connections to the
+ * same peer are strictly additive, opt-in via an explicit `connectionId`.
+ */
+export const DEFAULT_CONNECTION_ID = 'default'
+
+/**
+ * Manages multiple WebRTC peer connections indexed by remotePodId, and (see
+ * issue #116) optionally by a caller-chosen `connectionId` within a peer --
+ * e.g. one connection per traffic class, each paying its own ICE/STUN/DTLS
+ * negotiation cost independently. `connectionId` defaults to
+ * `DEFAULT_CONNECTION_ID`, so callers who never pass one see the original
+ * one-connection-per-peer behavior unchanged.
  * Thin orchestration layer — signaling is left to the caller.
  */
 export class WebRTCMeshManager {
   #localPodId
   #iceServers
-  #connections = new Map()   // remotePodId -> WebRTCPeerConnection
+  #connections = new Map()   // remotePodId -> Map<connectionId, WebRTCPeerConnection>
   #onLog
   #messageCbs = []
   #reconnectOfferCbs = []
-  #reconnectAttempts = new Map()  // remotePodId -> count
-  #reconnectTimers = new Map()    // remotePodId -> timer handle
+  #reconnectAttempts = new Map()  // "remotePodId connectionId" -> count
+  #reconnectTimers = new Map()    // "remotePodId connectionId" -> timer handle
   #maxReconnectAttempts
   #reconnectBaseDelayMs
   #disconnectedGraceMs
@@ -918,13 +932,17 @@ export class WebRTCMeshManager {
   /** Local pod identifier. */
   get localPodId() { return this.#localPodId }
 
-  /** Number of tracked connections. */
-  get connectionCount() { return this.#connections.size }
+  /** Number of tracked connections, across all peers and connectionIds. */
+  get connectionCount() {
+    let count = 0
+    for (const byConnectionId of this.#connections.values()) count += byConnectionId.size
+    return count
+  }
 
   /**
    * Register a global message listener that fires for all connections.
    *
-   * @param {Function} cb - Called with (data, remotePodId)
+   * @param {Function} cb - Called with (data, remotePodId, connectionId)
    */
   onMessage(cb) { this.#messageCbs.push(cb) }
 
@@ -934,20 +952,40 @@ export class WebRTCMeshManager {
    * this offer through the same external signaling channel used for the
    * original connection.
    *
-   * @param {Function} cb - Called with (offer: {type, sdp}, remotePodId: string)
+   * @param {Function} cb - Called with (offer: {type, sdp}, remotePodId: string, connectionId: string)
    */
   onReconnectOffer(cb) { this.#reconnectOfferCbs.push(cb) }
 
+  #reconnectKey(remotePodId, connectionId) { return `${remotePodId} ${connectionId}` }
+
   /**
    * Create or return an existing WebRTCPeerConnection for a remote pod.
-   * Returns the same instance on duplicate calls with the same remotePodId.
+   * Returns the same instance on duplicate calls with the same remotePodId
+   * *and* connectionId.
+   *
+   * Passing a `connectionId` other than the default opens a fully
+   * independent `RTCPeerConnection` to the same peer -- its own ICE/STUN/
+   * DTLS negotiation, its own DataChannel, its own reconnect backoff. See
+   * issue #116: this is the real cost of the feature, not a limitation of
+   * this method -- there is no way to get a second logical channel to a
+   * peer more cheaply than that without reusing an existing connection (see
+   * `WebRTCPeerConnection`'s single-DataChannel model / issue #115).
    *
    * @param {string} remotePodId
+   * @param {object} [opts]
+   * @param {string} [opts.connectionId] - Defaults to `DEFAULT_CONNECTION_ID`.
+   *   Independent connectionIds to the same remotePodId are independent
+   *   `RTCPeerConnection`s.
    * @returns {Promise<WebRTCPeerConnection>}
    */
-  async connectToPeer(remotePodId) {
-    if (this.#connections.has(remotePodId)) {
-      return this.#connections.get(remotePodId)
+  async connectToPeer(remotePodId, { connectionId = DEFAULT_CONNECTION_ID } = {}) {
+    let byConnectionId = this.#connections.get(remotePodId)
+    if (byConnectionId?.has(connectionId)) {
+      return byConnectionId.get(connectionId)
+    }
+    if (!byConnectionId) {
+      byConnectionId = new Map()
+      this.#connections.set(remotePodId, byConnectionId)
     }
     const conn = new WebRTCPeerConnection({
       localPodId: this.#localPodId,
@@ -959,21 +997,25 @@ export class WebRTCMeshManager {
     // Forward messages to manager-level listeners
     conn.onMessage((data) => {
       for (const cb of this.#messageCbs) {
-        try { cb(data, remotePodId) } catch (e) { silentCatch('clawser-mesh-webrtc', 'swallow', e) }
+        try { cb(data, remotePodId, connectionId) } catch (e) { silentCatch('clawser-mesh-webrtc', 'swallow', e) }
       }
     })
     // Auto-remove on close
     conn.onClose(() => {
-      this.#connections.delete(remotePodId)
-      this.#clearReconnectState(remotePodId)
+      const stillTracked = this.#connections.get(remotePodId)
+      if (stillTracked) {
+        stillTracked.delete(connectionId)
+        if (stillTracked.size === 0) this.#connections.delete(remotePodId)
+      }
+      this.#clearReconnectState(remotePodId, connectionId)
     })
     // Reset backoff once the connection actually recovers
     conn.onStateChange((state) => {
-      if (state === 'connected') this.#clearReconnectState(remotePodId)
+      if (state === 'connected') this.#clearReconnectState(remotePodId, connectionId)
     })
     // Auto-retry with exponential backoff on failure/disconnect
-    conn.onError(() => this.#scheduleReconnect(remotePodId, conn))
-    this.#connections.set(remotePodId, conn)
+    conn.onError(() => this.#scheduleReconnect(remotePodId, connectionId, conn))
+    byConnectionId.set(connectionId, conn)
     return conn
   }
 
@@ -984,108 +1026,135 @@ export class WebRTCMeshManager {
    * @param {object} [opts]
    * @param {boolean} [opts.force=false] - Renegotiate even if the connection
    *   looks healthy. Without it a healthy connection is left alone.
+   * @param {string} [opts.connectionId] - Defaults to `DEFAULT_CONNECTION_ID`.
    * @returns {Promise<{type: 'offer', sdp: string, renegotiation: true}|null>}
    *   null if there is no such connection, or nothing to repair.
    */
-  async reconnectPeer(remotePodId, { force = false } = {}) {
-    const conn = this.#connections.get(remotePodId)
+  async reconnectPeer(remotePodId, { force = false, connectionId = DEFAULT_CONNECTION_ID } = {}) {
+    const conn = this.#connections.get(remotePodId)?.get(connectionId)
     if (!conn) return null
     const offer = await conn.reconnect({ force })
     if (!offer) return null
-    this.#notifyReconnectOffer(offer, remotePodId)
+    this.#notifyReconnectOffer(offer, remotePodId, connectionId)
     return offer
   }
 
-  #clearReconnectState(remotePodId) {
-    this.#reconnectAttempts.delete(remotePodId)
-    const timer = this.#reconnectTimers.get(remotePodId)
+  #clearReconnectState(remotePodId, connectionId) {
+    const key = this.#reconnectKey(remotePodId, connectionId)
+    this.#reconnectAttempts.delete(key)
+    const timer = this.#reconnectTimers.get(key)
     if (timer) {
       clearTimeout(timer)
-      this.#reconnectTimers.delete(remotePodId)
+      this.#reconnectTimers.delete(key)
     }
   }
 
-  #notifyReconnectOffer(offer, remotePodId) {
+  #notifyReconnectOffer(offer, remotePodId, connectionId) {
     for (const cb of this.#reconnectOfferCbs) {
-      try { cb(offer, remotePodId) } catch (e) { silentCatch('clawser-mesh-webrtc', 'swallow', e) }
+      try { cb(offer, remotePodId, connectionId) } catch (e) { silentCatch('clawser-mesh-webrtc', 'swallow', e) }
     }
   }
 
-  #scheduleReconnect(remotePodId, conn) {
-    if (this.#reconnectTimers.has(remotePodId)) return // already scheduled
-    const attempts = this.#reconnectAttempts.get(remotePodId) || 0
+  #scheduleReconnect(remotePodId, connectionId, conn) {
+    const key = this.#reconnectKey(remotePodId, connectionId)
+    if (this.#reconnectTimers.has(key)) return // already scheduled
+    const attempts = this.#reconnectAttempts.get(key) || 0
     if (attempts >= this.#maxReconnectAttempts) {
-      if (this.#onLog) this.#onLog(`Giving up reconnecting to ${remotePodId} after ${attempts} attempts`)
+      if (this.#onLog) this.#onLog(`Giving up reconnecting to ${remotePodId} (${connectionId}) after ${attempts} attempts`)
       return
     }
     const delay = this.#reconnectBaseDelayMs * (2 ** attempts)
-    this.#reconnectAttempts.set(remotePodId, attempts + 1)
+    this.#reconnectAttempts.set(key, attempts + 1)
     const timer = setTimeout(async () => {
-      this.#reconnectTimers.delete(remotePodId)
-      if (!this.#connections.has(remotePodId)) return // closed/removed meanwhile
+      this.#reconnectTimers.delete(key)
+      if (!this.#connections.get(remotePodId)?.has(connectionId)) return // closed/removed meanwhile
       try {
         const offer = await conn.reconnect()
         if (offer) {
-          this.#notifyReconnectOffer(offer, remotePodId)
+          this.#notifyReconnectOffer(offer, remotePodId, connectionId)
         } else {
           // Nothing was wrong with the connection after all -- the error that
           // scheduled this attempt was spurious, or it healed while we waited.
           // Refund the backoff rather than counting it against the peer.
-          this.#clearReconnectState(remotePodId)
+          this.#clearReconnectState(remotePodId, connectionId)
         }
       } catch (e) { silentCatch('clawser-mesh-webrtc', 'reconnect-attempt', e) }
     }, delay)
-    this.#reconnectTimers.set(remotePodId, timer)
+    this.#reconnectTimers.set(key, timer)
   }
 
   /**
-   * Get an existing connection by remotePodId.
+   * Get an existing connection by remotePodId (and, optionally, connectionId).
    *
    * @param {string} remotePodId
+   * @param {string} [connectionId] - Defaults to `DEFAULT_CONNECTION_ID`.
    * @returns {WebRTCPeerConnection|null}
    */
-  getConnection(remotePodId) {
-    return this.#connections.get(remotePodId) || null
+  getConnection(remotePodId, connectionId = DEFAULT_CONNECTION_ID) {
+    return this.#connections.get(remotePodId)?.get(connectionId) || null
+  }
+
+  /**
+   * List every connectionId tracked for a peer, alongside its connection.
+   * Empty array if the peer has no tracked connections at all.
+   *
+   * @param {string} remotePodId
+   * @returns {Array<{connectionId: string, connection: WebRTCPeerConnection}>}
+   */
+  getConnectionsFor(remotePodId) {
+    const byConnectionId = this.#connections.get(remotePodId)
+    if (!byConnectionId) return []
+    return [...byConnectionId.entries()].map(([connectionId, connection]) => ({ connectionId, connection }))
   }
 
   /**
    * Check whether a connection to remotePodId exists.
    *
    * @param {string} remotePodId
+   * @param {string} [connectionId] - If given, checks that exact connection.
+   *   If omitted, checks whether *any* connection to remotePodId exists
+   *   (matches the pre-#116 behavior for single-connection-per-peer callers).
    * @returns {boolean}
    */
-  hasConnection(remotePodId) {
-    return this.#connections.has(remotePodId)
+  hasConnection(remotePodId, connectionId) {
+    const byConnectionId = this.#connections.get(remotePodId)
+    if (!byConnectionId) return false
+    return connectionId === undefined ? byConnectionId.size > 0 : byConnectionId.has(connectionId)
   }
 
   /**
    * List all tracked connections with their current state.
    *
-   * @returns {Array<{remotePodId: string, state: string}>}
+   * @returns {Array<{remotePodId: string, connectionId: string, state: string}>}
    */
   listConnections() {
-    return [...this.#connections.entries()].map(([remotePodId, conn]) => ({
-      remotePodId,
-      state: conn.state,
-    }))
+    const results = []
+    for (const [remotePodId, byConnectionId] of this.#connections.entries()) {
+      for (const [connectionId, conn] of byConnectionId.entries()) {
+        results.push({ remotePodId, connectionId, state: conn.state })
+      }
+    }
+    return results
   }
 
   /**
-   * Query `getConnectionStats()` on every tracked connection. A single
-   * connection's stats query failing (e.g. mid-teardown) doesn't abort
-   * the rest — its entry carries `error` instead. Result is cached on
-   * `lastStats` for synchronous readers (e.g. MeshInspector.snapshot(),
-   * which can't await this method).
+   * Query `getConnectionStats()` on every tracked connection (every
+   * connectionId, for every peer). A single connection's stats query
+   * failing (e.g. mid-teardown) doesn't abort the rest — its entry carries
+   * `error` instead. Result is cached on `lastStats` for synchronous readers
+   * (e.g. MeshInspector.snapshot(), which can't await this method).
    *
    * @returns {Promise<Array<object>>}
    */
   async getAllConnectionStats() {
     const results = []
-    for (const [remotePodId, conn] of this.#connections.entries()) {
-      try {
-        results.push(await conn.getConnectionStats())
-      } catch (err) {
-        results.push({ remotePodId, state: conn.state, error: err?.message || String(err) })
+    for (const [remotePodId, byConnectionId] of this.#connections.entries()) {
+      for (const [connectionId, conn] of byConnectionId.entries()) {
+        try {
+          results.push({ ...(await conn.getConnectionStats()), connectionId })
+        } catch (err) {
+          results.push({ remotePodId, connectionId, state: conn.state, error: err?.message || String(err) })
+        }
       }
     }
     this.#lastStats = results
@@ -1100,15 +1169,28 @@ export class WebRTCMeshManager {
   get lastStats() { return this.#lastStats }
 
   /**
-   * Broadcast data to all connected peers.
+   * Broadcast data to all connected peers, once per peer -- even if a peer
+   * has multiple tracked connections (issue #116), it gets the message once,
+   * over its default connection if that one is open, otherwise over
+   * whichever of its other connections is. Callers that need to reach every
+   * connection of every peer explicitly (rather than one message per peer)
+   * should iterate `getConnectionsFor()`/`listConnections()` themselves.
    *
    * @param {string|object} data
    * @returns {number} Number of peers the message was sent to
    */
   broadcast(data) {
     let sent = 0
-    for (const conn of this.#connections.values()) {
-      if (conn.isOpen) {
+    for (const byConnectionId of this.#connections.values()) {
+      const defaultConn = byConnectionId.get(DEFAULT_CONNECTION_ID)
+      // A Map entry is truthy regardless of isOpen, so this cannot be
+      // `defaultConn || [...].find(isOpen)` -- that would always short-
+      // circuit on the default entry existing at all, open or not, and
+      // never fall back.
+      const conn = (defaultConn && defaultConn.isOpen)
+        ? defaultConn
+        : [...byConnectionId.values()].find((c) => c.isOpen)
+      if (conn && conn.isOpen) {
         try {
           conn.send(data)
           sent++
@@ -1122,22 +1204,34 @@ export class WebRTCMeshManager {
    * Close a specific peer connection.
    *
    * @param {string} remotePodId
-   * @returns {boolean} True if a connection was found and closed
+   * @param {string} [connectionId] - If given, closes just that connection.
+   *   If omitted, closes *every* tracked connection to remotePodId (matches
+   *   the pre-#116 behavior for single-connection-per-peer callers).
+   * @returns {boolean} True if at least one connection was found and closed
    */
-  closePeer(remotePodId) {
-    const conn = this.#connections.get(remotePodId)
-    if (!conn) return false
-    conn.close()
-    this.#connections.delete(remotePodId)
+  closePeer(remotePodId, connectionId) {
+    const byConnectionId = this.#connections.get(remotePodId)
+    if (!byConnectionId || byConnectionId.size === 0) return false
+    if (connectionId !== undefined) {
+      const conn = byConnectionId.get(connectionId)
+      if (!conn) return false
+      conn.close()
+      // conn.onClose() (wired in connectToPeer) removes it from #connections.
+      return true
+    }
+    for (const conn of [...byConnectionId.values()]) conn.close()
     return true
   }
 
   /**
-   * Close all peer connections and clear internal state.
+   * Close all peer connections (every connectionId, for every peer) and
+   * clear internal state.
    */
   closeAll() {
-    for (const conn of this.#connections.values()) {
-      try { conn.close() } catch (e) { silentCatch('clawser-mesh-webrtc', 'conn.close', e) }
+    for (const byConnectionId of this.#connections.values()) {
+      for (const conn of byConnectionId.values()) {
+        try { conn.close() } catch (e) { silentCatch('clawser-mesh-webrtc', 'conn.close', e) }
+      }
     }
     this.#connections.clear()
   }
