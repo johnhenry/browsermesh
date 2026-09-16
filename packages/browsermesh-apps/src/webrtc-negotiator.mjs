@@ -29,10 +29,26 @@
  * ICE candidates are relayed in both directions for every connection,
  * regardless of which side initiated it.
  *
+ * ## Multiple connections per peer (issue #116)
+ * `auth.connectionId` (default `DEFAULT_CONNECTION_ID`, re-exported from
+ * `@johnhenry/browsermesh-transport`) selects which of possibly-several
+ * independent `RTCPeerConnection`s to `endpoint` this call negotiates --
+ * `PeerNode.connectToPeer(pubKey, endpoints, auth)` already threads `auth`
+ * straight through to `negotiator.negotiate(endpoints, auth)`, so callers
+ * can request a second, fully independent connection to a peer already
+ * connected to (its own ICE/STUN/DTLS negotiation, own DataChannel) simply
+ * by calling `connectToPeer()` again with a different `auth.connectionId`.
+ * Every signaling message (`webrtc-offer`/`webrtc-answer`/`webrtc-ice`)
+ * carries that same `connectionId` so concurrent exchanges with the same
+ * peer never cross-route an answer or ICE candidate meant for the other
+ * connection. Calls that never pass `connectionId` are unaffected -- they
+ * all resolve to the peer's single `DEFAULT_CONNECTION_ID` connection, same
+ * as before this was added.
+ *
  * No browser-only imports at module level.
  */
 
-import { WebRTCTransportAdapter } from '@johnhenry/browsermesh-transport'
+import { WebRTCTransportAdapter, DEFAULT_CONNECTION_ID } from '@johnhenry/browsermesh-transport'
 
 /** Default time to wait for an SDP answer before giving up. */
 const DEFAULT_ANSWER_TIMEOUT_MS = 15_000
@@ -49,7 +65,7 @@ const DEFAULT_OPEN_TIMEOUT_MS = 15_000
  * @param {import('@johnhenry/browsermesh-transport').WebRTCMeshManager} opts.meshManager
  * @param {import('./signaling.mjs').MeshSignalingChannel} opts.signaling
  * @param {Function} [opts.onLog]
- * @param {(remotePodId: string, adapter: import('@johnhenry/browsermesh-transport').WebRTCTransportAdapter) => void} [opts.onIncomingConnection]
+ * @param {(remotePodId: string, adapter: import('@johnhenry/browsermesh-transport').WebRTCTransportAdapter, connectionId: string) => void} [opts.onIncomingConnection]
  *   Called once the DataChannel for a *callee-side* (auto-answered) inbound
  *   offer actually opens, with a ready `WebRTCTransportAdapter` wrapping it.
  *   Optional: without it, inbound-only connections still come up at the
@@ -61,7 +77,8 @@ const DEFAULT_OPEN_TIMEOUT_MS = 15_000
  * @returns {(endpoint: string, auth?: object) => Promise<import('@johnhenry/browsermesh-transport').WebRTCTransportAdapter>}
  *   Factory suitable for `negotiator.registerAdapter('webrtc', factory)`.
  *   `endpoint` is the remote peer's podId; `auth` may carry
- *   `{ answerTimeoutMs, openTimeoutMs }` overrides.
+ *   `{ answerTimeoutMs, openTimeoutMs, connectionId }` overrides -- see this
+ *   file's header comment for `connectionId` (issue #116).
  */
 export function createWebRTCTransportFactory({
   localPodId, meshManager, signaling, onLog, onIncomingConnection, openTimeoutMs: defaultOpenTimeoutMs,
@@ -71,26 +88,28 @@ export function createWebRTCTransportFactory({
   if (!signaling) throw new Error('signaling is required')
   const log = onLog || (() => {})
 
-  /** @type {Set<string>} remotePodIds whose ICE relay is already wired */
+  /** @type {Set<string>} "remotePodId connectionId" pairs whose ICE relay is already wired */
   const wiredIce = new Set()
+  const iceKey = (remotePodId, connectionId) => `${remotePodId} ${connectionId}`
 
   /**
-   * Get (or create) the WebRTCPeerConnection for a peer, and make sure its
-   * locally-gathered ICE candidates get relayed exactly once, no matter
-   * which side (offerer or answerer) first touches this remotePodId.
+   * Get (or create) the WebRTCPeerConnection for a peer + connectionId, and
+   * make sure its locally-gathered ICE candidates get relayed exactly once,
+   * no matter which side (offerer or answerer) first touches this pair.
    */
-  async function getWiredConnection(remotePodId) {
-    const conn = await meshManager.connectToPeer(remotePodId)
-    if (!wiredIce.has(remotePodId)) {
-      wiredIce.add(remotePodId)
+  async function getWiredConnection(remotePodId, connectionId = DEFAULT_CONNECTION_ID) {
+    const conn = await meshManager.connectToPeer(remotePodId, { connectionId })
+    const key = iceKey(remotePodId, connectionId)
+    if (!wiredIce.has(key)) {
+      wiredIce.add(key)
       conn.onIceCandidate((candidate) => {
         try {
-          signaling.send('webrtc-ice', remotePodId, candidate)
+          signaling.send('webrtc-ice', remotePodId, candidate, connectionId)
         } catch (err) {
-          log('webrtc-negotiator:ice-send-failed', { remotePodId, error: err?.message || String(err) })
+          log('webrtc-negotiator:ice-send-failed', { remotePodId, connectionId, error: err?.message || String(err) })
         }
       })
-      conn.onClose(() => wiredIce.delete(remotePodId))
+      conn.onClose(() => wiredIce.delete(key))
     }
     return conn
   }
@@ -126,12 +145,12 @@ export function createWebRTCTransportFactory({
   // Callee side: answer any inbound offer automatically. Registered once,
   // for the lifetime of this factory, so a peer that only ever receives
   // connections (never calls negotiate() itself) still gets connected.
-  signaling.onOffer(async (fromPodId, offer) => {
+  signaling.onOffer(async (fromPodId, offer, connectionId = DEFAULT_CONNECTION_ID) => {
     try {
-      const conn = await getWiredConnection(fromPodId)
+      const conn = await getWiredConnection(fromPodId, connectionId)
       const answer = await conn.handleOffer(offer)
-      signaling.send('webrtc-answer', fromPodId, answer)
-      log('webrtc-negotiator:answered', { from: fromPodId })
+      signaling.send('webrtc-answer', fromPodId, answer, connectionId)
+      log('webrtc-negotiator:answered', { from: fromPodId, connectionId })
 
       // Hand the callee side a ready transport adapter too, once its
       // DataChannel actually opens, so callers (mesh-bootstrap.mjs) can
@@ -141,22 +160,22 @@ export function createWebRTCTransportFactory({
         await waitForOpen(conn, defaultOpenTimeoutMs ?? DEFAULT_OPEN_TIMEOUT_MS)
         const adapter = new WebRTCTransportAdapter(conn)
         await adapter.connect()
-        onIncomingConnection(fromPodId, adapter)
+        onIncomingConnection(fromPodId, adapter, connectionId)
       }
     } catch (err) {
-      log('webrtc-negotiator:offer-failed', { from: fromPodId, error: err?.message || String(err) })
+      log('webrtc-negotiator:offer-failed', { from: fromPodId, connectionId, error: err?.message || String(err) })
     }
   })
 
   // ICE candidates arriving from either side of any connection.
-  signaling.onIce((fromPodId, candidate) => {
-    const conn = meshManager.getConnection(fromPodId)
+  signaling.onIce((fromPodId, candidate, connectionId = DEFAULT_CONNECTION_ID) => {
+    const conn = meshManager.getConnection(fromPodId, connectionId)
     if (!conn) {
-      log('webrtc-negotiator:ice-no-connection', { from: fromPodId })
+      log('webrtc-negotiator:ice-no-connection', { from: fromPodId, connectionId })
       return
     }
     conn.addIceCandidate(candidate).catch((err) => {
-      log('webrtc-negotiator:ice-add-failed', { from: fromPodId, error: err?.message || String(err) })
+      log('webrtc-negotiator:ice-add-failed', { from: fromPodId, connectionId, error: err?.message || String(err) })
     })
   })
 
@@ -174,16 +193,17 @@ export function createWebRTCTransportFactory({
 
     const answerTimeoutMs = auth?.answerTimeoutMs ?? DEFAULT_ANSWER_TIMEOUT_MS
     const openTimeoutMs = auth?.openTimeoutMs ?? DEFAULT_OPEN_TIMEOUT_MS
+    const connectionId = auth?.connectionId ?? DEFAULT_CONNECTION_ID
 
-    const conn = await getWiredConnection(remotePodId)
+    const conn = await getWiredConnection(remotePodId, connectionId)
 
     const answerPromise = new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         unsubscribe()
         reject(new Error(`WebRTC negotiation with ${remotePodId} timed out waiting for an answer`))
       }, answerTimeoutMs)
-      const unsubscribe = signaling.onAnswer((fromPodId, answer) => {
-        if (fromPodId !== remotePodId) return
+      const unsubscribe = signaling.onAnswer((fromPodId, answer, answerConnectionId = DEFAULT_CONNECTION_ID) => {
+        if (fromPodId !== remotePodId || answerConnectionId !== connectionId) return
         clearTimeout(timer)
         unsubscribe()
         resolve(answer)
@@ -191,7 +211,7 @@ export function createWebRTCTransportFactory({
     })
 
     const offer = await conn.createOffer()
-    signaling.send('webrtc-offer', remotePodId, offer)
+    signaling.send('webrtc-offer', remotePodId, offer, connectionId)
 
     const answer = await answerPromise
     await conn.handleAnswer(answer)

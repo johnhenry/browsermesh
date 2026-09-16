@@ -23,6 +23,18 @@ const PEER_NODE_STATES = Object.freeze([
   'shutting_down',
 ])
 
+/**
+ * Connection identifier a session is tagged with when the caller doesn't
+ * request a specific one (issue #116). `#sessions` has always structurally
+ * supported multiple entries per pubKey (it's keyed by sessionId, not
+ * pubKey), but nothing before this ever created more than one -- this tag
+ * is what makes a second, independently-negotiated session for the same
+ * pubKey addressable (`sendTo(pubKey, data, { connectionId })`) rather than
+ * just an untargetable extra entry that `sendTo()`'s "most recent" fallback
+ * happens to shadow.
+ */
+const DEFAULT_CONNECTION_ID = 'default'
+
 // ---------------------------------------------------------------------------
 // PeerNode
 // ---------------------------------------------------------------------------
@@ -331,8 +343,16 @@ export class PeerNode {
    *
    * @param {string} pubKey - Peer fingerprint / public key hash
    * @param {object} [endpoints] - Map of transport type -> endpoint string
-   * @param {object} [auth] - Auth credentials for transport negotiation
-   * @returns {Promise<object>} Session info
+   * @param {object} [auth] - Auth credentials for transport negotiation.
+   *   `auth.connectionId` (issue #116), if present, both (a) is threaded
+   *   through to `transportNegotiator.negotiate(endpoints, auth)` -- for the
+   *   `'webrtc'` adapter (`webrtc-negotiator.mjs`) this opens a fully
+   *   independent `RTCPeerConnection` to a peer already connected to under a
+   *   different `connectionId` -- and (b) tags the resulting session, so
+   *   `sendTo()`/`hasActiveSession()` can address it specifically afterward.
+   *   Omit it to get (or add another anonymous session sharing) the peer's
+   *   `DEFAULT_CONNECTION_ID` session, exactly as before this was added.
+   * @returns {Promise<object>} Session info (includes `connectionId`)
    */
   async connectToPeer(pubKey, endpoints, auth) {
     this.#ensureRunning('connectToPeer')
@@ -369,7 +389,8 @@ export class PeerNode {
     // Create session (and wire its inbound data fan-out) via the same
     // helper `adoptIncomingSession()` uses for the callee side, so both
     // sides of a connection end up with identically-shaped bookkeeping.
-    const session = this.#createSession(pubKey, transportType, transport)
+    const connectionId = auth?.connectionId ?? DEFAULT_CONNECTION_ID
+    const session = this.#createSession(pubKey, transportType, transport, connectionId)
 
     this.#onLog('peer-node:session:created', {
       sessionId: session.sessionId,
@@ -412,9 +433,16 @@ export class PeerNode {
    * @param {object} transportInstance - An already-open MeshTransport-shaped
    *   object: must implement `send(data)`, should implement `onMessage(cb)`.
    * @param {string} transportType - e.g. `'webrtc'`
+   * @param {object} [opts]
+   * @param {string} [opts.connectionId] - Which of possibly-several
+   *   independent connections to `pubKey` this is (issue #116); see
+   *   `connectToPeer()`'s `auth.connectionId` doc. Defaults to
+   *   `DEFAULT_CONNECTION_ID`. `webrtc-negotiator.mjs`'s
+   *   `onIncomingConnection` hook passes through whichever connectionId the
+   *   inbound offer carried.
    * @returns {Promise<object>} Session info (same shape as `connectToPeer()`'s)
    */
-  async adoptIncomingSession(pubKey, transportInstance, transportType) {
+  async adoptIncomingSession(pubKey, transportInstance, transportType, { connectionId = DEFAULT_CONNECTION_ID } = {}) {
     this.#ensureRunning('adoptIncomingSession')
     if (!pubKey || typeof pubKey !== 'string') {
       throw new Error('adoptIncomingSession: pubKey is required')
@@ -425,7 +453,7 @@ export class PeerNode {
 
     this.#registry.connect(pubKey, { transport: transportType })
 
-    const session = this.#createSession(pubKey, transportType, transportInstance)
+    const session = this.#createSession(pubKey, transportType, transportInstance, connectionId)
 
     this.#onLog('peer-node:session:adopted', {
       sessionId: session.sessionId,
@@ -453,14 +481,16 @@ export class PeerNode {
    * @param {string} pubKey
    * @param {string|null} transportType
    * @param {object|null} transportInstance
+   * @param {string} [connectionId] - Defaults to `DEFAULT_CONNECTION_ID`.
    * @returns {object} The new session entry (includes `transportInstance`;
    *   callers strip it before returning to their own caller)
    */
-  #createSession(pubKey, transportType, transportInstance) {
+  #createSession(pubKey, transportType, transportInstance, connectionId = DEFAULT_CONNECTION_ID) {
     const sessionId = crypto.randomUUID()
     const session = {
       sessionId,
       pubKey,
+      connectionId,
       transport: transportType,
       transportInstance,
       connectedAt: Date.now(),
@@ -471,7 +501,7 @@ export class PeerNode {
     if (transportInstance && typeof transportInstance.onMessage === 'function') {
       transportInstance.onMessage((data) => {
         for (const cb of this.#dataListeners) {
-          try { cb(pubKey, data, { sessionId, transport: transportType }) }
+          try { cb(pubKey, data, { sessionId, transport: transportType, connectionId }) }
           catch (err) { this.#onLog('peer-node:data-listener-error', { error: err?.message || String(err) }) }
         }
       })
@@ -505,15 +535,24 @@ export class PeerNode {
 
   /**
    * Send raw bytes/data to a connected peer via its current transport
-   * session. Looks up the most recently-created active session for the
-   * given pubKey and calls `transport.send(data)`.
+   * session, and calls `transport.send(data)`.
    *
-   * Throws when no active session exists for the peer (caller should
-   * either connect first or surface the error to the user).
+   * Without `opts.connectionId`, looks up the most recently-created active
+   * session for the given pubKey -- exactly the pre-#116 behavior, which
+   * is unambiguous as long as a peer has at most one session (still true
+   * unless a caller deliberately opened another one via `connectToPeer()`'s
+   * or `adoptIncomingSession()`'s `connectionId`). With multiple sessions
+   * per pubKey, pass `opts.connectionId` to target one specifically.
+   *
+   * Throws when no matching active session exists for the peer (caller
+   * should either connect first or surface the error to the user).
    *
    * @param {string} pubKey - Peer fingerprint / public key hash
    * @param {*} data - Wire payload to send. Format is transport-defined;
    *   typical callers stringify a JSON envelope first.
+   * @param {object} [opts]
+   * @param {string} [opts.connectionId] - Target this specific connection's
+   *   session (issue #116) rather than "most recently created".
    * @returns {Promise<void>} Resolves when the underlying transport
    *   has accepted the send (transport-defined; some are fire-and-
    *   forget, others await an ack).
@@ -521,14 +560,14 @@ export class PeerNode {
    * @example
    *   await peerNode.sendTo('podid_abc', JSON.stringify({ type: 'ping' }));
    */
-  async sendTo(pubKey, data) {
+  async sendTo(pubKey, data, { connectionId } = {}) {
     this.#ensureRunning('sendTo');
     let session = null;
     for (const [, s] of this.#sessions) {
-      if (s.pubKey === pubKey && s.state === 'active') {
-        // Prefer the most recently-created active session
-        if (!session || (s.connectedAt || 0) > (session.connectedAt || 0)) session = s;
-      }
+      if (s.pubKey !== pubKey || s.state !== 'active') continue;
+      if (connectionId !== undefined && s.connectionId !== connectionId) continue;
+      // Prefer the most recently-created active (matching) session
+      if (!session || (s.connectedAt || 0) > (session.connectedAt || 0)) session = s;
     }
     if (!session) {
       throw new Error(`PeerNode.sendTo: no active session for pubKey ${pubKey}`);
@@ -558,13 +597,33 @@ export class PeerNode {
    * Whether the peer has an active session ready for `sendTo`.
    *
    * @param {string} pubKey
+   * @param {object} [opts]
+   * @param {string} [opts.connectionId] - If given, check that specific
+   *   connection's session (issue #116) rather than "any session".
    * @returns {boolean}
    */
-  hasActiveSession(pubKey) {
+  hasActiveSession(pubKey, { connectionId } = {}) {
     for (const [, s] of this.#sessions) {
-      if (s.pubKey === pubKey && s.state === 'active') return true;
+      if (s.pubKey !== pubKey || s.state !== 'active') continue;
+      if (connectionId !== undefined && s.connectionId !== connectionId) continue;
+      return true;
     }
     return false;
+  }
+
+  /**
+   * List every session for a peer (issue #116) -- e.g. to discover what
+   * `connectionId`s are currently live before addressing one via `sendTo()`.
+   *
+   * @param {string} pubKey
+   * @returns {object[]} Session info array (without transport instances),
+   *   most-recently-created first.
+   */
+  sessionsFor(pubKey) {
+    return [...this.#sessions.values()]
+      .filter((s) => s.pubKey === pubKey)
+      .sort((a, b) => (b.connectedAt || 0) - (a.connectedAt || 0))
+      .map((s) => ({ ...s, transportInstance: undefined }));
   }
 
   /**

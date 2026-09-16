@@ -113,6 +113,7 @@ import {
   mergeIceServers,
   DEFAULT_ICE_SERVERS,
   PUBLIC_STUN_SERVERS,
+  DEFAULT_CONNECTION_ID,
 } from '../src/webrtc.mjs'
 
 // ── supportsWebRTC ─────────────────────────────────────────────────────
@@ -377,6 +378,168 @@ describe('WebRTCMeshManager', () => {
     mgr.closeAll()
     assert.equal(mgr.connectionCount, 0)
     assert.deepEqual(mgr.listConnections(), [])
+  })
+})
+
+// ── WebRTCMeshManager: multiple connections per peer (issue #116) ─────────
+
+describe('WebRTCMeshManager multiple connections per peer (issue #116)', () => {
+  it('connectToPeer with a different connectionId opens an independent connection to the same peer', async () => {
+    const mgr = new WebRTCMeshManager({ localPodId: 'node-1' })
+    const bulk = await mgr.connectToPeer('node-2', { connectionId: 'bulk' })
+    const control = await mgr.connectToPeer('node-2', { connectionId: 'control' })
+    assert.notEqual(bulk, control, 'each connectionId gets its own WebRTCPeerConnection instance')
+    assert.equal(bulk.remotePodId, 'node-2')
+    assert.equal(control.remotePodId, 'node-2')
+    assert.equal(mgr.connectionCount, 2)
+  })
+
+  it('connectToPeer with the same connectionId returns the same instance (unchanged dedup behavior)', async () => {
+    const mgr = new WebRTCMeshManager({ localPodId: 'node-1' })
+    const a = await mgr.connectToPeer('node-2', { connectionId: 'bulk' })
+    const b = await mgr.connectToPeer('node-2', { connectionId: 'bulk' })
+    assert.equal(a, b)
+    assert.equal(mgr.connectionCount, 1)
+  })
+
+  it('omitting connectionId always resolves to DEFAULT_CONNECTION_ID, same instance every time', async () => {
+    const mgr = new WebRTCMeshManager({ localPodId: 'node-1' })
+    const noOpts = await mgr.connectToPeer('node-2')
+    const explicitDefault = await mgr.connectToPeer('node-2', { connectionId: DEFAULT_CONNECTION_ID })
+    assert.equal(noOpts, explicitDefault)
+  })
+
+  it('getConnection(remotePodId, connectionId) fetches a specific connection', async () => {
+    const mgr = new WebRTCMeshManager({ localPodId: 'node-1' })
+    const bulk = await mgr.connectToPeer('node-2', { connectionId: 'bulk' })
+    const control = await mgr.connectToPeer('node-2', { connectionId: 'control' })
+    assert.equal(mgr.getConnection('node-2', 'bulk'), bulk)
+    assert.equal(mgr.getConnection('node-2', 'control'), control)
+    assert.equal(mgr.getConnection('node-2', 'missing'), null)
+  })
+
+  it('getConnectionsFor lists every connectionId tracked for a peer', async () => {
+    const mgr = new WebRTCMeshManager({ localPodId: 'node-1' })
+    await mgr.connectToPeer('node-2', { connectionId: 'bulk' })
+    await mgr.connectToPeer('node-2', { connectionId: 'control' })
+    const entries = mgr.getConnectionsFor('node-2').map((e) => e.connectionId).sort()
+    assert.deepEqual(entries, ['bulk', 'control'])
+    assert.deepEqual(mgr.getConnectionsFor('unknown-peer'), [])
+  })
+
+  it('hasConnection(remotePodId) with no connectionId means "any connection", hasConnection(remotePodId, id) is exact', async () => {
+    const mgr = new WebRTCMeshManager({ localPodId: 'node-1' })
+    await mgr.connectToPeer('node-2', { connectionId: 'bulk' })
+    assert.equal(mgr.hasConnection('node-2'), true, 'any-connection check finds it regardless of connectionId')
+    assert.equal(mgr.hasConnection('node-2', 'bulk'), true)
+    assert.equal(mgr.hasConnection('node-2', 'control'), false, 'exact check does not match a different connectionId')
+  })
+
+  it('listConnections includes connectionId for every tracked connection', async () => {
+    const mgr = new WebRTCMeshManager({ localPodId: 'node-1' })
+    await mgr.connectToPeer('node-2', { connectionId: 'bulk' })
+    await mgr.connectToPeer('node-2', { connectionId: 'control' })
+    await mgr.connectToPeer('node-3')
+    const list = mgr.listConnections()
+    assert.equal(list.length, 3)
+    const forNode2 = list.filter((c) => c.remotePodId === 'node-2').map((c) => c.connectionId).sort()
+    assert.deepEqual(forNode2, ['bulk', 'control'])
+    const forNode3 = list.filter((c) => c.remotePodId === 'node-3')
+    assert.deepEqual(forNode3.map((c) => c.connectionId), [DEFAULT_CONNECTION_ID])
+  })
+
+  it('closePeer(remotePodId, connectionId) closes just that connection, leaving the peer\'s other connections up', async () => {
+    const mgr = new WebRTCMeshManager({ localPodId: 'node-1' })
+    const bulk = await mgr.connectToPeer('node-2', { connectionId: 'bulk' })
+    const control = await mgr.connectToPeer('node-2', { connectionId: 'control' })
+    assert.equal(mgr.closePeer('node-2', 'bulk'), true)
+    assert.equal(bulk.state, 'closed')
+    assert.notEqual(control.state, 'closed', 'closing "bulk" must not touch "control"')
+    assert.equal(mgr.getConnection('node-2', 'bulk'), null)
+    assert.equal(mgr.getConnection('node-2', 'control'), control)
+    assert.equal(mgr.connectionCount, 1)
+  })
+
+  it('closePeer(remotePodId) without connectionId closes every connection to that peer', async () => {
+    const mgr = new WebRTCMeshManager({ localPodId: 'node-1' })
+    await mgr.connectToPeer('node-2', { connectionId: 'bulk' })
+    await mgr.connectToPeer('node-2', { connectionId: 'control' })
+    await mgr.connectToPeer('node-3')
+    assert.equal(mgr.closePeer('node-2'), true)
+    assert.equal(mgr.connectionCount, 1, 'only node-3 (untouched) remains')
+    assert.deepEqual(mgr.getConnectionsFor('node-2'), [])
+  })
+
+  it('closePeer(remotePodId, connectionId) returns false for an untracked connectionId', async () => {
+    const mgr = new WebRTCMeshManager({ localPodId: 'node-1' })
+    await mgr.connectToPeer('node-2', { connectionId: 'bulk' })
+    assert.equal(mgr.closePeer('node-2', 'control'), false)
+    assert.equal(mgr.connectionCount, 1, 'the real "bulk" connection is untouched')
+  })
+
+  it('closeAll closes every connectionId for every peer', async () => {
+    const mgr = new WebRTCMeshManager({ localPodId: 'node-1' })
+    const bulk = await mgr.connectToPeer('node-2', { connectionId: 'bulk' })
+    const control = await mgr.connectToPeer('node-2', { connectionId: 'control' })
+    const other = await mgr.connectToPeer('node-3')
+    mgr.closeAll()
+    assert.equal(mgr.connectionCount, 0)
+    assert.equal(bulk.state, 'closed')
+    assert.equal(control.state, 'closed')
+    assert.equal(other.state, 'closed')
+  })
+
+  it('broadcast sends once per peer, over the default connection when it is open', async () => {
+    const mgr = new WebRTCMeshManager({ localPodId: 'node-1' })
+    const defaultConn = await mgr.connectToPeer('node-2')
+    const bulkConn = await mgr.connectToPeer('node-2', { connectionId: 'bulk' })
+    let defaultSends = 0
+    let bulkSends = 0
+    defaultConn.send = () => { defaultSends++ }
+    bulkConn.send = () => { bulkSends++ }
+    Object.defineProperty(defaultConn, 'isOpen', { get: () => true })
+    Object.defineProperty(bulkConn, 'isOpen', { get: () => true })
+
+    const sent = mgr.broadcast('hi')
+
+    assert.equal(sent, 1, 'the peer with two connections is only counted (and sent to) once')
+    assert.equal(defaultSends, 1)
+    assert.equal(bulkSends, 0, 'broadcast preferred the default connection, not the extra one')
+  })
+
+  it('broadcast falls back to a non-default open connection if the default one is not open', async () => {
+    const mgr = new WebRTCMeshManager({ localPodId: 'node-1' })
+    const defaultConn = await mgr.connectToPeer('node-2')
+    const bulkConn = await mgr.connectToPeer('node-2', { connectionId: 'bulk' })
+    let bulkSends = 0
+    bulkConn.send = () => { bulkSends++ }
+    Object.defineProperty(defaultConn, 'isOpen', { get: () => false })
+    Object.defineProperty(bulkConn, 'isOpen', { get: () => true })
+
+    const sent = mgr.broadcast('hi')
+
+    assert.equal(sent, 1)
+    assert.equal(bulkSends, 1, 'broadcast fell back to the peer\'s other open connection')
+  })
+
+  it('onMessage callbacks receive the connectionId as a third argument', async () => {
+    const mgr = new WebRTCMeshManager({ localPodId: 'node-1' })
+    const received = []
+    mgr.onMessage((data, remotePodId, connectionId) => received.push({ data, remotePodId, connectionId }))
+
+    const bulkConn = await mgr.connectToPeer('node-2', { connectionId: 'bulk' })
+    // Bring the connection up and drive its mock DataChannel's onmessage
+    // directly, the same way connectedConn() (below, for WebRTCPeerConnection
+    // itself) and the renegotiation tests in this file do.
+    await bulkConn.createOffer()
+    _lastMockPC.connectionState = 'connected'
+    _lastMockDC.onopen()
+    _lastMockDC.onmessage({ data: JSON.stringify('payload') })
+
+    assert.equal(received.length, 1)
+    assert.equal(received[0].data, 'payload')
+    assert.equal(received[0].remotePodId, 'node-2')
+    assert.equal(received[0].connectionId, 'bulk')
   })
 })
 

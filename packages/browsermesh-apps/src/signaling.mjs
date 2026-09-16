@@ -14,7 +14,16 @@
  * implementation the real `test/real-peer/` suite exercises), this is a
  * small, new, transport-agnostic relay: it wraps whatever bidirectional bus
  * is already in hand and speaks exactly three message shapes over it --
- * `{type: 'webrtc-offer'|'webrtc-answer'|'webrtc-ice', from, to, payload}`.
+ * `{type: 'webrtc-offer'|'webrtc-answer'|'webrtc-ice', from, to, payload,
+ * connectionId}`.
+ *
+ * `connectionId` (issue #116) lets `webrtc-negotiator.mjs` run more than one
+ * independent offer/answer/ICE exchange with the same peer at once --
+ * e.g. two concurrent `negotiate()` calls, each opening its own
+ * `RTCPeerConnection` to the same remote podId. It defaults to `'default'`
+ * on both `send()` and every `on*()` callback, so callers that never pass
+ * one see the original single-exchange-per-peer wire shape and behavior
+ * unchanged.
  *
  * The injected `transport` only needs to implement `send(msg)` and
  * `onMessage(cb)` (optionally `open()`/`close()`) -- the same minimal shape
@@ -31,6 +40,9 @@
 
 /** @type {readonly string[]} */
 const SIGNAL_TYPES = Object.freeze(['webrtc-offer', 'webrtc-answer', 'webrtc-ice'])
+
+/** Connection identifier used when a caller doesn't pass one explicitly. */
+const DEFAULT_CONNECTION_ID = 'default'
 
 // ---------------------------------------------------------------------------
 // MeshSignalingChannel
@@ -123,20 +135,23 @@ export class MeshSignalingChannel {
    * @param {'webrtc-offer'|'webrtc-answer'|'webrtc-ice'} type
    * @param {string} to - Target pod identifier
    * @param {*} payload - The offer/answer/candidate object
+   * @param {string} [connectionId] - Which of possibly-several independent
+   *   offer/answer/ICE exchanges with `to` this message belongs to (issue
+   *   #116). Defaults to `'default'`.
    */
-  send(type, to, payload) {
+  send(type, to, payload, connectionId = DEFAULT_CONNECTION_ID) {
     if (!SIGNAL_TYPES.includes(type)) {
       throw new Error(`Unknown signal type: ${type}`)
     }
     if (!to || typeof to !== 'string') {
       throw new Error('to is required and must be a non-empty string')
     }
-    this.#transport.send({ type, from: this.#localPodId, to, payload })
+    this.#transport.send({ type, from: this.#localPodId, to, payload, connectionId })
   }
 
   /**
-   * Subscribe to incoming offers. Callback receives `(fromPodId, offer)`.
-   * @param {(fromPodId: string, offer: object) => void} cb
+   * Subscribe to incoming offers. Callback receives `(fromPodId, offer, connectionId)`.
+   * @param {(fromPodId: string, offer: object, connectionId: string) => void} cb
    * @returns {() => void} Unsubscribe function.
    */
   onOffer(cb) {
@@ -144,8 +159,8 @@ export class MeshSignalingChannel {
   }
 
   /**
-   * Subscribe to incoming answers. Callback receives `(fromPodId, answer)`.
-   * @param {(fromPodId: string, answer: object) => void} cb
+   * Subscribe to incoming answers. Callback receives `(fromPodId, answer, connectionId)`.
+   * @param {(fromPodId: string, answer: object, connectionId: string) => void} cb
    * @returns {() => void} Unsubscribe function.
    */
   onAnswer(cb) {
@@ -153,8 +168,8 @@ export class MeshSignalingChannel {
   }
 
   /**
-   * Subscribe to incoming ICE candidates. Callback receives `(fromPodId, candidate)`.
-   * @param {(fromPodId: string, candidate: object) => void} cb
+   * Subscribe to incoming ICE candidates. Callback receives `(fromPodId, candidate, connectionId)`.
+   * @param {(fromPodId: string, candidate: object, connectionId: string) => void} cb
    * @returns {() => void} Unsubscribe function.
    */
   onIce(cb) {
@@ -179,7 +194,7 @@ export class MeshSignalingChannel {
 
     for (const cb of [...this.#listeners[msg.type]]) {
       try {
-        cb(msg.from, msg.payload)
+        cb(msg.from, msg.payload, msg.connectionId ?? DEFAULT_CONNECTION_ID)
       } catch (err) {
         this.#onLog('signaling:listener-error', {
           type: msg.type,
@@ -228,4 +243,4 @@ export function createBroadcastChannelSignalingTransport(channelName = 'mesh-sig
   }
 }
 
-export { SIGNAL_TYPES }
+export { SIGNAL_TYPES, DEFAULT_CONNECTION_ID }

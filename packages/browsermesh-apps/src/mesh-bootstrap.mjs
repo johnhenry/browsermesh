@@ -1006,10 +1006,11 @@ export async function createMeshNode(options = {}) {
     // give it the same PeerNode-level session bookkeeping connectToPeer()
     // gives the caller side, so sendTo()/onIncomingData() work symmetrically
     // regardless of which side dialed.
-    onIncomingConnection: (remotePodId, adapter) => {
-      node.adoptIncomingSession(remotePodId, adapter, 'webrtc').catch((err) => {
+    onIncomingConnection: (remotePodId, adapter, connectionId) => {
+      node.adoptIncomingSession(remotePodId, adapter, 'webrtc', { connectionId }).catch((err) => {
         onLog('mesh-bootstrap:adopt-incoming-session-failed', {
           remotePodId,
+          connectionId,
           error: err?.message || String(err),
         })
       })

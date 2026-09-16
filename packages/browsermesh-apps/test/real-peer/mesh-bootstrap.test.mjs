@@ -214,4 +214,104 @@ describeIfReal('mesh-bootstrap: two real PeerNodes over real WebRTC', () => {
       await nodeB.signaling.close()
     }
   })
+
+  // Issue #116: a second, fully independent RTCPeerConnection to a peer
+  // already connected to -- its own real ICE/DTLS negotiation, its own real
+  // DataChannel -- addressed end to end via PeerNode's `connectionId`.
+  it('opens a second, independent real WebRTC connection to a peer already connected to, and addresses each one separately', async () => {
+    const signalingBus = createSharedSignalingBus()
+    const discoveryA = new ManualStrategy()
+    const discoveryB = new ManualStrategy()
+
+    const nodeA = await createMeshNode({
+      label: 'alice-multi',
+      discoveryStrategies: [discoveryA],
+      signalingTransport: createBusTransport(signalingBus),
+      iceServers: [],
+    })
+    const nodeB = await createMeshNode({
+      label: 'bob-multi',
+      discoveryStrategies: [discoveryB],
+      signalingTransport: createBusTransport(signalingBus),
+      iceServers: [],
+    })
+
+    try {
+      discoveryA.addPeer(new DiscoveryRecord({ podId: nodeB.podId, transport: 'webrtc', label: 'bob-multi' }))
+      discoveryB.addPeer(new DiscoveryRecord({ podId: nodeA.podId, transport: 'webrtc', label: 'alice-multi' }))
+      await nodeA.discover()
+      await nodeB.discover()
+
+      // First connection: the peer's DEFAULT_CONNECTION_ID, exactly like
+      // the test above.
+      const defaultSession = await nodeA.connectToPeer(
+        nodeB.podId,
+        { webrtc: nodeB.podId },
+        { answerTimeoutMs: 10_000, openTimeoutMs: 10_000 },
+      )
+      assert.equal(defaultSession.transport, 'webrtc')
+      assert.equal(defaultSession.connectionId, 'default')
+
+      // Second connection: same peer, explicit connectionId. If #116 were
+      // still just a dedup map, this would resolve to the SAME
+      // RTCPeerConnection connectToPeer() already returned above -- it does
+      // not; it negotiates a brand new one, with its own real SDP/ICE/DTLS.
+      const bulkSession = await nodeA.connectToPeer(
+        nodeB.podId,
+        { webrtc: nodeB.podId },
+        { answerTimeoutMs: 10_000, openTimeoutMs: 10_000, connectionId: 'bulk' },
+      )
+      assert.equal(bulkSession.transport, 'webrtc')
+      assert.equal(bulkSession.connectionId, 'bulk')
+      assert.notEqual(bulkSession.sessionId, defaultSession.sessionId)
+
+      const defaultConn = nodeA.meshManager.getConnection(nodeB.podId, 'default')
+      const bulkConn = nodeA.meshManager.getConnection(nodeB.podId, 'bulk')
+      assert.ok(defaultConn && bulkConn, 'both connections are tracked')
+      assert.notEqual(defaultConn, bulkConn, 'they are two distinct RTCPeerConnections, not the same one twice')
+      assert.ok(defaultConn.isOpen && bulkConn.isOpen)
+      assert.equal(nodeA.meshManager.getConnectionsFor(nodeB.podId).length, 2)
+
+      // Bob's (callee/auto-answer) side comes up for both, tagged with the
+      // matching connectionId via adoptIncomingSession().
+      await waitFor(
+        () => nodeB.meshManager.getConnection(nodeA.podId, 'default')?.isOpen &&
+              nodeB.meshManager.getConnection(nodeA.podId, 'bulk')?.isOpen,
+        10_000,
+        "bob's side of both DataChannels to open",
+      )
+      assert.equal(nodeB.sessionsFor(nodeA.podId).length, 2, "bob's PeerNode has a session per connectionId too")
+      assert.ok(nodeB.hasActiveSession(nodeA.podId, { connectionId: 'default' }))
+      assert.ok(nodeB.hasActiveSession(nodeA.podId, { connectionId: 'bulk' }))
+
+      // Addressed end to end: sendTo(pubKey, data, {connectionId}) actually
+      // moves real bytes over the matching real DataChannel, not whichever
+      // one is "most recent".
+      const atBobDefault = []
+      const atBobBulk = []
+      nodeB.meshManager.getConnection(nodeA.podId, 'default').onMessage((d) => atBobDefault.push(d))
+      nodeB.meshManager.getConnection(nodeA.podId, 'bulk').onMessage((d) => atBobBulk.push(d))
+
+      await nodeA.sendTo(nodeB.podId, 'over-default', { connectionId: 'default' })
+      await nodeA.sendTo(nodeB.podId, 'over-bulk', { connectionId: 'bulk' })
+
+      await waitFor(() => atBobDefault.length === 1 && atBobBulk.length === 1, 5_000, 'both messages to arrive, each over its own connection')
+      assert.equal(atBobDefault[0], 'over-default')
+      assert.equal(atBobBulk[0], 'over-bulk')
+
+      // Closing the "bulk" connectionId must not disturb "default".
+      assert.equal(nodeA.meshManager.closePeer(nodeB.podId, 'bulk'), true)
+      await waitFor(() => nodeA.meshManager.getConnection(nodeB.podId, 'bulk') === null, 5_000, '"bulk" to be torn down')
+      assert.ok(nodeA.meshManager.getConnection(nodeB.podId, 'default')?.isOpen, '"default" survives closing "bulk"')
+      await nodeA.sendTo(nodeB.podId, 'still-alive', { connectionId: 'default' })
+      await waitFor(() => atBobDefault.length === 2, 5_000, 'the surviving connection still carries real bytes')
+    } finally {
+      nodeA.meshManager.closeAll()
+      nodeB.meshManager.closeAll()
+      await nodeA.shutdown()
+      await nodeB.shutdown()
+      await nodeA.signaling.close()
+      await nodeB.signaling.close()
+    }
+  })
 })

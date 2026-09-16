@@ -150,4 +150,61 @@ describe('createMeshNode: enableHardening (issue #89)', () => {
     assert.equal(attempts, 1, 'without enableHardening, a failing negotiation is not retried at all')
     assert.equal(session.transport, null, 'PeerNode falls back to a direct connection exactly as before')
   })
+
+  // Issue #116: before endpointsKey(endpoints, auth) folded auth.connectionId
+  // into the key, a second connectToPeer() for a peer already connected to
+  // (different auth.connectionId, same endpoints) reused the FIRST call's
+  // cached TransportFailover -- whose `activeTransport` was already set --
+  // so negotiate() took the `.failover()` (reconnect-the-existing-one)
+  // branch instead of ever calling the adapter factory again. The adapter
+  // below would then only ever have seen one call no matter how many
+  // distinct connectionIds asked for a connection.
+  it('issue #116: two connectToPeer() calls for the same peer with different auth.connectionId each independently negotiate their own connection', async () => {
+    const node = await createMeshNode({
+      label: 'alice-multi-connection',
+      signalingTransport: createStubSignalingTransport(),
+      discoveryStrategies: [new ManualStrategy()],
+      skipDiscovery: true,
+      enableHardening: true,
+      hardeningOptions: { retry: FAST_RETRY },
+    })
+
+    const attemptsByConnectionId = {}
+    node.transportNegotiator.registerAdapter('wsh-ws', async (endpoint, auth) => {
+      const id = auth?.connectionId ?? 'default'
+      attemptsByConnectionId[id] = (attemptsByConnectionId[id] || 0) + 1
+      const t = new MockMeshTransport('wsh-ws')
+      await t.connect(endpoint)
+      return t
+    })
+
+    const endpoints = { 'wsh-ws': 'ws://fake-peer-multi' }
+    const bulkSession = await node.connectToPeer('remote-pubkey-multi', endpoints, { connectionId: 'bulk' })
+    const controlSession = await node.connectToPeer('remote-pubkey-multi', endpoints, { connectionId: 'control' })
+
+    assert.equal(attemptsByConnectionId.bulk, 1, 'the "bulk" connectionId negotiated its own transport')
+    assert.equal(attemptsByConnectionId.control, 1, 'the "control" connectionId independently negotiated its own transport too, rather than reusing/failing-over the "bulk" one')
+    assert.notEqual(bulkSession.sessionId, controlSession.sessionId, 'each connectionId got its own PeerNode-level session')
+    assert.equal(bulkSession.connectionId, 'bulk')
+    assert.equal(controlSession.connectionId, 'control')
+
+    const bulkKey = 'wsh-ws=ws://fake-peer-multi::connectionId=bulk'
+    const controlKey = 'wsh-ws=ws://fake-peer-multi::connectionId=control'
+    assert.ok(node.hardening.failovers.has(bulkKey))
+    assert.ok(node.hardening.failovers.has(controlKey))
+    assert.notEqual(
+      node.hardening.failovers.get(bulkKey),
+      node.hardening.failovers.get(controlKey),
+      'each connectionId got its own TransportFailover instance, not a shared/reused one',
+    )
+
+    assert.ok(node.hasActiveSession('remote-pubkey-multi', { connectionId: 'bulk' }))
+    assert.ok(node.hasActiveSession('remote-pubkey-multi', { connectionId: 'control' }))
+    assert.equal(node.sessionsFor('remote-pubkey-multi').length, 2, 'PeerNode.sessionsFor() lists both sessions for the peer')
+
+    // Addressable independently: sendTo(pubKey, data, {connectionId}) must
+    // not just fall through to "whichever session is most recent".
+    await node.sendTo('remote-pubkey-multi', 'to-bulk', { connectionId: 'bulk' })
+    await node.sendTo('remote-pubkey-multi', 'to-control', { connectionId: 'control' })
+  })
 })
