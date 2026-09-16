@@ -316,9 +316,19 @@ export class SignalingClient {
     if (!this.#ws) {
       throw new Error('SignalingClient not connected')
     }
+    // The real deployed signaling server (browsermesh-servers/signaling)
+    // forwards offer/answer/ice-candidate/signal messages by their
+    // "target" field, not "to" -- confirmed directly against that
+    // server's own source (`const {target, ...payload} = msg`). A `to`
+    // field is simply ignored server-side, so every forwarded message
+    // was rejected with "forwarded messages require a target field"
+    // before this fix. `from` is sent for backward-compatible local
+    // debugging/logging only -- the server doesn't read or forward it
+    // as-is; see #fire()'s own comment for why the receiving side no
+    // longer trusts it.
     const msg = JSON.stringify({
       from: this.#localPodId,
-      to: remotePodId,
+      target: remotePodId,
       type,
       ...payload,
     })
@@ -372,8 +382,18 @@ export class SignalingClient {
   #fire(event, data) {
     const set = this.#listeners.get(event)
     if (!set) return
+    // The real signaling server stamps forwarded peer-to-peer messages
+    // with its own "source" field, based on which authenticated
+    // WebSocket connection the message actually arrived on -- that's
+    // the trustworthy value. `from` is whatever the ORIGINAL sender
+    // self-declared in their own outgoing payload and the server never
+    // validates it before forwarding, so preferring it here would mean
+    // trusting an arbitrary, spoofable claim over the server's own
+    // attribution. Falls back to `from` only for non-forwarded,
+    // direct server messages (e.g. `registered`) that have no `source`.
+    const fromPodId = data.source ?? data.from
     for (const cb of set) {
-      try { cb(data, data.from) } catch (e) { silentCatch('clawser-mesh-handshake', 'swallow-listener-errors', e) }
+      try { cb(data, fromPodId) } catch (e) { silentCatch('clawser-mesh-handshake', 'swallow-listener-errors', e) }
     }
   }
 }
