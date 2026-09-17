@@ -816,6 +816,16 @@ export class HandshakeCoordinator {
     ])
     clearTimeout(timeoutHandle)
 
+    // TransportFactory.negotiate() returns a transport that has been
+    // created but not yet connected (see its docstring) -- no offer,
+    // answer or ICE candidate has crossed the wire yet. Mirror
+    // acceptConnection()'s `await transport.handleOffer(offer)` on the
+    // answerer side by actually driving the handshake here before this
+    // session is adopted as 'connected'.
+    if (typeof transport.connect === 'function') {
+      await transport.connect()
+    }
+
     const sessionInfo = {
       localPodId: this.#localPodId,
       remotePodId,
