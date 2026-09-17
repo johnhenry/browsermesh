@@ -386,18 +386,73 @@ export class GroupKeyManager {
    * Used when adding a member (existing key is fine, but new epoch
    * ensures clean key lifecycle) or periodically for key freshness.
    *
+   * By default this self-generates a fresh random key for the new epoch
+   * (unchanged, original behavior). Pass `{ epoch, key }` to instead
+   * *adopt* a specific, externally-agreed key rather than generating one —
+   * see the "Adopt-path calling convention" note below.
+   *
+   * ## Adopt-path calling convention
+   *
+   * This exists for callers that run a distributed agreement protocol
+   * (e.g. PBFT/consensus) over *when* to rotate and *who* the members are,
+   * without letting the actual key bytes anywhere near that agreement
+   * payload — broadcasting raw key material to every participant of a
+   * consensus round (rather than just the intended group members) would be
+   * a security regression relative to the per-recipient envelope
+   * mechanism this package already provides (`wrapKeyForMember` /
+   * `unwrapKeyForMember`, used by `broadcastDistribute()` /
+   * `wireTransport()`'s `GROUP_KEY_DISTRIBUTE` handler).
+   *
+   * The intended shape of that split:
+   *   1. Consensus agrees ONLY on `{ epoch, members }` — never key bytes.
+   *   2. Exactly one designated party (the proposer/leader) generates the
+   *      real key and distributes it to each member individually via the
+   *      existing secure envelope mechanism (`wrapKeyForMember` on the
+   *      sender, `unwrapKeyForMember` — or the `GROUP_KEY_DISTRIBUTE`
+   *      handler wired by `wireTransport()`, which calls
+   *      `unwrapKeyForMember` internally — on each recipient).
+   *   3. Once a caller has BOTH the consensus-agreed epoch number AND the
+   *      real `CryptoKey` obtained locally from that envelope decrypt (not
+   *      exported/wire bytes — `unwrapKeyForMember` already hands back a
+   *      live `CryptoKey`, the same shape `acceptEpoch()` accepts), it
+   *      calls `rotate(members, { epoch, key })` to install that exact key
+   *      as this manager's active state for that epoch, instead of calling
+   *      plain `rotate(members)` (which would self-generate a different,
+   *      non-agreed key).
+   *
+   * `key` is deliberately a `CryptoKey`, not exported/serialized bytes:
+   * this path is for in-process callers on the same JS runtime (e.g. a
+   * PBFT `applyBlock()` dispatch handing off to this manager) that already
+   * hold a real key locally — it is not a wire format and must never be
+   * put on the wire itself.
+   *
    * @param {string[]} [newMembers] - Updated member list; defaults to current members
+   * @param {object} [adopt] - Omit entirely for today's self-generating behavior.
+   * @param {number} [adopt.epoch] - Externally-agreed epoch number to adopt. Must be
+   *   provided together with `adopt.key`, never alone.
+   * @param {CryptoKey} [adopt.key] - Externally-agreed key to adopt in-process (e.g. from
+   *   `unwrapKeyForMember`/an envelope decrypt), rather than generating a new one. Must be
+   *   provided together with `adopt.epoch`, never alone.
    * @returns {Promise<GroupState>}
    */
-  async rotate(newMembers) {
+  async rotate(newMembers, { epoch, key } = {}) {
+    const hasEpoch = epoch !== undefined
+    const hasKey = key !== undefined
+    if (hasEpoch !== hasKey) {
+      throw new Error('rotate: epoch and key must be provided together (both or neither)')
+    }
+    if (hasKey && !(typeof CryptoKey !== 'undefined' && key instanceof CryptoKey)) {
+      throw new Error('rotate: key must be a CryptoKey (e.g. from unwrapKeyForMember/an envelope decrypt), not exported bytes')
+    }
+
     const current = this.getCurrentState()
     const members = newMembers || (current ? current.members : [this.#localPodId])
 
-    const nextEpoch = this.#currentEpoch + 1
-    const key = await this.#generateKey()
+    const nextEpoch = hasEpoch ? epoch : this.#currentEpoch + 1
+    const nextKey = hasKey ? key : await this.#generateKey()
     const state = new GroupState({
       epoch: nextEpoch,
-      key,
+      key: nextKey,
       members,
     })
 
