@@ -248,6 +248,9 @@ export class EscrowManager {
   /** @type {Function} */
   #onLog
 
+  /** @type {(op: 'debit'|'credit', amount: number, podId: string, memo: string) => (any|Promise<any>)} */
+  #mutateLedger
+
   /** @type {Map<string, Function[]>} */
   #listeners = new Map()
 
@@ -255,6 +258,22 @@ export class EscrowManager {
    * @param {object} opts
    * @param {object} opts.creditLedger - Must have charge(), credit(), getBalance()
    * @param {Function} [opts.onLog] - Logging callback (level, msg)
+   * @param {(op: 'debit'|'credit', amount: number, podId: string, memo: string) => (any|Promise<any>)} [opts.mutateLedger] -
+   *   Async (or sync) hook invoked in place of a direct `creditLedger.debit()`/`.credit()`
+   *   call at every ledger-mutation point in `create()`/`release()`/`refund()`/`checkExpired()`.
+   *   `op` is `'debit'` (payer loses funds, in `create()`) or `'credit'` (a pod gains funds,
+   *   in `release()`/`refund()`/`checkExpired()`); `amount`/`podId`/`memo` are the exact
+   *   arguments `CreditLedger.debit(amount, toPodId, memo)`/`.credit(amount, fromPodId, memo)`
+   *   already take (amount first, podId second — see payments.mjs), just with an `op`
+   *   discriminator prepended so one hook can stand in for both methods. Defaults to calling
+   *   `creditLedger.debit()`/`.credit()` directly — today's exact behavior — so any existing
+   *   caller that does not pass this option sees no change at all. Callers that DO pass it
+   *   (e.g. to route the mutation through an awaited PBFT consensus round instead) are
+   *   responsible for actually performing the debit/credit against `creditLedger` themselves
+   *   (or an equivalent ledger) inside the hook; if the hook throws or its returned promise
+   *   rejects, that rejection propagates out of `create()`/`release()`/`refund()`/
+   *   `checkExpired()` exactly the way a synchronous `creditLedger.debit()`/`.credit()` throw
+   *   already did before this change (e.g. insufficient balance).
    */
   constructor(opts) {
     if (!opts?.creditLedger) {
@@ -262,6 +281,11 @@ export class EscrowManager {
     }
     this.#creditLedger = opts.creditLedger
     this.#onLog = opts.onLog ?? (() => {})
+    this.#mutateLedger = opts.mutateLedger ?? ((op, amount, podId, memo) => (
+      op === 'debit'
+        ? this.#creditLedger.debit(amount, podId, memo)
+        : this.#creditLedger.credit(amount, podId, memo)
+    ))
   }
 
   // ── Create ─────────────────────────────────────────────────────
@@ -276,16 +300,17 @@ export class EscrowManager {
    * @param {string} [opts.description]
    * @param {Array<{ type: string, params?: object }>} [opts.conditions]
    * @param {number} [opts.timeoutMs]
-   * @returns {EscrowContract}
-   * @throws {Error} If payer has insufficient balance
+   * @returns {Promise<EscrowContract>}
+   * @throws {Error} If payer has insufficient balance (or the `mutateLedger` hook rejects)
    */
-  create(opts) {
+  async create(opts) {
     const { payerPodId, payeePodId, amount, description, conditions, timeoutMs } = opts
 
-    // Debit payer — throws on insufficient balance. CreditLedger's real
-    // signature is debit(amount, toPodId, memo) -- no charge() method
-    // exists; amount comes first, not the podId.
-    this.#creditLedger.debit(amount, payerPodId, `escrow: ${description || 'contract'}`)
+    // Debit payer — throws (or rejects) on insufficient balance. CreditLedger's
+    // real signature is debit(amount, toPodId, memo) -- no charge() method
+    // exists; amount comes first, not the podId. Routed through #mutateLedger,
+    // which defaults to calling creditLedger.debit() directly (see constructor).
+    await this.#mutateLedger('debit', amount, payerPodId, `escrow: ${description || 'contract'}`)
 
     const contract = new EscrowContract({
       payer: payerPodId,
@@ -311,10 +336,11 @@ export class EscrowManager {
    *
    * @param {string} contractId
    * @param {object} [proof] - Proof object for condition checking
-   * @returns {{ success: boolean, txId?: string }}
-   * @throws {Error} If contract not found, not funded, expired, or conditions not met
+   * @returns {Promise<{ success: boolean, txId?: string }>}
+   * @throws {Error} If contract not found, not funded, expired, conditions not met
+   *   (or the `mutateLedger` hook rejects)
    */
-  release(contractId, proof) {
+  async release(contractId, proof) {
     const contract = this.#getValidContract(contractId, 'release')
 
     if (contract.status !== 'funded') {
@@ -334,8 +360,9 @@ export class EscrowManager {
     }
 
     // Credit payee. CreditLedger's real signature is credit(amount,
-    // fromPodId, memo) -- amount first, not the podId.
-    this.#creditLedger.credit(contract.amount, contract.payee, `escrow release: ${contractId}`)
+    // fromPodId, memo) -- amount first, not the podId. Routed through
+    // #mutateLedger, which defaults to calling creditLedger.credit() directly.
+    await this.#mutateLedger('credit', contract.amount, contract.payee, `escrow release: ${contractId}`)
     contract.status = 'released'
 
     this.#onLog('info', `Escrow released: ${contractId} (${contract.amount} to ${contract.payee})`)
@@ -351,10 +378,10 @@ export class EscrowManager {
    *
    * @param {string} contractId
    * @param {string} [reason]
-   * @returns {{ success: boolean, txId?: string }}
-   * @throws {Error} If contract not found or not funded
+   * @returns {Promise<{ success: boolean, txId?: string }>}
+   * @throws {Error} If contract not found or not funded (or the `mutateLedger` hook rejects)
    */
-  refund(contractId, reason) {
+  async refund(contractId, reason) {
     const contract = this.#getValidContract(contractId, 'refund')
 
     if (contract.status !== 'funded') {
@@ -362,7 +389,9 @@ export class EscrowManager {
     }
 
     // Credit payer. Same real signature as release() above: amount first.
-    this.#creditLedger.credit(contract.amount, contract.payer, `escrow refund: ${reason || contractId}`)
+    // Routed through #mutateLedger, which defaults to calling
+    // creditLedger.credit() directly.
+    await this.#mutateLedger('credit', contract.amount, contract.payer, `escrow refund: ${reason || contractId}`)
     contract.status = 'refunded'
 
     this.#onLog('info', `Escrow refunded: ${contractId} (${contract.amount} to ${contract.payer})`)
@@ -400,9 +429,9 @@ export class EscrowManager {
    * and still funded.
    *
    * @param {number} [now] - Current timestamp (default: Date.now())
-   * @returns {number} Count of expired contracts
+   * @returns {Promise<number>} Count of expired contracts
    */
-  checkExpired(now) {
+  async checkExpired(now) {
     let count = 0
     const ts = now ?? Date.now()
 
@@ -410,7 +439,12 @@ export class EscrowManager {
       if (contract.status === 'funded' && contract.isExpired(ts)) {
         // Auto-refund expired contracts. Same real signature as release()/
         // refund() above: credit(amount, fromPodId, memo), amount first.
-        this.#creditLedger.credit(
+        // Routed through #mutateLedger, which defaults to calling
+        // creditLedger.credit() directly. Awaited sequentially (not
+        // Promise.all) so events fire in the same deterministic order as
+        // the original synchronous sweep.
+        await this.#mutateLedger(
+          'credit',
           contract.amount,
           contract.payer,
           `escrow expired: ${contract.id}`,
@@ -725,6 +759,9 @@ const DEFAULT_ESCROW_REQUEST_TIMEOUT_MS = 10000
  * @param {Function} [opts.onLog] - Logging callback (level, msg) -- forwarded to `EscrowManager`'s own `onLog`, PLUS this wrapper's own wire-level logging (send/handling failures, denied requests).
  * @param {string} [opts.envelopeType='escrow'] - `envelope.type` used for request/response traffic.
  * @param {number} [opts.requestTimeoutMs=10000] - How long `requestCreate()`/`requestRelease()`/`requestRefund()`/`requestDispute()` wait for a response.
+ * @param {Function} [opts.mutateLedger] - Forwarded verbatim to `new EscrowManager()` -- see that
+ *   class's constructor doc comment. Omitted by default, so `EscrowManager` falls back to its
+ *   own default (direct `creditLedger.debit()`/`.credit()` calls) -- today's exact behavior.
  * @returns {import('./mesh-service.mjs').MeshService}
  */
 export function createEscrowService(opts = {}) {
@@ -733,6 +770,7 @@ export function createEscrowService(opts = {}) {
     onLog,
     envelopeType = DEFAULT_ESCROW_ENVELOPE_TYPE,
     requestTimeoutMs = DEFAULT_ESCROW_REQUEST_TIMEOUT_MS,
+    mutateLedger,
   } = opts
   const log = onLog || (() => {})
 
@@ -743,6 +781,7 @@ export function createEscrowService(opts = {}) {
       const manager = new EscrowManager({
         creditLedger,
         onLog: (level, msg) => log('escrow:manager-log', { level, message: msg }),
+        mutateLedger,
       })
 
       // -- Bridge EscrowManager's own on()/off() events through ctx.emit() --
@@ -777,8 +816,8 @@ export function createEscrowService(opts = {}) {
         }
       }
 
-      function doCreate(createOpts) {
-        const contract = manager.create(createOpts)
+      async function doCreate(createOpts) {
+        const contract = await manager.create(createOpts)
         grantContractAccess(contract)
         return contract
       }
@@ -807,7 +846,7 @@ export function createEscrowService(opts = {}) {
           if (op === 'create') {
             const { allowed } = ctx.registry.checkAccess(fromPubKey, 'escrow', 'create')
             if (!allowed) throw new Error('access denied')
-            const contract = doCreate({
+            const contract = await doCreate({
               payerPodId: fromPubKey,
               payeePodId: payload?.payeePodId,
               amount: payload?.amount,
@@ -823,8 +862,8 @@ export function createEscrowService(opts = {}) {
             }
             const { allowed } = ctx.registry.checkAccess(fromPubKey, `escrow:${contractId}`, op)
             if (!allowed) throw new Error('access denied')
-            if (op === 'release') result = manager.release(contractId, payload?.proof)
-            else if (op === 'refund') result = manager.refund(contractId, payload?.reason)
+            if (op === 'release') result = await manager.release(contractId, payload?.proof)
+            else if (op === 'refund') result = await manager.refund(contractId, payload?.reason)
             else result = manager.dispute(contractId, payload?.evidence)
           } else {
             throw new Error(`unknown op: ${op}`)
