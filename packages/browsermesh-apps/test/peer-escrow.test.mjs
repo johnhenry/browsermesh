@@ -143,8 +143,8 @@ describe('EscrowManager', () => {
   })
 
   // 1. Create escrow debits payer
-  it('create debits payer and stores funded contract', () => {
-    const contract = mgr.create({
+  it('create debits payer and stores funded contract', async () => {
+    const contract = await mgr.create({
       payerPodId: 'alice',
       payeePodId: 'bob',
       amount: 30,
@@ -159,103 +159,103 @@ describe('EscrowManager', () => {
   })
 
   // 2. Release credits payee
-  it('release credits payee', () => {
-    const contract = mgr.create({ payerPodId: 'alice', payeePodId: 'bob', amount: 20 })
-    const result = mgr.release(contract.id)
+  it('release credits payee', async () => {
+    const contract = await mgr.create({ payerPodId: 'alice', payeePodId: 'bob', amount: 20 })
+    const result = await mgr.release(contract.id)
     assert.equal(result.success, true)
     assert.equal(ledger.getBalance('bob'), 70) // 50 + 20
     assert.equal(mgr.getContract(contract.id).status, 'released')
   })
 
   // 3. Refund returns credits to payer
-  it('refund returns credits to payer', () => {
-    const contract = mgr.create({ payerPodId: 'alice', payeePodId: 'bob', amount: 25 })
+  it('refund returns credits to payer', async () => {
+    const contract = await mgr.create({ payerPodId: 'alice', payeePodId: 'bob', amount: 25 })
     assert.equal(ledger.getBalance('alice'), 75)
-    const result = mgr.refund(contract.id, 'service not delivered')
+    const result = await mgr.refund(contract.id, 'service not delivered')
     assert.equal(result.success, true)
     assert.equal(ledger.getBalance('alice'), 100) // restored
     assert.equal(mgr.getContract(contract.id).status, 'refunded')
   })
 
   // 4. Double-release prevented
-  it('double-release is prevented', () => {
-    const contract = mgr.create({ payerPodId: 'alice', payeePodId: 'bob', amount: 20 })
-    mgr.release(contract.id)
-    assert.throws(() => mgr.release(contract.id), /not funded/)
+  it('double-release is prevented', async () => {
+    const contract = await mgr.create({ payerPodId: 'alice', payeePodId: 'bob', amount: 20 })
+    await mgr.release(contract.id)
+    await assert.rejects(() => mgr.release(contract.id), /not funded/)
   })
 
   // 5. Expired contract auto-refunds via checkExpired()
-  it('expired contract auto-refunds via checkExpired()', () => {
-    const contract = mgr.create({
+  it('expired contract auto-refunds via checkExpired()', async () => {
+    const contract = await mgr.create({
       payerPodId: 'alice', payeePodId: 'bob', amount: 15,
       timeoutMs: 1, // 1ms timeout — will expire immediately
     })
     // Force time to pass
-    const count = mgr.checkExpired(Date.now() + 100)
+    const count = await mgr.checkExpired(Date.now() + 100)
     assert.equal(count, 1)
     assert.equal(mgr.getContract(contract.id).status, 'expired')
     assert.equal(ledger.getBalance('alice'), 100) // 100 - 15 + 15
   })
 
   // 6. Dispute updates status
-  it('dispute updates status to disputed', () => {
-    const contract = mgr.create({ payerPodId: 'alice', payeePodId: 'bob', amount: 10 })
+  it('dispute updates status to disputed', async () => {
+    const contract = await mgr.create({ payerPodId: 'alice', payeePodId: 'bob', amount: 10 })
     const result = mgr.dispute(contract.id, { reason: 'wrong result' })
     assert.ok(result.disputeId)
     assert.equal(mgr.getContract(contract.id).status, 'disputed')
   })
 
   // 7. Release with RESULT_HASH_MATCH — met
-  it('release with RESULT_HASH_MATCH condition met succeeds', () => {
-    const contract = mgr.create({
+  it('release with RESULT_HASH_MATCH condition met succeeds', async () => {
+    const contract = await mgr.create({
       payerPodId: 'alice', payeePodId: 'bob', amount: 10,
       conditions: [{ type: ESCROW_CONDITIONS.RESULT_HASH_MATCH, params: { expectedHash: 'h1' } }],
     })
-    const result = mgr.release(contract.id, { resultHash: 'h1' })
+    const result = await mgr.release(contract.id, { resultHash: 'h1' })
     assert.equal(result.success, true)
     assert.equal(mgr.getContract(contract.id).status, 'released')
   })
 
   // 8. Release with RESULT_HASH_MATCH — not met
-  it('release with RESULT_HASH_MATCH condition not met fails', () => {
-    const contract = mgr.create({
+  it('release with RESULT_HASH_MATCH condition not met fails', async () => {
+    const contract = await mgr.create({
       payerPodId: 'alice', payeePodId: 'bob', amount: 10,
       conditions: [{ type: ESCROW_CONDITIONS.RESULT_HASH_MATCH, params: { expectedHash: 'h1' } }],
     })
-    assert.throws(() => mgr.release(contract.id, { resultHash: 'wrong' }), /conditions not met/)
+    await assert.rejects(() => mgr.release(contract.id, { resultHash: 'wrong' }), /conditions not met/)
   })
 
   // 9. Release with ATTESTATION_QUORUM condition
-  it('release with ATTESTATION_QUORUM condition', () => {
-    const contract = mgr.create({
+  it('release with ATTESTATION_QUORUM condition', async () => {
+    const contract = await mgr.create({
       payerPodId: 'alice', payeePodId: 'bob', amount: 10,
       conditions: [{ type: ESCROW_CONDITIONS.ATTESTATION_QUORUM, params: { requiredCount: 3 } }],
     })
     // Not enough attestations
-    assert.throws(() => mgr.release(contract.id, { attestationCount: 2 }), /conditions not met/)
+    await assert.rejects(() => mgr.release(contract.id, { attestationCount: 2 }), /conditions not met/)
     // Enough attestations
-    const result = mgr.release(contract.id, { attestationCount: 3 })
+    const result = await mgr.release(contract.id, { attestationCount: 3 })
     assert.equal(result.success, true)
   })
 
   // 10. MANUAL_APPROVAL condition
-  it('release with MANUAL_APPROVAL condition', () => {
-    const contract = mgr.create({
+  it('release with MANUAL_APPROVAL condition', async () => {
+    const contract = await mgr.create({
       payerPodId: 'alice', payeePodId: 'bob', amount: 10,
       conditions: [{ type: ESCROW_CONDITIONS.MANUAL_APPROVAL }],
     })
     // Without approval
-    assert.throws(() => mgr.release(contract.id, {}), /conditions not met/)
+    await assert.rejects(() => mgr.release(contract.id, {}), /conditions not met/)
     // With approval
-    const result = mgr.release(contract.id, { manualApproval: true })
+    const result = await mgr.release(contract.id, { manualApproval: true })
     assert.equal(result.success, true)
   })
 
   // 11. listContracts with status filter
-  it('listContracts with status filter', () => {
-    mgr.create({ payerPodId: 'alice', payeePodId: 'bob', amount: 5 })
-    const c2 = mgr.create({ payerPodId: 'alice', payeePodId: 'bob', amount: 5 })
-    mgr.release(c2.id)
+  it('listContracts with status filter', async () => {
+    await mgr.create({ payerPodId: 'alice', payeePodId: 'bob', amount: 5 })
+    const c2 = await mgr.create({ payerPodId: 'alice', payeePodId: 'bob', amount: 5 })
+    await mgr.release(c2.id)
 
     const funded = mgr.listContracts({ status: 'funded' })
     assert.equal(funded.length, 1)
@@ -272,11 +272,11 @@ describe('EscrowManager', () => {
   })
 
   // 12. getStats returns correct counts
-  it('getStats returns correct counts', () => {
-    mgr.create({ payerPodId: 'alice', payeePodId: 'bob', amount: 10 })
-    const c2 = mgr.create({ payerPodId: 'alice', payeePodId: 'bob', amount: 15 })
-    mgr.release(c2.id)
-    const c3 = mgr.create({ payerPodId: 'alice', payeePodId: 'bob', amount: 5 })
+  it('getStats returns correct counts', async () => {
+    await mgr.create({ payerPodId: 'alice', payeePodId: 'bob', amount: 10 })
+    const c2 = await mgr.create({ payerPodId: 'alice', payeePodId: 'bob', amount: 15 })
+    await mgr.release(c2.id)
+    const c3 = await mgr.create({ payerPodId: 'alice', payeePodId: 'bob', amount: 5 })
     mgr.dispute(c3.id)
 
     const stats = mgr.getStats()
@@ -287,10 +287,10 @@ describe('EscrowManager', () => {
   })
 
   // 13. toJSON/fromJSON round-trip
-  it('toJSON/fromJSON round-trip preserves contracts', () => {
-    mgr.create({ payerPodId: 'alice', payeePodId: 'bob', amount: 20, description: 'job-1' })
-    const c2 = mgr.create({ payerPodId: 'alice', payeePodId: 'bob', amount: 10 })
-    mgr.release(c2.id)
+  it('toJSON/fromJSON round-trip preserves contracts', async () => {
+    await mgr.create({ payerPodId: 'alice', payeePodId: 'bob', amount: 20, description: 'job-1' })
+    const c2 = await mgr.create({ payerPodId: 'alice', payeePodId: 'bob', amount: 10 })
+    await mgr.release(c2.id)
 
     const json = mgr.toJSON()
     const restored = EscrowManager.fromJSON(json, { creditLedger: ledger })
@@ -301,13 +301,146 @@ describe('EscrowManager', () => {
   })
 
   // 14. Insufficient balance throws on create
-  it('insufficient balance throws on create', () => {
-    assert.throws(
+  it('insufficient balance throws on create', async () => {
+    await assert.rejects(
       () => mgr.create({ payerPodId: 'bob', payeePodId: 'alice', amount: 999 }),
       /Insufficient balance/,
     )
     // Balance unchanged
     assert.equal(ledger.getBalance('bob'), 50)
+  })
+})
+
+// -----------------------------------------------------------------------
+// mutateLedger hook -- default behavior, opt-in override, error propagation
+// -----------------------------------------------------------------------
+//
+// Issue erisera-code/clawser#195: EscrowManager.create()/release()/refund()/
+// checkExpired() are async specifically so a caller (clawser, when its PBFT
+// consensus feature is enabled) can supply a `mutateLedger` hook that routes
+// each ledger mutation through an awaited consensus round instead of
+// mutating creditLedger directly. These tests prove:
+//   (a) omitting the hook still calls creditLedger.debit()/.credit() directly
+//       -- byte-for-byte today's behavior, so no existing caller regresses;
+//   (b) a supplied hook is genuinely awaited, receives the same effective
+//       arguments credit()/debit() take (just with an op discriminator), and
+//       its resolved value/rejection propagates through create()/release()/
+//       refund()/checkExpired()'s own promise;
+//   (c) a hook rejection produces the same error-handling contract
+//       (a rejected promise, not a swallowed error or a different shape)
+//       that a synchronous creditLedger.debit() throw already produced pre-hook.
+describe('EscrowManager mutateLedger hook', () => {
+  it('default (no hook passed): calls creditLedger.debit()/.credit() directly, unchanged from before', async () => {
+    const ledger = createMockLedger({ alice: 100, bob: 50 })
+    const mgr = new EscrowManager({ creditLedger: ledger })
+
+    const contract = await mgr.create({ payerPodId: 'alice', payeePodId: 'bob', amount: 30, description: 'job' })
+    assert.deepEqual(ledger.txLog[0], { type: 'debit', podId: 'alice', amount: 30, desc: 'escrow: job' })
+    assert.equal(ledger.getBalance('alice'), 70)
+
+    await mgr.release(contract.id)
+    assert.deepEqual(ledger.txLog[1], { type: 'credit', podId: 'bob', amount: 30, desc: `escrow release: ${contract.id}` })
+    assert.equal(ledger.getBalance('bob'), 80)
+  })
+
+  it('a supplied hook is awaited and receives (op, amount, podId, memo) matching credit()/debit()\'s own argument order', async () => {
+    const ledger = createMockLedger({ alice: 100 })
+    const calls = []
+    const mgr = new EscrowManager({
+      creditLedger: ledger,
+      async mutateLedger(op, amount, podId, memo) {
+        calls.push({ op, amount, podId, memo })
+        // Deliberately await a microtask so a non-awaited call site would
+        // observe the mutation not having happened yet -- proves create()/
+        // release() themselves actually await this hook.
+        await new Promise((r) => setTimeout(r, 5))
+        if (op === 'debit') ledger.debit(amount, podId, memo)
+        else ledger.credit(amount, podId, memo)
+        return { hookHandled: true, op }
+      },
+    })
+
+    const contract = await mgr.create({ payerPodId: 'alice', payeePodId: 'bob', amount: 40, description: 'via hook' })
+    assert.equal(calls.length, 1)
+    assert.deepEqual(calls[0], { op: 'debit', amount: 40, podId: 'alice', memo: 'escrow: via hook' })
+    // The hook -- not a direct ledger call -- performed the mutation, and
+    // create() waited for it before returning (ledger reflects the debit).
+    assert.equal(ledger.getBalance('alice'), 60)
+    assert.equal(ledger.txLog.length, 1)
+
+    const result = await mgr.release(contract.id)
+    assert.equal(calls.length, 2)
+    assert.deepEqual(calls[1], { op: 'credit', amount: 40, podId: 'bob', memo: `escrow release: ${contract.id}` })
+    assert.equal(result.success, true)
+    assert.equal(ledger.getBalance('bob'), 40)
+  })
+
+  it('hook rejection propagates through create() the same way a synchronous insufficient-balance throw already did', async () => {
+    const ledger = createMockLedger({ alice: 100 })
+    const mgr = new EscrowManager({
+      creditLedger: ledger,
+      async mutateLedger() {
+        throw new Error('Insufficient balance: consensus round rejected the debit')
+      },
+    })
+
+    await assert.rejects(
+      () => mgr.create({ payerPodId: 'alice', payeePodId: 'bob', amount: 10 }),
+      /Insufficient balance/,
+    )
+    // The hook rejected before touching the ledger -- same "no partial
+    // mutation on failure" contract the direct debit() throw already had.
+    assert.equal(ledger.getBalance('alice'), 100)
+    assert.equal(ledger.txLog.length, 0)
+
+    const contractDirect = new EscrowManager({ creditLedger: ledger }) // control: real insufficient-balance path
+    await assert.rejects(
+      () => contractDirect.create({ payerPodId: 'nobody', payeePodId: 'bob', amount: 10 }),
+      /Insufficient balance/,
+    )
+  })
+
+  it('hook rejection on release()/refund() also propagates and leaves contract status unchanged', async () => {
+    const ledger = createMockLedger({ alice: 100 })
+    let shouldFail = false
+    const mgr = new EscrowManager({
+      creditLedger: ledger,
+      async mutateLedger(op, amount, podId, memo) {
+        if (shouldFail) throw new Error('consensus round rejected the credit')
+        return op === 'debit' ? ledger.debit(amount, podId, memo) : ledger.credit(amount, podId, memo)
+      },
+    })
+
+    const contract = await mgr.create({ payerPodId: 'alice', payeePodId: 'bob', amount: 20 })
+    shouldFail = true
+
+    await assert.rejects(() => mgr.release(contract.id), /consensus round rejected/)
+    // Contract remains 'funded' -- release() did not mark it 'released' when
+    // the hook rejected, mirroring the pre-hook behavior where a thrown
+    // creditLedger.credit() left the contract untouched.
+    assert.equal(mgr.getContract(contract.id).status, 'funded')
+
+    await assert.rejects(() => mgr.refund(contract.id), /consensus round rejected/)
+    assert.equal(mgr.getContract(contract.id).status, 'funded')
+  })
+
+  it('checkExpired() routes its auto-refund through the hook too', async () => {
+    const ledger = createMockLedger({ alice: 100 })
+    const calls = []
+    const mgr = new EscrowManager({
+      creditLedger: ledger,
+      async mutateLedger(op, amount, podId, memo) {
+        calls.push(op)
+        return op === 'debit' ? ledger.debit(amount, podId, memo) : ledger.credit(amount, podId, memo)
+      },
+    })
+
+    const contract = await mgr.create({ payerPodId: 'alice', payeePodId: 'bob', amount: 15, timeoutMs: 1 })
+    const count = await mgr.checkExpired(Date.now() + 100)
+    assert.equal(count, 1)
+    assert.deepEqual(calls, ['debit', 'credit'])
+    assert.equal(mgr.getContract(contract.id).status, 'expired')
+    assert.equal(ledger.getBalance('alice'), 100)
   })
 })
 
@@ -383,36 +516,36 @@ describe('EscrowManager against a real CreditLedger (not createMockLedger)', () 
   // charge() method at all, and credit()/debit() take amount FIRST
   // (payments.mjs: credit(amount, fromPodId, memo), debit(amount, toPodId,
   // memo)). This exercises the real class end to end.
-  it('create/release move real balance on a real CreditLedger', () => {
+  it('create/release move real balance on a real CreditLedger', async () => {
     const ledger = new CreditLedger('alice')
     ledger.credit(100, 'genesis', 'seed balance')
 
     const mgr = new EscrowManager({ creditLedger: ledger })
-    const contract = mgr.create({ payerPodId: 'alice', payeePodId: 'bob', amount: 30 })
+    const contract = await mgr.create({ payerPodId: 'alice', payeePodId: 'bob', amount: 30 })
     assert.equal(ledger.balance, 70)
 
-    mgr.release(contract.id)
+    await mgr.release(contract.id)
     assert.equal(ledger.balance, 100, 'release credits back into the same single-owner ledger')
     assert.equal(contract.status, 'released')
   })
 
-  it('create/refund move real balance on a real CreditLedger', () => {
+  it('create/refund move real balance on a real CreditLedger', async () => {
     const ledger = new CreditLedger('alice')
     ledger.credit(100, 'genesis', 'seed balance')
 
     const mgr = new EscrowManager({ creditLedger: ledger })
-    const contract = mgr.create({ payerPodId: 'alice', payeePodId: 'bob', amount: 40 })
+    const contract = await mgr.create({ payerPodId: 'alice', payeePodId: 'bob', amount: 40 })
     assert.equal(ledger.balance, 60)
 
-    mgr.refund(contract.id)
+    await mgr.refund(contract.id)
     assert.equal(ledger.balance, 100)
     assert.equal(contract.status, 'refunded')
   })
 
-  it('create throws (not TypeError from a missing charge()) on insufficient balance', () => {
+  it('create throws (not TypeError from a missing charge()) on insufficient balance', async () => {
     const ledger = new CreditLedger('alice') // balance 0
     const mgr = new EscrowManager({ creditLedger: ledger })
-    assert.throws(
+    await assert.rejects(
       () => mgr.create({ payerPodId: 'alice', payeePodId: 'bob', amount: 10 }),
       /Insufficient balance/,
     )
@@ -549,9 +682,9 @@ describe('createEscrowService: ctx.emit() bridges EscrowManager events', () => {
     const expired = []
     on('escrow:expired', (c) => expired.push(c))
 
-    const contract = api.create({ payerPodId: host.podId, payeePodId: 'someone', amount: 10, timeoutMs: 1 })
+    const contract = await api.create({ payerPodId: host.podId, payeePodId: 'someone', amount: 10, timeoutMs: 1 })
     await new Promise((r) => setTimeout(r, 20))
-    const count = api.checkExpired()
+    const count = await api.checkExpired()
     assert.equal(count, 1)
     assert.equal(expired.length, 1)
     assert.equal(expired[0].id, contract.id)
