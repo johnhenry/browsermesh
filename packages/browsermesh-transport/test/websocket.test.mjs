@@ -166,10 +166,20 @@ class MockSignaler {
   onOffer(cb) { this._handlers.offer = cb; }
   onAnswer(cb) { this._handlers.answer = cb; }
   onIceCandidate(cb) { this._handlers.ice = cb; }
-  // Simulate receiving signals
-  _receiveOffer(offer) { if (this._handlers.offer) this._handlers.offer(offer); }
-  _receiveAnswer(answer) { if (this._handlers.answer) this._handlers.answer(answer); }
-  _receiveIceCandidate(candidate) { if (this._handlers.ice) this._handlers.ice(candidate); }
+  // Simulate receiving signals. The real SignalingClient (browsermesh-core's
+  // handshake.mjs) hands listeners the FULL wrapped envelope
+  // ({from, target, type, offer/answer/candidate: {...}}, fromPodId), never
+  // the bare SDP/candidate object -- so these wrap payloads the same way,
+  // to actually exercise consumers' unwrapping logic instead of assuming it.
+  _receiveOffer(offer, fromPodId = 'pod-bob') {
+    if (this._handlers.offer) this._handlers.offer({ from: fromPodId, target: 'pod-alice', type: 'offer', offer }, fromPodId);
+  }
+  _receiveAnswer(answer, fromPodId = 'pod-bob') {
+    if (this._handlers.answer) this._handlers.answer({ from: fromPodId, target: 'pod-alice', type: 'answer', answer }, fromPodId);
+  }
+  _receiveIceCandidate(candidate, fromPodId = 'pod-bob') {
+    if (this._handlers.ice) this._handlers.ice({ from: fromPodId, target: 'pod-alice', type: 'ice-candidate', candidate }, fromPodId);
+  }
 }
 
 // ── Wire Constants ─────────────────────────────────────────────────
@@ -730,6 +740,27 @@ describe('WebRTCTransport', () => {
     assert.equal(offers[0].remotePodId, 'pod-bob');
   });
 
+  it('connect unwraps the signaling envelope before calling setRemoteDescription', async () => {
+    // Regression test for bug (a): the signaler hands onAnswer the full
+    // wrapped envelope ({from, target, type, answer: {...}}), not the bare
+    // SDP. If connect() forgets to unwrap it, the wrapped envelope itself
+    // gets passed to setRemoteDescription instead of the real SDP answer.
+    rtc = createRTC();
+    const p = rtc.connect();
+
+    setTimeout(() => {
+      signaler._receiveAnswer({ type: 'answer', sdp: 'mock-answer-sdp' });
+      if (lastPC._dataChannels[0]) lastPC._dataChannels[0]._open();
+    }, 10);
+
+    await p;
+    assert.deepEqual(
+      lastPC.remoteDescription,
+      { type: 'answer', sdp: 'mock-answer-sdp' },
+      'setRemoteDescription should receive the unwrapped SDP answer, not the signaling envelope',
+    );
+  });
+
   it('connect transitions to connecting then connected', async () => {
     rtc = createRTC();
     const p = rtc.connect();
@@ -760,6 +791,76 @@ describe('WebRTCTransport', () => {
     assert.equal(opened, true);
   });
 
+  // -- handleOffer() (as answerer) ---
+  //
+  // Bug regression coverage: handleOffer() used to fire 'open'/resolve as
+  // soon as the answer was sent, racing ahead of the data channel actually
+  // existing or opening. These prove it now waits for the data channel to
+  // reach readyState 'open' -- matching connect()'s already-correct
+  // behavior -- before considering the connection ready.
+
+  it('handleOffer does not resolve until the data channel actually opens', async () => {
+    rtc = createRTC();
+    const offer = { type: 'offer', sdp: 'mock-offer-sdp' };
+
+    let resolved = false;
+    const p = rtc.handleOffer(offer).then(() => { resolved = true; });
+
+    // Let the answer be created/sent (microtask-driven async work in
+    // handleOffer) before the remote data channel even arrives.
+    await settle(() => signaler._sent.length);
+    const answers = signaler._sent.filter(s => s.type === 'answer');
+    assert.equal(answers.length, 1, 'answer should already be sent');
+    assert.equal(resolved, false, 'must not resolve before the data channel opens');
+
+    // Data channel arrives via the 'datachannel' event, but has not yet
+    // reached readyState 'open'.
+    const remoteDC = new MockDataChannel('mesh', { ordered: true });
+    lastPC._fire('datachannel', { channel: remoteDC });
+    await settle(() => resolved);
+    assert.equal(resolved, false, 'must not resolve while the data channel is still connecting');
+
+    // Only once the data channel actually opens should the promise resolve.
+    remoteDC._open();
+    await p;
+    assert.equal(resolved, true);
+    assert.equal(rtc.state, 'connected');
+  });
+
+  it('handleOffer fires open event only once the data channel opens, not merely on arrival', async () => {
+    rtc = createRTC();
+    const offer = { type: 'offer', sdp: 'mock-offer-sdp' };
+
+    let opened = false;
+    rtc.on('open', () => { opened = true; });
+    const p = rtc.handleOffer(offer);
+
+    await settle(() => signaler._sent.length);
+    const remoteDC = new MockDataChannel('mesh', { ordered: true });
+    lastPC._fire('datachannel', { channel: remoteDC });
+    await settle(() => opened);
+    assert.equal(opened, false, "'open' must not fire just because the data channel arrived");
+
+    remoteDC._open();
+    await p;
+    assert.equal(opened, true);
+  });
+
+  it('handleOffer resolves immediately if the data channel is already open when it arrives', async () => {
+    rtc = createRTC();
+    const offer = { type: 'offer', sdp: 'mock-offer-sdp' };
+
+    const p = rtc.handleOffer(offer);
+    await settle(() => signaler._sent.length);
+
+    const remoteDC = new MockDataChannel('mesh', { ordered: true });
+    remoteDC._open(); // already open before it's handed off via 'datachannel'
+    lastPC._fire('datachannel', { channel: remoteDC });
+
+    await p;
+    assert.equal(rtc.state, 'connected');
+  });
+
   // -- ICE candidates ---
 
   it('handles ice candidates from signaler', async () => {
@@ -774,6 +875,15 @@ describe('WebRTCTransport', () => {
 
     await p;
     assert.equal(lastPC._iceCandidates.length, 1);
+    // Regression test for bug (a): the signaler hands onIceCandidate the
+    // full wrapped envelope ({from, target, type, candidate: {...}}), not
+    // the bare candidate. addIceCandidate must receive the unwrapped
+    // candidate object, not the signaling envelope itself.
+    assert.deepEqual(
+      lastPC._iceCandidates[0],
+      { candidate: 'cand-1', sdpMid: '0' },
+      'addIceCandidate should receive the unwrapped candidate, not the signaling envelope',
+    );
   });
 
   it('fires ice-candidate event for local candidates', async () => {
