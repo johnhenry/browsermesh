@@ -67,12 +67,29 @@ MockWebSocket.CLOSED = 3
 function createMockTransportFactory(overrides = {}) {
   return {
     async negotiate(localPodId, remotePodId, signaler, endpointOpts) {
-      return overrides.transport || { type: 'webrtc', connected: true }
+      return overrides.transport || createDefaultMockTransport()
     },
     async create(type, opts) {
-      const transport = overrides.transport || { type, connected: true }
+      const transport = overrides.transport || createDefaultMockTransport(type)
       if (overrides.handleOffer) transport.handleOffer = overrides.handleOffer
       return transport
+    },
+  }
+}
+
+/**
+ * Shaped like the real transports negotiate()/create() hand back: created
+ * but NOT yet connected, matching TransportFactory.negotiate()'s own
+ * docstring. connect() is what actually flips it to connected -- a mock
+ * that started life as `connected: true` would silently hide a caller that
+ * never invokes connect() at all (see #167).
+ */
+function createDefaultMockTransport(type = 'webrtc') {
+  return {
+    type,
+    connected: false,
+    async connect() {
+      this.connected = true
     },
   }
 }
@@ -588,7 +605,20 @@ describe('HandshakeCoordinator', () => {
     })
     await signaler.connect()
 
-    const mockTransport = { type: 'webrtc', connected: true }
+    // Shaped like the real WebRTCTransport negotiate() hands back: created
+    // but unconnected until connect() is actually awaited (#167 -- the
+    // prior version of this test used a transport that claimed
+    // `connected: true` from creation, which hid connectToPeer() never
+    // calling connect() at all).
+    let connectCalled = false
+    const mockTransport = {
+      type: 'webrtc',
+      connected: false,
+      async connect() {
+        connectCalled = true
+        this.connected = true
+      },
+    }
     const factory = createMockTransportFactory({ transport: mockTransport })
 
     const coord = new HandshakeCoordinator({
@@ -598,7 +628,9 @@ describe('HandshakeCoordinator', () => {
     })
 
     const result = await coord.connectToPeer('pod-remote')
+    assert.ok(connectCalled, 'connectToPeer must await transport.connect() before adopting the session')
     assert.equal(result.transport, mockTransport)
+    assert.equal(result.transport.connected, true)
     assert.equal(result.sessionInfo.localPodId, 'pod-local')
     assert.equal(result.sessionInfo.remotePodId, 'pod-remote')
     assert.equal(result.sessionInfo.transportType, 'webrtc')
