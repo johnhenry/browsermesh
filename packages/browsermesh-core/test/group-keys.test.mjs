@@ -174,6 +174,96 @@ describe('GroupKeyManager', () => {
       assert.ok(rotated.hasMember('pod-z'))
       assert.equal(rotated.hasMember('pod-a'), false)
     })
+
+    // ---------------------------------------------------------------------
+    // adopt-path: rotate(newMembers, { epoch, key })
+    // ---------------------------------------------------------------------
+
+    it('self-generates a key when the options argument is omitted (unchanged default)', async () => {
+      await mgr.initGroup(['pod-a'])
+      const before = mgr.getEpochState(0).key
+      const rotated = await mgr.rotate()
+      assert.equal(rotated.epoch, 1)
+      assert.notEqual(rotated.key, before)
+      assert.ok(rotated.key instanceof CryptoKey)
+    })
+
+    it('self-generates a key when options is an empty object (unchanged default)', async () => {
+      await mgr.initGroup(['pod-a'])
+      const rotated = await mgr.rotate(['pod-a'], {})
+      assert.equal(rotated.epoch, 1)
+      assert.ok(rotated.key instanceof CryptoKey)
+    })
+
+    it('throws if only epoch is given without key', async () => {
+      await mgr.initGroup(['pod-a'])
+      await assert.rejects(() => mgr.rotate(['pod-a'], { epoch: 5 }), /epoch and key must be provided together/)
+    })
+
+    it('throws if only key is given without epoch', async () => {
+      await mgr.initGroup(['pod-a'])
+      const key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt'])
+      await assert.rejects(() => mgr.rotate(['pod-a'], { key }), /epoch and key must be provided together/)
+    })
+
+    it('throws if key is not a CryptoKey (e.g. raw exported bytes)', async () => {
+      await mgr.initGroup(['pod-a'])
+      const notAKey = new Uint8Array(32)
+      await assert.rejects(() => mgr.rotate(['pod-a'], { epoch: 5, key: notAKey }), /must be a CryptoKey/)
+    })
+
+    it('adopts the exact explicit key and epoch instead of generating one', async () => {
+      await mgr.initGroup(['pod-a'])
+      const explicitKey = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt'])
+      const rotated = await mgr.rotate(['pod-a', 'pod-b'], { epoch: 7, key: explicitKey })
+      assert.equal(rotated.epoch, 7)
+      assert.equal(mgr.currentEpoch, 7)
+      assert.equal(rotated.key, explicitKey) // the SAME key object, not a freshly generated one
+      assert.ok(rotated.hasMember('pod-b'))
+    })
+
+    it('proof: two independent managers given the SAME explicit key via the adopt-path can decrypt each other\'s traffic', async () => {
+      // This is the actual correctness property the PBFT-follows-consensus
+      // design depends on: agreement on epoch+membership alone is useless
+      // unless every adopter ends up holding the literal same key object's
+      // underlying key material. Simulates the intended flow: exactly one
+      // designated party generates the key; every party (including the
+      // generator) installs it via the adopt-path, keyed by the
+      // consensus-agreed epoch number, and all can freely decrypt each
+      // other's ciphertext.
+      const leaderMgr = new GroupKeyManager({ localPodId: 'leader', groupId: 'group-1' })
+      const followerMgr = new GroupKeyManager({ localPodId: 'follower', groupId: 'group-1' })
+
+      await leaderMgr.initGroup(['follower'])
+      await followerMgr.initGroup(['leader'])
+
+      // The leader generates the one true key for the agreed epoch, out of
+      // band from any consensus payload (e.g. it's about to be distributed
+      // via wrapKeyForMember/broadcastDistribute separately).
+      const agreedEpoch = 42
+      const agreedKey = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt'])
+      const members = ['leader', 'follower']
+
+      // Both parties adopt the SAME key+epoch via the new adopt-path,
+      // rather than each independently self-generating via plain rotate().
+      await leaderMgr.rotate(members, { epoch: agreedEpoch, key: agreedKey })
+      await followerMgr.rotate(members, { epoch: agreedEpoch, key: agreedKey })
+
+      assert.equal(leaderMgr.currentEpoch, agreedEpoch)
+      assert.equal(followerMgr.currentEpoch, agreedEpoch)
+
+      // Genuine cross-instance proof: encrypt on one, decrypt on the other,
+      // in both directions — not merely "the method didn't throw".
+      const msgFromLeader = new TextEncoder().encode('hello from leader')
+      const enc1 = await leaderMgr.encrypt(msgFromLeader)
+      const dec1 = await followerMgr.decrypt(enc1.ciphertext, enc1.iv, enc1.epoch)
+      assert.deepEqual(dec1, msgFromLeader)
+
+      const msgFromFollower = new TextEncoder().encode('hello from follower')
+      const enc2 = await followerMgr.encrypt(msgFromFollower)
+      const dec2 = await leaderMgr.decrypt(enc2.ciphertext, enc2.iv, enc2.epoch)
+      assert.deepEqual(dec2, msgFromFollower)
+    })
   })
 
   // -----------------------------------------------------------------------
