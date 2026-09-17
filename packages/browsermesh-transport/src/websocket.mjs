@@ -492,7 +492,7 @@ export class WebRTCTransport {
     });
 
     // Set up signaler listeners for remote ICE candidates
-    this.#signaler.onIceCandidate((candidate) => {
+    this.#signaler.onIceCandidate((data) => {
       if (this.#pc) {
         // The promise must not be dropped. addIceCandidate rejects on a
         // malformed candidate and on one that arrives before the remote
@@ -500,7 +500,7 @@ export class WebRTCTransport {
         // unhandled rejection ends a Node process by default. webrtc.mjs's
         // addIceCandidate docblock records this being fixed there; this path
         // still had it.
-        Promise.resolve(this.#pc.addIceCandidate(candidate)).catch((e) => {
+        Promise.resolve(this.#pc.addIceCandidate(data.candidate)).catch((e) => {
           silentCatch('clawser-mesh-websocket', 'ignore-rejected-ice-candidate', e);
         });
       }
@@ -520,10 +520,10 @@ export class WebRTCTransport {
         reject(new Error('WebRTC answer timeout'));
       }, 30000);
 
-      this.#signaler.onAnswer(async (answer) => {
+      this.#signaler.onAnswer(async (data) => {
         clearTimeout(timeout);
         try {
-          await this.#pc.setRemoteDescription(answer);
+          await this.#pc.setRemoteDescription(data.answer);
         } catch (err) {
           this.#state = 'disconnected';
           reject(err);
@@ -563,14 +563,29 @@ export class WebRTCTransport {
     await this.#pc.setLocalDescription(answer);
     await this.#signaler.sendAnswer(this.#remotePodId, answer);
 
-    // The data channel will arrive via ondatachannel event
-    this.#pc.addEventListener('datachannel', (ev) => {
-      this.#dataChannel = ev.channel;
-      this._attachDataChannelListeners(this.#dataChannel);
-      if (this.#dataChannel.readyState === 'open') {
-        this.#state = 'connected';
-        this._fireEvent('open');
-      }
+    // The data channel will arrive via the ondatachannel event, and callers
+    // (e.g. HandshakeCoordinator.acceptConnection) await this method
+    // expecting the connection to be ready once it resolves -- so, like
+    // connect(), this must not resolve until the data channel is actually
+    // open, not merely once it has arrived or once the answer was sent.
+    return new Promise((resolve) => {
+      this.#pc.addEventListener('datachannel', (ev) => {
+        this.#dataChannel = ev.channel;
+        this._attachDataChannelListeners(this.#dataChannel);
+        if (this.#dataChannel.readyState === 'open') {
+          this.#state = 'connected';
+          this._fireEvent('open');
+          resolve();
+        } else {
+          const onDCOpen = () => {
+            this.#dataChannel.removeEventListener('open', onDCOpen);
+            this.#state = 'connected';
+            this._fireEvent('open');
+            resolve();
+          };
+          this.#dataChannel.addEventListener('open', onDCOpen);
+        }
+      });
     });
   }
 
