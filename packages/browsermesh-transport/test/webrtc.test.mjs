@@ -24,10 +24,17 @@ class MockRTCDataChannel {
   }
 }
 
-/** Tracks the most recently constructed mock PC/DC so tests can drive
- * their event callbacks without the real class exposing private fields. */
+/** Tracks the most recently constructed mock PC so tests can drive its
+ * event callbacks without the real class exposing private fields.
+ * `_lastMockDC` specifically tracks the CONTROL ('mesh') channel, not
+ * whichever channel was created most recently -- createOffer() now creates
+ * two (control, then bulk), and every test written before the bulk channel
+ * existed drives `_lastMockDC` expecting control-channel semantics
+ * (`state`/`isOpen` follow it). `_lastMockBulkDC` is the analogous handle
+ * for tests that specifically exercise the bulk channel. */
 let _lastMockPC = null
 let _lastMockDC = null
+let _lastMockBulkDC = null
 
 class MockRTCPeerConnection {
   #localDesc = null
@@ -48,7 +55,11 @@ class MockRTCPeerConnection {
   createDataChannel(label, opts) {
     const dc = new MockRTCDataChannel()
     dc.label = label
-    _lastMockDC = dc
+    if (label === 'mesh-bulk') {
+      _lastMockBulkDC = dc
+    } else {
+      _lastMockDC = dc
+    }
     return dc
   }
 

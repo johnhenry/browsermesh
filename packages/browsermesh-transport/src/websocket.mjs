@@ -384,6 +384,35 @@ export class WebSocketTransport {
 // ---------------------------------------------------------------------------
 
 /**
+ * Label of the original, always-present data channel. Ordered and reliable
+ * -- everything defaults here, unchanged from before the bulk channel
+ * existed.
+ */
+const CONTROL_CHANNEL_LABEL = 'mesh';
+
+/**
+ * Label of the second data channel, created alongside `CONTROL_CHANNEL_LABEL`
+ * on the SAME already-negotiated RTCPeerConnection (a second SCTP stream,
+ * not a second ICE/DTLS handshake), so bulk transfers stop sitting in front
+ * of latency-sensitive control messages on the one channel they used to
+ * share. See the identical constant and its rationale in `webrtc.mjs`,
+ * which this mirrors.
+ */
+const BULK_CHANNEL_LABEL = 'mesh-bulk';
+
+/**
+ * `ordered: false`, still fully reliable (no `maxRetransmits`/
+ * `maxPacketLifeTime`). Justified by clawser's chunk reassembly
+ * (`web/clawser-mesh-files.js`), which addresses each chunk by content hash
+ * plus offset and dedupes into a `Set` -- no order dependency -- so an
+ * out-of-order chunk on this channel reassembles identically to an in-order
+ * one, and unordered delivery also avoids head-of-line blocking *within*
+ * this one channel (an ordered channel would withhold a later chunk that
+ * arrived fine behind an earlier, lost one being retransmitted).
+ */
+const BULK_CHANNEL_OPTIONS = Object.freeze({ ordered: false });
+
+/**
  * WebRTC data channel transport.
  *
  * Establishes a peer connection using an external signaler for
@@ -414,6 +443,16 @@ export class WebRTCTransport {
 
   /** @type {object|null} */
   #dataChannel = null;
+
+  /**
+   * The second, `mesh-bulk` data channel. Stays null against a peer whose
+   * build never creates/sends one -- only the offerer side ever calls
+   * `createDataChannel()` (see `connect()`/`handleOffer()`) -- and every
+   * send that asks for `'bulk'` falls back to `#dataChannel` while it is
+   * null. See `send()`.
+   * @type {object|null}
+   */
+  #bulkChannel = null;
 
   /** @type {{ open: Function[], message: Function[], close: Function[], error: Function[], 'ice-candidate': Function[] }} */
   #callbacks = { open: [], message: [], close: [], error: [], 'ice-candidate': [] };
@@ -506,9 +545,16 @@ export class WebRTCTransport {
       }
     });
 
-    // Create data channel and offer
-    this.#dataChannel = this.#pc.createDataChannel('mesh', { ordered: true });
-    this._attachDataChannelListeners(this.#dataChannel);
+    // Create data channels and offer. A second createDataChannel() call on
+    // the same RTCPeerConnection is a second SCTP stream, not a second
+    // ICE/DTLS negotiation -- both are captured in the single offer created
+    // below. Only the offerer side creates channels; the answerer only ever
+    // listens via 'datachannel' (see handleOffer()).
+    this.#dataChannel = this.#pc.createDataChannel(CONTROL_CHANNEL_LABEL, { ordered: true });
+    this._attachDataChannelListeners(this.#dataChannel, 'control');
+
+    this.#bulkChannel = this.#pc.createDataChannel(BULK_CHANNEL_LABEL, BULK_CHANNEL_OPTIONS);
+    this._attachDataChannelListeners(this.#bulkChannel, 'bulk');
 
     const offer = await this.#pc.createOffer();
     await this.#pc.setLocalDescription(offer);
@@ -606,33 +652,65 @@ export class WebRTCTransport {
     // connect(), this must not resolve until the data channel is actually
     // open, not merely once it has arrived or once the answer was sent.
     return new Promise((resolve) => {
+      // A NEW-build peer offers two channels, routed here by label -- not by
+      // arrival order, which 'datachannel' does not promise -- so this event
+      // fires twice; an OLDER build offers only 'mesh' and it fires once,
+      // and #bulkChannel simply stays null (see #bulkChannel's docs and
+      // send()'s fallback). Only the control channel's open gates
+      // 'connected': the bulk channel is auxiliary, and gating on it too
+      // would mean a peer that never sends 'mesh-bulk' (an older build) can
+      // never connect.
+      let resolved = false;
+      const onControlOpen = () => {
+        if (resolved) return;
+        resolved = true;
+        this.#state = 'connected';
+        this._fireEvent('open');
+        resolve();
+      };
       this.#pc.addEventListener('datachannel', (ev) => {
-        this.#dataChannel = ev.channel;
-        this._attachDataChannelListeners(this.#dataChannel);
-        if (this.#dataChannel.readyState === 'open') {
-          this.#state = 'connected';
-          this._fireEvent('open');
-          resolve();
+        const chan = ev.channel;
+        if (chan.label === BULK_CHANNEL_LABEL) {
+          this.#bulkChannel = chan;
+          this._attachDataChannelListeners(chan, 'bulk');
+          return;
+        }
+        this.#dataChannel = chan;
+        this._attachDataChannelListeners(chan, 'control');
+        if (chan.readyState === 'open') {
+          onControlOpen();
         } else {
           const onDCOpen = () => {
-            this.#dataChannel.removeEventListener('open', onDCOpen);
-            this.#state = 'connected';
-            this._fireEvent('open');
-            resolve();
+            chan.removeEventListener('open', onDCOpen);
+            onControlOpen();
           };
-          this.#dataChannel.addEventListener('open', onDCOpen);
+          chan.addEventListener('open', onDCOpen);
         }
       });
     });
   }
 
   /**
-   * Send data over the data channel.
+   * Send data over a data channel.
    * @param {*} data
+   * @param {object} [opts]
+   * @param {'control'|'bulk'} [opts.channel='control'] - `'control'` is the
+   *   original `mesh` channel (every pre-existing call site that never
+   *   passes `opts` keeps using it, unchanged). `'bulk'` is the `mesh-bulk`
+   *   channel, for large/chunked payloads. Falls back to `'control'` when
+   *   the bulk channel doesn't exist or isn't open -- which is exactly what
+   *   happens when the remote peer's build never created/sent one -- so
+   *   traffic still gets there, just without a lane of its own, and no
+   *   version negotiation is needed for an old peer and a new peer to
+   *   interoperate.
    */
-  send(data) {
-    if (!this.connected || !this.#dataChannel) throw new Error('Not connected');
-    this.#dataChannel.send(data);
+  send(data, { channel = 'control' } = {}) {
+    if (!this.connected) throw new Error('Not connected');
+    const dc = (channel === 'bulk' && this.#bulkChannel?.readyState === 'open')
+      ? this.#bulkChannel
+      : this.#dataChannel;
+    if (!dc) throw new Error('Not connected');
+    dc.send(data);
     this.#stats.messagesSent++;
     this.#stats.bytesOut += byteLength(data);
   }
@@ -645,6 +723,9 @@ export class WebRTCTransport {
     this.#state = 'closing';
     if (this.#dataChannel) {
       try { this.#dataChannel.close(); } catch (e) { silentCatch('clawser-mesh-websocket', 'this', e) }
+    }
+    if (this.#bulkChannel) {
+      try { this.#bulkChannel.close(); } catch (e) { silentCatch('clawser-mesh-websocket', 'this', e) }
     }
     if (this.#pc) {
       this.#pc.close();
@@ -689,11 +770,29 @@ export class WebRTCTransport {
 
   /**
    * Attach event listeners to a data channel.
+   *
+   * `kind` distinguishes the control channel, whose lifecycle drives this
+   * transport's `state`, from the auxiliary bulk channel: losing the bulk
+   * channel alone (close) degrades future `send({channel:'bulk'})` calls to
+   * the control-channel fallback rather than closing an otherwise-healthy
+   * transport -- the same state a peer that never had a bulk channel to
+   * begin with looks like.
+   *
+   * Message delivery is identical for both kinds -- every 'message'
+   * listener fires for a message from either channel -- which is also what
+   * makes an OLDER, single-channel peer (as the answerer) work against this
+   * one with no extra wiring: it attaches its own listener to each incoming
+   * channel exactly the way this method does, and only ever changes which
+   * one it treats as "the" channel to *send* on, so it still receives from
+   * both. See webrtc.mjs's `#setupDataChannel()` for the identical reasoning
+   * on the other WebRTC transport class in this package.
+   *
    * @param {object} dc
+   * @param {'control'|'bulk'} [kind='control']
    */
-  _attachDataChannelListeners(dc) {
+  _attachDataChannelListeners(dc, kind = 'control') {
     dc.addEventListener('open', () => {
-      if (this.#state === 'connecting') {
+      if (kind === 'control' && this.#state === 'connecting') {
         this.#state = 'connected';
         this._fireEvent('open');
       }
@@ -707,6 +806,10 @@ export class WebRTCTransport {
     });
 
     dc.addEventListener('close', () => {
+      if (kind === 'bulk') {
+        if (this.#bulkChannel === dc) this.#bulkChannel = null;
+        return;
+      }
       if (this.#state !== 'closed' && this.#state !== 'closing') {
         this.#state = 'closed';
         this._fireEvent('close');

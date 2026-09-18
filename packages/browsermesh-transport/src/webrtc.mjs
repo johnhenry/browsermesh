@@ -111,6 +111,48 @@ export function mergeIceServers(userServers, defaults = DEFAULT_ICE_SERVERS) {
 const MAX_PENDING_REMOTE_CANDIDATES = 64
 
 // ---------------------------------------------------------------------------
+// Dual data channels: control + bulk
+// ---------------------------------------------------------------------------
+
+/**
+ * Label of the original, always-present data channel. Ordered and reliable:
+ * chat, agent RPC, sync metadata and consensus votes all depend on messages
+ * arriving in the order they were sent.
+ */
+const CONTROL_CHANNEL_LABEL = 'mesh'
+
+/**
+ * Label of the second data channel, added alongside `CONTROL_CHANNEL_LABEL`
+ * on the SAME already-negotiated RTCPeerConnection -- a second SCTP stream,
+ * not a second ICE/DTLS handshake. Its purpose is to give bulk transfers
+ * (file chunks, sync payloads) a lane of their own, so a large chunk queued
+ * on it can never sit in front of a latency-sensitive control message the
+ * way a single shared channel forced it to.
+ */
+const BULK_CHANNEL_LABEL = 'mesh-bulk'
+
+/**
+ * `ordered: false`, deliberately, and nothing else set on the object --
+ * still fully *reliable* (SCTP retransmits until every chunk arrives; there
+ * is no `maxRetransmits`/`maxPacketLifeTime` bound here), just not ordered.
+ *
+ * Justified by the consumer, not assumed: clawser's chunk reassembly
+ * (`web/clawser-mesh-files.js`) addresses each chunk by content hash (`cid`)
+ * plus offset and dedupes into a `Set` keyed by that hash -- there is no
+ * array-index/push-order dependency, so a chunk that overtakes an earlier
+ * one on the wire reassembles identically to one that didn't. Callers
+ * routing other traffic onto this channel must have the same tolerance;
+ * `ordered: true` control-style traffic belongs on `CONTROL_CHANNEL_LABEL`.
+ *
+ * Unordered also matters *within* the bulk channel, not only against the
+ * control channel: with `ordered: true`, SCTP itself withholds a later
+ * chunk that arrived fine behind an earlier one that was lost and is being
+ * retransmitted -- head-of-line blocking inside the one channel that exists
+ * specifically to avoid it. `ordered: false` removes that constraint.
+ */
+const BULK_CHANNEL_OPTIONS = Object.freeze({ ordered: false })
+
+// ---------------------------------------------------------------------------
 // WebRTCPeerConnection
 // ---------------------------------------------------------------------------
 
@@ -129,6 +171,14 @@ export class WebRTCPeerConnection {
   #remotePodId
   #pc = null
   #dataChannel = null
+  /**
+   * The second, `mesh-bulk` data channel. Stays null against a peer that
+   * never creates/sends one -- an older build talking to this one, since
+   * only the offerer side ever calls `createDataChannel()` (see
+   * `createOffer()`/`handleOffer()`) -- and every send that asks for it
+   * falls back to `#dataChannel` while it is null. See `send()`.
+   */
+  #bulkChannel = null
   #iceServers
   #onLog
   #state = 'new'   // new | connecting | connected | failed | closed
@@ -190,6 +240,16 @@ export class WebRTCPeerConnection {
            this.#dataChannel?.readyState === 'open'
   }
 
+  /**
+   * True when the second (`mesh-bulk`) data channel is open and usable.
+   * False against a peer that never created/received one -- an older build
+   * paired with this one -- in which case `send(data, {channel: 'bulk'})`
+   * falls back to the control channel rather than throwing. See `send()`.
+   */
+  get isBulkOpen() {
+    return this.#bulkChannel?.readyState === 'open'
+  }
+
   // -- Offer / Answer -------------------------------------------------------
 
   /**
@@ -205,10 +265,20 @@ export class WebRTCPeerConnection {
     this.#setupIceHandling()
     this.#setupConnectionStateHandling()
 
-    this.#dataChannel = this.#pc.createDataChannel('mesh', {
+    this.#dataChannel = this.#pc.createDataChannel(CONTROL_CHANNEL_LABEL, {
       ordered: true,
     })
-    this.#setupDataChannel(this.#dataChannel)
+    this.#setupDataChannel(this.#dataChannel, 'control')
+
+    // A second SCTP stream on the SAME RTCPeerConnection -- no additional
+    // ICE/DTLS negotiation, just one more createDataChannel() call before the
+    // offer is created, so both channels' m-line/stream setup is captured in
+    // the single SDP offer below. Only the offerer side creates channels
+    // (the answerer only ever listens via `ondatachannel`, see handleOffer());
+    // that asymmetry is unchanged, just now applied to two channels instead
+    // of one.
+    this.#bulkChannel = this.#pc.createDataChannel(BULK_CHANNEL_LABEL, BULK_CHANNEL_OPTIONS)
+    this.#setupDataChannel(this.#bulkChannel, 'bulk')
 
     const offer = await this.#pc.createOffer()
     await this.#pc.setLocalDescription(offer)
@@ -281,9 +351,24 @@ export class WebRTCPeerConnection {
     this.#setupIceHandling()
     this.#setupConnectionStateHandling()
 
+    // A fresh offer from a NEW-build peer carries two data channels; one
+    // from an OLDER build carries only 'mesh' and this event fires once.
+    // Routed by label, not by arrival order -- `ondatachannel` does not
+    // promise the channels arrive in the order they were created, and
+    // guessing "first event = control" would occasionally hand the control
+    // role to the bulk channel and vice versa. Anything not recognised as
+    // the bulk label is treated as control, which is also the correct
+    // behaviour for a hypothetical future peer that adds yet another
+    // channel this build doesn't know about.
     this.#pc.ondatachannel = (event) => {
-      this.#dataChannel = event.channel
-      this.#setupDataChannel(this.#dataChannel)
+      const chan = event.channel
+      if (chan.label === BULK_CHANNEL_LABEL) {
+        this.#bulkChannel = chan
+        this.#setupDataChannel(chan, 'bulk')
+      } else {
+        this.#dataChannel = chan
+        this.#setupDataChannel(chan, 'control')
+      }
     }
 
     await this.#pc.setRemoteDescription({ type: 'offer', sdp: offer.sdp })
@@ -425,18 +510,42 @@ export class WebRTCPeerConnection {
   onStateChange(cb) { this.#stateChangeCbs.push(cb) }
 
   /**
-   * Send data over the DataChannel.
-   * Objects are JSON-serialized automatically.
+   * Send data over a DataChannel. Objects are JSON-serialized automatically.
    *
    * @param {string|object} data
+   * @param {object} [opts]
+   * @param {'control'|'bulk'} [opts.channel='control'] - Which SCTP stream to
+   *   send on. `'control'` is the original `mesh` channel (ordered, used for
+   *   everything by default -- every pre-existing call site that never
+   *   passes `opts` keeps sending here, unchanged). `'bulk'` is the second
+   *   `mesh-bulk` channel (unordered, see `BULK_CHANNEL_OPTIONS`), meant for
+   *   large/chunked payloads that would otherwise sit in front of
+   *   latency-sensitive control messages queued behind them.
+   *
+   *   Falling back rather than throwing when `'bulk'` is requested but
+   *   unavailable is the load-bearing part of this option: it is what keeps
+   *   an old peer (single-channel) and a new peer (dual-channel) compatible
+   *   with no version negotiation. The bulk channel is unavailable exactly
+   *   when the remote peer's build never created/sent one (see
+   *   `handleOffer()`) -- there is no other way for it to be missing on a
+   *   peer that itself created both -- so the traffic still gets there, just
+   *   without its own lane, exactly as it did before this channel existed.
+   * @throws {Error} If there is no data channel at all, or the channel that
+   *   was actually selected (after fallback) is not open.
    */
-  send(data) {
-    if (!this.#dataChannel) throw new Error('No data channel')
-    if (this.#dataChannel.readyState !== 'open') {
+  send(data, { channel = 'control' } = {}) {
+    if (channel !== 'control' && channel !== 'bulk') {
+      throw new Error(`Unknown channel: ${channel}`)
+    }
+    const dc = (channel === 'bulk' && this.#bulkChannel?.readyState === 'open')
+      ? this.#bulkChannel
+      : this.#dataChannel
+    if (!dc) throw new Error('No data channel')
+    if (dc.readyState !== 'open') {
       throw new Error('Data channel not open')
     }
     const str = typeof data === 'string' ? data : JSON.stringify(data)
-    this.#dataChannel.send(str)
+    dc.send(str)
     this.#stats.bytesSent += str.length
     this.#stats.messagesOut += 1
   }
@@ -586,6 +695,10 @@ export class WebRTCPeerConnection {
         try { this.#dataChannel.close() } catch (e) { silentCatch('clawser-mesh-webrtc', 'this', e) }
         this.#dataChannel = null
       }
+      if (this.#bulkChannel) {
+        try { this.#bulkChannel.close() } catch (e) { silentCatch('clawser-mesh-webrtc', 'this', e) }
+        this.#bulkChannel = null
+      }
       if (this.#pc) {
         try { this.#pc.close() } catch (e) { silentCatch('clawser-mesh-webrtc', 'this', e) }
         this.#pc = null
@@ -653,12 +766,18 @@ export class WebRTCPeerConnection {
    */
   #releasePeerConnection() {
     const dc = this.#dataChannel
+    const bulkDc = this.#bulkChannel
     const pc = this.#pc
     this.#dataChannel = null
+    this.#bulkChannel = null
     this.#pc = null
     if (dc) {
       dc.onopen = null; dc.onmessage = null; dc.onclose = null; dc.onerror = null
       try { dc.close() } catch (e) { silentCatch('clawser-mesh-webrtc', 'release-dc', e) }
+    }
+    if (bulkDc) {
+      bulkDc.onopen = null; bulkDc.onmessage = null; bulkDc.onclose = null; bulkDc.onerror = null
+      try { bulkDc.close() } catch (e) { silentCatch('clawser-mesh-webrtc', 'release-bulk-dc', e) }
     }
     if (pc) {
       pc.onicecandidate = null; pc.ondatachannel = null; pc.onconnectionstatechange = null
@@ -823,10 +942,31 @@ export class WebRTCPeerConnection {
     this.#disconnectedTimer = null
   }
 
-  #setupDataChannel(dc) {
+  /**
+   * Wire up one DataChannel's events. `kind` distinguishes the control
+   * channel, whose lifecycle drives this connection's `state`, from the
+   * bulk channel, which is treated as auxiliary: losing it (close/error)
+   * degrades this connection to control-channel-only via `send()`'s
+   * fallback rather than tearing down a connection that is otherwise fine.
+   * That degrade is exactly the state a peer running an older,
+   * single-channel build looks like to begin with, so the bulk channel
+   * failing after connecting is handled by the same path that already
+   * handles it never existing.
+   *
+   * Message delivery is deliberately identical for both kinds: every
+   * `onMessage()` callback fires for a message from EITHER channel,
+   * regardless of which one is "the" channel for `state`/`isOpen` purposes.
+   * This is also what makes an old, single-channel peer talking to this one
+   * (as the answerer) work with no extra wiring: `ondatachannel` fires once
+   * per channel this side creates, an older `handleOffer`-shaped answerer
+   * attaches its own per-channel listeners to each one exactly the way this
+   * method does, and only ever overwrites which channel it treats as "the"
+   * one to *send* on -- so it still receives from both.
+   */
+  #setupDataChannel(dc, kind) {
     dc.onopen = () => {
-      this.#setState('connected')
-      this.#log(`DataChannel open with ${this.#remotePodId}`)
+      if (kind === 'control') this.#setState('connected')
+      this.#log(`DataChannel (${kind}) open with ${this.#remotePodId}`)
     }
     dc.onmessage = (event) => {
       const rawLen = event.data?.length || 0
@@ -839,12 +979,27 @@ export class WebRTCPeerConnection {
       }
     }
     dc.onclose = () => {
-      // The remote hung up. Go through close() rather than just flipping the
-      // state, so our own RTCPeerConnection is released too.
+      if (kind === 'bulk') {
+        // Auxiliary: drop the reference so send({channel:'bulk'}) falls back
+        // to control, but don't tear down a connection that may otherwise be
+        // healthy.
+        if (this.#bulkChannel === dc) this.#bulkChannel = null
+        this.#log(`Bulk DataChannel closed with ${this.#remotePodId}; falling back to control channel`)
+        return
+      }
+      // The remote hung up the control channel. Go through close() rather
+      // than just flipping the state, so our own RTCPeerConnection (and any
+      // still-open bulk channel) is released too.
       if (this.#state !== 'closed') this.close()
     }
     dc.onerror = (event) => {
-      this.#fireError(event?.error || new Error('DataChannel error'))
+      this.#fireError(event?.error || new Error(`DataChannel (${kind}) error`))
+      if (kind === 'bulk') {
+        // Same reasoning as onclose above: an error on the auxiliary channel
+        // alone should not take down a working control channel.
+        if (this.#bulkChannel === dc) this.#bulkChannel = null
+        return
+      }
       if (this.#state !== 'closed') {
         this.#setState('closed')
         this.#fireClose()
@@ -1284,9 +1439,12 @@ export class WebRTCTransportAdapter extends MeshTransport {
    * Send data through the underlying WebRTC DataChannel.
    *
    * @param {string|object} data
+   * @param {object} [opts]
+   * @param {'control'|'bulk'} [opts.channel='control'] - See
+   *   `WebRTCPeerConnection.send()`.
    */
-  send(data) {
-    this.#connection.send(data)
+  send(data, opts) {
+    this.#connection.send(data, opts)
   }
 
   /**
