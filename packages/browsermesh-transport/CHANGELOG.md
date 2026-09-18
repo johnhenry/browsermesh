@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.0
+
+### Minor Changes
+
+- `WebRTCPeerConnection` (webrtc.mjs) and `WebRTCTransport` (websocket.mjs) now open a second `RTCDataChannel` (`'mesh-bulk'`, unordered but reliable) alongside the original `'mesh'` channel, on the SAME already-negotiated `RTCPeerConnection` -- a second SCTP stream, not a second ICE/DTLS handshake. Previously every kind of traffic (chat, file transfer, sync, agent RPC, consensus votes) shared the one `'mesh'` channel, so a large file-transfer chunk queued on it blocked every other message's delivery order behind it.
+
+  `send(data, { channel })` is the new opt-in: `'control'` (default, unchanged behavior for every existing call site) or `'bulk'`. New `isBulkOpen` getter.
+
+  No version negotiation was added, and none is needed: reads are channel-agnostic (a message fires the same `onMessage`/`'message'` callbacks regardless of which channel it arrived on) and a `'bulk'` send silently falls back to the control channel when the bulk channel doesn't exist -- which is exactly what happens when the remote peer is running an older, single-channel build. Verified against real `RTCPeerConnection`s in both skew directions (old offerer/new answerer, and new offerer/old answerer) in `test/real-peer/dual-channel.test.mjs`.
+
 ## 0.1.1
 
 ### Patch Changes
