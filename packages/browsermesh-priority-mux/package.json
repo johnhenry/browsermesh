@@ -1,0 +1,37 @@
+{
+  "name": "@johnhenry/browsermesh-priority-mux",
+  "version": "0.0.1",
+  "description": "Application-level priority scheduler that chunks and interleaves messages to prevent head-of-line blocking on single-stream transports (WebSocket) for BrowserMesh",
+  "type": "module",
+  "main": "./src/index.mjs",
+  "exports": {
+    ".": "./src/index.mjs"
+  },
+  "files": [
+    "src",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "keywords": [
+    "websocket",
+    "priority",
+    "scheduler",
+    "head-of-line-blocking",
+    "multiplexing",
+    "mesh",
+    "browser"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/johnhenry/browsermesh",
+    "directory": "packages/browsermesh-priority-mux"
+  },
+  "homepage": "https://opensource.johnhenry.me/browsermesh/",
+  "engines": {
+    "node": ">=24.0.0"
+  }
+}
