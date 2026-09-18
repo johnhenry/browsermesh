@@ -967,3 +967,209 @@ describe('HandshakeCoordinator', () => {
     signaler.disconnect()
   })
 })
+
+// ---------------------------------------------------------------------------
+// Glare: simultaneous bidirectional connectToPeer() (#202)
+// ---------------------------------------------------------------------------
+
+/**
+ * Two `MockWebSocket`-shaped sockets wired directly to each other, so a
+ * `send()` on one is actually delivered as a `message` event on the other
+ * -- a real, if minimal, two-party signaling channel, not a stub that only
+ * pretends to have a remote side. Mirrors the real signaling server's own
+ * behavior of stamping forwarded messages with a server-verified `source`
+ * (see `SignalingClient#fire`'s doc comment) rather than trusting the
+ * sender's self-declared `from`.
+ */
+function createPairedSockets(localPodIdA, localPodIdB) {
+  class PairedSocket {
+    constructor(url, localPodId) {
+      this.url = url
+      this.localPodId = localPodId
+      this.readyState = 0
+      this.sent = []
+      this.peer = null
+      this._listeners = {}
+      // No auto-open here (unlike MockWebSocket): both sockets in a pair
+      // exist before either SignalingClient.connect() runs, so scheduling
+      // 'open' at construction time can fire it before connect() has
+      // registered its listener, losing the event forever and hanging
+      // connect() -- opening is instead triggered by the _WebSocket
+      // factory below, at the same point connect() would construct a
+      // fresh real WebSocket.
+    }
+    addEventListener(ev, cb) { (this._listeners[ev] ??= []).push(cb) }
+    removeEventListener(ev, cb) { this._listeners[ev] = (this._listeners[ev] || []).filter(c => c !== cb) }
+    _fire(ev, data) { for (const cb of this._listeners[ev] || []) cb(data) }
+    send(data) {
+      this.sent.push(JSON.parse(data))
+      const { target, from, ...rest } = JSON.parse(data)
+      // Deliver asynchronously, like a real socket round-trip -- and like
+      // a real signaling server, stamp `source` ourselves rather than
+      // forwarding the sender's self-declared `from`.
+      queueMicrotask(() => {
+        this.peer._fire('message', { data: JSON.stringify({ ...rest, source: this.localPodId }) })
+      })
+    }
+    close() { this.readyState = 3; this._fire('close', {}) }
+  }
+  const sockA = new PairedSocket('ws://mock/a', localPodIdA)
+  const sockB = new PairedSocket('ws://mock/b', localPodIdB)
+  sockA.peer = sockB
+  sockB.peer = sockA
+  return { sockA, sockB }
+}
+
+/**
+ * `_WebSocket` factory for `SignalingClient`: hands back an already-built
+ * `PairedSocket` but defers firing its 'open' event until this factory
+ * actually runs (i.e. until `connect()` constructs it), matching when a
+ * real WebSocket would fire 'open' relative to its own construction.
+ */
+function pairedSocketFactory(sock) {
+  return function () {
+    queueMicrotask(() => {
+      sock.readyState = 1
+      sock._fire('open', {})
+    })
+    return sock
+  }
+}
+
+/**
+ * A transport factory realistic enough to exercise HandshakeCoordinator's
+ * glare dedup for real: negotiate() (offerer path) sends an actual offer
+ * over the signaler when connect() runs, and create() (answerer path)
+ * sends an actual answer back when handleOffer() runs -- so two
+ * coordinators wired to a real paired signaling channel (createPairedSockets)
+ * actually drive each other, instead of two isolated unit tests each
+ * pretending to be the only side connecting. Counts calls so a test can
+ * assert how many real (mock) RTCPeerConnection-equivalents got created.
+ */
+function createInstrumentedTransportFactory() {
+  const calls = { negotiate: 0, create: 0 }
+  return {
+    calls,
+    async negotiate(localPodId, remotePodId, signaler) {
+      calls.negotiate++
+      return {
+        type: 'webrtc',
+        connected: false,
+        async connect() {
+          signaler.sendOffer(remotePodId, { sdp: `offer-from-${localPodId}` })
+          this.connected = true
+        },
+        onClose() {},
+      }
+    },
+    async create(_type, { localPodId, remotePodId, signaler }) {
+      calls.create++
+      return {
+        type: 'webrtc',
+        connected: false,
+        async handleOffer(_offer) {
+          signaler.sendAnswer(remotePodId, { sdp: `answer-from-${localPodId}` })
+          this.connected = true
+        },
+        onClose() {},
+      }
+    },
+  }
+}
+
+describe('HandshakeCoordinator glare (simultaneous bidirectional connectToPeer)', () => {
+  it('two real coordinators calling connectToPeer() on each other at the same time settle on exactly one connection, not two competing ones', async () => {
+    // Lexicographic order matters here: podLo < podHi is what makes podLo
+    // the deterministic tie-break winner.
+    const podLo = 'pod-aaaa'
+    const podHi = 'pod-bbbb'
+
+    const { sockA: sockLo, sockB: sockHi } = createPairedSockets(podLo, podHi)
+
+    const signalerLo = new SignalingClient({
+      url: 'ws://mock/lo',
+      localPodId: podLo,
+      _WebSocket: pairedSocketFactory(sockLo),
+    })
+    const signalerHi = new SignalingClient({
+      url: 'ws://mock/hi',
+      localPodId: podHi,
+      _WebSocket: pairedSocketFactory(sockHi),
+    })
+    await signalerLo.connect()
+    await signalerHi.connect()
+
+    const factoryLo = createInstrumentedTransportFactory()
+    const factoryHi = createInstrumentedTransportFactory()
+
+    const coordLo = new HandshakeCoordinator({ localPodId: podLo, signalingClient: signalerLo, transportFactory: factoryLo })
+    const coordHi = new HandshakeCoordinator({ localPodId: podHi, signalingClient: signalerHi, transportFactory: factoryHi })
+
+    // Mirror exactly how ClawserPod wires inbound offers to acceptConnection
+    // (clawser-pod.js's `onIncomingConnection(async ({remotePodId, offer}) =>
+    // handshakeCoordinator.acceptConnection(remotePodId, offer))`).
+    coordLo.onIncomingConnection(({ remotePodId, offer }) => coordLo.acceptConnection(remotePodId, offer))
+    coordHi.onIncomingConnection(({ remotePodId, offer }) => coordHi.acceptConnection(remotePodId, offer))
+
+    // The actual bug scenario (see #202 / clawser's mesh-p2p-e2e.spec.mjs):
+    // both pods discover each other via symmetric discovery and BOTH
+    // independently call connectToPeer() on the other at essentially the
+    // same time -- neither awaits the other first, and neither knows
+    // whether the other has already started.
+    const [resultLo, resultHi] = await Promise.all([
+      coordLo.connectToPeer(podHi),
+      coordHi.connectToPeer(podLo),
+    ])
+
+    // Exactly one real negotiation happened for this pair: the lower-ID
+    // pod is the designated offerer (negotiate() exactly once, create()
+    // never), and the higher-ID pod is the designated answerer (create()
+    // exactly once, negotiate() never). Pre-fix, both factories would see
+    // negotiate() AND create() called once each -- four RTCPeerConnections
+    // total for one pair instead of one each.
+    assert.equal(factoryLo.calls.negotiate, 1, 'designated offerer should negotiate exactly once')
+    assert.equal(factoryLo.calls.create, 0, 'designated offerer should never also answer its own offer')
+    assert.equal(factoryHi.calls.negotiate, 0, 'designated answerer should never send a competing offer')
+    assert.equal(factoryHi.calls.create, 1, 'designated answerer should accept exactly once')
+
+    // Both sides end up with a real, live session for the SAME pair -- no
+    // stuck state, no hang, no unhandled rejection.
+    assert.equal(resultLo.sessionInfo.remotePodId, podHi)
+    assert.equal(resultHi.sessionInfo.remotePodId, podLo)
+    assert.equal(resultLo.transport.connected, true)
+    assert.equal(resultHi.transport.connected, true)
+
+    // Calling connectToPeer() again for the same peer reuses the
+    // established session instead of starting a second negotiation.
+    const resultLoAgain = await coordLo.connectToPeer(podHi)
+    const resultHiAgain = await coordHi.connectToPeer(podLo)
+    assert.equal(resultLoAgain, resultLo)
+    assert.equal(resultHiAgain, resultHi)
+    assert.equal(factoryLo.calls.negotiate, 1)
+    assert.equal(factoryHi.calls.create, 1)
+  })
+
+  it('the designated-loser side falls back to its own offer if the winner never actually connects (no permanent hang)', async () => {
+    const podLo = 'pod-aaaa'
+    const podHi = 'pod-bbbb'
+
+    const signalerHi = new SignalingClient({
+      url: 'ws://mock/hi',
+      localPodId: podHi,
+      _WebSocket: function () { return new MockWebSocket('ws://mock/hi') },
+    })
+    await signalerHi.connect()
+
+    const factoryHi = createInstrumentedTransportFactory()
+    const coordHi = new HandshakeCoordinator({ localPodId: podHi, signalingClient: signalerHi, transportFactory: factoryHi })
+
+    // podLo never actually calls connectToPeer() (offline, or simply never
+    // discovered podHi) -- so no offer will ever arrive. coordHi must not
+    // hang forever waiting for one; it should time out like the existing
+    // "Connection timeout" behavior on the offerer path.
+    await assert.rejects(
+      coordHi.connectToPeer(podLo, { timeout: 25 }),
+      /Timed out waiting for .*offer|glare/i,
+    )
+  })
+})

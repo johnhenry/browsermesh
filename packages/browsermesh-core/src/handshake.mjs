@@ -751,6 +751,29 @@ export class HandshakeCoordinator {
   #listeners = new Map()
 
   /**
+   * Tracks, per remote pod, the Promise for this coordinator's one and only
+   * negotiation with that peer -- whichever of connectToPeer()'s own offer
+   * or acceptConnection()'s handling of an incoming offer actually runs.
+   * Both methods consult and populate this map so that "glare" -- two pods
+   * each calling connectToPeer() on the other at close to the same time --
+   * always settles on exactly one negotiation instead of each side racing
+   * its own offerer AND answerer RTCPeerConnection for the same remote pod
+   * (four connections total for one pair instead of one each). See #202.
+   * @type {Map<string, Promise<{transport: object, sessionInfo: object}>>}
+   */
+  #peerConnections = new Map()
+
+  /**
+   * Deferred resolvers for connectToPeer() calls that lost the glare
+   * tie-break (see #isDesignatedOfferer) and are waiting for
+   * acceptConnection() to finish handling the designated offerer's
+   * incoming offer for the same remotePodId, instead of sending a second,
+   * competing offer of their own.
+   * @type {Map<string, Array<{ resolve: Function, reject: Function }>>}
+   */
+  #glareWaiters = new Map()
+
+  /**
    * @param {object} opts
    * @param {string} opts.localPodId - Local pod identifier
    * @param {SignalingClient} [opts.signalingClient] - Signaling client instance
@@ -796,46 +819,76 @@ export class HandshakeCoordinator {
     }
 
     const timeout = opts.timeout || DEFAULT_TIMEOUT_MS
+
+    // Glare handling (#202): reuse whatever negotiation with this
+    // remotePodId is already in flight or established, rather than
+    // starting a second, competing one.
+    const existing = this.#peerConnections.get(remotePodId)
+    if (existing) {
+      this.#onLog(2, `Reusing existing connection/negotiation with ${remotePodId}`)
+      return existing
+    }
+
+    if (!this.#isDesignatedOfferer(remotePodId)) {
+      // Both sides discover each other independently and both call
+      // connectToPeer() on each other at close to the same time -- classic
+      // WebRTC "glare". Resolve it with a deterministic tie-breaker both
+      // sides can compute alone, with no further coordination: the pod
+      // whose ID sorts lower is always the designated offerer. We are not
+      // it, so don't race our own offer -- wait for remotePodId's offer to
+      // arrive over signaling and be handled by acceptConnection(), and
+      // adopt that session instead.
+      this.#onLog(2, `Deferring to ${remotePodId} as designated offerer (glare tie-break)`)
+      return this.#waitForPeerConnection(remotePodId, timeout)
+    }
+
     this.#onLog(2, `Initiating connection to ${remotePodId}`)
 
     const endpointOpts = opts.endpoints || {
       webrtc: { config: { iceServers: opts.iceServers || [] } },
     }
 
-    let timeoutHandle
-    const transport = await Promise.race([
-      this.#transportFactory.negotiate(
-        this.#localPodId,
+    const promise = (async () => {
+      let timeoutHandle
+      const transport = await Promise.race([
+        this.#transportFactory.negotiate(
+          this.#localPodId,
+          remotePodId,
+          this.#signalingClient,
+          endpointOpts,
+        ),
+        new Promise((_, reject) => {
+          timeoutHandle = setTimeout(() => reject(new Error('Connection timeout')), timeout)
+        }),
+      ])
+      clearTimeout(timeoutHandle)
+
+      // TransportFactory.negotiate() returns a transport that has been
+      // created but not yet connected (see its docstring) -- no offer,
+      // answer or ICE candidate has crossed the wire yet. Mirror
+      // acceptConnection()'s `await transport.handleOffer(offer)` on the
+      // answerer side by actually driving the handshake here before this
+      // session is adopted as 'connected'.
+      if (typeof transport.connect === 'function') {
+        await transport.connect()
+      }
+
+      const sessionInfo = {
+        localPodId: this.#localPodId,
         remotePodId,
-        this.#signalingClient,
-        endpointOpts,
-      ),
-      new Promise((_, reject) => {
-        timeoutHandle = setTimeout(() => reject(new Error('Connection timeout')), timeout)
-      }),
-    ])
-    clearTimeout(timeoutHandle)
+        transportType: transport.type,
+        establishedAt: Date.now(),
+      }
 
-    // TransportFactory.negotiate() returns a transport that has been
-    // created but not yet connected (see its docstring) -- no offer,
-    // answer or ICE candidate has crossed the wire yet. Mirror
-    // acceptConnection()'s `await transport.handleOffer(offer)` on the
-    // answerer side by actually driving the handshake here before this
-    // session is adopted as 'connected'.
-    if (typeof transport.connect === 'function') {
-      await transport.connect()
-    }
+      this.#onLog(2, `Connected to ${remotePodId} via ${transport.type}`)
+      const result = { transport, sessionInfo }
+      this.#forgetPeerConnectionOnClose(remotePodId, transport)
+      this.#fire('connected', { remotePodId, transport, sessionInfo })
+      return result
+    })()
 
-    const sessionInfo = {
-      localPodId: this.#localPodId,
-      remotePodId,
-      transportType: transport.type,
-      establishedAt: Date.now(),
-    }
-
-    this.#onLog(2, `Connected to ${remotePodId} via ${transport.type}`)
-    this.#fire('connected', { remotePodId, transport, sessionInfo })
-    return { transport, sessionInfo }
+    this.#settlePeerConnection(remotePodId, promise)
+    return promise
   }
 
   /**
@@ -856,28 +909,54 @@ export class HandshakeCoordinator {
       throw new Error('SignalingClient is required for acceptConnection')
     }
 
+    // Glare handling (#202): mirror connectToPeer()'s dedup.
+    const existing = this.#peerConnections.get(remotePodId)
+    if (existing) {
+      if (this.#isDesignatedOfferer(remotePodId)) {
+        // We are the designated offerer for this pair and already have our
+        // own negotiation with remotePodId in flight or established. This
+        // incoming offer is a late/duplicate glare offer from the side
+        // that should have deferred to ours -- ignore it instead of
+        // starting a second, competing negotiation.
+        this.#onLog(1, `Ignoring incoming offer from ${remotePodId}: already the designated offerer (glare tie-break)`)
+        return existing
+      }
+      // Not the designated offerer, and already negotiating/negotiated
+      // with remotePodId (a duplicate/retried offer for the same pair,
+      // or this accept is already underway) -- reuse it.
+      this.#onLog(2, `Reusing existing negotiation with ${remotePodId}`)
+      return existing
+    }
+
     this.#onLog(2, `Accepting connection from ${remotePodId}`)
 
-    const transport = await this.#transportFactory.create('webrtc', {
-      localPodId: this.#localPodId,
-      remotePodId,
-      signaler: this.#signalingClient,
-    })
+    const promise = (async () => {
+      const transport = await this.#transportFactory.create('webrtc', {
+        localPodId: this.#localPodId,
+        remotePodId,
+        signaler: this.#signalingClient,
+      })
 
-    if (typeof transport.handleOffer === 'function') {
-      await transport.handleOffer(offer)
-    }
+      if (typeof transport.handleOffer === 'function') {
+        await transport.handleOffer(offer)
+      }
 
-    const sessionInfo = {
-      localPodId: this.#localPodId,
-      remotePodId,
-      transportType: transport.type,
-      establishedAt: Date.now(),
-    }
+      const sessionInfo = {
+        localPodId: this.#localPodId,
+        remotePodId,
+        transportType: transport.type,
+        establishedAt: Date.now(),
+      }
 
-    this.#onLog(2, `Accepted connection from ${remotePodId}`)
-    this.#fire('connected', { remotePodId, transport, sessionInfo })
-    return { transport, sessionInfo }
+      this.#onLog(2, `Accepted connection from ${remotePodId}`)
+      const result = { transport, sessionInfo }
+      this.#forgetPeerConnectionOnClose(remotePodId, transport)
+      this.#fire('connected', { remotePodId, transport, sessionInfo })
+      return result
+    })()
+
+    this.#settlePeerConnection(remotePodId, promise)
+    return promise
   }
 
   /**
@@ -1019,6 +1098,108 @@ export class HandshakeCoordinator {
   }
 
   // -- Internal -------------------------------------------------------------
+
+  /**
+   * Deterministic glare tie-break (#202): exactly one side of any pod pair
+   * is the designated offerer, decided purely from both pods' own IDs so
+   * both sides agree without any further coordination -- neither needs to
+   * know what the other is doing, only its ID. The lower podId is always
+   * the designated offerer; the higher podId always defers to the
+   * incoming offer instead of sending its own.
+   * @param {string} remotePodId
+   * @returns {boolean} true when the local pod is the designated offerer.
+   */
+  #isDesignatedOfferer(remotePodId) {
+    return this.#localPodId < remotePodId
+  }
+
+  /**
+   * Wait for acceptConnection() to settle a negotiation for remotePodId
+   * that this coordinator lost the glare tie-break for, instead of racing
+   * a second offer of its own. Resolves/rejects exactly like the
+   * negotiation itself; rejects on timeout, matching connectToPeer()'s own
+   * "Connection timeout" behavior for the offerer path.
+   * @param {string} remotePodId
+   * @param {number} timeoutMs
+   * @returns {Promise<{transport: object, sessionInfo: object}>}
+   */
+  #waitForPeerConnection(remotePodId, timeoutMs) {
+    // Re-check: acceptConnection() may have already settled this between
+    // connectToPeer()'s own check and this call.
+    const existing = this.#peerConnections.get(remotePodId)
+    if (existing) return existing
+
+    return new Promise((resolve, reject) => {
+      const entry = {}
+      const timeoutHandle = setTimeout(() => {
+        const list = this.#glareWaiters.get(remotePodId)
+        if (list) {
+          const idx = list.indexOf(entry)
+          if (idx !== -1) list.splice(idx, 1)
+          if (list.length === 0) this.#glareWaiters.delete(remotePodId)
+        }
+        reject(new Error(`Timed out waiting for ${remotePodId}'s offer (lost glare tie-break)`))
+      }, timeoutMs)
+      entry.resolve = (value) => { clearTimeout(timeoutHandle); resolve(value) }
+      entry.reject = (err) => { clearTimeout(timeoutHandle); reject(err) }
+
+      if (!this.#glareWaiters.has(remotePodId)) this.#glareWaiters.set(remotePodId, [])
+      this.#glareWaiters.get(remotePodId).push(entry)
+    })
+  }
+
+  /**
+   * Record `promise` as this coordinator's one negotiation with
+   * remotePodId, and wake any connectToPeer() calls that deferred to it
+   * (see #waitForPeerConnection) once it settles. On rejection, forgets
+   * the entry so a later, genuine reconnection attempt isn't permanently
+   * blocked by a failed one.
+   * @param {string} remotePodId
+   * @param {Promise<{transport: object, sessionInfo: object}>} promise
+   */
+  #settlePeerConnection(remotePodId, promise) {
+    this.#peerConnections.set(remotePodId, promise)
+    promise.then(
+      (value) => {
+        const waiters = this.#glareWaiters.get(remotePodId)
+        if (!waiters) return
+        this.#glareWaiters.delete(remotePodId)
+        for (const w of waiters) w.resolve(value)
+      },
+      (err) => {
+        if (this.#peerConnections.get(remotePodId) === promise) {
+          this.#peerConnections.delete(remotePodId)
+        }
+        const waiters = this.#glareWaiters.get(remotePodId)
+        if (!waiters) return
+        this.#glareWaiters.delete(remotePodId)
+        for (const w of waiters) w.reject(err)
+      },
+    )
+  }
+
+  /**
+   * Once an established session's transport actually closes, forget it so
+   * a genuine future reconnection to remotePodId isn't permanently blocked
+   * by #peerConnections/#isDesignatedOfferer dedup (#202). No-op when the
+   * transport exposes no onClose (mirrors connectViaToken()'s own handling
+   * of that case).
+   * @param {string} remotePodId
+   * @param {object} transport
+   */
+  #forgetPeerConnectionOnClose(remotePodId, transport) {
+    if (typeof transport.onClose !== 'function') return
+    transport.onClose(() => {
+      // Only delete if this transport's own entry is still the current
+      // one -- a newer negotiation for the same remotePodId may already
+      // have replaced it by the time this fires.
+      const current = this.#peerConnections.get(remotePodId)
+      if (!current) return
+      current.then((v) => {
+        if (v && v.transport === transport) this.#peerConnections.delete(remotePodId)
+      }, () => {})
+    })
+  }
 
   /**
    * Fire all listeners for a given event, swallowing listener errors.
