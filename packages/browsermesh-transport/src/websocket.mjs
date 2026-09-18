@@ -555,6 +555,43 @@ export class WebRTCTransport {
   async handleOffer(offer) {
     if (!this.#pc) {
       this.#pc = new this.#RTCPeerConnectionCtor(this.#config);
+
+      // Mirror connect()'s wiring, which this answerer path was missing
+      // entirely: without it, this side's own gathered ICE candidates were
+      // never sent to the remote peer, and ICE candidates received from the
+      // remote peer were never fed into this RTCPeerConnection -- SDP offer/
+      // answer still completed (that's a separate exchange), but ICE
+      // connectivity checks then had no candidates to try on either side,
+      // so the connection stalled forever in its initial ICE state. Only
+      // wired when a fresh RTCPeerConnection is actually created here, so a
+      // reused #pc (offer arriving twice on the same transport) is not
+      // double-registered.
+      this.#pc.addEventListener('icecandidate', (ev) => {
+        if (ev.candidate) {
+          this.#signaler.sendIceCandidate(this.#remotePodId, ev.candidate);
+          this._fireEvent('ice-candidate', ev.candidate);
+        }
+      });
+
+      this.#pc.addEventListener('connectionstatechange', () => {
+        this.#stats.iceState = this.#pc.iceConnectionState || 'unknown';
+        if (this.#pc.connectionState === 'failed' || this.#pc.connectionState === 'closed') {
+          if (this.#state !== 'closed' && this.#state !== 'closing') {
+            this.#state = 'closed';
+            this._fireEvent('close');
+          }
+        }
+      });
+
+      this.#signaler.onIceCandidate((data) => {
+        if (this.#pc) {
+          // See connect()'s identical handler: the promise must not be
+          // dropped, for the same reason.
+          Promise.resolve(this.#pc.addIceCandidate(data.candidate)).catch((e) => {
+            silentCatch('clawser-mesh-websocket', 'ignore-rejected-ice-candidate', e);
+          });
+        }
+      });
     }
     this.#state = 'connecting';
 

@@ -903,6 +903,91 @@ describe('WebRTCTransport', () => {
     assert.equal(candidates.length, 1);
   });
 
+  // Regression coverage for a bug found while root-causing
+  // erisera-code/clawser#164 (mesh P2P connectivity): handleOffer() (the
+  // answerer role) never wired ICE candidates at all -- connect() (the
+  // offerer role) sends its own gathered candidates via
+  // signaler.sendIceCandidate() and feeds remote candidates it receives via
+  // signaler.onIceCandidate() into pc.addIceCandidate(), but handleOffer()
+  // did neither. SDP offer/answer still completed correctly (a separate
+  // exchange), so this was invisible to anything that only checked the
+  // handshake "succeeded" -- but with no candidates on either side, ICE
+  // connectivity checks had nothing to try and the connection stalled
+  // forever in its initial ICE state. Confirmed against two real
+  // RTCPeerConnections in a real browser (not this file's mocks): with the
+  // fix, ICE reaches 'connected' and the data channel opens; without it,
+  // neither side's iceConnectionState/connectionState ever changes at all.
+
+  it('handleOffer (answerer) feeds remote ICE candidates from the signaler into the peer connection', async () => {
+    rtc = createRTC();
+    const offer = { type: 'offer', sdp: 'mock-offer-sdp' };
+    const p = rtc.handleOffer(offer);
+
+    await settle(() => signaler._sent.length);
+    signaler._receiveIceCandidate({ candidate: 'remote-cand', sdpMid: '0' });
+
+    const remoteDC = new MockDataChannel('mesh', { ordered: true });
+    lastPC._fire('datachannel', { channel: remoteDC });
+    remoteDC._open();
+    await p;
+
+    assert.equal(lastPC._iceCandidates.length, 1);
+    assert.deepEqual(
+      lastPC._iceCandidates[0],
+      { candidate: 'remote-cand', sdpMid: '0' },
+      'addIceCandidate should receive the unwrapped candidate, not the signaling envelope',
+    );
+  });
+
+  it('handleOffer (answerer) sends its own gathered ICE candidates to the remote peer via the signaler', async () => {
+    rtc = createRTC();
+    const candidates = [];
+    rtc.on('ice-candidate', (c) => { candidates.push(c); });
+    const offer = { type: 'offer', sdp: 'mock-offer-sdp' };
+    const p = rtc.handleOffer(offer);
+
+    await settle(() => signaler._sent.length);
+    // Simulate a local ICE candidate gathered by this side's RTCPeerConnection.
+    lastPC._fire('icecandidate', { candidate: { candidate: 'local-cand', sdpMid: '0' } });
+
+    const remoteDC = new MockDataChannel('mesh', { ordered: true });
+    lastPC._fire('datachannel', { channel: remoteDC });
+    remoteDC._open();
+    await p;
+
+    assert.equal(candidates.length, 1, "'ice-candidate' event should fire for the locally-gathered candidate");
+    const sentIce = signaler._sent.filter((s) => s.type === 'ice');
+    assert.equal(sentIce.length, 1, 'the answerer must relay its own candidate to the remote peer, not just fire a local event');
+    assert.deepEqual(sentIce[0].candidate, { candidate: 'local-cand', sdpMid: '0' });
+  });
+
+  it('handleOffer (answerer) does not double-register ICE listeners when the same transport is reused for a second offer', async () => {
+    rtc = createRTC();
+    const offer = { type: 'offer', sdp: 'mock-offer-sdp' };
+    const p1 = rtc.handleOffer(offer);
+    await settle(() => signaler._sent.length);
+    const remoteDC1 = new MockDataChannel('mesh', { ordered: true });
+    lastPC._fire('datachannel', { channel: remoteDC1 });
+    remoteDC1._open();
+    await p1;
+
+    const firstPC = lastPC;
+    const candidates = [];
+    rtc.on('ice-candidate', (c) => { candidates.push(c); });
+
+    // A second offer on the same transport instance reuses this.#pc (it is
+    // only constructed `if (!this.#pc)`) -- the ICE listeners must not be
+    // attached a second time, or a single local candidate would be relayed
+    // (and the 'ice-candidate' event fired) more than once. Listener
+    // (re-)registration happens synchronously before handleOffer()'s first
+    // await, so there is no need to wait for (or complete) the second
+    // handshake to observe it.
+    rtc.handleOffer(offer).catch(() => {});
+    firstPC._fire('icecandidate', { candidate: { candidate: 'local-cand-2', sdpMid: '0' } });
+
+    assert.equal(candidates.length, 1, 'listener must be registered exactly once even after a second handleOffer() call');
+  });
+
   // -- send() ---
 
   it('send throws when not connected', () => {
