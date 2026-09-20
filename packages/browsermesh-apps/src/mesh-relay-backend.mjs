@@ -23,6 +23,13 @@
  * explicit "out of scope" list (UDP relay, inbound listen-relay).
  *
  * No browser-only imports at module level.
+ *
+ * `@johnhenry/browsermesh-netway` (an optional peerDependency) is imported
+ * eagerly here, deliberately -- see the CHANGELOG entry documenting the
+ * sibling fix in other files of this package. `Backend` is used as a base
+ * class (`export class MeshRelayBackend extends Backend`), evaluated at
+ * module load time -- same constraint as `cloud-storage-backend.mjs`'s
+ * identical pattern; not attempted here.
  */
 
 import { Backend, StreamSocket, ConnectionRefusedError } from '@johnhenry/browsermesh-netway'

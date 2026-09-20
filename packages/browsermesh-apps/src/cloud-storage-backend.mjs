@@ -140,6 +140,16 @@
  *     is byte-for-byte identical to before this phase existed.
  *
  * No browser-only imports at module level.
+ *
+ * `@johnhenry/browsermesh-netway` (an optional peerDependency) is imported
+ * eagerly here, deliberately -- see the CHANGELOG entry documenting the
+ * sibling fix in other files of this package. `Backend` is used as a base
+ * class (`export class CloudStorageBackend extends Backend`), evaluated at
+ * module load time; deferring a class's own base class requires either an
+ * async factory constructing an anonymous subclass (breaking direct
+ * `new CloudStorageBackend(...)`/`instanceof`/further-subclassing) or a
+ * dynamic-base-class pattern -- a real restructure of this file's public
+ * shape, not attempted here.
  */
 
 import { Backend, StreamSocket } from '@johnhenry/browsermesh-netway'

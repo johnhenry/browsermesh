@@ -30,9 +30,11 @@
  * regardless of which side initiated it.
  *
  * ## Multiple connections per peer (issue #116)
- * `auth.connectionId` (default `DEFAULT_CONNECTION_ID`, re-exported from
- * `@johnhenry/browsermesh-transport`) selects which of possibly-several
- * independent `RTCPeerConnection`s to `endpoint` this call negotiates --
+ * `auth.connectionId` (default `DEFAULT_CONNECTION_ID`, duplicated locally
+ * in this file rather than imported from `@johnhenry/browsermesh-transport`
+ * -- see that constant's own definition below for why) selects which of
+ * possibly-several independent `RTCPeerConnection`s to `endpoint` this call
+ * negotiates --
  * `PeerNode.connectToPeer(pubKey, endpoints, auth)` already threads `auth`
  * straight through to `negotiator.negotiate(endpoints, auth)`, so callers
  * can request a second, fully independent connection to a peer already
@@ -48,7 +50,21 @@
  * No browser-only imports at module level.
  */
 
-import { WebRTCTransportAdapter, DEFAULT_CONNECTION_ID } from '@johnhenry/browsermesh-transport'
+// @johnhenry/browsermesh-transport (an optional peerDependency) is imported
+// lazily, at each of the two `WebRTCTransportAdapter` call sites below, not
+// eagerly here -- so this module doesn't force it on every consumer of
+// this package's top-level `.` entrypoint. See the CHANGELOG entry
+// documenting this fix.
+//
+// DEFAULT_CONNECTION_ID is duplicated locally (its real value, confirmed by
+// reading browsermesh-transport/src/webrtc.mjs directly: `export const
+// DEFAULT_CONNECTION_ID = 'default'`) rather than lazily imported --
+// unlike WebRTCTransportAdapter, it's used as a *default parameter value*
+// in several places below, which is evaluated at call time from whatever
+// is in scope; a lazily-imported `let` binding could still be `undefined`
+// the first time one of those calls happens before the import resolves. A
+// plain literal has no such timing hazard.
+const DEFAULT_CONNECTION_ID = 'default'
 
 /** Default time to wait for an SDP answer before giving up. */
 const DEFAULT_ANSWER_TIMEOUT_MS = 15_000
@@ -158,6 +174,7 @@ export function createWebRTCTransportFactory({
       // side gets from connectToPeer() -- see PeerNode.adoptIncomingSession().
       if (typeof onIncomingConnection === 'function') {
         await waitForOpen(conn, defaultOpenTimeoutMs ?? DEFAULT_OPEN_TIMEOUT_MS)
+        const { WebRTCTransportAdapter } = await import('@johnhenry/browsermesh-transport')
         const adapter = new WebRTCTransportAdapter(conn)
         await adapter.connect()
         onIncomingConnection(fromPodId, adapter, connectionId)
@@ -222,6 +239,7 @@ export function createWebRTCTransportFactory({
       throw new Error(`WebRTC DataChannel with ${remotePodId} did not open in time`)
     }
 
+    const { WebRTCTransportAdapter } = await import('@johnhenry/browsermesh-transport')
     const adapter = new WebRTCTransportAdapter(conn)
     await adapter.connect()
     return adapter

@@ -204,6 +204,16 @@
  *     received a task notification from a remote submitter.
  *
  * No browser-only imports at module level.
+ *
+ * `@johnhenry/browsermesh-discovery` (an optional peerDependency) is
+ * imported eagerly here, deliberately -- see the CHANGELOG entry
+ * documenting the sibling fix in other files of this package.
+ * `SwimMembership`/`SwarmCoordinator` are both constructed synchronously
+ * inside this service's `attach()`, whose synchronous-return contract is a
+ * hard, repo-wide convention (`mesh-service.mjs`'s `attachService()`,
+ * relied on -- without `await` -- throughout `mesh-bootstrap.mjs`); making
+ * `attach()` async to lazy-load these would break that convention, not
+ * attempted here.
  */
 
 import {

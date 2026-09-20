@@ -49,6 +49,16 @@
  * supplying that out-of-band knowledge yourself.
  *
  * No browser-only imports at module level.
+ *
+ * `@johnhenry/browsermesh-discovery` (an optional peerDependency) is
+ * imported eagerly here, deliberately -- see the CHANGELOG entry
+ * documenting the sibling fix in other files of this package.
+ * `createMeshDht()` is synchronous, has a directly-tested synchronous
+ * validation-throw contract (`test/mesh-dht.test.mjs`'s
+ * `assert.throws(...)`), and returns `{strategy, dhtNode, teardown}`
+ * directly to ~11 synchronous call sites in its own test file -- making it
+ * async to lazy-load `DhtDiscoveryStrategy` would break all of that; not
+ * attempted here.
  */
 
 import { DhtDiscoveryStrategy } from '@johnhenry/browsermesh-discovery'

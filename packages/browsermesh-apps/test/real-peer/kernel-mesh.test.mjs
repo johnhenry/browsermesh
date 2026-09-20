@@ -154,7 +154,7 @@ describeIfReal('kernel mesh capability: a real Kernel tenant sends/receives over
       assert.ok(bobsConnToAlice.isOpen)
 
       // -- Kernel wired to alice's real, connected PeerNode -------------------
-      const kernel = createMeshKernel({ peerNode: nodeA })
+      const kernel = await createMeshKernel({ peerNode: nodeA })
 
       // == Negative path 1: capability never granted -> throws, no silent no-op ==
       const untrustedTenant = kernel.createTenant({ capabilities: [] }) // no KERNEL_CAP.MESH

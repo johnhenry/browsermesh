@@ -252,7 +252,7 @@ describe('mesh-keepalive: hardening integration', () => {
       return t
     })
 
-    const hardening = createHardenedNegotiator({ negotiator })
+    const hardening = await createHardenedNegotiator({ negotiator })
     const nodeWithHardening = new PeerNode({ wallet: alice.wallet, registry: alice.registry, transportNegotiator: hardening })
     await nodeWithHardening.boot()
 

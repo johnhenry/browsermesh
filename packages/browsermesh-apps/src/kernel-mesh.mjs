@@ -29,10 +29,9 @@
  * with no adapter code needed -- this module's only real job is making that
  * dependency direction, and the one-import convenience, explicit.
  *
- * No browser-only imports at module level.
+ * No browser-only imports at module level -- @johnhenry/browsermesh-kernel
+ * is imported lazily inside createMeshKernel() (see below).
  */
-
-import { Kernel } from '@johnhenry/browsermesh-kernel'
 
 /**
  * Construct a Kernel whose MESH capability is backed by a real, connected
@@ -49,8 +48,15 @@ import { Kernel } from '@johnhenry/browsermesh-kernel'
  *   `new Kernel()`.
  * @param {object} [opts.kernelOpts] - Passed through to the Kernel
  *   constructor (`clock`, `rng`, `tracerOpts`, `loggerOpts`, `resourceOpts`).
- * @returns {Kernel}
+ * @returns {Promise<Kernel>}
  */
-export function createMeshKernel({ peerNode, kernelOpts = {} } = {}) {
+export async function createMeshKernel({ peerNode, kernelOpts = {} } = {}) {
+  // Lazily imported so this module doesn't force @johnhenry/browsermesh-kernel
+  // (an optional peerDependency) on every consumer of this package's
+  // top-level `.` entrypoint, which `export *`s from this file among 70+
+  // others -- see the CHANGELOG entry documenting this fix for the full
+  // rationale. BREAKING: this function is now async (was sync); the only
+  // in-repo caller (test/real-peer/kernel-mesh.test.mjs) is updated to match.
+  const { Kernel } = await import('@johnhenry/browsermesh-kernel')
   return new Kernel({ ...kernelOpts, mesh: peerNode || null })
 }

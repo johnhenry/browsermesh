@@ -85,7 +85,10 @@
  * No browser-only imports at module level.
  */
 
-import { RetryWithBackoff, TransportFailover, MetricsRegistry } from '@johnhenry/browsermesh-core'
+// @johnhenry/browsermesh-core (an optional peerDependency) is imported
+// lazily inside createHardenedNegotiator() below, not eagerly here -- so
+// this module doesn't force it on every consumer of this package's
+// top-level `.` entrypoint. See the CHANGELOG entry documenting this fix.
 
 const DEFAULT_METRICS_KEY = 'unknown'
 
@@ -192,17 +195,21 @@ function instrumentTransport(transport, metrics) {
  *   `new RetryWithBackoff()` (maxRetries/baseDelayMs/maxDelayMs/jitterFactor/
  *   resetTimeoutMs -- see hardening.mjs).
  * @param {Function} [opts.onLog]
- * @returns {{
+ * @returns {Promise<{
  *   negotiate: (endpoints: object, auth?: object) => Promise<object>,
  *   metrics: import('@johnhenry/browsermesh-core').MetricsRegistry,
  *   failovers: Map<string, import('@johnhenry/browsermesh-core').TransportFailover>,
  *   retries: Map<string, import('@johnhenry/browsermesh-core').RetryWithBackoff>,
- * }}
+ * }>}
  */
-export function createHardenedNegotiator({ negotiator, retryOptions, onLog }) {
+export async function createHardenedNegotiator({ negotiator, retryOptions, onLog }) {
   if (!negotiator) {
     throw new Error('createHardenedNegotiator: options.negotiator is required')
   }
+  // Lazily imported (an optional peerDependency) -- see the CHANGELOG entry
+  // documenting this fix. BREAKING: this function is now async (was sync);
+  // its one in-repo caller (mesh-bootstrap.mjs) is updated to match.
+  const { RetryWithBackoff, TransportFailover, MetricsRegistry } = await import('@johnhenry/browsermesh-core')
   const log = onLog || (() => {})
   const metrics = new MetricsRegistry()
   const failovers = new Map()

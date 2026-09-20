@@ -1,5 +1,92 @@
 # Changelog
 
+## 0.6.0
+
+### Minor Changes
+
+- Made `@johnhenry/browsermesh-transport` and `@johnhenry/browsermesh-kernel`
+  genuinely optional for this package's top-level `.` entrypoint --
+  `peerDependenciesMeta` already declared both `optional: true`, but every
+  consumer of `.` (which `export *`s from 70+ modules) was forced to have
+  both installed anyway, since several modules imported them eagerly at
+  module top-level. Verified via a full recursive audit of every eager
+  top-level import of an "optional" peer across this package, cross-checked
+  against actual usage (was the imported symbol used inside an already-async
+  function with no other callers to update, or would deferring it require a
+  breaking signature change or an unsafe restructure).
+
+  **Fixed (lazy `import()`, no observable behavior change beyond BREAKING
+  notes below):**
+
+  - `mesh-bootstrap.mjs`: `createMeshNode()` (already async) now lazily
+    imports all of `@johnhenry/browsermesh-core`, `-discovery`, and
+    `-transport` internally, instead of eagerly at module top-level.
+  - `webrtc-negotiator.mjs`: `WebRTCTransportAdapter` (from `-transport`) is
+    now lazily imported at its two call sites (both already inside async
+    functions). `DEFAULT_CONNECTION_ID` is now a local literal
+    (`'default'`, matching the real value in `browsermesh-transport`)
+    instead of an eager import -- it's used as a default-parameter value in
+    several places, evaluated at call time from whatever's in scope, which
+    a lazily-resolved binding can't safely guarantee is ready yet.
+  - `key-distribution.mjs`: `@johnhenry/browsermesh-core`'s
+    `generateEncryptionKeyPair`/`wrapKeyForMember`/`unwrapKeyForMember` are
+    now lazily imported at their (already-async) call sites. No public
+    signature change -- `createKeyDistributionService()`/`attach()` stay
+    synchronous.
+  - `kernel-mesh.mjs`: `Kernel` (from `-kernel`) is now lazily imported
+    inside `createMeshKernel()`.
+
+  **BREAKING:**
+
+  - `kernel-mesh.mjs`'s `createMeshKernel()` is now `async` (was
+    synchronous) -- its only in-repo callers
+    (`test/real-peer/kernel-mesh.test.mjs`,
+    `test/real-peer/full-pipeline.test.mjs`) are updated to `await` it.
+  - `mesh-hardening.mjs`'s `createHardenedNegotiator()` is now `async` (was
+    synchronous) -- `MetricsRegistry` (from `@johnhenry/browsermesh-core`)
+    was constructed synchronously at factory-call time, not deferred into
+    any already-async internal path, unlike `RetryWithBackoff`/
+    `TransportFailover`. Its two in-repo callers (`mesh-bootstrap.mjs`,
+    `test/mesh-keepalive.test.mjs`) are updated to `await` it.
+
+  **Evaluated and deliberately left eager** (each documented in its own
+  file's header comment with the specific reason): `mesh-fetch.mjs` and
+  `serverless-fetch.mjs` (`-discovery`, `-discovery` respectively) both have
+  synchronous, directly-tested validation-throw contracts
+  (`assert.throws(() => fn(...))`) and return real values (not promises)
+  to many synchronous callers in their own test files -- making either
+  async would silently break that documented behavior, not a simple
+  per-call dynamic import. `mesh-websocket.mjs` (`-discovery`) uses its
+  import inside a class constructor, which can never be async.
+  `mesh-swarm.mjs` (`-discovery`) constructs its `-discovery` classes
+  synchronously inside `attach()`, whose synchronous-return contract is a
+  hard, repo-wide `mesh-service.mjs` convention relied on throughout
+  `mesh-bootstrap.mjs`. `mesh-keepalive.mjs` (`@johnhenry/browsermesh-core`)
+  has a synchronous de-dup guard around starting a per-peer health check
+  that a lazy import would race (two rapid calls for the same peer could
+  both pass the guard before the first import resolves) -- closing that
+  safely needs a reservation/cancellation state machine, real complexity in
+  production failover-adjacent code not attempted here.
+  `cloud-storage-backend.mjs`/`mesh-relay-backend.mjs` (`@johnhenry/browsermesh-netway`)
+  both use `Backend` as a base class
+  (`class X extends Backend`), evaluated at module load time -- deferring a
+  class's own base class requires either an async factory constructing an
+  anonymous subclass (breaking direct `new X(...)`/`instanceof`/further
+  subclassing) or a dynamic-base-class pattern, a real restructure of each
+  file's public shape.
+
+  **Net result**: `@johnhenry/browsermesh-transport` and
+  `@johnhenry/browsermesh-kernel` are now genuinely optional for `.`.
+  `@johnhenry/browsermesh-core`, `@johnhenry/browsermesh-discovery`, and
+  `@johnhenry/browsermesh-netway` remain effectively required for `.` (one,
+  five, and two files respectively still import them eagerly, each for a
+  real, documented reason) -- use this package's existing subpath exports
+  (`./mesh-rpc`, `./mesh-fetch`, `./mesh-service`, `./peer-registry`) to
+  avoid them entirely if you only need that layer.
+
+  All 2211 unit tests and all 10 real-peer (real WebRTC/TCP) integration
+  tests pass unchanged.
+
 ## 0.5.0
 
 ### Minor Changes

@@ -117,6 +117,21 @@
  *     instance was found -- see "HARDENING INTEGRATION" above).
  *
  * No browser-only imports at module level.
+ *
+ * `@johnhenry/browsermesh-core` (an optional peerDependency) is imported
+ * eagerly here, deliberately -- see the CHANGELOG entry documenting the
+ * sibling fix in other files of this package. `startCheckFor()` is called
+ * both from a synchronous event handler and synchronously inside
+ * `attach()`'s initial peer-scan loop, with a synchronous de-dup guard
+ * (`checks.has(pubKey)`) against being started twice for the same peer.
+ * Making it lazy-load `TransportHealthCheck` would open a real race: two
+ * rapid calls for the same peer could both pass the de-dup check before
+ * the first call's import resolves, creating duplicate health checks.
+ * Closing that safely needs a reservation/cancellation state machine
+ * (synchronously claim the slot before the `await`, handle a concurrent
+ * `stopCheckFor()` arriving mid-import) -- real complexity in
+ * production failover-adjacent code that wasn't attempted here without
+ * much more thorough validation than a function-scoped dynamic import.
  */
 
 import { TransportHealthCheck } from '@johnhenry/browsermesh-core'

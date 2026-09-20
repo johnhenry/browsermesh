@@ -300,28 +300,11 @@
  * detection). Attached to the returned node as `node.swarm` (the
  * `attachService()` handle -- also reachable via `node.services.get('swarm')`).
  *
- * No browser-only imports at module level.
+ * No browser-only imports at module level. @johnhenry/browsermesh-core/
+ * -discovery/-transport (all optional peerDependencies) are imported
+ * lazily inside createMeshNode() itself, not here -- see that function's
+ * own comment and the CHANGELOG entry documenting this fix.
  */
-
-import {
-  IdentityWallet,
-  MeshIdentityManager,
-  MeshPeerManager,
-  TrustGraph,
-  MeshACL,
-  CapabilityValidator,
-  CapabilityToken,
-} from '@johnhenry/browsermesh-core'
-import {
-  DiscoveryManager,
-  DiscoveryRecord,
-  BroadcastChannelStrategy,
-} from '@johnhenry/browsermesh-discovery'
-import {
-  MeshTransportNegotiator,
-  WebRTCMeshManager,
-  mergeIceServers,
-} from '@johnhenry/browsermesh-transport'
 
 import { PeerNode } from './peer-node.mjs'
 import { PeerRegistry } from './peer-registry.mjs'
@@ -876,6 +859,22 @@ export async function createMeshNode(options = {}) {
     )
   }
 
+  // @johnhenry/browsermesh-core/-discovery/-transport (all optional
+  // peerDependencies) are imported lazily here, not eagerly at module
+  // top-level, so this module doesn't force them on every consumer of
+  // this package's top-level `.` entrypoint -- see the CHANGELOG entry
+  // documenting this fix. createMeshNode() was already async, so this
+  // adds no signature change.
+  const [
+    { IdentityWallet, MeshIdentityManager, MeshPeerManager, TrustGraph, MeshACL, CapabilityValidator, CapabilityToken },
+    { DiscoveryManager, DiscoveryRecord, BroadcastChannelStrategy },
+    { MeshTransportNegotiator, WebRTCMeshManager, mergeIceServers },
+  ] = await Promise.all([
+    import('@johnhenry/browsermesh-core'),
+    import('@johnhenry/browsermesh-discovery'),
+    import('@johnhenry/browsermesh-transport'),
+  ])
+
   // -- Identity ---------------------------------------------------------
   const identityManager = providedIdentityManager || new MeshIdentityManager({ onLog })
   const wallet = new IdentityWallet({ identityManager, onLog })
@@ -980,7 +979,7 @@ export async function createMeshNode(options = {}) {
   // same `transportNegotiator` reference, so it sees adapters registered on
   // it regardless of when registration happens relative to wrapping.
   const hardening = enableHardening
-    ? createHardenedNegotiator({
+    ? await createHardenedNegotiator({
       negotiator: transportNegotiator,
       retryOptions: hardeningOptions?.retry,
       onLog,

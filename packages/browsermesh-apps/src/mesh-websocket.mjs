@@ -205,6 +205,14 @@
  *     side (this peer's own `close()` or a received `ws-close`).
  *
  * No browser-only imports at module level.
+ *
+ * `@johnhenry/browsermesh-discovery` (an optional peerDependency) is
+ * imported eagerly here, deliberately -- see the CHANGELOG entry
+ * documenting the sibling fix in other files of this package.
+ * `parseMeshRequest()` is used inside `BrowserMeshWebSocket`'s
+ * *constructor*, which can never be `async`; lazy-loading it there isn't
+ * possible without a bigger restructure (an async factory replacing direct
+ * `new BrowserMeshWebSocket(...)` construction) that wasn't attempted here.
  */
 
 import { parseMeshRequest } from '@johnhenry/browsermesh-discovery'

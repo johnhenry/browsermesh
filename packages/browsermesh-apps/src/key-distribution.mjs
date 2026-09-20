@@ -168,7 +168,13 @@
  */
 
 import { encodeBase64url, decodeBase64url } from '@johnhenry/browsermesh-primitives'
-import { generateEncryptionKeyPair, wrapKeyForMember, unwrapKeyForMember } from '@johnhenry/browsermesh-core'
+// @johnhenry/browsermesh-core (an optional peerDependency) is imported
+// lazily, at each of the three call sites below, rather than eagerly here
+// -- so this module doesn't force it on every consumer of this package's
+// top-level `.` entrypoint. Dynamic import() is cached by the module
+// system after the first real resolution, so this costs nothing on repeat
+// calls. See the CHANGELOG entry documenting this fix for the full
+// rationale.
 
 /** Default `envelope.type` used to route key-distribution payloads on the shared `onIncomingData()` bus. */
 const DEFAULT_ENVELOPE_TYPE = 'bucket-key'
@@ -315,11 +321,13 @@ export function createKeyDistributionService({
 
       function ensureKeyPair() {
         if (!keyPairPromise) {
-          keyPairPromise = generateEncryptionKeyPair().then(async (kp) => {
-            const raw = new Uint8Array(await crypto.subtle.exportKey('raw', kp.publicKey))
-            localPublicKeyB64 = toBase64(raw)
-            return kp
-          })
+          keyPairPromise = import('@johnhenry/browsermesh-core')
+            .then(({ generateEncryptionKeyPair }) => generateEncryptionKeyPair())
+            .then(async (kp) => {
+              const raw = new Uint8Array(await crypto.subtle.exportKey('raw', kp.publicKey))
+              localPublicKeyB64 = toBase64(raw)
+              return kp
+            })
         }
         return keyPairPromise
       }
@@ -330,6 +338,7 @@ export function createKeyDistributionService({
 
       /** Wrap `rawKeyBytes` for `recipientPublicKey` and sign a `deliver` record over the result. */
       async function buildDeliverRecord(rawKeyBytes, recipientPublicKey) {
+        const { wrapKeyForMember } = await import('@johnhenry/browsermesh-core')
         const importable = await crypto.subtle.importKey('raw', rawKeyBytes, { name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt'])
         const envelope = await wrapKeyForMember(importable, recipientPublicKey)
 
@@ -464,6 +473,7 @@ export function createKeyDistributionService({
 
         let rawKeyBytes
         try {
+          const { unwrapKeyForMember } = await import('@johnhenry/browsermesh-core')
           const keyPair = await ensureKeyPair()
           const unwrapped = await unwrapKeyForMember(envelope, keyPair.privateKey)
           rawKeyBytes = new Uint8Array(await crypto.subtle.exportKey('raw', unwrapped))

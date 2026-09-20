@@ -92,6 +92,20 @@
  *     send failure represents.
  *
  * No browser-only imports at module level.
+ *
+ * `@johnhenry/browsermesh-discovery` (an optional peerDependency) is
+ * imported eagerly here, deliberately, unlike several other optional-peer
+ * imports fixed elsewhere in this package (see the CHANGELOG entry
+ * documenting that fix): `browserMeshFetch(url, init)` below is
+ * deliberately NOT async (see "ERROR-VS-REJECT SEMANTICS" above -- it must
+ * throw a `TypeError` *synchronously* for a malformed URL, matching real
+ * `fetch()`), and `createBrowserMeshFetch()`'s own synchronous
+ * meshRpcApi-validation throw is directly tested
+ * (`test/mesh-fetch.test.mjs`'s `assert.throws(() => createBrowserMeshFetch(...))`).
+ * A dynamic `import()` is inherently async, so making either function
+ * lazy-load `parseMeshRequest` would require making one of them async,
+ * breaking a documented, tested, deliberate design decision -- not
+ * attempted here.
  */
 
 import { parseMeshRequest } from '@johnhenry/browsermesh-discovery'

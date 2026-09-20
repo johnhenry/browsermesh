@@ -211,7 +211,7 @@ describeIfReal('full pipeline: sync + kernel-gated mesh + relay all wired onto o
       assert.ok(nodeB.hasActiveSession(nodeA.podId))
 
       // -- Kernel wired to alice's connected PeerNode, over the same session --
-      const kernel = createMeshKernel({ peerNode: nodeA })
+      const kernel = await createMeshKernel({ peerNode: nodeA })
       const tenant = kernel.createTenant({ capabilities: [KERNEL_CAP.MESH] })
 
       // Authorize bob for both the kernel-mesh view and the relay service.

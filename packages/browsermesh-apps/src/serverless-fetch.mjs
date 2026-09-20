@@ -33,6 +33,16 @@
  * option's shape exactly, no adapter needed.
  *
  * @module serverless-fetch
+ *
+ * `@johnhenry/browsermesh-discovery` (an optional peerDependency) is
+ * imported eagerly here, deliberately -- see the CHANGELOG entry
+ * documenting the sibling fix in other files of this package.
+ * `createServerlessFetchRouter()` is synchronous, has a directly-tested
+ * synchronous validation-throw contract (`test/serverless-fetch.test.mjs`'s
+ * `assert.throws(...)`), and returns a real `MeshFetchRouter` instance
+ * directly to ~10 synchronous call sites in its own test file -- making it
+ * async to lazy-load `MeshFetchRouter` would break all of that; not
+ * attempted here.
  */
 
 import { MeshFetchRouter } from '@johnhenry/browsermesh-discovery'
