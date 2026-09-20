@@ -23,7 +23,7 @@ import assert from 'node:assert/strict'
 
 import { PeerRegistry } from '../src/peer-registry.mjs'
 import { MeshRelayHost } from '../src/mesh-relay-host.mjs'
-import { MeshRelayBackend } from '../src/mesh-relay-backend.mjs'
+import { createMeshRelayBackend } from '../src/mesh-relay-backend.mjs'
 import { MeshPeerManager, TrustGraph, MeshACL } from '@johnhenry/browsermesh-core'
 import { VirtualNetwork } from '@johnhenry/browsermesh-netway'
 
@@ -151,7 +151,7 @@ describe('mesh-relay: MeshRelayHost + MeshRelayBackend', () => {
 
     registry.grantCapabilities(BOB, ['mesh-relay:echo:connect'])
 
-    const backend = new MeshRelayBackend({ node: bobNode, relayPeerPubKey: ALICE })
+    const backend = createMeshRelayBackend({ node: bobNode, relayPeerPubKey: ALICE })
     const bobNetwork = new VirtualNetwork()
     bobNetwork.addBackend('via-alice', backend)
 
@@ -180,7 +180,7 @@ describe('mesh-relay: MeshRelayHost + MeshRelayBackend', () => {
     host.exposeService('echo', 'mem://localhost:9000')
     registry.grantCapabilities(BOB, ['mesh-relay:echo:connect'])
 
-    const backend = new MeshRelayBackend({ node: bobNode, relayPeerPubKey: ALICE })
+    const backend = createMeshRelayBackend({ node: bobNode, relayPeerPubKey: ALICE })
 
     try {
       const [socketOne, socketTwo] = await Promise.all([
@@ -212,7 +212,7 @@ describe('mesh-relay: MeshRelayHost + MeshRelayBackend', () => {
     host.exposeService('echo', 'mem://localhost:9000')
     // Deliberately: no registry.grantCapabilities(CAROL, ...) call.
 
-    const backend = new MeshRelayBackend({ node: carolNode, relayPeerPubKey: ALICE })
+    const backend = createMeshRelayBackend({ node: carolNode, relayPeerPubKey: ALICE })
 
     try {
       await assert.rejects(
@@ -235,7 +235,7 @@ describe('mesh-relay: MeshRelayHost + MeshRelayBackend', () => {
     // Note: 'echo' is intentionally NOT exposed via host.exposeService() here.
     registry.grantCapabilities(BOB, ['mesh-relay:echo:connect'])
 
-    const backend = new MeshRelayBackend({ node: bobNode, relayPeerPubKey: ALICE })
+    const backend = createMeshRelayBackend({ node: bobNode, relayPeerPubKey: ALICE })
 
     try {
       await assert.rejects(
@@ -258,7 +258,7 @@ describe('mesh-relay: MeshRelayHost + MeshRelayBackend', () => {
     host.exposeService('echo', 'mem://localhost:9000')
     registry.grantCapabilities(BOB, ['mesh-relay:*:connect'])
 
-    const backend = new MeshRelayBackend({ node: bobNode, relayPeerPubKey: ALICE })
+    const backend = createMeshRelayBackend({ node: bobNode, relayPeerPubKey: ALICE })
 
     try {
       const socket = await backend.connect('echo')
@@ -276,7 +276,7 @@ describe('mesh-relay: MeshRelayHost + MeshRelayBackend', () => {
     host.exposeService('echo', 'mem://localhost:9000')
     registry.grantCapabilities(BOB, ['mesh-relay:echo:connect'])
 
-    const backend = new MeshRelayBackend({ node: bobNode, relayPeerPubKey: ALICE })
+    const backend = createMeshRelayBackend({ node: bobNode, relayPeerPubKey: ALICE })
 
     try {
       // Grant -> one successful round trip.
@@ -310,7 +310,7 @@ describe('mesh-relay: MeshRelayHost + MeshRelayBackend', () => {
     host.exposeService('echo', 'mem://localhost:9000')
     registry.grantCapabilities(BOB, ['mesh-relay:echo:connect'])
 
-    const backend = new MeshRelayBackend({ node: bobNode, relayPeerPubKey: ALICE })
+    const backend = createMeshRelayBackend({ node: bobNode, relayPeerPubKey: ALICE })
 
     try {
       const socket = await backend.connect('echo')
@@ -337,7 +337,7 @@ describe('mesh-relay: MeshRelayHost + MeshRelayBackend', () => {
     const { nodeA: aliceNode, nodeB: bobNode } = createNodePair(ALICE, BOB)
     // Deliberately: no MeshRelayHost constructed on aliceNode's side, so no
     // 'ok'/'refused' will ever arrive.
-    const backend = new MeshRelayBackend({ node: bobNode, relayPeerPubKey: ALICE, connectTimeoutMs: 50 })
+    const backend = createMeshRelayBackend({ node: bobNode, relayPeerPubKey: ALICE, connectTimeoutMs: 50 })
 
     try {
       await assert.rejects(() => backend.connect('echo'), /timed out/)
@@ -369,7 +369,7 @@ describe('mesh-relay: MeshRelayHost + MeshRelayBackend', () => {
     host.exposeService('one-shot', 'mem://localhost:9100')
     registry.grantCapabilities(BOB, ['mesh-relay:one-shot:connect'])
 
-    const backend = new MeshRelayBackend({ node: bobNode, relayPeerPubKey: ALICE })
+    const backend = createMeshRelayBackend({ node: bobNode, relayPeerPubKey: ALICE })
 
     try {
       const socket = await backend.connect('one-shot')

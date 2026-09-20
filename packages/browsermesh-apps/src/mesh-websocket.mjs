@@ -207,15 +207,26 @@
  * No browser-only imports at module level.
  *
  * `@johnhenry/browsermesh-discovery` (an optional peerDependency) is
- * imported eagerly here, deliberately -- see the CHANGELOG entry
- * documenting the sibling fix in other files of this package.
- * `parseMeshRequest()` is used inside `BrowserMeshWebSocket`'s
- * *constructor*, which can never be `async`; lazy-loading it there isn't
- * possible without a bigger restructure (an async factory replacing direct
- * `new BrowserMeshWebSocket(...)` construction) that wasn't attempted here.
+ * lazily resolved via `createRequire(import.meta.url)` -- Node's stable
+ * synchronous `require()` of an ES module (Node >=22.12/23, well within
+ * this package's own `engines.node: >=24` floor). This is the file that
+ * motivated trying `require()` at all: `parseMeshRequest()` is used inside
+ * `BrowserMeshWebSocket`'s *constructor*, which can never be `async` --
+ * `import()` was a dead end here (an async factory replacing direct `new
+ * BrowserMeshWebSocket(...)` construction would have been a real,
+ * unwanted breaking change to this class's whole reason for existing: matching
+ * real `new WebSocket(url)` construction ergonomics as closely as
+ * possible, per this file's own "API SHAPE DECISION" precedent in
+ * `mesh-fetch.mjs`). `require()` resolves synchronously, so it works
+ * directly inside the constructor with zero API changes: the module is
+ * only actually loaded the first time a `BrowserMeshWebSocket` is
+ * constructed (or `createMeshWebSocketService()`'s `api.connect()` is
+ * called), not at this module's own load time.
  */
 
-import { parseMeshRequest } from '@johnhenry/browsermesh-discovery'
+import { createRequire } from 'node:module'
+
+const require = createRequire(import.meta.url)
 
 /** Default `envelope.type` used to route mesh-websocket payloads on the shared `onIncomingData()` bus. */
 const DEFAULT_ENVELOPE_TYPE = 'mesh-websocket'
@@ -363,6 +374,9 @@ export class BrowserMeshWebSocket {
     if (!peerNode || typeof peerNode.sendTo !== 'function' || typeof peerNode.onIncomingData !== 'function') {
       throw new Error('BrowserMeshWebSocket: opts.peerNode is required and must provide sendTo()/onIncomingData()')
     }
+    // Lazy, synchronous (see module doc comment) -- cached by require()'s
+    // own module cache after the first construction.
+    const { parseMeshRequest } = require('@johnhenry/browsermesh-discovery')
     const parsed = parseMeshRequest(url)
     if (!parsed) {
       throw new Error(`BrowserMeshWebSocket: invalid mesh URL '${url}' (expected mesh://podId/path or https://podId.mesh.local/path)`)

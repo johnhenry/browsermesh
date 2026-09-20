@@ -141,20 +141,38 @@
  *
  * No browser-only imports at module level.
  *
- * `@johnhenry/browsermesh-netway` (an optional peerDependency) is imported
- * eagerly here, deliberately -- see the CHANGELOG entry documenting the
- * sibling fix in other files of this package. `Backend` is used as a base
- * class (`export class CloudStorageBackend extends Backend`), evaluated at
- * module load time; deferring a class's own base class requires either an
- * async factory constructing an anonymous subclass (breaking direct
- * `new CloudStorageBackend(...)`/`instanceof`/further-subclassing) or a
- * dynamic-base-class pattern -- a real restructure of this file's public
- * shape, not attempted here.
+ * `@johnhenry/browsermesh-netway` (an optional peerDependency) is lazily
+ * resolved via `createRequire(import.meta.url)` -- Node's stable
+ * synchronous `require()` of an ES module (Node >=22.12/23, well within
+ * this package's own `engines.node: >=24` floor). `Backend` is used as a
+ * base class (`class CloudStorageBackend extends Backend`); a class's
+ * `extends` clause is evaluated at class-DECLARATION time, and a
+ * `class ... extends ... {}` statement written at module top level always
+ * runs at module-LOAD time, no matter how the `Backend` reference feeding
+ * it is obtained -- there is no way to defer that with a plain lazy
+ * import, sync or async. The fix here instead moves the class declaration
+ * itself out of module-top-level scope, into a function that resolves
+ * `Backend` via `require()` and builds+memoizes the class on first call, so
+ * it still only runs once, lazily, the first time this file is actually
+ * used, not merely imported. (`@johnhenry/browsermesh-sync` and
+ * `@johnhenry/browsermesh-primitives`, imported below, are both REQUIRED
+ * -- not optional -- peerDependencies of this package, so they stay
+ * imported eagerly; only `browsermesh-netway` needed this treatment.)
+ *
+ * **BREAKING CHANGE**: `CloudStorageBackend` is no longer exported as a
+ * class. Replace `new CloudStorageBackend(opts)` with
+ * `createCloudStorageBackend(opts)` (same `opts` shape, still returns a
+ * real `CloudStorageBackend` instance with the exact same instance API) --
+ * see the CHANGELOG entry documenting this fix across the package for the
+ * full rationale and the sibling `mesh-relay-backend.mjs` fix.
  */
 
-import { Backend, StreamSocket } from '@johnhenry/browsermesh-netway'
+import { createRequire } from 'node:module'
+
 import { IndexedDBChunkStore, IndexedDBSyncStorage, TRANSFER_DEFAULTS } from '@johnhenry/browsermesh-sync'
 import { LWWMap } from '@johnhenry/browsermesh-primitives'
+
+const require = createRequire(import.meta.url)
 
 /** 256KB, matching `MeshFileTransfer`'s existing chunking convention exactly (imported, not duplicated as a literal). */
 const CHUNK_SIZE = TRANSFER_DEFAULTS.chunkSize
@@ -296,13 +314,26 @@ function bytesEqual(a, b) {
 // CloudStorageBackend
 // ---------------------------------------------------------------------------
 
+let _CloudStorageBackendClass = null
+
 /**
- * A `Backend` exposing a durable, encrypted-at-rest, single-peer S3-like
- * object store over a JSON-command-over-socket protocol.
- *
- * @extends Backend
+ * Lazily builds (and memoizes) the `CloudStorageBackend` class, deferring
+ * resolution of `@johnhenry/browsermesh-netway`'s `Backend`/`StreamSocket`
+ * past module-load time -- see module doc comment. Only ever runs once per
+ * process; every later call returns the same class reference.
+ * @returns {typeof CloudStorageBackend}
  */
-export class CloudStorageBackend extends Backend {
+function resolveCloudStorageBackendClass() {
+  if (_CloudStorageBackendClass) return _CloudStorageBackendClass
+  const { Backend, StreamSocket } = require('@johnhenry/browsermesh-netway')
+
+  /**
+   * A `Backend` exposing a durable, encrypted-at-rest, single-peer S3-like
+   * object store over a JSON-command-over-socket protocol.
+   *
+   * @extends Backend
+   */
+  class CloudStorageBackend extends Backend {
   /** @type {string} */
   #bucket
 
@@ -939,4 +970,22 @@ export class CloudStorageBackend extends Backend {
     this.#manifestStorage.close?.()
     this.#keyStorage.close?.()
   }
+  }
+
+  _CloudStorageBackendClass = CloudStorageBackend
+  return CloudStorageBackend
+}
+
+/**
+ * Construct a `CloudStorageBackend` -- the class itself is no longer
+ * exported directly (see module doc comment's "BREAKING CHANGE" note).
+ *
+ * @param {object} opts - Same shape as `CloudStorageBackend`'s constructor:
+ *   `{bucket, dbName?, chunkStore?, manifestStorage?, keyStorage?, nodeId?, onLog?}`.
+ * @returns {import('@johnhenry/browsermesh-netway').Backend} A real
+ *   `CloudStorageBackend` instance (the full instance API is unchanged).
+ */
+export function createCloudStorageBackend(opts) {
+  const CloudStorageBackend = resolveCloudStorageBackendClass()
+  return new CloudStorageBackend(opts)
 }

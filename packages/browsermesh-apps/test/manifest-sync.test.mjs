@@ -30,7 +30,7 @@ import assert from 'node:assert/strict'
 import { PeerRegistry } from '../src/peer-registry.mjs'
 import { attachService } from '../src/mesh-service.mjs'
 import { createManifestSyncService } from '../src/manifest-sync.mjs'
-import { CloudStorageBackend } from '../src/cloud-storage-backend.mjs'
+import { createCloudStorageBackend } from '../src/cloud-storage-backend.mjs'
 import {
   IdentityWallet,
   MeshIdentityManager,
@@ -64,7 +64,7 @@ let bucketCounter = 0
 /** A fresh, fake-indexeddb-backed CloudStorageBackend, attributed to `peer`'s own identity. */
 function createBackendFor(peer, bucketSuffix = '') {
   bucketCounter += 1
-  return new CloudStorageBackend({
+  return createCloudStorageBackend({
     bucket: `${BUCKET}-${bucketCounter}${bucketSuffix}`,
     nodeId: peer.podId,
   })

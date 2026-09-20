@@ -35,18 +35,25 @@
  * @module serverless-fetch
  *
  * `@johnhenry/browsermesh-discovery` (an optional peerDependency) is
- * imported eagerly here, deliberately -- see the CHANGELOG entry
- * documenting the sibling fix in other files of this package.
+ * lazily resolved via `createRequire(import.meta.url)` -- Node's stable
+ * synchronous `require()` of an ES module (Node >=22.12/23, well within
+ * this package's own `engines.node: >=24` floor), not a dynamic `import()`.
  * `createServerlessFetchRouter()` is synchronous, has a directly-tested
  * synchronous validation-throw contract (`test/serverless-fetch.test.mjs`'s
  * `assert.throws(...)`), and returns a real `MeshFetchRouter` instance
- * directly to ~10 synchronous call sites in its own test file -- making it
- * async to lazy-load `MeshFetchRouter` would break all of that; not
- * attempted here.
+ * directly to ~10 synchronous call sites in its own test file -- an async
+ * `import()` would have broken all of that (see the CHANGELOG entry
+ * documenting this fix across the package). `require()` resolves lazily
+ * (only when `createServerlessFetchRouter()` is actually called, after its
+ * own validation throw) while staying fully synchronous, so none of that
+ * changes.
  */
 
-import { MeshFetchRouter } from '@johnhenry/browsermesh-discovery'
+import { createRequire } from 'node:module'
+
 import { decodeWireResponse } from './serverless-wire.mjs'
+
+const require = createRequire(import.meta.url)
 
 /**
  * @param {{request: (podId: string, req: {method?: string, path?: string, headers?: object, body?: *}) => Promise<{status: number, headers: object, body: *}>}} meshRpcApi
@@ -68,6 +75,9 @@ export function createServerlessFetchRouter(meshRpcApi, { resolveSite } = {}) {
   if (!meshRpcApi || typeof meshRpcApi.request !== 'function') {
     throw new Error('createServerlessFetchRouter: meshRpcApi (a mesh-rpc.mjs service api with .request()) is required')
   }
+
+  // Lazy, synchronous (see module doc comment).
+  const { MeshFetchRouter } = require('@johnhenry/browsermesh-discovery')
 
   return new MeshFetchRouter({
     onRpc: async ({ podId: siteOrPodId, method, path, headers, body }) => {

@@ -53,7 +53,7 @@
  * e.g. one with a `GatewayBackend` reaching a real local service), attached
  * as `node.relayHost`. This is the "share my `VirtualNetwork` access with
  * specific peers" side; the client side is `mesh-relay-backend.mjs`'s
- * `MeshRelayBackend`, constructed directly (not via this function) and
+ * `createMeshRelayBackend()`, called directly (not via this function) and
  * registered on the *client's own* `VirtualNetwork`.
  *
  * **Transport hardening is opt-in via `{ enableHardening: true,

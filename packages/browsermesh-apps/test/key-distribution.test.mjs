@@ -26,7 +26,7 @@ import { PeerRegistry } from '../src/peer-registry.mjs'
 import { attachService } from '../src/mesh-service.mjs'
 import { createGrantLogService } from '../src/grant-log.mjs'
 import { createKeyDistributionService } from '../src/key-distribution.mjs'
-import { CloudStorageBackend } from '../src/cloud-storage-backend.mjs'
+import { createCloudStorageBackend } from '../src/cloud-storage-backend.mjs'
 import { IndexedDBSyncStorage } from '@johnhenry/browsermesh-sync'
 import {
   IdentityWallet,
@@ -135,8 +135,8 @@ describe('createKeyDistributionService: end-to-end key delivery', () => {
   /** @type {any} */ let nodeA
   /** @type {any} */ let nodeB
   /** @type {string} */ let dbPrefix
-  /** @type {CloudStorageBackend} */ let aliceBackend
-  /** @type {CloudStorageBackend} */ let bobBackend
+  /** @type {import('../src/cloud-storage-backend.mjs').CloudStorageBackend} */ let aliceBackend
+  /** @type {import('../src/cloud-storage-backend.mjs').CloudStorageBackend} */ let bobBackend
 
   beforeEach(async () => {
     alice = await createPeer('alice')
@@ -151,8 +151,8 @@ describe('createKeyDistributionService: end-to-end key delivery', () => {
     // Phase E doc addition) but gets its OWN, separate, empty key storage --
     // exactly the thing this phase's key-distribution channel must populate
     // before Bob can decrypt anything.
-    aliceBackend = new CloudStorageBackend({ bucket: 'test-bucket', dbName: dbPrefix })
-    bobBackend = new CloudStorageBackend({
+    aliceBackend = createCloudStorageBackend({ bucket: 'test-bucket', dbName: dbPrefix })
+    bobBackend = createCloudStorageBackend({
       bucket: 'test-bucket',
       dbName: dbPrefix,
       keyStorage: new IndexedDBSyncStorage({ dbName: `${dbPrefix}-bob-keys` }),
@@ -213,7 +213,7 @@ describe('createKeyDistributionService: end-to-end key delivery', () => {
   it('a peer that was never granted access never receives a key', async () => {
     const carol = await createPeer('carol')
     const { nodeA: nodeAC, nodeB: nodeC } = wireNodes(alice, carol)
-    const carolBackend = new CloudStorageBackend({
+    const carolBackend = createCloudStorageBackend({
       bucket: 'test-bucket',
       dbName: dbPrefix,
       keyStorage: new IndexedDBSyncStorage({ dbName: `${dbPrefix}-carol-keys` }),
@@ -267,8 +267,8 @@ describe('createKeyDistributionService: forged/unauthorized deliver rejection', 
   /** @type {any} */ let nodeA
   /** @type {any} */ let nodeB
   /** @type {string} */ let dbPrefix
-  /** @type {CloudStorageBackend} */ let aliceBackend
-  /** @type {CloudStorageBackend} */ let bobBackend
+  /** @type {import('../src/cloud-storage-backend.mjs').CloudStorageBackend} */ let aliceBackend
+  /** @type {import('../src/cloud-storage-backend.mjs').CloudStorageBackend} */ let bobBackend
   /** @type {any} */ let aliceServices
   /** @type {any} */ let bobServices
 
@@ -278,8 +278,8 @@ describe('createKeyDistributionService: forged/unauthorized deliver rejection', 
     ;({ nodeA, nodeB } = wireNodes(alice, bob))
 
     dbPrefix = freshBucketDbPrefix()
-    aliceBackend = new CloudStorageBackend({ bucket: 'test-bucket', dbName: dbPrefix })
-    bobBackend = new CloudStorageBackend({
+    aliceBackend = createCloudStorageBackend({ bucket: 'test-bucket', dbName: dbPrefix })
+    bobBackend = createCloudStorageBackend({
       bucket: 'test-bucket',
       dbName: dbPrefix,
       keyStorage: new IndexedDBSyncStorage({ dbName: `${dbPrefix}-bob-keys` }),
@@ -364,7 +364,7 @@ describe('createKeyDistributionService: forged/unauthorized deliver rejection', 
     // no authority" precedent.
     const carol = await createPeer('carol')
     const { nodeA: nodeBC, nodeB: nodeC } = wireNodes(bob, carol)
-    const carolBackend = new CloudStorageBackend({
+    const carolBackend = createCloudStorageBackend({
       bucket: 'test-bucket',
       dbName: dbPrefix,
       keyStorage: new IndexedDBSyncStorage({ dbName: `${dbPrefix}-carol-keys` }),

@@ -39,7 +39,7 @@ import {
   createMeshSync,
   createMeshKernel,
   MeshRelayHost,
-  MeshRelayBackend,
+  createMeshRelayBackend,
 } from '@johnhenry/browsermesh-apps'
 
 const ALICE = 'pod-alice'
@@ -147,7 +147,7 @@ console.log('3. CRDT sync: both sides converged on', aliceSync.engine.getState('
 // real `CapabilityToken` (Phase 5), so this grant could be live-revoked
 // mid-session exactly like `kernel-mesh.test.mjs` proves; this example
 // keeps the grant standing to focus on the composition story.
-const kernel = createMeshKernel({ peerNode: aliceNode })
+const kernel = await createMeshKernel({ peerNode: aliceNode })
 const tenant = kernel.createTenant({ capabilities: [KERNEL_CAP.MESH] })
 
 registry.grantCapabilities(BOB, ['mesh:send', 'mesh:receive', 'mesh-relay:trip-notes:connect'])
@@ -183,7 +183,7 @@ const notesListener = await aliceNetwork.listen('mem://localhost:9200')
 const relayHost = new MeshRelayHost({ node: aliceNode, network: aliceNetwork, registry })
 relayHost.exposeService('trip-notes', 'mem://localhost:9200')
 
-const relayBackend = new MeshRelayBackend({ node: bobNode, relayPeerPubKey: ALICE })
+const relayBackend = createMeshRelayBackend({ node: bobNode, relayPeerPubKey: ALICE })
 const bobNetwork = new VirtualNetwork()
 bobNetwork.addBackend('via-alice', relayBackend)
 

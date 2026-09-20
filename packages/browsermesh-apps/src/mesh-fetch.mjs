@@ -94,21 +94,31 @@
  * No browser-only imports at module level.
  *
  * `@johnhenry/browsermesh-discovery` (an optional peerDependency) is
- * imported eagerly here, deliberately, unlike several other optional-peer
- * imports fixed elsewhere in this package (see the CHANGELOG entry
- * documenting that fix): `browserMeshFetch(url, init)` below is
+ * lazily resolved via `createRequire(import.meta.url)` -- Node's stable
+ * synchronous `require()` of an ES module (Node >=22.12/23, well within
+ * this package's own `engines.node: >=24` floor) -- rather than a dynamic
+ * `import()`. This matters because `browserMeshFetch(url, init)` below is
  * deliberately NOT async (see "ERROR-VS-REJECT SEMANTICS" above -- it must
  * throw a `TypeError` *synchronously* for a malformed URL, matching real
  * `fetch()`), and `createBrowserMeshFetch()`'s own synchronous
  * meshRpcApi-validation throw is directly tested
  * (`test/mesh-fetch.test.mjs`'s `assert.throws(() => createBrowserMeshFetch(...))`).
- * A dynamic `import()` is inherently async, so making either function
- * lazy-load `parseMeshRequest` would require making one of them async,
- * breaking a documented, tested, deliberate design decision -- not
- * attempted here.
+ * A dynamic `import()` is inherently async and would have broken both of
+ * those; `require()` resolves the module lazily (only when
+ * `createBrowserMeshFetch()` is actually called, not at this module's own
+ * load time -- achieving the same "optional peer" goal a dynamic import
+ * would) while staying fully synchronous, so neither function's signature
+ * or throw semantics change at all. See the CHANGELOG entry documenting
+ * this fix across the package for the sibling files that use the same
+ * technique, and `mesh-websocket.mjs`'s module doc comment for the one
+ * case (a constructor) where a dynamic `import()` genuinely could not have
+ * worked even with an async rewrite, which is what led to trying
+ * `require()` here in the first place.
  */
 
-import { parseMeshRequest } from '@johnhenry/browsermesh-discovery'
+import { createRequire } from 'node:module'
+
+const require = createRequire(import.meta.url)
 
 /**
  * @typedef {object} MeshRpcApi
@@ -134,6 +144,11 @@ export function createBrowserMeshFetch(meshRpcApi) {
       '(pass the .api returned by attachService(peerNode, network, createMeshRpcService(...)))',
     )
   }
+
+  // Lazy, synchronous (see module doc comment) -- only resolved once a
+  // caller actually builds a browserMeshFetch, and cached by require()'s
+  // own module cache for every subsequent call.
+  const { parseMeshRequest } = require('@johnhenry/browsermesh-discovery')
 
   /**
    * `browserMeshFetch()` itself -- deliberately NOT an `async function` (see

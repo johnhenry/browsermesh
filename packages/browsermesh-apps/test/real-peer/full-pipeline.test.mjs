@@ -108,7 +108,7 @@ describeIfReal('full pipeline: sync + kernel-gated mesh + relay all wired onto o
   /** @type {any} */ let DiscoveryRecord
   /** @type {any} */ let KERNEL_CAP
   /** @type {any} */ let VirtualNetwork
-  /** @type {any} */ let MeshRelayBackend
+  /** @type {any} */ let createMeshRelayBackend
 
   before(async () => {
     // webrtc.mjs reads RTCPeerConnection off the global at call time, so
@@ -121,7 +121,7 @@ describeIfReal('full pipeline: sync + kernel-gated mesh + relay all wired onto o
     })
     ;({ createMeshNode } = await import('../../src/mesh-bootstrap.mjs'))
     ;({ createMeshKernel } = await import('../../src/kernel-mesh.mjs'))
-    ;({ MeshRelayBackend } = await import('../../src/mesh-relay-backend.mjs'))
+    ;({ createMeshRelayBackend } = await import('../../src/mesh-relay-backend.mjs'))
     ;({ ManualStrategy, DiscoveryRecord } = await import('@johnhenry/browsermesh-discovery'))
     ;({ KERNEL_CAP } = await import('@johnhenry/browsermesh-kernel'))
     ;({ VirtualNetwork } = await import('@johnhenry/browsermesh-netway'))
@@ -269,7 +269,7 @@ describeIfReal('full pipeline: sync + kernel-gated mesh + relay all wired onto o
 
       // == 3. Mesh relay, through alice, while sync + kernel channels stay live =
       const bobNetwork = new VirtualNetwork()
-      const relayBackend = new MeshRelayBackend({ node: nodeB, relayPeerPubKey: nodeA.podId })
+      const relayBackend = createMeshRelayBackend({ node: nodeB, relayPeerPubKey: nodeA.podId })
       bobNetwork.addBackend('via-alice', relayBackend)
 
       const relaySocket = await bobNetwork.connect('via-alice://pipeline-echo')

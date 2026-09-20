@@ -46,7 +46,7 @@ import { attachService } from '../src/mesh-service.mjs'
 import { createGrantLogService } from '../src/grant-log.mjs'
 import { createChunkReplicationService } from '../src/chunk-replication.mjs'
 import { createMeshKvService } from '../src/mesh-kv.mjs'
-import { CloudStorageBackend } from '../src/cloud-storage-backend.mjs'
+import { createCloudStorageBackend } from '../src/cloud-storage-backend.mjs'
 import { createObservabilityBridge } from '../src/observability-bridge.mjs'
 import {
   IdentityWallet,
@@ -81,7 +81,7 @@ let bucketCounter = 0
 /** A fresh, fake-indexeddb-backed CloudStorageBackend with its OWN chunk/manifest/key databases, attributed to `peer`'s own identity -- mirrors chunk-replication.test.mjs's own `createBackendFor()`. */
 function createBackendFor(peer) {
   bucketCounter += 1
-  return new CloudStorageBackend({
+  return createCloudStorageBackend({
     bucket: `${BUCKET}-${bucketCounter}`,
     dbName: `obs-bridge-test-${bucketCounter}`,
     nodeId: peer.podId,

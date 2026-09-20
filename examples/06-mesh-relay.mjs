@@ -28,7 +28,7 @@ import { MeshPeerManager, TrustGraph, MeshACL } from '@johnhenry/browsermesh-cor
 import {
   PeerRegistry,
   MeshRelayHost,
-  MeshRelayBackend,
+  createMeshRelayBackend,
 } from '@johnhenry/browsermesh-apps'
 
 const ALICE = 'pod-alice'
@@ -88,7 +88,7 @@ console.log('alice exposes services:', relayHost.listServices())
 // ── Bob tries to reach it before being granted access — refused, not a
 //    silent no-op ──
 
-const bobBackend = new MeshRelayBackend({ node: bobNode, relayPeerPubKey: ALICE })
+const bobBackend = createMeshRelayBackend({ node: bobNode, relayPeerPubKey: ALICE })
 const bobNetwork = new VirtualNetwork()
 bobNetwork.addBackend('via-alice', bobBackend)
 

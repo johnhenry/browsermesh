@@ -171,7 +171,7 @@ describeIfReal('mesh-relay: MeshRelayHost + MeshRelayBackend over real WebRTC, r
   /** @type {any} */ let VirtualNetwork
   /** @type {any} */ let GatewayBackend
   /** @type {any} */ let ConnectionRefusedError
-  /** @type {any} */ let MeshRelayBackend
+  /** @type {any} */ let createMeshRelayBackend
 
   before(async () => {
     // webrtc.mjs reads RTCPeerConnection off the global at call time, so
@@ -183,7 +183,7 @@ describeIfReal('mesh-relay: MeshRelayHost + MeshRelayBackend over real WebRTC, r
       RTCSessionDescription: ndc.RTCSessionDescription,
     })
     ;({ createMeshNode } = await import('../../src/mesh-bootstrap.mjs'))
-    ;({ MeshRelayBackend } = await import('../../src/mesh-relay-backend.mjs'))
+    ;({ createMeshRelayBackend } = await import('../../src/mesh-relay-backend.mjs'))
     ;({ ManualStrategy, DiscoveryRecord } = await import('@johnhenry/browsermesh-discovery'))
     ;({ VirtualNetwork, GatewayBackend, ConnectionRefusedError } = await import('@johnhenry/browsermesh-netway'))
   })
@@ -280,8 +280,8 @@ describeIfReal('mesh-relay: MeshRelayHost + MeshRelayBackend over real WebRTC, r
       // Only Bob is authorized -- Carol gets no grant at all.
       nodeA.registry.grantCapabilities(nodeB.podId, ['mesh-relay:local-tcp:connect'])
 
-      const bobBackend = new MeshRelayBackend({ node: nodeB, relayPeerPubKey: nodeA.podId })
-      const carolBackend = new MeshRelayBackend({ node: nodeC, relayPeerPubKey: nodeA.podId })
+      const bobBackend = createMeshRelayBackend({ node: nodeB, relayPeerPubKey: nodeA.podId })
+      const carolBackend = createMeshRelayBackend({ node: nodeC, relayPeerPubKey: nodeA.podId })
 
       try {
         // == Carol (ungranted): refused, proving per-peer enforcement =========

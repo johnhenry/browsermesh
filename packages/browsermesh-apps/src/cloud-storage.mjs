@@ -198,7 +198,7 @@
  */
 
 import { attachService, createEventBus } from './mesh-service.mjs'
-import { CloudStorageBackend } from './cloud-storage-backend.mjs'
+import { createCloudStorageBackend } from './cloud-storage-backend.mjs'
 import { createGrantLogService } from './grant-log.mjs'
 import { createKeyDistributionService } from './key-distribution.mjs'
 import { createManifestSyncService } from './manifest-sync.mjs'
@@ -304,7 +304,7 @@ export class CloudStorage {
   /** @type {import('@johnhenry/browsermesh-netway').VirtualNetwork|null} */
   #network
 
-  /** @type {CloudStorageBackend} */
+  /** @type {import('./cloud-storage-backend.mjs').CloudStorageBackend} */
   #backend
 
   /** @type {import('@johnhenry/browsermesh-netway').StreamSocket|null} lazily-opened private local socket to `#backend` */
@@ -415,7 +415,7 @@ export class CloudStorage {
       })
     }
 
-    this.#backend = new CloudStorageBackend({
+    this.#backend = createCloudStorageBackend({
       bucket,
       dbName,
       chunkStore,

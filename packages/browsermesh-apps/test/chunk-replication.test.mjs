@@ -32,7 +32,7 @@ import assert from 'node:assert/strict'
 import { PeerRegistry } from '../src/peer-registry.mjs'
 import { attachService } from '../src/mesh-service.mjs'
 import { createChunkReplicationService } from '../src/chunk-replication.mjs'
-import { CloudStorageBackend } from '../src/cloud-storage-backend.mjs'
+import { createCloudStorageBackend } from '../src/cloud-storage-backend.mjs'
 import {
   IdentityWallet,
   MeshIdentityManager,
@@ -66,7 +66,7 @@ let bucketCounter = 0
 /** A fresh, fake-indexeddb-backed CloudStorageBackend with its OWN chunk/manifest/key databases, attributed to `peer`'s own identity. */
 function createBackendFor(peer) {
   bucketCounter += 1
-  return new CloudStorageBackend({
+  return createCloudStorageBackend({
     bucket: `${BUCKET}-${bucketCounter}`,
     dbName: `chunk-repl-test-${bucketCounter}`,
     nodeId: peer.podId,

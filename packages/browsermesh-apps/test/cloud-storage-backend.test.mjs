@@ -15,7 +15,7 @@ import 'fake-indexeddb/auto'
 import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { CloudStorageBackend } from '../src/cloud-storage-backend.mjs'
+import { createCloudStorageBackend } from '../src/cloud-storage-backend.mjs'
 import { IndexedDBChunkStore } from '@johnhenry/browsermesh-sync'
 
 // Use a fresh bucket name per test so tests don't interact through shared
@@ -56,11 +56,11 @@ async function send(socket, cmd) {
 
 describe('CloudStorageBackend', () => {
   it('constructor requires a bucket name', () => {
-    assert.throws(() => new CloudStorageBackend({}), /bucket is required/)
+    assert.throws(() => createCloudStorageBackend({}), /bucket is required/)
   })
 
   it('put then get round-trips a small object', async () => {
-    const backend = new CloudStorageBackend({ bucket: freshBucket() })
+    const backend = createCloudStorageBackend({ bucket: freshBucket() })
     const socket = await backend.connect()
 
     const plaintext = new TextEncoder().encode('hello cloud storage')
@@ -82,7 +82,7 @@ describe('CloudStorageBackend', () => {
   })
 
   it('put then get round-trips a multi-chunk object (>256KB)', async () => {
-    const backend = new CloudStorageBackend({ bucket: freshBucket() })
+    const backend = createCloudStorageBackend({ bucket: freshBucket() })
     const socket = await backend.connect()
 
     // 256KB chunk size -> 700KB spans 3 chunks.
@@ -98,7 +98,7 @@ describe('CloudStorageBackend', () => {
   })
 
   it('put of an empty object round-trips to zero bytes', async () => {
-    const backend = new CloudStorageBackend({ bucket: freshBucket() })
+    const backend = createCloudStorageBackend({ bucket: freshBucket() })
     const socket = await backend.connect()
 
     await send(socket, { op: 'put', key: 'empty.bin', data: toBase64(new Uint8Array(0)) })
@@ -109,7 +109,7 @@ describe('CloudStorageBackend', () => {
   })
 
   it('get on a missing key returns {error: "not found"} without closing the socket', async () => {
-    const backend = new CloudStorageBackend({ bucket: freshBucket() })
+    const backend = createCloudStorageBackend({ bucket: freshBucket() })
     const socket = await backend.connect()
 
     const res = await send(socket, { op: 'get', key: 'nope' })
@@ -122,7 +122,7 @@ describe('CloudStorageBackend', () => {
   })
 
   it('list with no prefix returns all keys; with a prefix filters', async () => {
-    const backend = new CloudStorageBackend({ bucket: freshBucket() })
+    const backend = createCloudStorageBackend({ bucket: freshBucket() })
     const socket = await backend.connect()
 
     await send(socket, { op: 'put', key: 'docs/a.txt', data: toBase64(new Uint8Array([1])) })
@@ -144,7 +144,7 @@ describe('CloudStorageBackend', () => {
   })
 
   it('delete tombstones a key; subsequent get returns not found', async () => {
-    const backend = new CloudStorageBackend({ bucket: freshBucket() })
+    const backend = createCloudStorageBackend({ bucket: freshBucket() })
     const socket = await backend.connect()
 
     await send(socket, { op: 'put', key: 'temp.txt', data: toBase64(new Uint8Array([9])) })
@@ -159,7 +159,7 @@ describe('CloudStorageBackend', () => {
   })
 
   it('head returns metadata without the data payload', async () => {
-    const backend = new CloudStorageBackend({ bucket: freshBucket() })
+    const backend = createCloudStorageBackend({ bucket: freshBucket() })
     const socket = await backend.connect()
 
     const plaintext = new TextEncoder().encode('some content')
@@ -181,7 +181,7 @@ describe('CloudStorageBackend', () => {
   })
 
   it('head on a missing key returns {error: "not found"}', async () => {
-    const backend = new CloudStorageBackend({ bucket: freshBucket() })
+    const backend = createCloudStorageBackend({ bucket: freshBucket() })
     const socket = await backend.connect()
 
     const res = await send(socket, { op: 'head', key: 'nope' })
@@ -189,7 +189,7 @@ describe('CloudStorageBackend', () => {
   })
 
   it('re-putting the same key increments version', async () => {
-    const backend = new CloudStorageBackend({ bucket: freshBucket() })
+    const backend = createCloudStorageBackend({ bucket: freshBucket() })
     const socket = await backend.connect()
 
     await send(socket, { op: 'put', key: 'k', data: toBase64(new Uint8Array([1])) })
@@ -200,7 +200,7 @@ describe('CloudStorageBackend', () => {
   })
 
   it('unknown op returns an error without closing the socket', async () => {
-    const backend = new CloudStorageBackend({ bucket: freshBucket() })
+    const backend = createCloudStorageBackend({ bucket: freshBucket() })
     const socket = await backend.connect()
 
     const res = await send(socket, { op: 'frobnicate' })
@@ -217,7 +217,7 @@ describe('CloudStorageBackend', () => {
   it('stores ciphertext, not plaintext, in the underlying chunk store', async () => {
     const bucket = freshBucket()
     const chunkStore = new IndexedDBChunkStore({ dbName: `${bucket}-chunks-direct` })
-    const backend = new CloudStorageBackend({ bucket, dbName: bucket, chunkStore })
+    const backend = createCloudStorageBackend({ bucket, dbName: bucket, chunkStore })
     const socket = await backend.connect()
 
     const plaintext = new TextEncoder().encode('this is definitely secret plaintext')
@@ -252,7 +252,7 @@ describe('CloudStorageBackend', () => {
 
   it('two different puts of identical plaintext produce different ciphertext (fresh IV per chunk)', async () => {
     const bucket = freshBucket()
-    const backend = new CloudStorageBackend({ bucket })
+    const backend = createCloudStorageBackend({ bucket })
     const socket = await backend.connect()
 
     const plaintext = new TextEncoder().encode('identical content')
@@ -279,7 +279,7 @@ describe('CloudStorageBackend', () => {
     const bucket = freshBucket()
 
     // "Session 1": write via one backend instance.
-    const backend1 = new CloudStorageBackend({ bucket })
+    const backend1 = createCloudStorageBackend({ bucket })
     const socket1 = await backend1.connect()
     const plaintext = new TextEncoder().encode('durable across reload')
     await send(socket1, {
@@ -300,7 +300,7 @@ describe('CloudStorageBackend', () => {
     // `#loadOrCreateKey`) rather than generating a new one -- this is how
     // the bucket key persists across a reload in this single-peer phase.
     // (Cross-*peer* key distribution is Phase E's job, not this one's.)
-    const backend2 = new CloudStorageBackend({ bucket })
+    const backend2 = createCloudStorageBackend({ bucket })
     const socket2 = await backend2.connect()
     const getRes = await send(socket2, { op: 'get', key: 'k' })
 
@@ -312,12 +312,12 @@ describe('CloudStorageBackend', () => {
 
   it('a fresh instance pointed at a DIFFERENT bucket name cannot read the first bucket\'s data', async () => {
     const bucket = freshBucket()
-    const backend1 = new CloudStorageBackend({ bucket })
+    const backend1 = createCloudStorageBackend({ bucket })
     const socket1 = await backend1.connect()
     await send(socket1, { op: 'put', key: 'k', data: toBase64(new TextEncoder().encode('secret')) })
     await backend1.close()
 
-    const backend2 = new CloudStorageBackend({ bucket: freshBucket() })
+    const backend2 = createCloudStorageBackend({ bucket: freshBucket() })
     const socket2 = await backend2.connect()
     const getRes = await send(socket2, { op: 'get', key: 'k' })
     assert.equal(getRes.error, 'not found')

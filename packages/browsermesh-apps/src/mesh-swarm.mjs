@@ -206,24 +206,22 @@
  * No browser-only imports at module level.
  *
  * `@johnhenry/browsermesh-discovery` (an optional peerDependency) is
- * imported eagerly here, deliberately -- see the CHANGELOG entry
- * documenting the sibling fix in other files of this package.
+ * lazily resolved via `createRequire(import.meta.url)` -- Node's stable
+ * synchronous `require()` of an ES module (Node >=22.12/23, well within
+ * this package's own `engines.node: >=24` floor), not a dynamic `import()`.
  * `SwimMembership`/`SwarmCoordinator` are both constructed synchronously
  * inside this service's `attach()`, whose synchronous-return contract is a
  * hard, repo-wide convention (`mesh-service.mjs`'s `attachService()`,
- * relied on -- without `await` -- throughout `mesh-bootstrap.mjs`); making
- * `attach()` async to lazy-load these would break that convention, not
- * attempted here.
+ * relied on -- without `await` -- throughout `mesh-bootstrap.mjs`); an
+ * async `import()` would have broken that (see the CHANGELOG entry
+ * documenting this fix across the package). `require()` resolves lazily
+ * (only when `attach()` actually runs) while staying fully synchronous, so
+ * `attach()`'s contract doesn't change.
  */
 
-import {
-  SwarmCoordinator,
-  SwimMembership,
-  SWARM_JOIN,
-  SWARM_LEAVE,
-  SWARM_HEARTBEAT,
-  SWARM_TASK_ASSIGN,
-} from '@johnhenry/browsermesh-discovery'
+import { createRequire } from 'node:module'
+
+const require = createRequire(import.meta.url)
 
 const DEFAULT_SWIM_ENVELOPE_TYPE = 'swarm-swim'
 const DEFAULT_HEARTBEAT_ENVELOPE_TYPE = 'swarm-heartbeat'
@@ -288,6 +286,16 @@ export function createSwarmService(opts = {}) {
 
     attach(peerNode, ctx) {
       const localPodId = peerNode.podId
+
+      // Lazy, synchronous (see module doc comment).
+      const {
+        SwarmCoordinator,
+        SwimMembership,
+        SWARM_JOIN,
+        SWARM_LEAVE,
+        SWARM_HEARTBEAT,
+        SWARM_TASK_ASSIGN,
+      } = require('@johnhenry/browsermesh-discovery')
 
       // -----------------------------------------------------------------
       // SwimMembership -- see module doc comment's "SWIM BRIDGE" section.

@@ -24,15 +24,33 @@
  *
  * No browser-only imports at module level.
  *
- * `@johnhenry/browsermesh-netway` (an optional peerDependency) is imported
- * eagerly here, deliberately -- see the CHANGELOG entry documenting the
- * sibling fix in other files of this package. `Backend` is used as a base
- * class (`export class MeshRelayBackend extends Backend`), evaluated at
- * module load time -- same constraint as `cloud-storage-backend.mjs`'s
- * identical pattern; not attempted here.
+ * `@johnhenry/browsermesh-netway` (an optional peerDependency) is lazily
+ * resolved via `createRequire(import.meta.url)` -- Node's stable
+ * synchronous `require()` of an ES module (Node >=22.12/23, well within
+ * this package's own `engines.node: >=24` floor). `Backend` is used as a
+ * base class (`class MeshRelayBackend extends Backend`); a class's
+ * `extends` clause is evaluated at class-DECLARATION time, and a
+ * `class ... extends ... {}` statement written at module top level always
+ * runs at module-LOAD time, no matter how the `Backend` reference feeding
+ * it is obtained -- there is no way to defer that with a plain lazy
+ * import, sync or async (see `cloud-storage-backend.mjs`'s identical
+ * constraint). The fix here instead moves the class declaration itself out
+ * of module-top-level scope, into a function that resolves `Backend` via
+ * `require()` and builds+memoizes the class on first call, so it still
+ * only runs once, lazily, the first time this file is actually used, not
+ * merely imported.
+ *
+ * **BREAKING CHANGE**: `MeshRelayBackend` is no longer exported as a
+ * class. Replace `new MeshRelayBackend(opts)` with
+ * `createMeshRelayBackend(opts)` (same `opts` shape, still returns a real
+ * `MeshRelayBackend` instance with the exact same instance API) -- see the
+ * CHANGELOG entry documenting this fix across the package for the full
+ * rationale and the sibling `cloud-storage-backend.mjs` fix.
  */
 
-import { Backend, StreamSocket, ConnectionRefusedError } from '@johnhenry/browsermesh-netway'
+import { createRequire } from 'node:module'
+
+const require = createRequire(import.meta.url)
 
 /** Default `envelope.type` used to route relay payloads on the shared `onIncomingData()` bus. */
 const DEFAULT_ENVELOPE_TYPE = 'mesh-relay'
@@ -69,13 +87,26 @@ function fromBase64(str) {
 // MeshRelayBackend
 // ---------------------------------------------------------------------------
 
+let _MeshRelayBackendClass = null
+
 /**
- * A `Backend` that relays TCP-like `connect()`s through one specific mesh
- * peer's `MeshRelayHost`, over `PeerNode.sendTo()`/`onIncomingData()`.
- *
- * @extends Backend
+ * Lazily builds (and memoizes) the `MeshRelayBackend` class, deferring
+ * resolution of `@johnhenry/browsermesh-netway`'s `Backend` past
+ * module-load time -- see module doc comment. Only ever runs once per
+ * process; every later call returns the same class reference.
+ * @returns {typeof MeshRelayBackend}
  */
-export class MeshRelayBackend extends Backend {
+function resolveMeshRelayBackendClass() {
+  if (_MeshRelayBackendClass) return _MeshRelayBackendClass
+  const { Backend, StreamSocket, ConnectionRefusedError } = require('@johnhenry/browsermesh-netway')
+
+  /**
+   * A `Backend` that relays TCP-like `connect()`s through one specific mesh
+   * peer's `MeshRelayHost`, over `PeerNode.sendTo()`/`onIncomingData()`.
+   *
+   * @extends Backend
+   */
+  class MeshRelayBackend extends Backend {
   /** @type {import('./peer-node.mjs').PeerNode} */
   #node
 
@@ -291,6 +322,24 @@ export class MeshRelayBackend extends Backend {
       pending.reject(new Error('MeshRelayBackend closed'))
     }
   }
+  }
+
+  _MeshRelayBackendClass = MeshRelayBackend
+  return MeshRelayBackend
+}
+
+/**
+ * Construct a `MeshRelayBackend` -- the class itself is no longer exported
+ * directly (see module doc comment's "BREAKING CHANGE" note).
+ *
+ * @param {object} opts - Same shape as `MeshRelayBackend`'s constructor:
+ *   `{node, relayPeerPubKey, envelopeType?, connectTimeoutMs?, onLog?}`.
+ * @returns {import('@johnhenry/browsermesh-netway').Backend} A real
+ *   `MeshRelayBackend` instance (the full instance API is unchanged).
+ */
+export function createMeshRelayBackend(opts) {
+  const MeshRelayBackend = resolveMeshRelayBackendClass()
+  return new MeshRelayBackend(opts)
 }
 
 export { DEFAULT_ENVELOPE_TYPE }

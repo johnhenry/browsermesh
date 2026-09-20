@@ -51,17 +51,23 @@
  * No browser-only imports at module level.
  *
  * `@johnhenry/browsermesh-discovery` (an optional peerDependency) is
- * imported eagerly here, deliberately -- see the CHANGELOG entry
- * documenting the sibling fix in other files of this package.
+ * lazily resolved via `createRequire(import.meta.url)` -- Node's stable
+ * synchronous `require()` of an ES module (Node >=22.12/23, well within
+ * this package's own `engines.node: >=24` floor), not a dynamic `import()`.
  * `createMeshDht()` is synchronous, has a directly-tested synchronous
  * validation-throw contract (`test/mesh-dht.test.mjs`'s
  * `assert.throws(...)`), and returns `{strategy, dhtNode, teardown}`
- * directly to ~11 synchronous call sites in its own test file -- making it
- * async to lazy-load `DhtDiscoveryStrategy` would break all of that; not
- * attempted here.
+ * directly to ~11 synchronous call sites in its own test file -- an async
+ * `import()` would have broken all of that (see the CHANGELOG entry
+ * documenting this fix across the package). `require()` resolves lazily
+ * (only when `createMeshDht()` is actually called, after its own
+ * validation throws) while staying fully synchronous, so none of that
+ * changes.
  */
 
-import { DhtDiscoveryStrategy } from '@johnhenry/browsermesh-discovery'
+import { createRequire } from 'node:module'
+
+const require = createRequire(import.meta.url)
 
 /** Default `type` tag for DHT wire messages multiplexed onto a shared transport. */
 const DEFAULT_MESSAGE_TYPE = 'dht-relay'
@@ -155,6 +161,10 @@ export function createMeshDht({
   if (!transport || typeof transport.send !== 'function' || typeof transport.onMessage !== 'function') {
     throw new Error('createMeshDht: options.transport is required and must implement send(msg)/onMessage(cb)')
   }
+
+  // Lazy, synchronous (see module doc comment) -- only reached once
+  // validation above has already passed.
+  const { DhtDiscoveryStrategy } = require('@johnhenry/browsermesh-discovery')
 
   const sendFn = (targetId, msg) => {
     transport.send({ type: messageType, from: localPodId, to: targetId, payload: msg })

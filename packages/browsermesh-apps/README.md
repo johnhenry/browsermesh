@@ -49,9 +49,9 @@ Extracted from the private `clawser` monorepo (previously `packages/browsermesh-
 | peer-verification | `VerificationQuorum`, `Attestation` |
 | marketplace-ui | `SkillMarketplace` |
 | mesh-relay-host | `MeshRelayHost` |
-| mesh-relay-backend | `MeshRelayBackend` |
+| mesh-relay-backend | `createMeshRelayBackend` |
 | mesh-service | `attachService`, `MeshService` (attach convention) |
-| cloud-storage-backend | `CloudStorageBackend` |
+| cloud-storage-backend | `createCloudStorageBackend` |
 | grant-log | `GrantLog`, `createGrantLogService` |
 | key-distribution | `createKeyDistributionService` |
 | manifest-sync | `createManifestSyncService` |
@@ -232,17 +232,17 @@ alice.registry.grantCapabilities(bob.podId, ['mesh-relay:s3-local:connect']);
 alice.registry.revokeCapabilities(bob.podId, ['mesh-relay:s3-local:connect']);
 ```
 
-On the client side (the peer being granted access), `MeshRelayBackend` is a
-`browsermesh-netway` `Backend` -- register it on your own `VirtualNetwork`
+On the client side (the peer being granted access), `createMeshRelayBackend()`
+builds a `browsermesh-netway` `Backend` -- register it on your own `VirtualNetwork`
 under any scheme you like, and connect through the normal API, treating the
 service name as the "host":
 
 ```js
-import { MeshRelayBackend } from '@johnhenry/browsermesh-apps';
+import { createMeshRelayBackend } from '@johnhenry/browsermesh-apps';
 import { VirtualNetwork } from '@johnhenry/browsermesh-netway';
 
 const bobNetwork = new VirtualNetwork();
-bobNetwork.addBackend('via-alice', new MeshRelayBackend({ node: bob, relayPeerPubKey: alice.podId }));
+bobNetwork.addBackend('via-alice', createMeshRelayBackend({ node: bob, relayPeerPubKey: alice.podId }));
 
 const socket = await bobNetwork.connect('via-alice://s3-local'); // refused (ConnectionRefusedError) until granted
 ```
