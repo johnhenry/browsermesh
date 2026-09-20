@@ -118,23 +118,26 @@
  *
  * No browser-only imports at module level.
  *
- * `@johnhenry/browsermesh-core` (an optional peerDependency) is imported
- * eagerly here, deliberately -- see the CHANGELOG entry documenting the
- * sibling fix in other files of this package. `startCheckFor()` is called
- * both from a synchronous event handler and synchronously inside
- * `attach()`'s initial peer-scan loop, with a synchronous de-dup guard
- * (`checks.has(pubKey)`) against being started twice for the same peer.
- * Making it lazy-load `TransportHealthCheck` would open a real race: two
- * rapid calls for the same peer could both pass the de-dup check before
- * the first call's import resolves, creating duplicate health checks.
- * Closing that safely needs a reservation/cancellation state machine
- * (synchronously claim the slot before the `await`, handle a concurrent
- * `stopCheckFor()` arriving mid-import) -- real complexity in
- * production failover-adjacent code that wasn't attempted here without
- * much more thorough validation than a function-scoped dynamic import.
+ * `@johnhenry/browsermesh-core` (an optional peerDependency) is lazily
+ * imported inside `startCheckFor()`, guarded by a reservation/cancellation
+ * scheme rather than a bare `checks.has(pubKey)` de-dup: `startCheckFor()`
+ * is called both from a synchronous event handler and synchronously inside
+ * `attach()`'s initial peer-scan loop, so a naive lazy import would open a
+ * real race (two rapid calls for the same peer both passing the de-dup
+ * check before the first call's import resolves, leaking an orphaned,
+ * un-stoppable `TransportHealthCheck`). The fix: `checks.set(pubKey, {
+ * pending: true, cancelled: false })` happens SYNCHRONOUSLY, before the
+ * `await import()` -- so the de-dup guard (`checks.has(pubKey)`) is
+ * correct the instant `startCheckFor()` returns, regardless of how long
+ * the import takes. A concurrent `stopCheckFor()` arriving while pending
+ * flips `cancelled` and removes the map entry immediately; when the import
+ * later resolves, a cancelled reservation is a no-op (no orphaned check
+ * gets installed). Every other `checks.get(pubKey)` read site (the pong
+ * handler, `handleTransportClose`/`handleTransportError`,
+ * `getStatus()`/`getCheck()`) is reservation-aware -- see each site's own
+ * comment. See `test/mesh-keepalive.test.mjs`'s dedicated race tests.
  */
 
-import { TransportHealthCheck } from '@johnhenry/browsermesh-core'
 import { endpointsKey } from './mesh-hardening.mjs'
 
 /** Envelope type for the outbound liveness probe. */
@@ -187,8 +190,18 @@ export function createMeshKeepaliveService({
         )
       }
 
-      /** @type {Map<string, import('@johnhenry/browsermesh-core').TransportHealthCheck>} pubKey -> health check */
+      /**
+       * pubKey -> either a real health check, or a pending reservation
+       * (`{pending: true, cancelled: boolean}`) while `TransportHealthCheck`
+       * is being lazily imported -- see module doc comment.
+       * @type {Map<string, import('@johnhenry/browsermesh-core').TransportHealthCheck | {pending: true, cancelled: boolean}>}
+       */
       const checks = new Map()
+
+      /** @param {*} entry @returns {boolean} */
+      function isReservation(entry) {
+        return !!entry && entry.pending === true
+      }
 
       /**
        * Best-effort lookup of the `TransportFailover` instance
@@ -219,9 +232,32 @@ export function createMeshKeepaliveService({
         }
       }
 
-      /** @param {string} pubKey */
+      /**
+       * Claims the `pubKey` slot synchronously (closing the lazy-import
+       * race -- see module doc comment), then lazily imports
+       * `TransportHealthCheck` and installs a real check, unless the
+       * reservation was cancelled (via `stopCheckFor()`) in the meantime.
+       * @param {string} pubKey
+       */
       function startCheckFor(pubKey) {
         if (!pubKey || checks.has(pubKey)) return
+
+        const reservation = { pending: true, cancelled: false }
+        checks.set(pubKey, reservation)
+
+        buildCheck(pubKey, reservation).catch((err) => {
+          if (checks.get(pubKey) === reservation) checks.delete(pubKey)
+          log('mesh-keepalive:start-check-failed', { pubKey, error: err?.message || String(err) })
+        })
+      }
+
+      /**
+       * @param {string} pubKey
+       * @param {{pending: true, cancelled: boolean}} reservation
+       */
+      async function buildCheck(pubKey, reservation) {
+        const { TransportHealthCheck } = await import('@johnhenry/browsermesh-core')
+        if (reservation.cancelled) return
 
         const check = new TransportHealthCheck({
           // TransportHealthCheck requires a truthy `transport` but only
@@ -257,12 +293,21 @@ export function createMeshKeepaliveService({
         check.start()
       }
 
-      /** @param {string} pubKey */
+      /**
+       * If `pubKey` is still a pending reservation, cancels it (the
+       * in-flight lazy import will no-op when it resolves). Otherwise stops
+       * and removes the real check.
+       * @param {string} pubKey
+       */
       function stopCheckFor(pubKey) {
-        const check = checks.get(pubKey)
-        if (!check) return
-        check.stop()
+        const entry = checks.get(pubKey)
+        if (!entry) return
         checks.delete(pubKey)
+        if (isReservation(entry)) {
+          entry.cancelled = true
+          return
+        }
+        entry.stop()
       }
 
       // -----------------------------------------------------------------
@@ -279,15 +324,19 @@ export function createMeshKeepaliveService({
       // NATIVE-TRANSPORT-CLOSE WIRING". A stronger, immediate signal than
       // waiting out maxMissed ping/pong cycles.
       function handleTransportClose({ pubKey } = {}) {
-        if (!pubKey || !checks.has(pubKey)) return
-        ctx.emit('keepalive:peer-unhealthy', { pubKey, missedCount: checks.get(pubKey).missedCount, reason: 'transport-close' })
+        const entry = checks.get(pubKey)
+        if (!pubKey || !entry) return
+        // A pending reservation has 0 missed pings so far -- matches
+        // TransportHealthCheck's own #missedCount = 0 default (hardening.mjs).
+        ctx.emit('keepalive:peer-unhealthy', { pubKey, missedCount: isReservation(entry) ? 0 : entry.missedCount, reason: 'transport-close' })
         triggerFailover(pubKey, 'keepalive:transport-close').catch((err) => {
           log('mesh-keepalive:trigger-failover-error', { pubKey, error: err?.message || String(err) })
         })
       }
       function handleTransportError({ pubKey, error } = {}) {
-        if (!pubKey || !checks.has(pubKey)) return
-        ctx.emit('keepalive:peer-unhealthy', { pubKey, missedCount: checks.get(pubKey).missedCount, reason: 'transport-error' })
+        const entry = checks.get(pubKey)
+        if (!pubKey || !entry) return
+        ctx.emit('keepalive:peer-unhealthy', { pubKey, missedCount: isReservation(entry) ? 0 : entry.missedCount, reason: 'transport-error' })
         log('mesh-keepalive:transport-error', { pubKey, error })
         triggerFailover(pubKey, 'keepalive:transport-error').catch((err) => {
           log('mesh-keepalive:trigger-failover-error', { pubKey, error: err?.message || String(err) })
@@ -322,8 +371,12 @@ export function createMeshKeepaliveService({
             log('mesh-keepalive:pong-send-failed', { to: fromPubKey, error: err?.message || String(err) })
           })
         } else if (msg.type === PONG_TYPE) {
-          const check = checks.get(fromPubKey)
-          if (check) check.recordPong()
+          const entry = checks.get(fromPubKey)
+          // A pong arriving while still a pending reservation would be a
+          // stray/duplicate from a prior connection -- this file can't have
+          // sent a ping for this peer yet (check.start() hasn't run), so
+          // it's safe to drop.
+          if (entry && !isReservation(entry)) entry.recordPong()
         }
       })
 
@@ -331,18 +384,29 @@ export function createMeshKeepaliveService({
         /**
          * @param {string} pubKey
          * @returns {'healthy'|'degraded'|'unhealthy'|null} `null` if this
-         *   peer is not currently tracked (never connected, or already
-         *   disconnected).
+         *   peer is not currently tracked (never connected or already
+         *   disconnected). A pending reservation (lazy import still in
+         *   flight) reports `'healthy'` -- matching `TransportHealthCheck`'s
+         *   own `#status = 'healthy'` default at construction, before
+         *   `start()` runs (`hardening.mjs`) -- not `null`, so callers see
+         *   the exact same synchronous-default behavior as before this file
+         *   lazy-loaded the class.
          */
         getStatus(pubKey) {
-          return checks.get(pubKey)?.status ?? null
+          const entry = checks.get(pubKey)
+          if (!entry) return null
+          return isReservation(entry) ? 'healthy' : entry.status
         },
         /**
          * @param {string} pubKey
          * @returns {import('@johnhenry/browsermesh-core').TransportHealthCheck|null}
+         *   `null` also while a pending reservation hasn't finished
+         *   installing yet -- never returns the internal reservation shape.
          */
         getCheck(pubKey) {
-          return checks.get(pubKey) || null
+          const entry = checks.get(pubKey)
+          if (!entry || isReservation(entry)) return null
+          return entry
         },
         /** @returns {string[]} pubKeys currently tracked. */
         listTracked() {

@@ -136,13 +136,20 @@ describe('mesh-keepalive: real ping/pong -> healthy', () => {
     const handleA = attachService(nodeA, undefined, createMeshKeepaliveService({ intervalMs: 25, timeoutMs: 200, maxMissed: 3 }))
     const handleB = attachService(nodeB, undefined, createMeshKeepaliveService({ intervalMs: 25, timeoutMs: 200, maxMissed: 3 }))
 
+    // 'healthy' immediately -- either the real TransportHealthCheck's own
+    // construction-time default, or (briefly, before the lazy import
+    // resolves) the reservation mirroring that same default. getCheck()
+    // itself stays null until the real instance is actually installed, so
+    // every getCheck() read below is optional-chained to survive that
+    // narrow pending window -- see mesh-keepalive.mjs's getStatus()/
+    // getCheck() doc comments.
     assert.equal(handleA.api.getStatus(bob.podId), 'healthy', 'starts healthy before the first ping (TransportHealthCheck default)')
 
-    await waitFor(() => handleA.api.getStatus(bob.podId) === 'healthy' && handleA.api.getCheck(bob.podId).totalPongs > 0, 2000, 'nodeA to receive a real pong from nodeB')
-    await waitFor(() => handleB.api.getStatus(alice.podId) === 'healthy' && handleB.api.getCheck(alice.podId).totalPongs > 0, 2000, 'nodeB to receive a real pong from nodeA')
+    await waitFor(() => handleA.api.getStatus(bob.podId) === 'healthy' && handleA.api.getCheck(bob.podId)?.totalPongs > 0, 2000, 'nodeA to receive a real pong from nodeB')
+    await waitFor(() => handleB.api.getStatus(alice.podId) === 'healthy' && handleB.api.getCheck(alice.podId)?.totalPongs > 0, 2000, 'nodeB to receive a real pong from nodeA')
 
-    assert.ok(handleA.api.getCheck(bob.podId).totalPings > 0, 'nodeA actually sent ping envelopes')
-    assert.ok(handleB.api.getCheck(alice.podId).totalPings > 0, 'nodeB actually sent ping envelopes')
+    assert.ok(handleA.api.getCheck(bob.podId)?.totalPings > 0, 'nodeA actually sent ping envelopes')
+    assert.ok(handleB.api.getCheck(alice.podId)?.totalPings > 0, 'nodeB actually sent ping envelopes')
 
     handleA.teardown()
     handleB.teardown()
@@ -509,5 +516,134 @@ describe('mesh-keepalive: instance lifecycle / no leaked timers', () => {
     assert.ok(handleA.api.listTracked().includes(bob.podId), 'a peer connected before attach() is still picked up')
 
     handleA.teardown()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Lazy-import race safety (startCheckFor's reservation/cancellation scheme
+// -- see mesh-keepalive.mjs's module doc comment). Unlike the suites above,
+// these don't need a real linked PeerNode pair: the race being tested is
+// entirely internal to the service's own `checks` Map, exercised directly
+// via a minimal `{on, off, listPeers}` fake so the two `peer:connect`
+// deliveries can be fired synchronously, back-to-back, in the same tick --
+// the exact condition a real reconnect storm would produce.
+// ---------------------------------------------------------------------------
+
+/** @returns {{on: Function, off: Function, listPeers: Function, fire: Function}} */
+function fakePeerNode() {
+  const handlers = new Map()
+  return {
+    on(event, cb) { handlers.set(event, cb) },
+    off(event, cb) { if (handlers.get(event) === cb) handlers.delete(event) },
+    listPeers() { return [] },
+    fire(event, payload) { handlers.get(event)?.(payload) },
+  }
+}
+
+/** @returns {object} minimal MeshService ctx -- no real dispatch needed for these tests. */
+function fakeCtx() {
+  return {
+    onIncomingData: () => () => {},
+    sendTo: async () => {},
+    emit: () => {},
+  }
+}
+
+describe('mesh-keepalive: lazy-import race safety', () => {
+  it('dedupes a rapid duplicate peer:connect for the same peer synchronously, before the lazy import resolves', () => {
+    const service = createMeshKeepaliveService({ intervalMs: 60000, timeoutMs: 30000, maxMissed: 10 })
+    const node = fakePeerNode()
+    const { api, teardown } = service.attach(node, fakeCtx())
+    try {
+      node.fire('peer:connect', { fingerprint: 'peer-x' })
+      node.fire('peer:connect', { fingerprint: 'peer-x' }) // rapid duplicate, same tick
+
+      // Must already be deduped here -- synchronously, in the same tick as
+      // both fire() calls -- not just once the import eventually settles.
+      // This is the exact invariant a naive `checks.has(pubKey)`-only guard
+      // would fail (both calls would pass the check before either import
+      // resolved, leaking an orphaned, un-stoppable second TransportHealthCheck).
+      assert.equal(api.listTracked().length, 1)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('installs exactly one real TransportHealthCheck once the lazy import resolves', async () => {
+    const service = createMeshKeepaliveService({ intervalMs: 60000, timeoutMs: 30000, maxMissed: 10 })
+    const node = fakePeerNode()
+    const { api, teardown } = service.attach(node, fakeCtx())
+    try {
+      node.fire('peer:connect', { fingerprint: 'peer-x' })
+      node.fire('peer:connect', { fingerprint: 'peer-x' })
+
+      await new Promise((r) => setImmediate(r))
+      await new Promise((r) => setImmediate(r))
+
+      assert.equal(api.listTracked().length, 1)
+      assert.ok(api.getCheck('peer-x'), 'a real TransportHealthCheck was installed, not left as a bare reservation')
+      assert.equal(typeof api.getCheck('peer-x').stop, 'function')
+    } finally {
+      teardown() // stops the real check's live setInterval -- otherwise this leaks a timer for the life of the process.
+    }
+  })
+
+  it('cancels a pending reservation if the peer disconnects before the lazy import resolves', async () => {
+    const service = createMeshKeepaliveService({ intervalMs: 60000, timeoutMs: 30000, maxMissed: 10 })
+    const node = fakePeerNode()
+    const { api, teardown } = service.attach(node, fakeCtx())
+    try {
+      node.fire('peer:connect', { fingerprint: 'peer-y' })
+      node.fire('peer:disconnect', { fingerprint: 'peer-y' })
+
+      assert.equal(api.listTracked().length, 0, 'cancelled synchronously')
+
+      await new Promise((r) => setImmediate(r))
+      await new Promise((r) => setImmediate(r))
+
+      assert.equal(api.listTracked().length, 0, 'the import resolving later must not resurrect a cancelled reservation')
+      assert.equal(api.getStatus('peer-y'), null, 'disconnected peers are not tracked at all -- unlike a pending, still-connected reservation, which reports healthy (see the next describe block)')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('re-connecting after a cancelled reservation starts a fresh check, unaffected by the earlier in-flight import', async () => {
+    const service = createMeshKeepaliveService({ intervalMs: 60000, timeoutMs: 30000, maxMissed: 10 })
+    const node = fakePeerNode()
+    const { api, teardown } = service.attach(node, fakeCtx())
+    try {
+      node.fire('peer:connect', { fingerprint: 'peer-z' })
+      node.fire('peer:disconnect', { fingerprint: 'peer-z' })
+      node.fire('peer:connect', { fingerprint: 'peer-z' }) // reconnect while the first import may still be in flight
+
+      await new Promise((r) => setImmediate(r))
+      await new Promise((r) => setImmediate(r))
+
+      assert.equal(api.listTracked().length, 1)
+      assert.ok(api.getCheck('peer-z'))
+    } finally {
+      teardown()
+    }
+  })
+
+  it('getStatus reports healthy (TransportHealthCheck\'s own construction-time default) while pending, getCheck stays null until the real instance is installed', () => {
+    const service = createMeshKeepaliveService({ intervalMs: 60000, timeoutMs: 30000, maxMissed: 10 })
+    const node = fakePeerNode()
+    const { api, teardown } = service.attach(node, fakeCtx())
+    try {
+      node.fire('peer:connect', { fingerprint: 'peer-w' })
+
+      // Still pending -- the import hasn't had a chance to resolve yet.
+      // getStatus mirrors TransportHealthCheck's own #status = 'healthy'
+      // default (hardening.mjs), so callers see identical behavior to
+      // before this file lazy-loaded the class. getCheck never hands back
+      // the internal reservation shape, so it's null until the real
+      // instance exists.
+      assert.equal(api.getStatus('peer-w'), 'healthy')
+      assert.equal(api.getCheck('peer-w'), null)
+    } finally {
+      teardown()
+    }
   })
 })
