@@ -1,12 +1,16 @@
 {
   "name": "@johnhenry/browsermesh-apps",
-  "version": "0.4.3",
+  "version": "0.5.0",
   "description": "Application layer: marketplace, chat, payments, compute, orchestration, and agent tools for BrowserMesh",
   "type": "module",
   "main": "./src/index.mjs",
   "exports": {
     ".": "./src/index.mjs",
-    "./compat": "./src/compat.mjs"
+    "./compat": "./src/compat.mjs",
+    "./mesh-rpc": "./src/mesh-rpc.mjs",
+    "./mesh-fetch": "./src/mesh-fetch.mjs",
+    "./mesh-service": "./src/mesh-service.mjs",
+    "./peer-registry": "./src/peer-registry.mjs"
   },
   "files": [
     "src",
