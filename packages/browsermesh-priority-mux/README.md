@@ -1,5 +1,8 @@
 # browsermesh-priority-mux
 
+[![npm version](https://img.shields.io/npm/v/%40johnhenry%2Fbrowsermesh-priority-mux.svg)](https://www.npmjs.com/package/@johnhenry/browsermesh-priority-mux)
+[![license](https://img.shields.io/npm/l/%40johnhenry%2Fbrowsermesh-priority-mux.svg)](LICENSE)
+
 Application-level priority scheduling for single-stream transports. A plain
 WebSocket is one ordered TCP byte stream with no multi-stream capability at
 all -- unlike WebRTC, which gets a second `RTCDataChannel` almost for free

@@ -1,14 +1,47 @@
 # browsermesh-pod
 
+[![npm version](https://img.shields.io/npm/v/%40johnhenry%2Fbrowsermesh-pod.svg)](https://www.npmjs.com/package/@johnhenry/browsermesh-pod)
+[![license](https://img.shields.io/npm/l/%40johnhenry%2Fbrowsermesh-pod.svg)](LICENSE)
+
 Pod base class for browser execution contexts with Ed25519 identity, BroadcastChannel discovery, and peer messaging.
 
 A Pod is any browser execution context (window, iframe, worker, service worker) that can execute code, receive messages, and be discovered/addressed. This package provides the standalone base class with zero framework dependencies.
 
 Pods automatically generate an Ed25519 cryptographic identity, detect their execution context, discover same-origin peers via BroadcastChannel, and establish roles (autonomous, child, peer).
 
+## Contents
+
+- [Why this exists](#why-this-exists)
+- [Used by](#used-by)
+- [Provenance](#provenance)
+- [Install](#install)
+- [Quick Start](#quick-start)
+- [Boot Sequence](#boot-sequence)
+- [Boot Options](#boot-options)
+- [API](#api)
+  - [Getters](#getters)
+  - [Methods](#methods)
+  - [Events](#events)
+  - [Subclass Hooks](#subclass-hooks)
+- [Runtime Convenience Functions](#runtime-convenience-functions)
+- [Pod Kinds](#pod-kinds)
+- [Capabilities](#capabilities)
+- [Wire Protocol](#wire-protocol)
+- [InjectedPod](#injectedpod)
+- [Peer Dependency](#peer-dependency)
+- [License](#license)
+
+## Why this exists
+
+A mesh needs *something* to be the addressable unit -- the thing with an identity, a place in the topology, and a lifecycle other peers can observe. In a browser that unit is naturally an execution context (a tab, an iframe, a worker), but the platform gives you no way to ask "who else is running near me" or "am I a top-level window or something a parent spawned." `Pod` is that missing base class: it generates an identity, classifies its own context (`window`, `iframe`, `worker`, `service-worker`, ...), runs a 6-phase boot sequence to find and be found by same-origin peers, and gives every higher-level package in this monorepo (and outside it) a stable `podId`/`role`/`peers` surface to build on, without dragging in any framework or transport of its own. It depends on nothing but `browsermesh-primitives`, deliberately -- boot and identity should work the same whether or not a mesh transport, sync engine, or kernel is present.
+
+## Used by
+
+`@johnhenry/browsermesh-embed`'s `EmbeddedPod` extends `Pod` directly, layering a `sendMessage`/message-log widget on top of the same boot sequence and peer discovery this package provides -- see that package's README for what it adds.
+
 ## Provenance
 
-Previously published as `browsermesh-pod@0.2.1`. Imported into the `@johnhenry` npm scope as part of the browsermesh monorepo consolidation; the version restarts at `0.0.0` per family convention (a new address is a new era).
+Previously maintained as an independent, standalone repository and published to npm, unscoped, as `browsermesh-pod@0.2.1` (initial release `0.1.0`, 2026-03-15), with its own CI already wired up (tests, CodeQL, dependency review). Imported into the `@johnhenry/browsermesh` monorepo via `git subtree` -- preserving its full commit history -- and rescoped to `@johnhenry/browsermesh-pod`; the version restarts at `0.0.0` per family convention.
 
 ## Install
 
@@ -21,7 +54,7 @@ npm install @johnhenry/browsermesh-pod @johnhenry/browsermesh-primitives
 ## Quick Start
 
 ```js
-import { Pod } from 'browsermesh-pod'
+import { Pod } from '@johnhenry/browsermesh-pod'
 
 const pod = new Pod()
 await pod.boot()
@@ -120,7 +153,7 @@ await pod.boot({
 ## Runtime Convenience Functions
 
 ```js
-import { installPodRuntime, createRuntime, createClient, createServer } from 'browsermesh-pod'
+import { installPodRuntime, createRuntime, createClient, createServer } from '@johnhenry/browsermesh-pod'
 
 // Create and boot a pod (createRuntime is an alias)
 const pod = await installPodRuntime({ context: globalThis })
@@ -178,7 +211,7 @@ Message factories: `createHello()`, `createHelloAck()`, `createGoodbye()`, `crea
 Lightweight subclass for Chrome extension injection or bookmarklet use. Adds page text extraction, structured data extraction, and a visual overlay indicator.
 
 ```js
-import { InjectedPod } from 'browsermesh-pod'
+import { InjectedPod } from '@johnhenry/browsermesh-pod'
 
 const pod = new InjectedPod({ extensionBridge: chrome.runtime.connect() })
 await pod.boot()

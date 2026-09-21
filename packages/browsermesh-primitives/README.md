@@ -1,10 +1,31 @@
 # browsermesh-primitives
 
+[![npm version](https://img.shields.io/npm/v/%40johnhenry%2Fbrowsermesh-primitives.svg)](https://www.npmjs.com/package/@johnhenry/browsermesh-primitives)
+[![license](https://img.shields.io/npm/l/%40johnhenry%2Fbrowsermesh-primitives.svg)](LICENSE)
+
 Shared primitives for browser mesh networking -- wire format, identity (Ed25519), CRDTs, capabilities, trust model, and ACL engine. Zero dependencies, pure ES modules, runs in browsers and Node.js.
+
+## Why this exists
+
+Every other package in this monorepo needs the same handful of building blocks -- an identity to sign with, a wire format to put bytes on the network, CRDTs that merge deterministically across peers, and a shared vocabulary for "does this peer have permission to do X." Reimplementing any of those per package would mean N slightly-different Ed25519 key derivations, N incompatible wire encodings, and no guarantee that two packages' capability tokens even mean the same thing. `browsermesh-primitives` exists to be that one shared, dependency-free floor: every downstream package imports its identity, CRDT, capability, or wire-format types directly rather than rolling its own, so two peers running different BrowserMesh packages built against the same primitives version can always talk to, sign for, and verify each other. It has zero dependencies of its own on purpose -- nothing downstream should have to worry about *this* package dragging in a second copy of anything.
+
+## Used by
+
+Every other package in this monorepo depends on `browsermesh-primitives` directly, or transitively through one that does:
+
+- `@johnhenry/browsermesh-core` -- identity, keyring, ACL, and trust-graph classes wrap this package's `PodIdentity`, `MESH_TYPE`, and capability/CRDT types.
+- `@johnhenry/browsermesh-discovery` -- DHT, naming, and swarm messages are tagged with this package's `MESH_TYPE` constants.
+- `@johnhenry/browsermesh-pod` -- `Pod` generates its Ed25519 identity via `PodIdentity.generate()`.
+- `@johnhenry/browsermesh-sync` -- `SyncDocument` is built directly on this package's `VectorClock`, `LWWRegister`, `GCounter`, `PNCounter`, `ORSet`, `RGA`, and `LWWMap` CRDT classes.
+- `@johnhenry/browsermesh-transport` -- transport message/error types (`MESH_TYPE`, `MESH_ERROR`) come from here.
+- `@johnhenry/browsermesh-apps` -- imports this package directly (`MESH_TYPE`, `LWWMap`, base64url helpers) alongside its required `browsermesh-sync` peer.
+- `@johnhenry/browsermesh-embed` -- transitively, through its hard dependency on `browsermesh-pod`.
+
+`browsermesh-kernel`, `browsermesh-netway`, and `browsermesh-priority-mux` are the exceptions: each is deliberately zero-dependency and imports nothing from this package.
 
 ## Provenance
 
-Previously published as `browsermesh-primitives@0.1.1`. Imported into the `@johnhenry` npm scope as part of the browsermesh monorepo consolidation; the version restarts at `0.0.0` per family convention (a new address is a new era).
+Previously maintained as an independent, standalone repository and published to npm, unscoped, as `browsermesh-primitives@0.1.1` (initial release `0.1.0`, 2026-03-15), with its own CI already wired up (tests, CodeQL, dependency review). Imported into the `@johnhenry/browsermesh` monorepo via `git subtree` -- preserving its full commit history -- and rescoped to `@johnhenry/browsermesh-primitives`; the version restarts at `0.0.0` per family convention.
 
 ## Install
 
@@ -31,7 +52,7 @@ import {
   ACLEngine,
   encodeMeshMessage,
   decodeMeshMessage,
-} from 'browsermesh-primitives'
+} from '@johnhenry/browsermesh-primitives'
 
 // Generate an Ed25519 identity
 const identity = await PodIdentity.generate()

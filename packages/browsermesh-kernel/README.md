@@ -1,12 +1,22 @@
 # browsermesh-kernel
 
+[![npm version](https://img.shields.io/npm/v/%40johnhenry%2Fbrowsermesh-kernel.svg)](https://www.npmjs.com/package/@johnhenry/browsermesh-kernel)
+[![license](https://img.shields.io/npm/l/%40johnhenry%2Fbrowsermesh-kernel.svg)](LICENSE)
+
 Capability-secure browser microkernel: resource handles, ByteStreams, IPC,
 service mesh, structured tracing, chaos engineering, and tenant isolation —
 zero npm dependencies, pure ES modules.
 
 ## Provenance
 
-Extracted from the private `clawser` monorepo (previously `packages/browsermesh-kernel` (web/packages/kernel)), where it was manually published to npm, unscoped, as `browsermesh-kernel@0.1.0` (2026-07-17) with no CI ever automating that publish. This is its first release as part of the `@johnhenry/browsermesh` monorepo; the version restarts at `0.0.0` per family convention.
+Extracted from the private `clawser` monorepo (previously `packages/browsermesh-kernel`), where it was manually published to npm, unscoped, as `browsermesh-kernel@0.1.0` (2026-07-17) with no CI ever automating that publish. This is its first release as part of the `@johnhenry/browsermesh` monorepo; the version restarts at `0.0.0` per family convention.
+
+## Cross-package relationship
+
+`browsermesh-kernel` has zero npm dependencies, including on other packages in this monorepo -- `kernel.mjs`/`caps.mjs` have no static or dynamic import of anything outside this package. Two relationships exist anyway, both deliberately duck-typed rather than hard dependencies:
+
+- `Kernel#networkFor()` accepts any object shaped like `@johnhenry/browsermesh-netway`'s `VirtualNetwork` and wraps it in a `ScopedNetwork` to hand a sandboxed tenant its `caps.net` view -- a real, wired integration point, but one that works with any conforming object, not specifically `browsermesh-netway`'s class.
+- `@johnhenry/browsermesh-apps`'s `kernel-mesh.mjs` lazily `import()`s this package's `Kernel` at runtime (an optional peer) to gate a tenant's mesh capability (`caps.mesh`) behind kernel-enforced permissions, composable alongside sync and mesh-relay on the same `PeerNode` -- see `browsermesh-apps`'s README, "Putting it all together."
 
 
 ## Modules
@@ -36,7 +46,7 @@ npm install @johnhenry/browsermesh-kernel
 ## Usage
 
 ```js
-import { Kernel, KERNEL_CAP } from 'browsermesh-kernel'
+import { Kernel, KERNEL_CAP } from '@johnhenry/browsermesh-kernel'
 
 const kernel = new Kernel()
 
@@ -67,3 +77,7 @@ agent workspace, where it underpins workspace tenants, shell pipes, MCP
 service registration, provider cost tracing, sandboxed code execution, and
 daemon IPC — all as opt-in hooks (`clawser-kernel-integration.js`) that are
 no-ops when the kernel isn't active.
+
+## License
+
+MIT

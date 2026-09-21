@@ -1,6 +1,28 @@
 # browsermesh-apps
 
+[![npm version](https://img.shields.io/npm/v/%40johnhenry%2Fbrowsermesh-apps.svg)](https://www.npmjs.com/package/@johnhenry/browsermesh-apps)
+[![license](https://img.shields.io/npm/l/%40johnhenry%2Fbrowsermesh-apps.svg)](LICENSE)
+
 Application layer for BrowserMesh: marketplace, chat, payments, compute orchestration, and agent tools.
+
+## Contents
+
+- [Provenance](#provenance)
+- [Modules](#modules)
+- [GPU compute](#gpu-compute)
+- [Install](#install)
+- [Usage](#usage)
+- [Connecting a real mesh node: `createMeshNode()`](#connecting-a-real-mesh-node-createmeshnode)
+  - [TURN server configuration](#turn-server-configuration)
+- [Sharing a `VirtualNetwork` with specific peers: mesh relay](#sharing-a-virtualnetwork-with-specific-peers-mesh-relay)
+- [CloudStorage bucket authorization and key distribution](#cloudstorage-bucket-authorization-and-key-distribution)
+- [CloudStorage: the ergonomic SDK](#cloudstorage-the-ergonomic-sdk)
+- [Putting it all together: sync + kernel-gated mesh + relay on one connection](#putting-it-all-together-sync--kernel-gated-mesh--relay-on-one-connection)
+- [`fetch()`/`WebSocket`-shaped mesh access: `browserMeshFetch` and `BrowserMeshWebSocket`](#fetchwebsocket-shaped-mesh-access-browsermeshfetch-and-browsermeshwebsocket)
+  - [`browserMeshFetch`](#browsermeshfetch)
+  - [`BrowserMeshWebSocket`](#browsermeshwebsocket)
+- [LLM tool-calling: `BrowserToolRegistry` and `createAgentRuntime`](#llm-tool-calling-browsertoolregistry-and-createagentruntime)
+- [License](#license)
 
 ## Provenance
 
@@ -133,7 +155,7 @@ npm install @johnhenry/browsermesh-apps @johnhenry/browsermesh-primitives @johnh
 ## Usage
 
 ```js
-import { MeshChat, AppRegistry, MeshOrchestrator } from 'browsermesh-apps';
+import { MeshChat, AppRegistry, MeshOrchestrator } from '@johnhenry/browsermesh-apps';
 ```
 
 ## Connecting a real mesh node: `createMeshNode()`

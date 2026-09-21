@@ -1,5 +1,8 @@
 # browsermesh-embed
 
+[![npm version](https://img.shields.io/npm/v/%40johnhenry%2Fbrowsermesh-embed.svg)](https://www.npmjs.com/package/@johnhenry/browsermesh-embed)
+[![license](https://img.shields.io/npm/l/%40johnhenry%2Fbrowsermesh-embed.svg)](LICENSE)
+
 Embeddable agent-backed workspace pod — drop an interactive agent into any
 web app.
 
@@ -74,3 +77,7 @@ exact contract `sendMessage()` relies on.
 
 `ClawserEmbed` is exported as an alias of `EmbeddedPod` for callers migrating
 from an earlier naming.
+
+## License
+
+MIT
