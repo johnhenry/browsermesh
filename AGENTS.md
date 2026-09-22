@@ -7,9 +7,10 @@ package ships plain ESM source (`main`/`exports` point directly at
 
 `CLAUDE.md` in this directory is a symlink to this file.
 
-## Workspace structure
+## Workspace structure and build order
 
-Foundational packages other packages build on:
+Packages are declared in `package.json`'s `workspaces` array. Foundational
+packages other packages build on:
 
 | Package | Role |
 | --- | --- |
@@ -33,7 +34,7 @@ Higher-level packages that sit on top of those:
 Packages version independently (see `RELEASING.md`); the root
 `package.json` version is only the release marker.
 
-## Build / test commands
+## The verification loop (before every push)
 
 ```bash
 npm install
@@ -64,6 +65,23 @@ There is no `npm run build` — packages ship source directly.
   pinned `libdatachannel` version. That file is a debugging session log, not
   conventions — check it before touching the WebRTC transport layer, but
   don't treat it as a style guide.
+
+## New-package definition of done
+
+Adding a package under `packages/` means all of the following, not just
+`npm init`:
+- `tsconfig.json` (or equivalent) matching an existing package's shape; no
+  build step is required (packages ship plain ESM source), but `package.json`
+  `main`/`exports` must point directly at `src/index.mjs`.
+- The package added to root `package.json`'s `workspaces` array, in
+  dependency order relative to the tables above.
+- `README.md` with the badge row, provenance note and `## Family` section
+  (root `## Family` section, above, covers cross-repo relationships; a new
+  package's own README covers its role among its browsermesh siblings via
+  the `## Packages` table).
+- A changeset (`npm run changeset`) describing the new package for its first
+  `CHANGELOG.md` entry.
+- `"engines": { "node": ">=26.0.0" }` matching the root.
 
 ## Releases
 
