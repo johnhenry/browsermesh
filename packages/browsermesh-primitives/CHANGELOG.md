@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.0.2
+
+### Patch Changes
+
+- Fix TypeScript declarations not being resolved (#179).
+
+  `browsermesh-primitives` shipped `src/index.d.ts`, but its `exports` map
+  used a bare string target with no `types` condition (and no top-level
+  `types` field), so TypeScript ignored the sibling declaration file
+  entirely and consumers hit `TS7016` on every import. `exports["."]` now
+  has an explicit `types` condition (checked first) alongside `import`,
+  and a top-level `types` field points at the same file.
+
+  `browsermesh-pod` shipped no declarations at all, even though `Pod` and
+  `BroadcastChannelTransport` are real public exports the tutorial docs
+  use. It now ships `src/index.d.ts` covering its full public surface —
+  `Pod`, `InjectedPod`, `detectPodKind`, `detectCapabilities`, the
+  transport adapters (`BroadcastChannelTransport`, `EventEmitterTransport`,
+  `NullTransport`), the discovery adapters (`TransportDiscovery`,
+  `NullDiscovery`), the wire-protocol message constants and factories, and
+  the `installPodRuntime` / `createRuntime` / `createClient` /
+  `createServer` runtime entrypoints — wired into `package.json` the same
+  way as primitives.
+
 ## 0.0.1
 
 ### Patch Changes

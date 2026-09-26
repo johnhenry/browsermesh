@@ -29,6 +29,6 @@
     "test": "node --test test/*.test.mjs"
   },
   "devDependencies": {
-    "@johnhenry/browsermesh-pod": "^0.0.1"
+    "@johnhenry/browsermesh-pod": "^0.0.2"
   }
 }
