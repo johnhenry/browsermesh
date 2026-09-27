@@ -206,9 +206,11 @@
  * No browser-only imports at module level.
  *
  * `@johnhenry/browsermesh-discovery` (an optional peerDependency) is
- * lazily resolved via `createRequire(import.meta.url)` -- Node's stable
- * synchronous `require()` of an ES module (Node >=22.12/23, well within
- * this package's own `engines.node: >=24` floor), not a dynamic `import()`.
+ * lazily resolved via `createLazyRequire(import.meta.url)`
+ * (`./internal/lazy-node-require.mjs`, using
+ * `process.getBuiltinModule('module')` rather than a static
+ * `import ... from 'node:module'`, so no Node-only code runs merely from
+ * importing this file -- see issue #183), not a dynamic `import()`.
  * `SwimMembership`/`SwarmCoordinator` are both constructed synchronously
  * inside this service's `attach()`, whose synchronous-return contract is a
  * hard, repo-wide convention (`mesh-service.mjs`'s `attachService()`,
@@ -219,9 +221,7 @@
  * `attach()`'s contract doesn't change.
  */
 
-import { createRequire } from 'node:module'
-
-const require = createRequire(import.meta.url)
+import { createLazyRequire } from './internal/lazy-node-require.mjs'
 
 const DEFAULT_SWIM_ENVELOPE_TYPE = 'swarm-swim'
 const DEFAULT_HEARTBEAT_ENVELOPE_TYPE = 'swarm-heartbeat'
@@ -288,6 +288,7 @@ export function createSwarmService(opts = {}) {
       const localPodId = peerNode.podId
 
       // Lazy, synchronous (see module doc comment).
+      const require = createLazyRequire(import.meta.url)
       const {
         SwarmCoordinator,
         SwimMembership,

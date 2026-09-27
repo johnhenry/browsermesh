@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.3.1
+
+### Patch Changes
+
+- Part of browsermesh#183: removed an internal engineering note that had
+  leaked into `MeshWshBridge`'s (`src/wsh-bridge.mjs`) published source
+  comments -- it referenced an unrelated private codebase by name and
+  included internal implementation-status notes not appropriate for a
+  public package. Two stale, non-existent relative type-import paths in the
+  same file's JSDoc (pointing at files that don't exist in this repo) were
+  also fixed to plain `{*}` annotations, matching the constructor's own
+  untyped parameters -- this package doesn't depend on `@johnhenry/wsh` or
+  `@johnhenry/browsermesh-core`, so a concrete type import was never
+  resolvable here anyway. No behavior change; `MeshWshBridge`'s actual
+  technical documentation (the hex/base64url key-format bridging it does)
+  is preserved, just rewritten without the leaked references.
+
 ## 0.3.0
 
 ### Minor Changes

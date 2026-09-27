@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.7.1
+
+### Patch Changes
+
+- Fixes browsermesh#183.
+
+  **`import '@johnhenry/browsermesh-apps'` broke in a browser bundle.** Seven
+  files (`mesh-fetch.mjs`, `mesh-websocket.mjs`, `serverless-fetch.mjs`,
+  `cloud-storage-backend.mjs`, `mesh-swarm.mjs`, `mesh-dht.mjs`,
+  `mesh-relay-backend.mjs`) each had a top-level
+  `import { createRequire } from 'node:module'`, left over from the 0.7.0
+  fix that made their optional-peer resolution lazy: the actual `require()`
+  _call_ was already deferred inside the function that needs it, but
+  `createRequire` itself was still imported statically. A static import of
+  `node:module` fails immediately when a browser (or a bundler without a
+  Node-builtin shim) tries to resolve it -- before any function runs -- and
+  all seven files are re-exported from the package root (`src/index.mjs`),
+  so simply importing `@johnhenry/browsermesh-apps` broke in a browser, even
+  for code paths that never touch the optional peer at all.
+
+  Fixed by replacing the static import with a new internal helper,
+  `createLazyRequire(url)` (`src/internal/lazy-node-require.mjs`), which
+  obtains `require()` from `process.getBuiltinModule('module')` -- called
+  only from inside the function that needs it, never at module load time.
+  Nothing Node-only executes merely from importing any of the seven files
+  now. `package.json`'s `exports["."]` also gained an explicit `"browser"`
+  condition (pointing at the same, now browser-safe, entry) to make this
+  guarantee explicit for bundlers. Zero API changes: every affected
+  function/class keeps its exact existing signature, return value, and
+  throw semantics.
+
+  **`engines.node` republished at its real floor.** `engines.node` was
+  bumped from `>=24.0.0` to `>=26.0.0` in a previous commit but never
+  actually published -- the currently-published `browsermesh-apps@0.7.0`
+  tarball still declares `>=24.0.0`, while sibling
+  `@johnhenry/browsermesh-primitives`/`@johnhenry/browsermesh-pod` are
+  already published requiring `>=26.0.0`. Since this package peer-depends
+  on `browsermesh-primitives`, its published `engines.node` was already
+  inaccurate for anyone actually able to install it. This release publishes
+  the already-correct `>=26.0.0` value that's been sitting in the tree.
+
+  **Root `AGENTS.md`/`CLAUDE.md` now documents the narrow, intentional
+  circular relationship** between `browsermesh-core` and `browsermesh-apps`
+  (each lazily `import()`s one specific thing from the other; both
+  directions are optional peerDependencies) -- previously only
+  `browsermesh-core/README.md` explained it, and the root docs' strict
+  top-down package tables gave no hint it existed.
+
 ## 0.7.0
 
 ### Minor Changes
