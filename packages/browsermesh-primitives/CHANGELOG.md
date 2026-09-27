@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.0.3 (2026-09-26)
+
+### Patch Changes
+
+- Add missing `probeEd25519Support` type declaration (#181).
+
+  `probeEd25519Support` has been exported at runtime from `src/index.mjs`
+  (re-exported from `src/identity.mjs`) since before the package shipped
+  declarations at all, but it was never added to `src/index.d.ts`. TypeScript
+  consumers hit `TS2305` ("has no exported member") and had to write a local
+  `declare module` augmentation just to call it. `src/index.d.ts` now declares
+  `probeEd25519Support(): Promise<boolean>`, matching the real implementation
+  (never throws; resolves `true`/`false` and caches the answer). A `.ts`
+  fixture under `test/` imports it by the package's published name and is
+  type-checked via a new `typecheck` script (wired into `pretest`, so
+  `npm test` catches this class of regression going forward).
+
 ## 0.0.2
 
 ### Patch Changes
