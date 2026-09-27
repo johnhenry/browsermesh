@@ -34,6 +34,19 @@ Higher-level packages that sit on top of those:
 Packages version independently (see `RELEASING.md`); the root
 `package.json` version is only the release marker.
 
+**`browsermesh-core` and `browsermesh-apps` have a narrow, intentional
+circular relationship**, not shown by the strict top-down ordering above:
+`browsermesh-core` lazily `import()`s `ScheduledTask` from
+`browsermesh-apps` in `peer-tools.mjs`, and `browsermesh-apps` lazily
+`import()`s several `browsermesh-core` exports across
+`mesh-hardening.mjs`/`mesh-keepalive.mjs`/`key-distribution.mjs`/
+`mesh-bootstrap.mjs`. Both directions are optional peerDependencies and
+both imports are lazy (`await import()`, never a static top-level import),
+so neither package requires the other to load -- see
+`packages/browsermesh-core/README.md`'s "Cross-package relationship"
+section for the full accounting. This is why both packages'
+`peerDependencies` name each other.
+
 ## The verification loop (before every push)
 
 ```bash

@@ -25,9 +25,11 @@
  * No browser-only imports at module level.
  *
  * `@johnhenry/browsermesh-netway` (an optional peerDependency) is lazily
- * resolved via `createRequire(import.meta.url)` -- Node's stable
- * synchronous `require()` of an ES module (Node >=22.12/23, well within
- * this package's own `engines.node: >=24` floor). `Backend` is used as a
+ * resolved via `createLazyRequire(import.meta.url)`
+ * (`./internal/lazy-node-require.mjs`, using
+ * `process.getBuiltinModule('module')` rather than a static
+ * `import ... from 'node:module'`, so no Node-only code runs merely from
+ * importing this file -- see issue #183). `Backend` is used as a
  * base class (`class MeshRelayBackend extends Backend`); a class's
  * `extends` clause is evaluated at class-DECLARATION time, and a
  * `class ... extends ... {}` statement written at module top level always
@@ -48,9 +50,7 @@
  * rationale and the sibling `cloud-storage-backend.mjs` fix.
  */
 
-import { createRequire } from 'node:module'
-
-const require = createRequire(import.meta.url)
+import { createLazyRequire } from './internal/lazy-node-require.mjs'
 
 /** Default `envelope.type` used to route relay payloads on the shared `onIncomingData()` bus. */
 const DEFAULT_ENVELOPE_TYPE = 'mesh-relay'
@@ -98,6 +98,7 @@ let _MeshRelayBackendClass = null
  */
 function resolveMeshRelayBackendClass() {
   if (_MeshRelayBackendClass) return _MeshRelayBackendClass
+  const require = createLazyRequire(import.meta.url)
   const { Backend, StreamSocket, ConnectionRefusedError } = require('@johnhenry/browsermesh-netway')
 
   /**

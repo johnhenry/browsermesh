@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.1
+
+### Patch Changes
+
+- Part of browsermesh#183: `engines.node` republished at its real floor.
+
+  `engines.node` was bumped from `>=24.0.0` to `>=26.0.0` in a previous
+  commit but never actually published -- the currently-published
+  `browsermesh-core@0.3.0` tarball still declares `>=24.0.0`, while sibling
+  `@johnhenry/browsermesh-primitives` is already published requiring
+  `>=26.0.0`. Since this package peer-depends on `browsermesh-primitives`,
+  its published `engines.node` was already inaccurate for anyone actually
+  able to install it. This release publishes the already-correct
+  `>=26.0.0` value that's been sitting in the tree.
+
 ## 0.3.0
 
 ### Minor Changes

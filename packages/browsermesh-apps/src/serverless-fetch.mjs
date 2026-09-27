@@ -35,9 +35,11 @@
  * @module serverless-fetch
  *
  * `@johnhenry/browsermesh-discovery` (an optional peerDependency) is
- * lazily resolved via `createRequire(import.meta.url)` -- Node's stable
- * synchronous `require()` of an ES module (Node >=22.12/23, well within
- * this package's own `engines.node: >=24` floor), not a dynamic `import()`.
+ * lazily resolved via `createLazyRequire(import.meta.url)`
+ * (`./internal/lazy-node-require.mjs`, itself using
+ * `process.getBuiltinModule('module')` rather than a static
+ * `import ... from 'node:module'`, so no Node-only code runs merely from
+ * importing this file -- see issue #183), not a dynamic `import()`.
  * `createServerlessFetchRouter()` is synchronous, has a directly-tested
  * synchronous validation-throw contract (`test/serverless-fetch.test.mjs`'s
  * `assert.throws(...)`), and returns a real `MeshFetchRouter` instance
@@ -49,11 +51,9 @@
  * changes.
  */
 
-import { createRequire } from 'node:module'
+import { createLazyRequire } from './internal/lazy-node-require.mjs'
 
 import { decodeWireResponse } from './serverless-wire.mjs'
-
-const require = createRequire(import.meta.url)
 
 /**
  * @param {{request: (podId: string, req: {method?: string, path?: string, headers?: object, body?: *}) => Promise<{status: number, headers: object, body: *}>}} meshRpcApi
@@ -77,6 +77,7 @@ export function createServerlessFetchRouter(meshRpcApi, { resolveSite } = {}) {
   }
 
   // Lazy, synchronous (see module doc comment).
+  const require = createLazyRequire(import.meta.url)
   const { MeshFetchRouter } = require('@johnhenry/browsermesh-discovery')
 
   return new MeshFetchRouter({

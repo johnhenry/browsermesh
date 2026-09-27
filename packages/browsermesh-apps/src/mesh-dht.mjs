@@ -51,9 +51,11 @@
  * No browser-only imports at module level.
  *
  * `@johnhenry/browsermesh-discovery` (an optional peerDependency) is
- * lazily resolved via `createRequire(import.meta.url)` -- Node's stable
- * synchronous `require()` of an ES module (Node >=22.12/23, well within
- * this package's own `engines.node: >=24` floor), not a dynamic `import()`.
+ * lazily resolved via `createLazyRequire(import.meta.url)`
+ * (`./internal/lazy-node-require.mjs`, using
+ * `process.getBuiltinModule('module')` rather than a static
+ * `import ... from 'node:module'`, so no Node-only code runs merely from
+ * importing this file -- see issue #183), not a dynamic `import()`.
  * `createMeshDht()` is synchronous, has a directly-tested synchronous
  * validation-throw contract (`test/mesh-dht.test.mjs`'s
  * `assert.throws(...)`), and returns `{strategy, dhtNode, teardown}`
@@ -65,9 +67,7 @@
  * changes.
  */
 
-import { createRequire } from 'node:module'
-
-const require = createRequire(import.meta.url)
+import { createLazyRequire } from './internal/lazy-node-require.mjs'
 
 /** Default `type` tag for DHT wire messages multiplexed onto a shared transport. */
 const DEFAULT_MESSAGE_TYPE = 'dht-relay'
@@ -164,6 +164,7 @@ export function createMeshDht({
 
   // Lazy, synchronous (see module doc comment) -- only reached once
   // validation above has already passed.
+  const require = createLazyRequire(import.meta.url)
   const { DhtDiscoveryStrategy } = require('@johnhenry/browsermesh-discovery')
 
   const sendFn = (targetId, msg) => {

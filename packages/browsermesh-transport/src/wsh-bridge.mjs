@@ -1,12 +1,7 @@
 /**
-// STATUS: implemented + unit-tested (clawser-mesh-wsh-bridge.test.mjs), but
-// never instantiated in app code — `import { MeshWshBridge }` in
-// clawser-pod.js has no matching `new MeshWshBridge(...)` call site anywhere.
-// Not a functional replacement for clawser-kernel-wsh-bridge.js despite the
-// similar name and shared mention in docs/data/networking.yaml's "WSH Bridge
-// Deprecation" entry — this bridges identity key *formats*, not wsh session
-// tenant/capability routing.
- * clawser-mesh-wsh-bridge.js -- Bridge between WshKeyStore and MeshIdentityManager.
+ * MeshWshBridge -- bridges identity key *formats* between WshKeyStore and
+ * MeshIdentityManager (not a general-purpose session/tenant/capability
+ * router).
  *
  * WshKeyStore uses hex-encoded SHA-256 fingerprints.
  * MeshIdentityManager uses base64url-encoded SHA-256 pod IDs.
@@ -14,8 +9,14 @@
  *
  * This bridge converts between the two formats and syncs keys.
  *
- * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-mesh-wsh-bridge.test.mjs
+ * Implemented and unit-tested (`test/wsh-bridge.test.mjs`), but this repo
+ * doesn't currently construct it anywhere outside that test suite -- there
+ * is no `new MeshWshBridge(...)` call site in this package's own source.
+ * It's kept available for consumers that maintain both a WshKeyStore and a
+ * MeshIdentityManager and need to keep their key formats in sync.
+ *
+ * Run tests: `npm test` in this package (runs `test/wsh-bridge.test.mjs`
+ * along with the rest of the suite).
  */
 
 import {
@@ -62,10 +63,13 @@ function bytesToHex(bytes) {
  * uses base64url (no padding).
  */
 export class MeshWshBridge {
-  /** @type {import('./packages/wsh/src/keystore.mjs').WshKeyStore} */
+  // Duck-typed, not imported: this package doesn't depend on `@johnhenry/wsh`
+  // (source of WshKeyStore) or `@johnhenry/browsermesh-core` (source of
+  // MeshIdentityManager) -- see the constructor's own `{*}` params below.
+  /** @type {*} A WshKeyStore instance (hex-encoded fingerprints). */
   #wshKeyStore;
 
-  /** @type {import('./clawser-mesh-identity.js').MeshIdentityManager} */
+  /** @type {*} A MeshIdentityManager instance (base64url-encoded pod IDs). */
   #meshIdentityManager;
 
   /**

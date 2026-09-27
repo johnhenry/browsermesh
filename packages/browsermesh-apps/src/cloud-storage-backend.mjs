@@ -142,10 +142,11 @@
  * No browser-only imports at module level.
  *
  * `@johnhenry/browsermesh-netway` (an optional peerDependency) is lazily
- * resolved via `createRequire(import.meta.url)` -- Node's stable
- * synchronous `require()` of an ES module (Node >=22.12/23, well within
- * this package's own `engines.node: >=24` floor). `Backend` is used as a
- * base class (`class CloudStorageBackend extends Backend`); a class's
+ * resolved via `createLazyRequire(import.meta.url)`
+ * (`./internal/lazy-node-require.mjs`, using
+ * `process.getBuiltinModule('module')` rather than a static
+ * `import ... from 'node:module'`, so no Node-only code runs merely from
+ * importing this file -- see issue #183). `Backend` is used as a
  * `extends` clause is evaluated at class-DECLARATION time, and a
  * `class ... extends ... {}` statement written at module top level always
  * runs at module-LOAD time, no matter how the `Backend` reference feeding
@@ -167,12 +168,10 @@
  * full rationale and the sibling `mesh-relay-backend.mjs` fix.
  */
 
-import { createRequire } from 'node:module'
+import { createLazyRequire } from './internal/lazy-node-require.mjs'
 
 import { IndexedDBChunkStore, IndexedDBSyncStorage, TRANSFER_DEFAULTS } from '@johnhenry/browsermesh-sync'
 import { LWWMap } from '@johnhenry/browsermesh-primitives'
-
-const require = createRequire(import.meta.url)
 
 /** 256KB, matching `MeshFileTransfer`'s existing chunking convention exactly (imported, not duplicated as a literal). */
 const CHUNK_SIZE = TRANSFER_DEFAULTS.chunkSize
@@ -325,6 +324,7 @@ let _CloudStorageBackendClass = null
  */
 function resolveCloudStorageBackendClass() {
   if (_CloudStorageBackendClass) return _CloudStorageBackendClass
+  const require = createLazyRequire(import.meta.url)
   const { Backend, StreamSocket } = require('@johnhenry/browsermesh-netway')
 
   /**
