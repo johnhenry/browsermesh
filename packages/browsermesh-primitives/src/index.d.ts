@@ -19,6 +19,24 @@ export declare function encodeBase64url(bytes: Uint8Array): string;
 export declare function decodeBase64url(str: string): Uint8Array;
 export declare function derivePodId(publicKey: CryptoKey): Promise<string>;
 
+/**
+ * Probe for WebCrypto Ed25519 support by asking for a key. Resolves true or
+ * false, never throws, and caches the answer. Call this before
+ * `PodIdentity.generate()` if you need to degrade gracefully rather than
+ * catch a NotSupportedError from four frames down.
+ */
+export declare function probeEd25519Support(): Promise<boolean>;
+
+/**
+ * Cached answer from `probeEd25519Support()`, or `null` when the probe has
+ * not resolved yet. Treat `null` as "unknown"; await `probeEd25519Support()`
+ * for a definite answer.
+ */
+export declare function supportsEd25519(): boolean | null;
+
+/** Reset the cached Ed25519 probe. Tests only. */
+export declare function _resetEd25519Probe(): void;
+
 export declare class PodIdentity {
   keyPair: CryptoKeyPair;
   podId: string;

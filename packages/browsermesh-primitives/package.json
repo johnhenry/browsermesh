@@ -1,6 +1,6 @@
 {
   "name": "@johnhenry/browsermesh-primitives",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Shared primitives for browser mesh networking — wire format, identity (Ed25519), CRDTs, capabilities, trust model, and ACL engine",
   "type": "module",
   "main": "./src/index.mjs",
@@ -32,7 +32,12 @@
   },
   "homepage": "https://opensource.johnhenry.me/browsermesh/",
   "scripts": {
-    "test": "node --test test/*.test.mjs"
+    "pretest": "npm run typecheck",
+    "test": "node --test test/*.test.mjs",
+    "typecheck": "tsc --noEmit -p test/tsconfig.json"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2"
   },
   "engines": {
     "node": ">=26.0.0"
