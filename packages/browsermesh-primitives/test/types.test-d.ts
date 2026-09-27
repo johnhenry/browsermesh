@@ -12,7 +12,7 @@
 // check also exercises the package.json `exports["."].types` resolution
 // fixed in #179/#180.
 
-import { probeEd25519Support } from "@johnhenry/browsermesh-primitives";
+import { probeEd25519Support, supportsEd25519, _resetEd25519Probe } from "@johnhenry/browsermesh-primitives";
 
 async function checkProbeEd25519Support(): Promise<void> {
   // Real signature per src/identity.mjs: `(): Promise<boolean>`.
@@ -20,4 +20,17 @@ async function checkProbeEd25519Support(): Promise<void> {
   void supported;
 }
 
+function checkSupportsEd25519(): void {
+  // Same bug class as probeEd25519Support -- also exported from index.mjs
+  // but missing from index.d.ts until this fix.
+  const cached: boolean | null = supportsEd25519();
+  void cached;
+}
+
+function checkResetEd25519Probe(): void {
+  _resetEd25519Probe();
+}
+
 void checkProbeEd25519Support;
+void checkSupportsEd25519;
+void checkResetEd25519Probe;
