@@ -177,7 +177,7 @@ const server = await createServer({ discoveryTimeout: 5000 })
 | `shared-worker` | `instanceof SharedWorkerGlobalScope` |
 | `worker` | `instanceof WorkerGlobalScope` |
 | `worklet` | `instanceof AudioWorkletGlobalScope` |
-| `server` | No `window` or `document` — this is also what `detectPodKind()` returns inside a V8 isolate (workerd/Cloudflare Workers) or a Firecracker microVM guest, since neither exposes `window`/`document` either. See [Running a Pod outside the browser](#running-a-pod-outside-the-browser). |
+| `server` | No `window`, `document`, or worker global scope — plain Node.js, including a Firecracker microVM guest. Note: inside workerd/Cloudflare Workers the global is an instance of `ServiceWorkerGlobalScope`, so an isolate-hosted pod reports `service-worker`, not `server`. See [Running a Pod outside the browser](#running-a-pod-outside-the-browser). |
 | `iframe` | `window !== window.parent` |
 | `spawned` | `window.opener` is set |
 | `window` | Default (top-level window) |

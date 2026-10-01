@@ -7,7 +7,7 @@
  *   3. `wrangler dev` serving this spike's worker.mjs / PodObject
  *
  * and one in-process Node pod (this test file itself, using
- * `@johnhenry/browsermesh-pod`'s `Pod` + our temporary `ws-transport.mjs`),
+ * `@johnhenry/browsermesh-pod`'s `Pod` + `WebSocketTransport`),
  * then:
  *   - boots a DO-hosted pod named "alpha" via `POST /pods/alpha/boot`
  *   - asserts the Node pod and the DO pod discover each other (mutual
@@ -31,9 +31,8 @@ import { createServer } from 'node:net'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 
-import { Pod, TransportDiscovery } from '../../../packages/browsermesh-pod/src/index.mjs'
+import { Pod, TransportDiscovery, WebSocketTransport } from '../../../packages/browsermesh-pod/src/index.mjs'
 import { PodIdentity } from '../../../packages/browsermesh-primitives/src/index.mjs'
-import { WebSocketTransport } from '../src/ws-transport.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const SPIKE_ROOT = path.resolve(__dirname, '..')
@@ -190,8 +189,7 @@ test('DO pod boots and a Node pod discovers it through the relay within 10s', as
   )
 
   // 2. Boot a Node pod in-process on the same relay/signaling pair, using
-  //    our temporary ws-transport.mjs (the WP1 adapter is not available in
-  //    this clone — see ws-transport.mjs header comment).
+  //    the package's WebSocketTransport (WP1 of #185).
   const nodeIdentity = await PodIdentity.generate()
   const nodeTransport = new WebSocketTransport({
     url: `ws://localhost:${relayPort}`,

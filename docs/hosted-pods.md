@@ -139,10 +139,13 @@ Re-verified correct, as stated in the issue:
 The constructor takes `opts.transport` (any object with `send`/`onMessage`/
 `open`/`close`/`ready`) and `opts.discovery` (any `DiscoveryAdapter`).
 `detectPodKind()` returns `'server'` whenever there is no `window`/`document`
-(`detect-kind.mjs`, confirmed), so a pod inside an isolate or a microVM
-already reports the right kind without any code changes — **this also holds
-inside a `node:vm` context or a `worker_threads` worker**, since neither
-exposes a `window`/`document` global by default either. See the
+and no worker global scope (`detect-kind.mjs`, confirmed), so a pod in a
+microVM guest running Node, a `node:vm` context, or a `worker_threads`
+worker reports `'server'` without code changes. **Inside workerd the answer
+is `'service-worker'`**, because workerd's global satisfies `instanceof
+ServiceWorkerGlobalScope`, which is checked first (measured in WP2). Hosted-pod
+logic must therefore treat both kinds as "not a browser window" and never
+branch on `'server'` alone. See the
 [`node:vm` warning](#node-vm-and-worker_threads-are-not-a-security-boundary)
 below for why that is not the same thing as a security boundary.
 
@@ -633,6 +636,22 @@ registration** in `packages/browsermesh-pod/test/transport-conformance.test.mjs`
 | Wake on message after idle | < 50 ms (hibernation) | < 300 ms (snapshot) | Whether "sleeping pods" is a usable primitive |
 | Message RTT browser ↔ hosted pod via relay | < 2× browser ↔ browser via relay | same | Relay is the only path for isolates |
 
+### Measured so far
+
+Lane A, WP2 (`spikes/isolate-pod-host`, `wrangler dev` on a laptop, relay and
+signaling on loopback):
+
+| Measure | Measured | Note |
+| --- | --- | --- |
+| Spawn → `registered` | ~35–42 ms | Relay + signaling handshake only |
+| `Pod.boot()` wall time | ~1.5 s | Dominated by `TransportDiscovery`'s fixed discovery window, not connection cost; a hosted pod should use a shorter `discoveryTimeout` |
+| Wake on message after idle | ≈ cold boot (~1.5 s) | **WebSocket Hibernation does not apply**: it only covers sockets a Durable Object *accepts* as a server. `PodObject` dials *out* to the relay, and an open outbound socket pins the DO in memory. Getting hibernation back requires inverting the topology so peers (or the relay) dial the DO. Tracked as open question 6 |
+| Message RTT via relay | 1–2 ms | Loopback |
+| Memory per idle pod | not measured | workerd does not expose per-isolate memory under `wrangler dev` |
+
+Lane B, WP3 (`spikes/vm-pod-host`): built and tested on macOS against a fake
+Firecracker API only. No numbers until it runs on a KVM host.
+
 These numbers are targets for WP2/WP3's spikes to measure, not yet-measured
 results — this table should gain a second column with real numbers once
 those spikes report.
@@ -655,6 +674,11 @@ those spikes report.
 5. Multiple data channels over one WebRTC connection (issue #115) would let
    a microVM pod multiplex several hosted services over one peer link;
    related, not blocking.
+6. Should the isolate topology be inverted so the relay (or peers) dial the
+   Durable Object rather than the DO dialing out? That is the only way to
+   get WebSocket Hibernation, and therefore cheap idle pods, in Lane A (WP2
+   finding). It would need the relay to act as a WebSocket client toward
+   registered hosted pods.
 
 ## Non-goals
 

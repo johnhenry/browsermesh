@@ -1,7 +1,7 @@
 /**
  * worker-websocket.mjs — outbound (client-role) WebSocket for workerd.
  *
- * `ws-transport.mjs` is written against the browser/Node `WebSocket`
+ * `@johnhenry/browsermesh-pod`'s `WebSocketTransport` is written against the browser/Node `WebSocket`
  * constructor shape: `new WebSocket(url)`, then `addEventListener('open'|
  * 'message'|'close'|'error', ...)`, `.send()`, `.close()`, `.readyState`.
  *
@@ -14,8 +14,8 @@
  *   const ws = resp.webSocket
  *   ws.accept()
  *
- * This class wraps that dance behind the `new WS(url)` shape ws-transport
- * expects, so ws-transport itself stays environment-agnostic (same file
+ * This class wraps that dance behind the `new WS(url)` shape WebSocketTransport
+ * expects, so the transport itself stays environment-agnostic (same file
  * works against Node's global WebSocket and this adapter, just injected
  * differently). It buffers `send()` calls made before the upgrade
  * completes and replays them once the socket is open, and maps the
@@ -51,7 +51,7 @@ export class WorkerClientWebSocket extends EventTarget {
   async #connect(url) {
     try {
       // fetch() requires an http(s) scheme even for the Upgrade-header
-      // WebSocket dance — ws(s):// is rejected outright. ws-transport.mjs
+      // WebSocket dance — ws(s):// is rejected outright. WebSocketTransport
       // and env vars use ws(s):// (correct for a real WebSocket
       // constructor, e.g. Node's global WebSocket), so translate here.
       const httpUrl = url.replace(/^ws:/, 'http:').replace(/^wss:/, 'https:')
