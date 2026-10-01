@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>browsermesh hosted pod (CDP lane)</title>
+<!--
+  A browser bare specifier ("@johnhenry/browsermesh-primitives") needs an
+  import map to resolve outside a bundler -- the in-test static server
+  (test/static-server.mjs) serves that package's source tree at
+  /primitives/ so this mapping is real, not aspirational.
+-->
+<script type="importmap">
+{
+  "imports": {
+    "@johnhenry/browsermesh-primitives": "/primitives/index.mjs"
+  }
+}
+</script>
+</head>
+<body>
+<!--
+  The whole pod bootstrap: boot a real Pod via the SAME
+  bootHostedPod() the in-page driver's children use (served at
+  /pod/browser-host-child.mjs by the static server, straight from
+  packages/browsermesh-pod/src/), then publish a
+  window.__browsermeshHosted global the CDP driver polls for
+  (createCdpDriver()'s READY_PROBE) and evaluates against for send()/exec().
+-->
+<script type="module">
+  import { bootHostedPod } from '/pod/browser-host-child.mjs'
+
+  const { pod, name } = await bootHostedPod({ handshakeTimeout: 50, discoveryTimeout: 50 })
+
+  window.__browsermeshHosted = {
+    ready: true,
+    name,
+    podId: pod.podId,
+    send(payload) { pod.broadcast(payload) },
+  }
+
+  document.title = `pod: ${name || pod.podId}`
+</script>
+</body>
+</html>

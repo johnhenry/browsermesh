@@ -28,7 +28,11 @@
     "example:09": "node examples/09-cloud-storage.mjs",
     "example:10": "node examples/10-mesh-kv-and-observability.mjs",
     "example:11": "node examples/11-agent-tool-calling.mjs",
-    "example:12": "node examples/12-hosted-pod-over-websocket.mjs"
+    "example:12": "node examples/12-hosted-pod-over-websocket.mjs",
+    "example:13": "node examples/13-pod-host-service.mjs",
+    "example:14": "node examples/14-pod-host-over-mesh-fetch.mjs",
+    "example:15": "node examples/15-agent-spawns-hosted-pod.mjs",
+    "example:16": "node examples/16-supervised-hosted-pods.mjs"
   },
   "devDependencies": {
     "@changesets/cli": "^2.27.0",

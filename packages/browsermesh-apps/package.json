@@ -28,6 +28,7 @@
   },
   "peerDependencies": {
     "@johnhenry/browsermesh-primitives": ">=0.0.1 <1.0.0",
+    "@johnhenry/browsermesh-pod": ">=0.0.1 <1.0.0",
     "@johnhenry/browsermesh-core": ">=0.1.0 <1.0.0",
     "@johnhenry/browsermesh-transport": ">=0.1.0 <1.0.0",
     "@johnhenry/browsermesh-sync": ">=0.0.0 <1.0.0",
@@ -58,6 +59,7 @@
   },
   "devDependencies": {
     "@johnhenry/andbox": ">=0.0.1 <1.0.0",
+    "@johnhenry/browsermesh-pod": ">=0.0.1 <1.0.0",
     "node-datachannel": "^0.33.4",
     "fake-indexeddb": "^6.2.5",
     "webgpu": "^0.6.1"

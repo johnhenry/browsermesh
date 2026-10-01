@@ -23,6 +23,7 @@ Application layer for BrowserMesh: marketplace, chat, payments, compute orchestr
   - [`BrowserMeshWebSocket`](#browsermeshwebsocket)
 - [LLM tool-calling: `BrowserToolRegistry` and `createAgentRuntime`](#llm-tool-calling-browsertoolregistry-and-createagentruntime)
 - [Runtime classes and placement lanes](#runtime-classes-and-placement-lanes)
+- [Pod host service: spawning and controlling hosted pods](#pod-host-service-spawning-and-controlling-hosted-pods)
 - [License](#license)
 
 ## Provenance
@@ -47,7 +48,7 @@ Extracted from the private `clawser` monorepo (previously `packages/browsermesh-
 | mesh-orchestrator | `createOrchestratorService` (`MeshService` wrapper: real, gated wire dispatch for `execOnPod`/`deploySkill`/`drainPod`, ungated local aggregation for `listPods`/`getPodStatus`/`topPods`) |
 | compat | `BrowserTool`, `BrowserToolRegistry` (base class + registry an LLM-drivable agent loop dispatches tool calls through) |
 | agent-runtime | `createAgentRuntime` (the LLM tool-calling dispatch loop: bring-your-own `llmFn`, real registry-backed tool execution) |
-| mesh-orchestrator-tools | `registerOrchestratorTools`, `createOrchestratorToolRegistry` (wires the 8 real `Meshctl*Tool`s into a `BrowserToolRegistry` against a real, attached `MeshOrchestrator`) |
+| mesh-orchestrator-tools | `registerOrchestratorTools`, `createOrchestratorToolRegistry` (wires the 15 real `Meshctl*Tool`s into a `BrowserToolRegistry` against a real, attached `MeshOrchestrator`) |
 | audit | `AuditChain`, `AuditStore`, `detectFork`, `buildMerkleRoot` |
 | visualizations | `TopologyLayout`, `TrustGraphLayout`, `TrustHeatmap` |
 | devtools | `MeshInspector`, `MeshInspectTool` |
@@ -506,22 +507,94 @@ dependency anywhere in this family); `llmFn(messages, toolSpecs) ->
 
 `mesh-orchestrator-tools.mjs`'s `registerOrchestratorTools()` is the worked
 example of wiring a *mesh-backed* capability into this pattern: it
-constructs `orchestrator.mjs`'s 8 real `Meshctl*Tool`s
+constructs `orchestrator.mjs`'s 15 real `Meshctl*Tool`s
 (`meshctl_pods`/`meshctl_status`/`meshctl_exec`/`meshctl_deploy`/
-`meshctl_top`/`meshctl_compute`/`meshctl_expose`/`meshctl_drain`) against a
-real, attached `mesh-orchestrator.mjs` service, so an LLM-requested
-`meshctl_exec` tool call really dispatches through that service's
-`checkAccess()`-gated wire protocol to a real remote peer.
+`meshctl_top`/`meshctl_compute`/`meshctl_expose`/`meshctl_drain`, plus issue
+#185 §8a item 4's hosted-pods control surface five —
+`meshctl_spawn`/`meshctl_snapshot`/`meshctl_restore`/`meshctl_hosted_pods`/
+`meshctl_hosts`) against a real, attached `mesh-orchestrator.mjs` service,
+so an LLM-requested `meshctl_exec` tool call really dispatches through that
+service's `checkAccess()`-gated wire protocol to a real remote peer.
 `createMeshNode({enableAgentRuntime: true, enableOrchestrator: true})` wires
 all of this for you, returning `node.toolRegistry` pre-populated and ready
 to drive `createAgentRuntime({registry: node.toolRegistry, llmFn})`.
 
-`examples/11-agent-tool-calling.mjs` runs the whole story end to end over
+`examples/11-agent-tool-calling.mjs` runs the original eight end to end over
 two real `createMeshNode()` peers, with a deterministic test `llmFn`. See
 `docs/building-mesh-services.md`'s own "`BrowserTool`/`BrowserToolRegistry`/
 agent runtime" section for the full design writeup, including two real bugs
 found while building it and the recommended DI pattern for new tools going
 forward.
+
+### `meshctl_*` tools for hosted pods (issue #185 §8a item 4)
+
+The five hosted-pods tools project `pod-host-service.mjs`'s eight-verb
+control surface (see "Pod host service" below) into the same
+`BrowserTool` shape, each calling straight through to `MeshOrchestrator`'s
+own `spawnPod`/`snapshotPod`/`restorePod`/`listHostedPods`/`listPodHosts`
+methods — which already dispatch over `pod-host-service.mjs`'s own mesh
+protocol and are already gated by the target HOST's own
+`checkAccess()`, independently of `mesh-orchestrator.mjs`'s
+`RISKY_ACTIONS` gate that `meshctl_exec`/`meshctl_deploy`/`meshctl_drain`
+use:
+
+| Tool | Args | Calls |
+| --- | --- | --- |
+| `meshctl_spawn` | `{host, name, lane?, run, limits?, caps?, env?, budget?, restart?}` | `spawnPod()` |
+| `meshctl_snapshot` | `{host, name}` | `snapshotPod()` |
+| `meshctl_restore` | `{host, name}` | `restorePod()` |
+| `meshctl_hosted_pods` | `{host}` | `listHostedPods()` |
+| `meshctl_hosts` | `{}` | `listPodHosts()` |
+
+**Auto host selection** (`meshctl_spawn` with `host: 'auto'`, or omitted):
+the orchestrator "proposes, the host accepts" — it picks exactly one host
+and never silently retries a different one after a refusal (an `EACCES`,
+or any other `PodHostDriverError`, is reported as-is). Selection prefers
+`listComputeCandidates()` (the same descriptor list `meshctl_compute`
+reads), narrowed to hosts advertising `runtime:<lane>` and preferring one
+with `availability: 'online'`. Because an ISOLATE-lane host has no `exec`
+by lane definition, it never produces a compute descriptor at all (see
+"Known limitation" below) — so for `isolate`/`browser` lanes, selection
+falls back to `listPodHosts()`, which reads the same runtime-registry peers
+directly, without that filter. `MeshOrchestrator#listPodHosts()` is new
+read-only bookkeeping this item adds: runtime-registry peers carrying a
+`metadata.podHost` entry (i.e. anything projected through
+`podHostRuntimePeer()`), returned as `{podId, lane, verbs, runtimeClasses,
+shellBackend, resource, capabilities, hostedBy}`.
+
+**Error mapping**: each tool's `error` field turns a `PodHostDriverError`
+code into a lane-aware message rather than the raw errno-shaped code —
+`ELANE` on `snapshot`/`restore` against an isolate host reads "isolate
+pods cannot snapshot/restore; Durable Object hibernation is automatic, not
+a verb you drive" (the same mapping the docs/hosted-pods.md §8a lane table
+documents), `EACCES` names the host and the verb that was denied, and so
+on for `ENOENT`/`EEXIST`/`ENOTSUP`/`ETIMEDOUT`/`EBUSY`.
+
+**The `meshctl` text-command grammar** (`registerMeshctlBuiltins()`) grew
+five subcommands matching the new tools one-for-one, usable from any shell
+wired to `MeshOrchestrator`:
+
+```
+meshctl spawn <host|auto> <name> --lane <lane> --kind <kind> --ref <ref> [--entry <entry>]
+meshctl snapshot <host> <name>
+meshctl restore <host> <name>
+meshctl hosted <host>
+meshctl hosts
+```
+
+`examples/15-agent-spawns-hosted-pod.mjs` runs the whole story end to end:
+a deterministic `llmFn` calls `meshctl_hosts`, then `meshctl_spawn` with
+`host: 'auto'`, then `meshctl_hosted_pods`, `meshctl_snapshot`,
+`meshctl_restore`, and finally the pre-existing `meshctl_drain` to drain
+the host pod itself — composing the five new tools with the original
+eight.
+
+**Item 6's supervisor tools** (`meshctl_supervise`/`meshctl_supervised`,
+and the `meshctl supervise`/`meshctl supervised` text commands) bring the
+tool count to 15. `meshctl_supervise` accepts the same args as
+`meshctl_spawn` plus `restart`/`links`, and calls
+`orchestrator.getSupervisor()` then that supervisor's own `supervise()` —
+see "Pod supervisor" above.
 
 ## Runtime classes and placement lanes
 
@@ -613,8 +686,366 @@ lifecycle this and future work packages write to the audit chain:
 `placement_ready`, `placement_evicted` -- mirroring the existing
 `remote_deploy_*`/`remote_exec_*`/`remote_compute_*` record families.
 `MeshOrchestrator#recordPlacement(kind, details)` writes one through the
-same `#recordAudit` path those use. No placement RPC is implemented yet;
-this is the audit vocabulary WP2/WP3 will write through once they land.
+same `#recordAudit` path those use. The pod host service below is what
+actually writes through it today, from both sides of a placement.
+
+## Pod host service: spawning and controlling hosted pods
+
+`createPodHostService()` is the gated, audited mesh service for **hosted
+pods** — pods running on a machine someone else operates ([issue
+#185](https://github.com/johnhenry/browsermesh/issues/185),
+[`docs/hosted-pods.md`](../../docs/hosted-pods.md)). It serves one
+lane-agnostic verb set:
+
+```
+spawn   status   send   exec   snapshot   restore   drain   list
+```
+
+The protocol itself — the verbs, the podspec, the lifecycle state machine,
+the wire envelopes, the error codes — is plain data in
+`@johnhenry/browsermesh-pod`'s `host-protocol.mjs`, deliberately *outside*
+this package so a Worker or a microVM guest can import it without the app
+runtime. What lives here is everything that needs a `PeerNode`:
+`PeerRegistry.checkAccess()`, the `AuditChain`, and the orchestrator's
+`PLACEMENT_AUDIT` vocabulary.
+
+Every later surface is a projection of this one service: `mesh://` routes,
+`meshctl` LLM tools, an external CLI, a supervisor. None of them should
+re-implement access control, validation or audit.
+
+### Hosting: attach the service
+
+```js
+import { attachService, createPodHostService } from '@johnhenry/browsermesh-apps'
+import { InMemoryPodHostDriver } from '@johnhenry/browsermesh-pod'
+
+const handle = attachService(peerNode, undefined, createPodHostService({
+  driver: new InMemoryPodHostDriver({ lane: 'node' }),  // or a real lane driver
+  resource: 'pod-host',        // ACL resource every verb is checked against
+  auditChain,                  // optional; writes PLACEMENT_AUDIT records
+  hostLabel: 'alice-laptop',
+}))
+
+handle.api.describe()
+// { podId, lane: 'node', verbs: [...8], runtimeClasses: ['node'],
+//   shellBackend: 'pty', deploymentSupport: { canDeploy: true },
+//   capabilities: ['pod-host', 'exec'], resource: 'pod-host', hostLabel }
+
+handle.api.runtimePeer()   // the runtime-registry peer shape the orchestrator reads
+```
+
+The `driver` is any object implementing `PodHostDriver` (a JSDoc typedef,
+not a base class). Three exist today:
+
+| Driver | Lane | Where |
+| --- | --- | --- |
+| `InMemoryPodHostDriver` | configurable (default `node`) | `@johnhenry/browsermesh-pod` — tests, examples, the reference implementation |
+| `createVmPodDriver(vmPodHost)` | `microvm` | `spikes/vm-pod-host/src/driver.mjs` — Firecracker, via WP3's `VmPodHost` |
+| `createIsolatePodDriver({baseUrl})` | `isolate` | `spikes/isolate-pod-host/src/driver.mjs` — workerd/Durable Objects, over HTTP |
+
+### Driving: the client
+
+```js
+import { createPodHostClient } from '@johnhenry/browsermesh-apps'
+
+const client = createPodHostClient({ peerNode, timeoutMs: 10_000 })
+
+await client.spawn(hostPubKey, {
+  name: 'transcoder',
+  lane: 'microvm',
+  run: { kind: 'command', ref: '/usr/bin/ffmpeg' },
+  limits: { vcpus: 2, memMib: 512 },
+  caps: ['net', 'fs'],
+  budget: { credits: 25 },
+  restart: { policy: 'on-failure', maxRestarts: 3 },
+})
+
+await client.exec(hostPubKey, 'transcoder', ['ffmpeg', '-version'])
+await client.snapshot(hostPubKey, 'transcoder')
+await client.restore(hostPubKey, 'transcoder')
+await client.drain(hostPubKey, 'transcoder', { cascade: true })
+await client.list(hostPubKey)
+await client.describe(hostPubKey)
+
+client.onEvent((hostPubKey, event) => {
+  // event.kind is 'lifecycle' | 'log' | 'exit'
+})
+client.close()
+```
+
+One client talks to any number of hosts; responses are correlated by
+`requestId`, so several verbs can be in flight at once. A request with no
+answer inside `timeoutMs` rejects with `PodHostDriverError` / `ETIMEDOUT`,
+and a remote `{code, message}` is rethrown as a local `PodHostDriverError`
+— so `err.code === 'EACCES'` reads the same whether the refusal came from
+the local driver or six hops away.
+
+`MeshOrchestrator` wraps the four placement-shaped verbs and writes the
+requester half of the audit trail itself:
+
+```js
+const orchestrator = new MeshOrchestrator({ peerNode, auditRecorder, podHostClient })
+await orchestrator.spawnPod(hostPodId, spec)   // placement_requested → placement_ready
+await orchestrator.snapshotPod(hostPodId, 'transcoder')  // placement_evicted
+await orchestrator.restorePod(hostPodId, 'transcoder')   // placement_requested → placement_ready
+await orchestrator.listHostedPods(hostPodId)
+```
+
+`podHostClient` is optional — one is built lazily from `peerNode` on first
+use.
+
+### Gating
+
+Every verb is checked as `registry.checkAccess(pubKey, resource, verb)`,
+i.e. the scope grammar is `pod-host:spawn`, `pod-host:exec`, … A denial
+answers `EACCES`, emits `pod-host:denied` on the service's event bus, and
+writes a `placement_denied` audit record. Verbs are independent: granting
+`pod-host:status` does not grant `pod-host:exec`. A host serving several
+tenants gives each its own resource (`resource: 'pod-host:tenant-a'`)
+rather than trying to express tenancy inside one scope.
+
+`describe()` is **not** gated, and travels on its own `pod-host:describe`
+envelope rather than as a ninth verb: it returns only what the host would
+publish in its announce metadata anyway, and a peer has to be able to find
+out a host exists before it can ask to be granted anything on it.
+
+### Which lane can do what
+
+```js
+import { POD_LANE_VERBS, laneSupports } from '@johnhenry/browsermesh-pod'
+```
+
+| Lane | `spawn` | `status` | `send` | `exec` | `snapshot` | `restore` | `drain` | `list` |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `isolate` | ✓ | ✓ | ✓ | `ELANE` | `ELANE` | `ELANE` | ✓ | ✓ |
+| `microvm` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `node` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `browser` | ✓ | ✓ | ✓ | `ELANE` | `ELANE` | `ELANE` | ✓ | ✓ |
+
+`ELANE` means "this lane structurally cannot" (a V8 isolate has no shell);
+`ENOTSUP` means "this driver did not implement an otherwise lane-compatible
+verb" (WP3's `VmPodHost` has no message path yet, so the microvm driver
+answers `send` with `ENOTSUP`). The distinction matters to a caller
+deciding whether to retry elsewhere or give up on the whole lane.
+
+### Observability and audit
+
+The service's `attachService()` handle emits `pod-host:request`,
+`pod-host:denied`, `pod-host:completed` and `pod-host:event`. With an
+`auditChain`, the host writes `placement_requested` / `placement_started` /
+`placement_ready` / `placement_denied` / `placement_evicted`. The requester
+writes its own records through `MeshOrchestrator#recordPlacement()`: the two
+chains are independent, with independent authors, by design — a host's audit
+log is not evidence to the requester and vice versa.
+
+### Known limitation: isolate hosts produce no compute descriptor
+
+`runtimePeerToComputeDescriptor()` only returns a descriptor for peers whose
+capabilities include `shell`/`exec`/`tools`. An isolate-lane pod host has no
+`exec` by definition, so `podHostRuntimePeer()` output for one is correctly
+scored as *not* a compute target and can only be reached through this service
+directly, not through `dispatchCompute()`. Teaching the scorer that "can
+spawn" is a kind of compute even without a shell is a change to WP4's scoring
+surface, not to this service.
+
+A runnable end-to-end walkthrough is
+[`examples/13-pod-host-service.mjs`](../../examples/13-pod-host-service.mjs).
+
+## Pod supervisor
+
+`createPodSupervisor()` (`pod-supervisor.mjs`) is [issue
+#185](https://github.com/johnhenry/browsermesh/issues/185)'s item 6: the
+last row of the control-surface table, `restart` policy + `status`/`spawn`/
+`drain` in a loop. The precedent is OTP, three ideas composed rather than
+reinvented:
+
+- **links** — parent/child pod relationships that cascade on drain (a
+  general form of [§7](../../docs/hosted-pods.md#7-identity-trust-and-what-hosting-cannot-promise)'s
+  "hosted pods are child-role pods of the host").
+- **monitors** — be told when a pod you care about dies, without taking
+  responsibility for it.
+- **supervisors** — `podspec.restart` (`host-protocol.mjs`) finally gets an
+  implementation.
+
+**The one rule that matters: a restart is a NEW `spawn` request the host
+may refuse.** Every (re)spawn goes through `orchestrator.spawnPod()` (the
+gated `PodHostClient` round trip, which also writes the requester-side
+`PLACEMENT_AUDIT` trail for free) or, with no orchestrator, straight
+through an injected `PodHostClient` — never the driver directly, never
+bypassing `pod-host-service.mjs`'s gate.
+
+```js
+import { createPodSupervisor } from '@johnhenry/browsermesh-apps'
+
+const supervisor = createPodSupervisor({ orchestrator }) // or { client, peerNode }
+
+const { ref } = await supervisor.supervise(hostPodId, {
+  name: 'worker', lane: 'node', run: { kind: 'command', ref: '/bin/worker' },
+  restart: { policy: 'on-failure', maxRestarts: 3, backoffMs: 1000 },
+})
+
+supervisor.monitor(ref, ({ ref, event }) => console.log(ref.name, event.kind, event.data))
+supervisor.on('supervisor:restarted', ({ ref, attempt, host }) => { /* ... */ })
+
+await supervisor.drain(ref, { cascade: true })  // children first, depth-first, then ref itself
+supervisor.stop()                               // clears every pending backoff timer
+```
+
+Everything is event-driven by default — the `PodHostClient`'s own
+`onEvent()` (`lifecycle`/`log`/`exit`) and, for host loss, the `PeerNode`'s
+`'peer:disconnect'` signal, synthesizing `{reason: 'host-lost',
+restartable: true}` for every pod that host was running. An opt-in,
+slow `reconcileIntervalMs` sweep is a safety net for an event that never
+arrives, not the primary mechanism. `links.parent`/`links.detachOnParentExit`
+on the podspec (`host-protocol.mjs`) imply a `link()` call at `supervise()`
+time; `drain(parent, {cascade: true})` drains every descendant depth-first
+(grandchildren, then children, then the parent) and emits
+`supervisor:cascade` with the full order.
+
+`AutoMigrator` (`peer-health.mjs`) already does "move work when a peer
+degrades" for the MESH-PEER population; this does the analogous thing for
+the HOSTED-POD population. They watch different signals and move different
+things, so a mesh using both gets whole-peer failover from one and
+single-pod supervision from the other with no overlap.
+
+`MeshOrchestrator#getSupervisor()` lazily builds one supervisor per
+orchestrator, and `drainPod(hostPodId)` consults it (without creating one
+it didn't need) to cascade-drain every pod that host supervises before the
+pre-existing mesh-peer drain logic runs. `meshctl_supervise`/
+`meshctl_supervised` (`orchestrator.mjs`) are the LLM-tool and
+`meshctl supervise`/`meshctl supervised` the text-command projections —
+see [`packages/browsermesh-meshctl`'s README](../browsermesh-meshctl/README.md#supervision)
+for the external-CLI surface, and
+[`examples/16-supervised-hosted-pods.mjs`](../../examples/16-supervised-hosted-pods.mjs)
+for a runnable walkthrough (crash a pod twice, watch backoff and two
+restarts, then drain the parent with cascade).
+
+## Pod host over mesh:// and the HTTP gateway
+
+[Issue #185](https://github.com/johnhenry/browsermesh/issues/185) control-surface
+item 3: an HTTP-shaped view of the pod host service above, two ways --
+`pod-host-routes.mjs` projects the eight verbs onto `mesh://` routes for
+mesh peers, and `pod-host-gateway.mjs` fronts the same client with a real
+Node HTTP server for callers who aren't on the mesh at all. Neither
+re-implements access control, validation or audit -- see below for exactly
+how each reuses `pod-host-service.mjs`'s gate.
+
+### The route table
+
+| Method | Path | Verb |
+| --- | --- | --- |
+| `GET` | `/pods` | `list` |
+| `POST` | `/pods` | `spawn` (body = podspec) |
+| `GET` | `/pods/:name` | `status` |
+| `POST` | `/pods/:name/send` | `send` |
+| `POST` | `/pods/:name/exec` | `exec` |
+| `POST` | `/pods/:name/snapshot` | `snapshot` |
+| `POST` | `/pods/:name/restore` | `restore` |
+| `DELETE` | `/pods/:name` | `drain` (`?cascade=true`) |
+| `GET` | `/host` | `describe` (ungated, like the envelope protocol's `pod-host:describe`) |
+
+Status mapping: `ok` → 200 (201 for `spawn`, 204 for `drain` -- no body, per
+HTTP's own rule); `EINVAL` → 400; `EACCES` → 403; `ENOENT` → 404; `EEXIST` →
+409; `ELANE` → 405 with an `Allow` header listing the verbs the driver's
+lane supports; `ENOTSUP` → 501; `ETIMEDOUT` → 504; `EBUSY` → 409; anything
+else → 500. Bodies are JSON `{ok, result}` or `{ok: false, error: {code,
+message}}`. `matchPodHostRoute(method, pathname) -> {verb, params}|null`
+and `POD_HOST_ROUTES` are exported for anything that wants to reuse the
+table itself.
+
+### Mounting the router on `mesh://`
+
+`browserMeshFetch('mesh://<podId>/path')` is answered, host-side, by
+whatever `onRequest` a peer attached via `createMeshRpcService({onRequest})`
+(see "`fetch()`/`WebSocket`-shaped mesh access" above) -- that slot was
+already fully composable, so no change to `mesh-fetch.mjs`/`mesh-rpc.mjs`
+was needed to mount this router there:
+
+```js
+import {
+  attachService, createMeshRpcService,
+  createPodHostRouter, createPodHostMeshRpcHandler,
+} from '@johnhenry/browsermesh-apps'
+
+const router = createPodHostRouter({ driver, registry: peerNode.registry })
+attachService(peerNode, undefined, createMeshRpcService({
+  onRequest: createPodHostMeshRpcHandler(router),
+}))
+```
+
+`createPodHostRouter({driver|api, registry, resource?, onLog?})`'s `route(request)
+-> Promise<Response|null>` is shaped exactly like `@johnhenry/browsermesh-discovery`'s
+`MeshFetchRouter.route()` -- useful on its own (e.g. for tests), and reused
+unmodified by the HTTP gateway below. **`registry` (`peerNode.registry`) is
+required and cannot be defaulted or derived from `api`**: `createPodHostService()`'s
+`attach()` returns an `api` with `driver`/`resource`/`describe()` but no
+gated-dispatch method, so routing straight through `api.driver` would bypass
+`checkAccess()` entirely. This router instead calls
+`registry.checkAccess(pubKey, resource, verb)` itself, exactly where
+`pod-host-service.mjs`'s own `handleRequest()` does -- never create a second
+code path around that gate.
+
+`podHostFetch(hostPodId, {fetch})` is the matching client, "control from
+within" for code that would rather call fetch-shaped methods than build
+`pod-host:*` envelopes by hand:
+
+```js
+import { createBrowserMeshFetch, podHostFetch } from '@johnhenry/browsermesh-apps'
+
+const browserMeshFetch = createBrowserMeshFetch(meshRpcApi) // bound to YOUR peerNode
+const pods = podHostFetch(hostPodId, { fetch: browserMeshFetch })
+
+await pods.spawn({ name: 'alpha', lane: 'node', run: { kind: 'command', ref: '/bin/echo' } })
+await pods.exec('alpha', ['echo', 'hi'])
+await pods.drain('alpha', { cascade: true })
+```
+
+### The HTTP gateway: control from outside the mesh
+
+`createPodHostGatewayHandler({client|peerNode, resolveHost, auth})` is a
+plain `(req: Request) => Promise<Response>` handler -- Web-standard only, so
+it runs in a Worker, Deno, or (via `serveNodeGateway()`) Node's `node:http`.
+Paths are `/hosts/:hostPodId/pods...` (plus `GET /hosts`, listing the hosts
+`resolveHost` knows about), mapped onto the identical route table above.
+
+**Identity caveat, worth repeating because it's easy to miss:** the gateway
+is itself a mesh peer. `checkAccess()` on the remote host sees the
+*gateway's own* mesh identity (`client`'s pubKey), never whoever made the
+HTTP request -- exactly like an API gateway in front of a backend that
+trusts mTLS client certs, where the backend sees the gateway's cert, not the
+original caller's. Because of this, `auth(req) -> {ok, pubKey?}` is a
+REQUIRED argument -- there is no default-open gateway -- and deciding who
+gets to use the gateway's mesh identity, and how (bearer token, mTLS
+terminated upstream, a signed JWT...), is entirely the **operator's**
+responsibility; this package has no opinion on the scheme:
+
+```js
+import {
+  createPodHostClient, createPodHostGatewayHandler, serveNodeGateway,
+} from '@johnhenry/browsermesh-apps'
+
+const client = createPodHostClient({ peerNode: gatewayPeerNode })
+const handler = createPodHostGatewayHandler({
+  client,
+  resolveHost: { alice: aliceHostPodId }, // token in the URL -> real pubKey
+  auth: (req) => {
+    const token = (req.headers.get('authorization') || '').replace('Bearer ', '')
+    return { ok: token === process.env.GATEWAY_TOKEN }
+  },
+})
+
+const gateway = await serveNodeGateway({ handler, port: 0 })
+// POST http://127.0.0.1:<port>/hosts/alice/pods, Authorization: Bearer <token>
+await gateway.close()
+```
+
+`serveNodeGateway()` `await import('node:http')`s lazily, so this module
+stays reachable from the package root's `export *` graph without breaking
+in a browser bundle merely by being imported.
+
+A runnable end-to-end walkthrough of both transports against the same host
+is
+[`examples/14-pod-host-over-mesh-fetch.mjs`](../../examples/14-pod-host-over-mesh-fetch.mjs).
 
 ## License
 

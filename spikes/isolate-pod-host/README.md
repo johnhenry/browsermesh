@@ -17,9 +17,29 @@ this directory has its own `package.json` and `node_modules`.
 
 ## What this is
 
-- `src/worker.mjs` — Worker entry. Routes `/pods/:name/{boot,status,send}`
-  to a `PodObject` Durable Object, one instance per pod name
-  (`env.POD.idFromName(name)`).
+- `src/worker.mjs` — Worker entry. Re-exports `PodObject` and hands every
+  request to `routes.mjs`.
+- `src/routes.mjs` — the HTTP route table, a 1:1 projection of the eight
+  pod-host verbs (`host-protocol.mjs` in `@johnhenry/browsermesh-pod`) onto
+  a Durable Object per pod name (`env.POD.idFromName(name)`):
+
+  | Route | Verb | Notes |
+  | --- | --- | --- |
+  | `GET /pods` | `list` | roster kept in one extra DO, `idFromName('__roster__')` — a DO namespace cannot be enumerated |
+  | `POST /pods/:name/boot` | `spawn` | body is a podspec, validated with `validatePodSpec()` and persisted in DO storage; the URL wins on `name` |
+  | `GET /pods/:name/status` | `status` | protocol fields plus the WP2-era `podId`/`kind`/`role`/`peers`/`booted` |
+  | `POST /pods/:name/send` | `send` | `{to, payload}` |
+  | `POST /pods/:name/exec` | `exec` | `405 {code:'ELANE'}` — a V8 isolate has no shell |
+  | `POST /pods/:name/snapshot\|restore` | — | `501 {code:'ENOTSUP'}` — DO hibernation is automatic, not a verb |
+  | `DELETE /pods/:name` | `drain` | shuts the pod down, closes the transport, marks it `gone` |
+
+  It lives apart from `worker.mjs` so `test/routes.test.mjs` can drive every
+  route in plain `node --test` with a fake DO namespace — no `wrangler dev`.
+- `src/driver.mjs` — `createIsolatePodDriver({baseUrl, fetch})`, the
+  Node-side `PodHostDriver` for the isolate lane. A thin `fetch` client for
+  the routes above, translating HTTP statuses and `{code, message}` bodies
+  into `PodHostDriverError`s. This is what
+  `createPodHostService()` in `@johnhenry/browsermesh-apps` dispatches to.
 - `src/pod-object.mjs` — `PodObject extends DurableObject`. On `/boot`,
   loads (or generates + persists) an Ed25519 `PodIdentity`, boots a `Pod`
   from `@johnhenry/browsermesh-pod` on a `WebSocketTransport` against the
@@ -35,8 +55,12 @@ this directory has its own `package.json` and `node_modules`.
   self-hosted (no-account) path, respectively.
 - `test/isolate-pod.test.mjs` — end-to-end `node --test` harness; spawns
   the relay, the signaling server, and `wrangler dev` as real child
-  processes, boots a Node pod and a DO pod, and asserts mutual discovery +
-  measures timings.
+  processes, boots a Node pod and a DO pod, asserts mutual discovery,
+  measures timings, and drives the full verb set through
+  `createIsolatePodDriver()` against real workerd.
+- `test/routes.test.mjs` — the route table plus the driver's error
+  translation, against a fake DO namespace. Runs anywhere, in milliseconds,
+  with no wrangler.
 
 ## How to run
 
