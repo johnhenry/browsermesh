@@ -666,12 +666,12 @@ are a 1:1 projection of the same verbs: `GET /pods`,
 The surfaces still to build are all re-expressions of this one service, and
 none of them should re-implement access control, validation or audit:
 
-| Item | Surface | Projects |
-| --- | --- | --- |
-| 3 | `mesh://` routes | the eight verbs as URL paths |
-| 4 | `meshctl` LLM tools | the eight verbs as tool definitions |
-| 5 | external CLI | the eight verbs as subcommands |
-| 6 | supervisor | `restart` policy + `status`/`spawn`/`drain` in a loop |
+| Item | Surface | Projects | Status |
+| --- | --- | --- | --- |
+| 3 | `mesh://` routes | the eight verbs as URL paths | |
+| 4 | `meshctl` LLM tools | the eight verbs as tool definitions | |
+| 5 | external CLI | the eight verbs as subcommands | done -- `packages/browsermesh-meshctl` (`meshctl`); see that package's README |
+| 6 | supervisor | `restart` policy + `status`/`spawn`/`drain` in a loop | |
 
 A runnable walkthrough of the whole surface —
 spawn/exec/snapshot/restore/drain, a denied stranger, live lifecycle events
