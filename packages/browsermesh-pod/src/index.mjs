@@ -13,4 +13,5 @@ export {
 export { InjectedPod } from './injected-pod.mjs'
 export { installPodRuntime, createRuntime, createClient, createServer } from './runtime.mjs'
 export { BroadcastChannelTransport, EventEmitterTransport, NullTransport } from './transport.mjs'
+export { WebSocketTransport } from './ws-transport.mjs'
 export { TransportDiscovery, NullDiscovery } from './discovery.mjs'

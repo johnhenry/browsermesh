@@ -27,6 +27,7 @@ Pods automatically generate an Ed25519 cryptographic identity, detect their exec
 - [Pod Kinds](#pod-kinds)
 - [Capabilities](#capabilities)
 - [Wire Protocol](#wire-protocol)
+- [WebSocketTransport (relay-backed)](#websockettransport-relay-backed)
 - [InjectedPod](#injectedpod)
 - [Peer Dependency](#peer-dependency)
 - [License](#license)
@@ -205,6 +206,42 @@ const server = await createServer({ discoveryTimeout: 5000 })
 | `POD_RPC_RESPONSE` | `'pod:rpc-response'` | RPC result |
 
 Message factories: `createHello()`, `createHelloAck()`, `createGoodbye()`, `createMessage()`, `createRpcRequest()`, `createRpcResponse()`.
+
+## WebSocketTransport (relay-backed)
+
+`BroadcastChannelTransport` only reaches same-origin tabs. `WebSocketTransport` is the adapter that lets a `Pod` run anywhere a WebSocket client exists — a Node process, a browser, or a V8 isolate (workerd / Cloudflare Workers) — and still join the mesh, by speaking the `browsermesh-servers` relay/signaling wire protocol (`register`/`registered`, `relay`/`relayed`, `peers`/`peer-joined`/`peer-left`, `ping`/`pong`, `error`). This is what unlocks "hosted pods" (see [issue #185](https://github.com/johnhenry/browsermesh/issues/185)): a pod running on a machine someone else operates, reachable over the same relay a browser tab would use.
+
+```js
+import { Pod, WebSocketTransport } from '@johnhenry/browsermesh-pod'
+import { PodIdentity } from '@johnhenry/browsermesh-primitives'
+
+// Pod generates its own identity during boot() unless one is supplied; the
+// transport needs the same podId up front to register with the relay, so
+// generate (or load) the identity first.
+const identity = await PodIdentity.generate()
+
+const transport = new WebSocketTransport({
+  url: 'wss://relay.example.com',
+  podId: identity.podId,
+  // WebSocket: globalThis.WebSocket is used by default; inject your own
+  // (e.g. the `ws` package, or a fake) for testing or non-browser runtimes
+  // that don't expose a global WebSocket.
+  peersFromSignaling: true,
+  signalingUrl: 'wss://signaling.example.com',
+})
+
+const pod = new Pod()
+await pod.boot({ identity, transport })
+```
+
+Key properties, driven directly by the relay server's shape:
+
+- **Point-to-point only.** The relay server forwards `{type:'relay', target, envelope}` to exactly one registered peer — it has no broadcast primitive. `send(msg)` relays point-to-point when `msg.to` names a specific peer, and fans a `to`-less (or `to: '*'`) message like discovery's `hello`/`goodbye` out point-to-point to every peer id the transport currently knows about (`get knownPeers`).
+- **`knownPeers` has two sources**: every podId seen as the sender of a `relayed` envelope, and — when `peersFromSignaling: true` and `signalingUrl` is set — a second WebSocket connection to the signaling server that consumes its `peers` snapshot plus `peer-joined`/`peer-left` events. Seeding from signaling matters for discovery specifically: without it, two freshly-registered pods' first `hello` broadcasts have nobody to fan out to.
+- **Reconnects with exponential backoff** (`reconnect: { baseMs: 250, maxMs: 10000, maxAttempts: Infinity }` by default) and re-registers on reconnect; `ready` is `false` while disconnected, and `close()` clears all pending timers.
+- **Protocol note**: the relay/signaling servers' wire protocol uses `target`/`source` field names for forwarding, not `to`/`from` — `WebSocketTransport` speaks the servers' real field names and only remaps to `from` on the Pod message shape when delivering to `onMessage()`.
+
+See `examples/12-hosted-pod-over-websocket.mjs` in the monorepo root for a full runnable example (two pods discovering each other and exchanging a message over a simulated relay, no network required).
 
 ## InjectedPod
 

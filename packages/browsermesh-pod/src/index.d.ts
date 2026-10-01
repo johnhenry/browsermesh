@@ -177,6 +177,33 @@ export declare class NullTransport implements TransportAdapter {
   close(): Promise<void>;
 }
 
+export interface WebSocketTransportReconnectOptions {
+  baseMs?: number;
+  maxMs?: number;
+  maxAttempts?: number;
+}
+
+export interface WebSocketTransportOptions {
+  url: string;
+  podId: string;
+  WebSocket?: new (url: string) => any;
+  protocol?: "relay" | "signaling";
+  signalingUrl?: string;
+  peersFromSignaling?: boolean;
+  reconnect?: WebSocketTransportReconnectOptions;
+  onLog?: (msg: string) => void;
+}
+
+export declare class WebSocketTransport implements TransportAdapter {
+  constructor(opts: WebSocketTransportOptions);
+  get ready(): boolean;
+  get knownPeers(): Set<string>;
+  onMessage(handler: (msg: any) => void): void;
+  open(): Promise<void>;
+  send(msg: any): void;
+  close(): Promise<void>;
+}
+
 // ── Discovery adapters ────────────────────────────────────────────────────────
 
 export interface PeerFoundInfo {
@@ -265,7 +292,7 @@ export declare class Pod {
   get role(): PodRole;
   get state(): PodState;
   get peers(): Map<string, PeerInfo>;
-  get transport(): BroadcastChannelTransport | EventEmitterTransport | NullTransport | null;
+  get transport(): BroadcastChannelTransport | EventEmitterTransport | WebSocketTransport | NullTransport | null;
 
   boot(opts?: PodBootOptions): Promise<void>;
   shutdown(opts?: PodShutdownOptions): Promise<void>;
