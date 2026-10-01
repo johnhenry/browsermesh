@@ -4,7 +4,9 @@
  * Spawns, as real child processes:
  *   1. the browsermesh-servers relay    (node ../../browsermesh-servers/relay/index.mjs)
  *   2. the browsermesh-servers signaling (node ../../browsermesh-servers/signaling/index.mjs)
- *   3. `wrangler dev` serving this spike's worker.mjs / PodObject
+ *   3. `cf dev` serving this spike's worker.mjs / PodObject (via the Vite
+ *      dev server `cf dev` delegates to — see cloudflare.config.ts /
+ *      vite.config.ts)
  *
  * and one in-process Node pod (this test file itself, using
  * `@johnhenry/browsermesh-pod`'s `Pod` + `WebSocketTransport`),
@@ -18,7 +20,20 @@
  * the WP2 task rules — no background bash, no Monitor. `after()` kills every
  * child.
  *
- * If `wrangler dev` cannot start in this environment (no network access to
+ * `cf dev` (1.0.0-beta.9) does not support `--local` as a CLI flag and,
+ * because this spike delegates to a detected framework dev command (`npx
+ * vite`), does not currently forward extra CLI args (like `--port`) to that
+ * command either — see README.md's "cf migration history" note.
+ * Two consequences for this harness, both worked around below rather than
+ * worked past:
+ *   - RELAY_URL / SIGNALING_URL are threaded through as environment
+ *     variables (read by cloudflare.config.ts via `process.env`) instead of
+ *     a CLI var-override flag the previous dev-server CLI offered.
+ *   - The dev server's port is whatever Vite picks (default 5173, or the
+ *     next free port after that) and is parsed out of `cf dev`'s stdout
+ *     rather than fixed via a `--port` flag.
+ *
+ * If `cf dev` cannot start in this environment (no network access to
  * download the workerd binary, sandboxed /dev/kvm-less CI, etc.) the whole
  * suite is SKIPPED (not failed) with a clear reason, after a real attempt
  * to start it with a generous timeout.
@@ -30,6 +45,7 @@ import { spawn } from 'node:child_process'
 import { createServer } from 'node:net'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
+import fs from 'node:fs'
 
 import { Pod, TransportDiscovery, WebSocketTransport } from '../../../packages/browsermesh-pod/src/index.mjs'
 import { PodIdentity } from '../../../packages/browsermesh-primitives/src/index.mjs'
@@ -39,14 +55,23 @@ const SPIKE_ROOT = path.resolve(__dirname, '..')
 const REPO_ROOT = path.resolve(SPIKE_ROOT, '..', '..')
 const SERVERS_ROOT = path.join(REPO_ROOT, 'browsermesh-servers')
 
-const WRANGLER_START_TIMEOUT_MS = 60_000
+const CF_DEV_START_TIMEOUT_MS = 60_000
 const HEALTH_POLL_INTERVAL_MS = 250
 const DISCOVERY_WINDOW_MS = 10_000
+// `cf dev` -> Vite's "Local:   http://localhost:<port>/" banner line.
+// Vite colorizes this when it detects FORCE_COLOR (node --test sets it for
+// its own output, and that env var leaks into every child we spawn with
+// `...process.env`), so ANSI escapes must be stripped before matching.
+const CF_DEV_URL_RE = /Local:\s+https?:\/\/localhost:(\d+)\//
+const ANSI_RE = /\x1b\[[0-9;]*m/g
+function stripAnsi(str) {
+  return str.replace(ANSI_RE, '')
+}
 
 /** @type {{proc: import('node:child_process').ChildProcess, name: string}[]} */
 const children = []
 let relayPort, signalingPort, workerPort
-let wranglerAvailable = false
+let cfDevAvailable = false
 let skipReason = ''
 let tearingDown = false
 const timings = {}
@@ -95,6 +120,36 @@ async function waitForHealth(url, timeoutMs) {
   throw new Error(`${url} did not become healthy within ${timeoutMs}ms: ${lastErr && lastErr.message}`)
 }
 
+/**
+ * Spawns `cf dev` and resolves with the port Vite actually bound to, parsed
+ * out of its stdout (see CF_DEV_URL_RE above — `cf dev` has no `--port`
+ * passthrough to rely on instead).
+ */
+function spawnCfDevAndGetPort(env, timeoutMs) {
+  const cfBin = path.join(SPIKE_ROOT, 'node_modules', '.bin', 'cf')
+  const proc = spawnChild('cf-dev', cfBin, ['dev'], { cwd: SPIKE_ROOT, env })
+  return new Promise((resolve, reject) => {
+    let out = ''
+    const timer = setTimeout(() => {
+      reject(new Error(`cf dev did not print a "Local:" URL within ${timeoutMs}ms\n--- output so far ---\n${out.slice(-4000)}`))
+    }, timeoutMs)
+    const onData = (d) => {
+      out += d.toString()
+      const match = stripAnsi(out).match(CF_DEV_URL_RE)
+      if (match) {
+        clearTimeout(timer)
+        proc.stdout.off('data', onData)
+        proc.stderr.off('data', onDataErr)
+        resolve({ proc, port: Number(match[1]) })
+      }
+    }
+    const onDataErr = (d) => { out += d.toString() }
+    proc.stdout.on('data', onData)
+    proc.stderr.on('data', onDataErr)
+    proc.on('error', (err) => { clearTimeout(timer); reject(err) })
+  })
+}
+
 async function killAll() {
   tearingDown = true
   await Promise.all(children.map(({ proc }) => new Promise((resolve) => {
@@ -110,9 +165,7 @@ async function killAll() {
 // ── Setup ────────────────────────────────────────────────────────────
 
 before(async () => {
-  [relayPort, signalingPort, workerPort] = await Promise.all([
-    getFreePort(), getFreePort(), getFreePort(),
-  ])
+  [relayPort, signalingPort] = await Promise.all([getFreePort(), getFreePort()])
 
   spawnChild('relay', process.execPath, [path.join(SERVERS_ROOT, 'relay', 'index.mjs')], {
     cwd: SERVERS_ROOT,
@@ -126,23 +179,25 @@ before(async () => {
   await waitForHealth(`http://localhost:${relayPort}/health`, 10_000)
   await waitForHealth(`http://localhost:${signalingPort}/health`, 10_000)
 
-  const wranglerBin = path.join(SPIKE_ROOT, 'node_modules', '.bin', 'wrangler')
-  spawnChild('wrangler', wranglerBin, [
-    'dev',
-    '--port', String(workerPort),
-    '--local',
-    '--var', `RELAY_URL:ws://localhost:${relayPort}`,
-    '--var', `SIGNALING_URL:ws://localhost:${signalingPort}`,
-  ], { cwd: SPIKE_ROOT, env: { ...process.env, CI: 'true' } })
-
   try {
     const t0 = Date.now()
-    await waitForHealth(`http://localhost:${workerPort}/health`, WRANGLER_START_TIMEOUT_MS)
-    timings.wranglerStartMs = Date.now() - t0
-    wranglerAvailable = true
+    const { port } = await spawnCfDevAndGetPort({
+      ...process.env,
+      CI: 'true',
+      // node --test sets FORCE_COLOR for its own output; without this
+      // override that leaks into the cf/vite child and colorizes the
+      // "Local: http://..." banner we parse below with ANSI escapes.
+      FORCE_COLOR: '0',
+      RELAY_URL: `ws://localhost:${relayPort}`,
+      SIGNALING_URL: `ws://localhost:${signalingPort}`,
+    }, CF_DEV_START_TIMEOUT_MS)
+    workerPort = port
+    await waitForHealth(`http://localhost:${workerPort}/health`, CF_DEV_START_TIMEOUT_MS)
+    timings.cfDevStartMs = Date.now() - t0
+    cfDevAvailable = true
   } catch (err) {
-    wranglerAvailable = false
-    skipReason = `wrangler dev did not come up within ${WRANGLER_START_TIMEOUT_MS}ms: ${err.message}`
+    cfDevAvailable = false
+    skipReason = `cf dev did not come up within ${CF_DEV_START_TIMEOUT_MS}ms: ${err.message}`
   }
 })
 
@@ -152,22 +207,35 @@ after(async () => {
 
 // ── Tests ────────────────────────────────────────────────────────────
 
-test('wrangler dry-run bundles the worker', { skip: false }, async (t) => {
-  // This is a cheap, always-run sanity check independent of wrangler dev
-  // actually coming up — bundling is the thing most likely to break when
-  // the pod/primitives packages change, and it fails fast (no server
-  // needed).
+test('cf build bundles the worker', { skip: false }, async (t) => {
+  // This is a cheap, always-run sanity check independent of cf dev actually
+  // coming up — bundling is the thing most likely to break when the
+  // pod/primitives packages change, and it fails fast (no server needed).
+  // This is the `cf build` equivalent of the old build-only, no-deploy
+  // sanity check this spike used before migrating to cf (see README.md's
+  // "cf migration history" note).
   const { execFile } = await import('node:child_process')
   const { promisify } = await import('node:util')
   const run = promisify(execFile)
-  const wranglerBin = path.join(SPIKE_ROOT, 'node_modules', '.bin', 'wrangler')
-  const { stdout } = await run(wranglerBin, ['deploy', '--dry-run', '--outdir', 'dist'], { cwd: SPIKE_ROOT })
-  assert.match(stdout, /Total Upload/)
-  t.diagnostic(stdout.trim())
+  const cfBin = path.join(SPIKE_ROOT, 'node_modules', '.bin', 'cf')
+  const { stdout } = await run(cfBin, ['build'], { cwd: SPIKE_ROOT })
+  assert.match(stdout, /Build complete/)
+
+  // cf build's Build Output Specification lands under
+  // .cloudflare/output/v0/workers/<name>/bundle/index.js — assert the
+  // bundle was actually written, not just that the CLI printed success.
+  const outputRoot = path.join(SPIKE_ROOT, '.cloudflare', 'output', 'v0', 'workers')
+  const workerDirs = fs.existsSync(outputRoot) ? fs.readdirSync(outputRoot) : []
+  assert.ok(workerDirs.length > 0, `no worker output dirs under ${outputRoot}`)
+  const bundlePath = path.join(outputRoot, workerDirs[0], 'bundle', 'index.js')
+  assert.ok(fs.existsSync(bundlePath), `expected bundle at ${bundlePath}`)
+  const bundleSize = fs.statSync(bundlePath).size
+  assert.ok(bundleSize > 1000, `bundle at ${bundlePath} looks too small (${bundleSize} bytes)`)
+  t.diagnostic(`${stdout.trim()}\nbundle: ${bundlePath} (${bundleSize} bytes)`)
 })
 
 test('DO pod boots and a Node pod discovers it through the relay within 10s', async (t) => {
-  if (!wranglerAvailable) {
+  if (!cfDevAvailable) {
     t.skip(skipReason)
     return
   }
@@ -249,7 +317,7 @@ test('DO pod boots and a Node pod discovers it through the relay within 10s', as
 })
 
 test('report measured timings', (t) => {
-  if (!wranglerAvailable) {
+  if (!cfDevAvailable) {
     t.skip(skipReason)
     return
   }

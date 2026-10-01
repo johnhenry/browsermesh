@@ -372,8 +372,9 @@ sequenceDiagram
 | Single-threaded message ordering | DO's one-at-a-time execution model |
 
 Self-hosted path: `workerd` with a `config.capnp` that declares the Worker
-and the DO namespace; no Cloudflare account needed for the spike. `wrangler
-dev` is the quickest local harness. See WP2.
+and the DO namespace; no Cloudflare account needed for the spike. `cf dev`
+(Cloudflare's Wrangler successor, open beta — the spike migrated off
+Wrangler 4 to it) is the quickest local harness. See WP2.
 
 ### 4.3 Threat model for Lane A
 
@@ -577,9 +578,10 @@ WebSocket example.
   conformance suite this WP (WP5) introduces — see
   [§10](#10-transportadapter-conformance-suite).
 - [ ] **WP2 — Isolate pod host spike** (`agent/wp2-isolate-host`,
-  `spikes/isolate-pod-host/`). `wrangler.toml` + Worker + Durable Object pod,
-  keypair persisted in DO storage, keepalive via alarm, WebSocket
-  hibernation, a `workerd`-based test harness.
+  `spikes/isolate-pod-host/`). `cloudflare.config.ts` (migrated from
+  `wrangler.toml` to Cloudflare's `cf` CLI, open beta) + Worker + Durable
+  Object pod, keypair persisted in DO storage, keepalive via alarm,
+  WebSocket hibernation, a `workerd`-based test harness.
 - [ ] **WP3 — microVM pod host spike** (`agent/wp3-vm-host`,
   `vm-pod-host/` or `spikes/vm-pod-host/`). `firecracker-client.mjs` tested
   against a fake unix-socket server, `vm-pod.mjs` lifecycle state machine
@@ -638,16 +640,17 @@ registration** in `packages/browsermesh-pod/test/transport-conformance.test.mjs`
 
 ### Measured so far
 
-Lane A, WP2 (`spikes/isolate-pod-host`, `wrangler dev` on a laptop, relay and
-signaling on loopback):
+Lane A, WP2 (`spikes/isolate-pod-host`, `cf dev` on a laptop — migrated from
+`wrangler dev`, open beta — relay and signaling on loopback):
 
 | Measure | Measured | Note |
 | --- | --- | --- |
-| Spawn → `registered` | ~35–42 ms | Relay + signaling handshake only |
+| Spawn → `registered` | ~26–42 ms | Relay + signaling handshake only |
 | `Pod.boot()` wall time | ~1.5 s | Dominated by `TransportDiscovery`'s fixed discovery window, not connection cost; a hosted pod should use a shorter `discoveryTimeout` |
 | Wake on message after idle | ≈ cold boot (~1.5 s) | **WebSocket Hibernation does not apply**: it only covers sockets a Durable Object *accepts* as a server. `PodObject` dials *out* to the relay, and an open outbound socket pins the DO in memory. Getting hibernation back requires inverting the topology so peers (or the relay) dial the DO. Tracked as open question 6 |
 | Message RTT via relay | 1–2 ms | Loopback |
-| Memory per idle pod | not measured | workerd does not expose per-isolate memory under `wrangler dev` |
+| Memory per idle pod | not measured | workerd does not expose per-isolate memory under local `cf dev` |
+| `cf dev` cold start | ~4 s (range ~4–13 s) | Beta rough edge: slower and more variable than `wrangler dev`'s ~1.0–1.1 s, because `cf dev` delegates to a cold `npx vite` on top of miniflare/workerd init. See `spikes/isolate-pod-host/README.md`'s "Migrated from wrangler to cf" note. |
 
 Lane B, WP3 (`spikes/vm-pod-host`): built on macOS against a fake Firecracker
 API. Since then the spike's `FirecrackerClient` has been run against a real
