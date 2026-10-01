@@ -24,14 +24,9 @@ this directory has its own `package.json` and `node_modules`.
   loads (or generates + persists) an Ed25519 `PodIdentity`, boots a `Pod`
   from `@johnhenry/browsermesh-pod` on a `WebSocketTransport` against the
   relay/signaling servers, and arms a 30s keepalive alarm.
-- `src/ws-transport.mjs` — **temporary** copy of the `WebSocketTransport`
-  adapter issue #185 WP1 is adding to `@johnhenry/browsermesh-pod`. Written
-  independently against the same contract (see its header comment) because
-  WP1 is a sibling, concurrent piece of work not present in this checkout.
-  Delete this file and import the real one once WP1 lands.
 - `src/worker-websocket.mjs` — adapts workerd's fetch-with-`Upgrade`-header
   outbound WebSocket pattern to the `new WebSocket(url)` constructor shape
-  `ws-transport.mjs` expects, so the same transport file runs unmodified in
+  `WebSocketTransport` expects, so the same transport runs unmodified in
   Node (global `WebSocket`) and workerd (this wrapper).
 - `src/identity-jwk.mjs` — the "smallest possible helper" the issue asks
   for (§8 WP2): JWK import/export for `PodIdentity`, since the package has
@@ -193,14 +188,7 @@ names generally, not a new one introduced by this choice.
 
 ## Exact follow-ups
 
-1. **Land WP1** (`WebSocketTransport` in `@johnhenry/browsermesh-pod`
-   proper) and delete `src/ws-transport.mjs` here, replacing it with
-   `import { WebSocketTransport } from '@johnhenry/browsermesh-pod'`. This
-   spike's copy was written independently against the documented contract
-   and passes the same end-to-end test against the real relay/signaling
-   servers, but it has not been tested against WP1's actual adapter-
-   conformance suite (issue #185 §8 WP5) — do that before treating it as
-   equivalent.
+1. ~~Land WP1~~ Done: this spike imports `WebSocketTransport` from `@johnhenry/browsermesh-pod` (merged in the same wave).
 2. **Spike the inverted topology** (peers connect directly to the DO,
    which accepts and can hibernate) as a separate follow-up, specifically
    to get a real "wake on message after idle" number under 50ms. This is

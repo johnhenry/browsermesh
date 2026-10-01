@@ -10,13 +10,14 @@
 /**
  * Detect the pod kind for the current execution context.
  *
- * Returns `'server'` whenever there is no `window`/`document` on `g` — this
- * covers plain Node.js, but also a V8 isolate (workerd / Cloudflare Workers
- * + Durable Objects) and a Firecracker microVM guest, since neither exposes
- * `window`/`document` by default either. No isolate/VM-specific detection
- * is needed: the existing `window`/`document` check already produces the
- * right answer in both hosted-pod lanes. See `docs/hosted-pods.md` at the
- * monorepo root for how those lanes use this.
+ * Returns `'server'` whenever there is no `window`/`document` and no worker
+ * global scope on `g` — plain Node.js, and a Firecracker microVM guest
+ * running Node. Inside workerd / Cloudflare Workers the global satisfies
+ * `instanceof ServiceWorkerGlobalScope`, so an isolate-hosted pod reports
+ * `'service-worker'` (measured in `spikes/isolate-pod-host`), not
+ * `'server'`. Hosted-pod code must treat both as "not a browser window"
+ * rather than branching on `'server'` alone. See `docs/hosted-pods.md` at
+ * the monorepo root.
  *
  * @param {object} [g=globalThis] - The global scope to inspect
  * @returns {PodKind}

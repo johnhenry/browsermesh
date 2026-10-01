@@ -4,8 +4,8 @@
  * One Durable Object instance == one hosted isolate pod. Identity (an
  * Ed25519 `PodIdentity`) is persisted in `ctx.storage` as JWK so the same
  * pod comes back with the same `podId` across evictions and restarts. The
- * pod itself boots on `WebSocketTransport` (our temporary copy — see
- * `ws-transport.mjs`) against the relay/signaling servers named by the
+ * pod itself boots on `@johnhenry/browsermesh-pod`'s `WebSocketTransport`
+ * (WP1 of #185) against the relay/signaling servers named by the
  * `RELAY_URL` / `SIGNALING_URL` vars, wrapped in a `TransportDiscovery` so
  * it runs the normal pod:hello/pod:hello-ack discovery protocol.
  *
@@ -23,8 +23,7 @@
  * Hibernation API only covers WebSockets the DO *accepts* as a server.
  */
 
-import { Pod, TransportDiscovery, POD_MESSAGE } from '@johnhenry/browsermesh-pod'
-import { WebSocketTransport } from './ws-transport.mjs'
+import { Pod, TransportDiscovery, POD_MESSAGE, WebSocketTransport } from '@johnhenry/browsermesh-pod'
 import { WorkerClientWebSocket } from './worker-websocket.mjs'
 import { loadOrCreateIdentity } from './identity-jwk.mjs'
 
