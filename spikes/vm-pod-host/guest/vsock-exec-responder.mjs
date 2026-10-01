@@ -56,6 +56,14 @@ const server = net.createServer((socket) => {
       return
     }
 
+    // CodeQL js/command-line-injection fires here, and it is right that the
+    // argv comes from the socket: executing host-supplied commands IS this
+    // program's purpose (it is the guest end of `execOnPod`). The security
+    // boundary is the Firecracker microVM around this process, not this
+    // file: the socket is reachable only from the host agent over vsock,
+    // argv is passed to execFile (no shell), and the guest has only the
+    // rootfs, /data and the rate-limited NIC the host gave it. See issue
+    // #185 §5 and §7. Alert dismissed as "won't fix / by design" on PR #186.
     const [cmd, ...args] = argv
     execFile(cmd, args, { timeout: 30_000, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
       const result = {
