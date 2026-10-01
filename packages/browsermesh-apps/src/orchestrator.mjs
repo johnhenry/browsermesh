@@ -12,7 +12,7 @@
  */
 
 import { MESH_TYPE } from '@johnhenry/browsermesh-primitives'
-import { ComputeRequest, ResourceDescriptor, ResourceScorer } from './resources.mjs'
+import { ComputeRequest, ResourceDescriptor, ResourceScorer, RUNTIME_CLASS } from './resources.mjs'
 import { BrowserTool as CompatBrowserTool } from './compat.mjs'
 
 // A real browser environment (clawser's web/clawser-tools.js) may already
@@ -51,6 +51,21 @@ export const ORCH_ROUTE = MESH_TYPE.ORCH_ROUTE            // 0xde
 const VALID_POD_STATUSES = Object.freeze([
   'online', 'offline', 'draining', 'unknown',
 ])
+
+/**
+ * Placement-lifecycle audit record names (issue #185 §7/§8 WP4). WP4 wires
+ * only the vocabulary and the audit path -- actual placement RPC (spawning
+ * or restoring a hosted pod on an isolate/microvm host) is WP2/WP3, not
+ * implemented here. Mirrors the existing `remote_deploy_*`/`remote_exec_*`
+ * audit record naming.
+ */
+export const PLACEMENT_AUDIT = Object.freeze({
+  REQUESTED: 'placement_requested',
+  DENIED: 'placement_denied',
+  STARTED: 'placement_started',
+  READY: 'placement_ready',
+  EVICTED: 'placement_evicted',
+})
 
 // ---------------------------------------------------------------------------
 // PodInfo
@@ -316,6 +331,24 @@ export class MeshOrchestrator {
     await this.#auditRecorder?.record?.(operation, data)
   }
 
+  /**
+   * Record a placement-lifecycle audit event (issue #185 §7/§8 WP4): one of
+   * `PLACEMENT_AUDIT`'s `placement_requested`/`placement_denied`/
+   * `placement_started`/`placement_ready`/`placement_evicted`. Writes
+   * through the same `#recordAudit` path as `execOnPod`/`deploySkill`'s
+   * `remote_*` records -- a no-op when no `auditRecorder` is wired. This is
+   * vocabulary + audit plumbing only: WP4 does not implement the placement
+   * RPC itself (spawning/restoring a hosted pod), that is WP2 (isolate pod
+   * host) / WP3 (microVM pod host).
+   *
+   * @param {string} kind - One of `PLACEMENT_AUDIT`'s values
+   * @param {object} [details]
+   * @returns {Promise<void>}
+   */
+  async recordPlacement(kind, details = {}) {
+    await this.#recordAudit(kind, details)
+  }
+
   #recordComputeReputation(descriptor, score) {
     const fingerprint = descriptor?.identity?.fingerprint || null
     if (!fingerprint || !this.#peerRegistry?.recordObservedTrust) return
@@ -452,6 +485,18 @@ export class MeshOrchestrator {
     }
 
     const runtime = this.#resolveRuntime(podId)
+    if (runtime && isIsolateOnlyRuntime(runtime)) {
+      await this.#recordAudit('remote_exec_denied', {
+        actor: 'operator',
+        podId,
+        reason: 'isolate runtime cannot execute shell commands',
+        layer: 'runtime',
+      })
+      return {
+        output: 'pod runtime "isolate" cannot execute shell commands; use deploySkill or a microvm pod',
+        exitCode: 126,
+      }
+    }
     if (runtime && this.#remoteSessionBroker) {
       const result = await this.#remoteSessionBroker.openSession(podId, {
         intent: 'exec',
@@ -1072,9 +1117,34 @@ function runtimePeerToComputeDescriptor(peer) {
     resources: peer.metadata?.resources || {},
     capabilities,
     availability,
+    hostedBy: peer.metadata?.hostedBy || null,
   })
   descriptor.source = 'runtime-registry'
   return descriptor
+}
+
+/**
+ * Whether a runtime-registry peer's advertised runtime classes mean it can
+ * only run inside a V8 isolate (issue #185 §6/§8 WP4): `'isolate'` is one
+ * of its `metadata.runtimeClasses`, and nothing else about the peer --
+ * another runtime class of `'microvm'`/`'node'`/`'browser'`, or an
+ * explicit `shellBackend` -- says it can also execute shell commands. Used
+ * by `execOnPod()` to deny shell execution against isolate-only pods
+ * instead of silently dispatching a request the pod has no way to honor.
+ *
+ * @param {object} runtime - A runtime-registry peer, as returned by
+ *   `#resolveRuntime()` (the same shape `runtimePeerToComputeDescriptor()`
+ *   and `deploySkill()`'s `runtime.metadata?.deploymentSupport` read).
+ * @returns {boolean}
+ */
+function isIsolateOnlyRuntime(runtime) {
+  const runtimeClasses = runtime?.metadata?.runtimeClasses || []
+  if (!runtimeClasses.includes(RUNTIME_CLASS.ISOLATE)) return false
+  if (runtimeClasses.includes(RUNTIME_CLASS.MICROVM)) return false
+  if (runtimeClasses.includes(RUNTIME_CLASS.NODE)) return false
+  if (runtimeClasses.includes(RUNTIME_CLASS.BROWSER)) return false
+  if (runtime?.shellBackend) return false
+  return true
 }
 
 function mergeResourceDescriptors(base, incoming) {
@@ -1091,6 +1161,7 @@ function mergeResourceDescriptors(base, incoming) {
     availability: availabilityPriority(incoming.availability) > availabilityPriority(base.availability)
       ? incoming.availability
       : base.availability,
+    hostedBy: incoming.hostedBy || base.hostedBy || null,
   })
   merged.source = incoming.source || base.source || 'resource-registry'
   return merged
