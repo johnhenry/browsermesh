@@ -670,7 +670,7 @@ them re-implement access control, validation or audit:
 | --- | --- | --- | --- |
 | 3 | `mesh://` routes | the eight verbs as URL paths | **done**, see below |
 | 4 | `meshctl` LLM tools | the eight verbs as tool definitions | **done**, see below |
-| 5 | external CLI | the eight verbs as subcommands | not yet built |
+| 5 | external CLI | the eight verbs as subcommands | **done** -- `packages/browsermesh-meshctl` (`meshctl`); see that package's README |
 | 6 | supervisor | `restart` policy + `status`/`spawn`/`drain` in a loop | not yet built |
 
 A runnable walkthrough of the whole surface —
