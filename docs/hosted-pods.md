@@ -21,7 +21,9 @@ Beyond those five, the **hosted pods control surface** adds the one API both
 lanes answer to — the eight-verb pod host protocol, the mesh service that
 serves it, and the per-lane drivers. See [§8a](#8a-control-surface);
 items 3-6 of that work (`mesh://` routes, `meshctl` tools, an external CLI,
-a supervisor) are all projections of it.
+a supervisor) are all projections of it. Item 7, the **browser lane**, adds
+a third lane with three drivers of its own (in-page, CDP, extension) —
+see [§8b](#8b-lane-c--browser-pods).
 
 ## Motivation
 
@@ -608,7 +610,18 @@ records.
 | `isolate` | ✓ | ✓ | ✓ | `ELANE` | `ELANE` | `ELANE` | ✓ | ✓ |
 | `microvm` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `node` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `browser` | ✓ | ✓ | ✓ | `ELANE` | `ELANE` | `ELANE` | ✓ | ✓ |
+| `browser` | ✓ | ✓ | ✓ | ✓* | `ELANE` | `ELANE` | ✓ | ✓ |
+
+\* Issue #185 item 7's decision, made while building the browser lane's
+drivers (see [§8b](#8b-lane-c--browser-pods)): `exec` on the browser lane
+means **"evaluate an expression in the page's JS context,"** not "spawn a
+shell command" — a tab has no shell, but it does have a JS realm, and two
+of the browser lane's three drivers (CDP, extension) can genuinely drive
+that safely from outside the page. So `exec` is lane-capable (`true`), not
+`ELANE`; the in-page driver, which has no safe way to do this from inside
+the page it hosts, answers `ENOTSUP` for it instead — a driver gap, not a
+lane law. `snapshot`/`restore` stay `ELANE`: no browser-lane driver in this
+wave durably freezes a page's JS heap and thaws it byte-for-byte.
 
 `POD_LANE_VERBS` / `laneSupports(lane, verb)` publish this up front.
 `ELANE` means "this lane structurally cannot" — a V8 isolate has no shell,
@@ -653,6 +666,9 @@ A `PodHostDriver` is a JSDoc typedef, not a base class: any object with
 | `InMemoryPodHostDriver` | configurable (default `node`) | `browsermesh-pod` — the reference driver, with the real state machine |
 | `createVmPodDriver(vmPodHost)` | `microvm` | `spikes/vm-pod-host/src/driver.mjs`, over WP3's `VmPodHost` |
 | `createIsolatePodDriver({baseUrl})` | `isolate` | `spikes/isolate-pod-host/src/driver.mjs`, over WP2's Worker routes |
+| `createInPageDriver({podUrl, ...})` | `browser` | `browsermesh-pod/src/browser-host-driver.mjs` — in-page, zero deps, see [§8b](#8b-lane-c--browser-pods) |
+| `createCdpDriver({cdp, podUrl})` | `browser` | `spikes/browser-pod-host/src/driver.mjs` — remote debugging protocol |
+| `createExtensionDriver({chrome})` | `browser` | `spikes/browser-extension-host/src/driver.mjs` — MV3 extension |
 
 The isolate lane's HTTP routes (`spikes/isolate-pod-host/src/routes.mjs`)
 are a 1:1 projection of the same verbs: `GET /pods`,
@@ -676,6 +692,111 @@ none of them should re-implement access control, validation or audit:
 A runnable walkthrough of the whole surface —
 spawn/exec/snapshot/restore/drain, a denied stranger, live lifecycle events
 — is [`examples/13-pod-host-service.mjs`](../examples/13-pod-host-service.mjs).
+
+## 8b. Lane C — browser pods
+
+Lanes A and B host a pod somewhere the REQUESTER does not control (a
+Worker, a microVM). The **browser lane** (`POD_LANE.BROWSER`, issue #185
+item 7) is the opposite case: the host and the hosted pod are both inside
+*someone's own browser* — a tab spawning and controlling windows, iframes,
+and workers that each boot a `Pod`. The verb set, the podspec, and the
+gated/audited service are identical; only the driver changes, and this
+lane has **three** of them, trading how much of the browser they can touch
+for how much setup they need.
+
+```mermaid
+flowchart TB
+  subgraph Browser["One browser"]
+    subgraph InPage["In-page driver (browsermesh-pod/src/browser-host-driver.mjs)"]
+      HostTab["Host tab<br/>createInPageDriver()"]
+      Iframe["iframe pod"]
+      Window["window.open() pod"]
+      Worker["Worker pod"]
+      HostTab -- "iframe.src / postMessage" --> Iframe
+      HostTab -- "window.open() / postMessage" --> Window
+      HostTab -- "new Worker() / postMessage" --> Worker
+      HostTab -. "BroadcastChannel: browser-host:ready" .- Iframe
+      HostTab -. "BroadcastChannel: browser-host:ready" .- Window
+      HostTab -. "BroadcastChannel: browser-host:ready" .- Worker
+    end
+
+    subgraph ExtHost["Extension driver (spikes/browser-extension-host)"]
+      SW["MV3 service worker<br/>createExtensionDriver()"]
+      Tab1["chrome.tabs pod"]
+      SW -- "chrome.tabs.create / sendMessage" --> Tab1
+      SW -. "chrome.scripting.executeScript (exec)" .- Tab1
+    end
+  end
+
+  subgraph Remote["Anywhere with a debugging port"]
+    Operator["Operator process<br/>(spikes/browser-pod-host)<br/>createCdpDriver()"]
+    subgraph HeadlessChrome["Headless Chrome (launchChrome())"]
+      Ctx1["BrowserContext A<br/>(tenant 1)"]
+      Ctx2["BrowserContext B<br/>(tenant 2)"]
+      PodA["pod page"]
+      PodB["pod page"]
+      Ctx1 --> PodA
+      Ctx2 --> PodB
+    end
+    Operator -- "CDP: Target.createTarget, Runtime.evaluate" --> HeadlessChrome
+  end
+
+  subgraph MicroVM["Lane B: a Firecracker microVM (spikes/vm-pod-host)"]
+    Guest["guest agent"]
+    GuestChrome["headless Chrome, driven by createCdpDriver()"]
+    Guest --> GuestChrome
+    GuestChrome -. "same CDP driver, nested" .-> GuestPods["pod pages inside the guest"]
+  end
+
+  Remote -. "Lane B host agent could run the CDP driver\ninside the guest instead of on the host" .-> MicroVM
+```
+
+### The three drivers
+
+| Driver | Needs | Trust model | `exec` | `snapshot`/`restore` |
+| --- | --- | --- | --- | --- |
+| **In-page** (`browser-host-driver.mjs`) | Nothing — a page's own JS | None: the driver IS a page, with no privilege over what it spawns | `ENOTSUP` — no safe way to evaluate in a child from inside the page that hosts it | `ENOTSUP` (IndexedDB soft-snapshot is a documented follow-up) |
+| **CDP** (`spikes/browser-pod-host`) | A `--remote-debugging-port`, raw `WebSocket` | An external operator with full remote control of the browser | **Supported** — `Runtime.evaluate(expression)`, gated by `checkAccess()` like any exec | `ENOTSUP` (not implemented this wave) |
+| **Extension** (`spikes/browser-extension-host`) | An installed MV3 extension | Extension privileges (host permissions, `scripting`) over pages it is allowed to touch | **Supported** — `chrome.scripting.executeScript` in the page's isolated world, gated | `snapshot` ≈ `chrome.tabs.discard` / `restore` ≈ reload — a real pause, but a WEAKER promise than a microVM snapshot (documented honestly in that spike's README, not wired into the standard gated verb set) |
+
+All three answer `spawn`/`status`/`send`/`drain`/`list` and share the same
+lifecycle (`cold → booting → registered → … → draining → gone`). What
+differs is `exec`'s availability — see `host-protocol.mjs`'s
+`POD_LANE_VERBS` doc comment for the full "why `exec` is lane-capable but
+driver-optional" reasoning — and, for the extension driver only, an
+honestly-weaker `snapshot`/`restore` pair kept out of the gated verb set
+on purpose.
+
+### Nesting with Lane B
+
+The CDP driver does not care whether the Chrome it is driving is on the
+operator's own laptop or inside a Lane B microVM guest: `launchChrome()`
+just spawns a binary and speaks WebSocket to it. That means **"Firecracker
+runs headless Chrome runs pod pages"** is not a new capability to build —
+it is this driver, pointed at a Chrome binary a Lane B host agent launched
+inside its own guest instead of on the host. A Lane B `VmPodHost` could,
+in principle, use `createCdpDriver()` as its OWN `exec` implementation for
+a `run.kind: 'command'` pod whose command happens to be "run a browser
+workload" — two lanes' drivers composing rather than a third thing to
+design.
+
+### Trust caveat
+
+**A tab is not a trust boundary against the page it hosts.** The in-page
+driver's `spawn()` creates an iframe/window/worker the same way any script
+on that page could; nothing stops the hosted page from doing anything a
+same-privileged script can already do (reading `document`, making
+requests as the user, etc.) — `postMessage`/`BroadcastChannel` give
+ADDRESSABILITY, not isolation. Running a stranger's code in this lane
+means trusting the page's own content, same as opening any other URL.
+
+For actually-untrusted hosted-pod code, do not reach for the browser
+lane's in-page driver at all: use the **CDP driver inside a microVM**
+(Lane B's isolation, with a real headless Chrome inside it) so a hostile
+pod page is contained by the guest/host boundary Firecracker already
+provides, not by browser same-origin policy. The extension driver sits in
+between — it has no sandbox either, but at least confines itself to pages
+the extension's `host_permissions` were explicitly scoped to.
 
 ## 9. Work packages
 

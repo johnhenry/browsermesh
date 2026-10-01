@@ -30,6 +30,7 @@ Pods automatically generate an Ed25519 cryptographic identity, detect their exec
 - [WebSocketTransport (relay-backed)](#websockettransport-relay-backed)
 - [Running a Pod outside the browser](#running-a-pod-outside-the-browser)
 - [Pod host protocol](#pod-host-protocol)
+  - [Browser lane drivers](#browser-lane-drivers)
 - [InjectedPod](#injectedpod)
 - [Peer Dependency](#peer-dependency)
 - [License](#license)
@@ -398,7 +399,7 @@ app runtime. Zero dependencies, no browser-only globals, no `node:` imports.
 | `spawn` | a **podspec** (below) | pod status | `EEXIST` if the name is live |
 | `status` | `{name}` | pod status | `ENOENT` if unknown |
 | `send` | `{name, to?, payload}` | driver-defined | delivers a message to the pod |
-| `exec` | `{name, command, timeoutMs?}` | `{stdout, stderr, code}` | `ELANE` on isolate/browser |
+| `exec` | `{name, command, timeoutMs?}` | `{stdout, stderr, code}` | `ELANE` on isolate; on browser it means "evaluate script in the page", not a shell — see [Browser lane drivers](#browser-lane-drivers) |
 | `snapshot` | `{name}` | pod status | `ELANE` on isolate/browser |
 | `restore` | `{name}` | pod status | `ELANE` on isolate/browser |
 | `drain` | `{name, cascade?}` | pod status | ends at `gone` |
@@ -418,7 +419,11 @@ and `laneSupports(lane, verb)` say so up front:
 | `isolate` | ✓ | ✓ | ✓ | `ELANE` | `ELANE` | `ELANE` | ✓ | ✓ |
 | `microvm` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `node` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `browser` | ✓ | ✓ | ✓ | `ELANE` | `ELANE` | `ELANE` | ✓ | ✓ |
+| `browser` | ✓ | ✓ | ✓ | ✓* | `ELANE` | `ELANE` | ✓ | ✓ |
+
+\* lane-capable (a tab has a JS realm to evaluate in, even with no shell);
+whether a given browser-lane *driver* implements it is separate — see
+[Browser lane drivers](#browser-lane-drivers).
 
 `POD_LANE`'s strings are identical to `RUNTIME_CLASS` in
 `@johnhenry/browsermesh-apps`' `resources.mjs`, so a host's lane is also the
@@ -521,6 +526,45 @@ await driver.drain('alpha')                  // -> draining -> gone
 The gated, audited mesh service that speaks this protocol over a `PeerNode`
 is `createPodHostService()` in `@johnhenry/browsermesh-apps` — see that
 package's "Pod host service" README section.
+
+### Browser lane drivers
+
+The browser lane (`POD_LANE.BROWSER`) has three drivers, documented in full
+with a diagram in `docs/hosted-pods.md` §8b. The one THIS package ships —
+`createInPageDriver()` — needs nothing beyond what a page already has:
+
+```js
+import { createInPageDriver, bootHostedPod } from '@johnhenry/browsermesh-pod'
+
+// On the pod page itself (podUrl), the whole bootstrap is:
+await bootHostedPod() // reads its name from window.name / #name=…, boots a Pod,
+                       // announces readiness over BroadcastChannel
+
+// On the host tab:
+const driver = createInPageDriver({
+  podUrl: 'https://example.com/pod.html',
+  spawnKind: 'iframe', // or 'window' | 'worker'
+})
+await driver.spawn({ name: 'worker-1', lane: 'browser', run: { kind: 'module', ref: 'pod' } })
+await driver.send('worker-1', { payload: { hi: true } })
+await driver.drain('worker-1')
+```
+
+It answers `spawn`/`status`/`send`/`drain`/`list`; `exec`/`snapshot`/
+`restore` are `ENOTSUP` — a parent tab has no safe way to evaluate code in
+a child it spawned, and no durable freeze/thaw of a page's JS heap exists
+yet. The other two drivers trade that safety story for more setup:
+
+| Driver | Where | `exec` |
+| --- | --- | --- |
+| In-page (above) | here | `ENOTSUP` |
+| CDP (remote debugging protocol) | `spikes/browser-pod-host` | real `Runtime.evaluate`, gated like any exec |
+| Extension (Manifest V3) | `spikes/browser-extension-host` | real `chrome.scripting.executeScript`, gated |
+
+**Trust caveat:** a tab is not a privilege boundary against the page it
+hosts. For a hosted pod whose code you do not trust, use the CDP driver
+inside a Lane B microVM, not the in-page driver — see §8b's "Trust
+caveat".
 
 ## InjectedPod
 

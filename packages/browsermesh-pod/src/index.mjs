@@ -24,3 +24,8 @@ export {
   createHostRequest, createHostResponse, createHostEvent,
   InMemoryPodHostDriver,
 } from './host-protocol.mjs'
+export {
+  bootHostedPod, readPodName,
+  DEFAULT_DISCOVERY_CHANNEL, BROWSER_HOST_READY,
+} from './browser-host-child.mjs'
+export { createInPageDriver } from './browser-host-driver.mjs'
