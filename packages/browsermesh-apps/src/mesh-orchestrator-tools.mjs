@@ -1,9 +1,12 @@
 /**
  * mesh-orchestrator-tools.mjs -- Phase 4 of the agent-runtime plan (issues
- * #90/#92): registers `orchestrator.mjs`'s 8 real `Meshctl*Tool` classes
+ * #90/#92): registers `orchestrator.mjs`'s 13 real `Meshctl*Tool` classes
  * (`MeshctlPodsTool`/`MeshctlStatusTool`/`MeshctlExecTool`/`MeshctlDeployTool`/
  * `MeshctlTopTool`/`MeshctlComputeTool`/`MeshctlExposeTool`/`MeshctlDrainTool`,
- * built via that file's own `createMeshctlTools(orchestrator)` helper) into a
+ * plus issue #185 §8a item 4's hosted-pods control surface five --
+ * `MeshctlSpawnTool`/`MeshctlSnapshotTool`/`MeshctlRestoreTool`/
+ * `MeshctlHostedPodsTool`/`MeshctlHostsTool` -- built via that file's own
+ * `createMeshctlTools(orchestrator)` helper) into a
  * `compat.mjs` `BrowserToolRegistry` (Phase 1), wired against a real, attached
  * `MeshOrchestrator` (Phase 3, `mesh-orchestrator.mjs`'s `createOrchestratorService()`).
  * Once registered, `agent-runtime.mjs`'s `createAgentRuntime({registry, llmFn})`
@@ -112,6 +115,37 @@
  * protocol first (out of scope here, exactly per this plan's Phase 4 section).
  *
  * ---------------------------------------------------------------------------
+ * `meshctl_spawn`/`meshctl_snapshot`/`meshctl_restore`/`meshctl_hosted_pods`/
+ * `meshctl_hosts` -- issue #185 §8a item 4's hosted-pods control surface,
+ * ALSO ALWAYS WIRED STRAIGHT TO THE RAW INSTANCE, BUT FOR A DIFFERENT REASON
+ * THAN COMPUTE/EXPOSE
+ *
+ * `MeshctlSpawnTool`/`MeshctlSnapshotTool`/`MeshctlRestoreTool`/
+ * `MeshctlHostedPodsTool` call `orchestrator.spawnPod()`/`.snapshotPod()`/
+ * `.restorePod()`/`.listHostedPods()`; `MeshctlHostsTool` calls
+ * `orchestrator.listPodHosts()`. Like compute/expose, none of these five are
+ * part of `mesh-orchestrator.mjs`'s `RISKY_ACTIONS` wire protocol (still
+ * exactly `['exec', 'deploy', 'drain']`), so there is no `api.spawnPod`/etc.
+ * gated equivalent to prefer -- they are wired straight to the raw
+ * instance's own methods here regardless of which input shape is supplied.
+ *
+ * Unlike compute/expose, this is NOT a gating gap: `spawnPod()`/
+ * `snapshotPod()`/`restorePod()`/`listHostedPods()` dispatch over `pod-host-
+ * service.mjs`'s OWN mesh protocol (`createPodHostClient()` -> a real
+ * `sendTo()` round trip to the target host), and that service gates every
+ * verb itself via `ctx.registry.checkAccess(pubKey, resource, verb)` on the
+ * HOST side -- the real authorization path for hosted pods, independent of
+ * `mesh-orchestrator.mjs`'s own `RISKY_ACTIONS` gate entirely. An EACCES
+ * from a refused host surfaces through these tools exactly as it does
+ * calling `spawnPod()` directly (see `orchestrator.mjs`'s
+ * `formatPodHostError()`); nothing here re-adds or bypasses that gate.
+ * `meshctl_hosts` is the one read with no gate anywhere, by design -- it
+ * reads `describe()`-derived runtime-registry peers, and `describe()`
+ * itself is deliberately ungated (`pod-host-service.mjs`'s module doc
+ * comment: a peer must be able to find a host before asking to be granted
+ * anything on it).
+ *
+ * ---------------------------------------------------------------------------
  * No browser-only imports at module level.
  */
 
@@ -179,6 +213,18 @@ function buildToolFacade(orchestrator) {
       // instance either way.
       runComputeTask: (...args) => raw.runComputeTask(...args),
       exposePod: (...args) => raw.exposePod(...args),
+      // meshctl_spawn/meshctl_snapshot/meshctl_restore/meshctl_hosted_pods/
+      // meshctl_hosts (issue #185 §8a item 4) -- gated by pod-host-
+      // service.mjs's own checkAccess() on the host side, not by this
+      // service's RISKY_ACTIONS; straight to the raw instance either way
+      // (see module doc comment's dedicated section for these five).
+      spawnPod: (...args) => raw.spawnPod(...args),
+      snapshotPod: (...args) => raw.snapshotPod(...args),
+      restorePod: (...args) => raw.restorePod(...args),
+      listHostedPods: (...args) => raw.listHostedPods(...args),
+      listPodHosts: (...args) => raw.listPodHosts(...args),
+      // MeshctlSpawnTool's auto host selection reads this too.
+      listComputeCandidates: (...args) => raw.listComputeCandidates(...args),
       // MeshctlExposeTool reads `this.#orchestrator.peerNode` directly for
       // its own default-podId fallback.
       get peerNode() { return raw.peerNode },
@@ -200,11 +246,12 @@ function buildToolFacade(orchestrator) {
 }
 
 /**
- * Construct all 8 `Meshctl*Tool` instances (`orchestrator.mjs`'s own
+ * Construct all 13 `Meshctl*Tool` instances (`orchestrator.mjs`'s own
  * `createMeshctlTools()`) against `orchestrator` and register each into
  * `registry`. See module doc comment for the full design writeup (the two
- * accepted `orchestrator` shapes, the exec/deploy/drain gating decision, and
- * the compute/expose "not wired by Phase 3 at all" note).
+ * accepted `orchestrator` shapes, the exec/deploy/drain gating decision, the
+ * compute/expose "not wired by Phase 3 at all" note, and the hosted-pods
+ * control surface's own gating section).
  *
  * @param {import('./compat.mjs').BrowserToolRegistry} registry - REQUIRED.
  *   Duck-typed (`.register` a function), matching this package's established
@@ -213,9 +260,10 @@ function buildToolFacade(orchestrator) {
  * @param {object} orchestrator - REQUIRED. Either `mesh-orchestrator.mjs`'s
  *   service `api` (recommended -- e.g. `node.orchestrator.api`) or a raw
  *   `MeshOrchestrator` instance -- see module doc comment.
- * @returns {import('./orchestrator.mjs').BrowserTool[]} the 8 registered tool
- *   instances, in `createMeshctlTools()`'s own order (pods, status, exec,
- *   deploy, top, compute, expose, drain).
+ * @returns {import('./orchestrator.mjs').BrowserTool[]} the 13 registered
+ *   tool instances, in `createMeshctlTools()`'s own order (pods, status,
+ *   exec, deploy, top, compute, expose, drain, spawn, snapshot, restore,
+ *   hosted_pods, hosts).
  */
 export function registerOrchestratorTools(registry, orchestrator) {
   if (!registry || typeof registry.register !== 'function') {
@@ -235,11 +283,11 @@ export function registerOrchestratorTools(registry, orchestrator) {
 
 /**
  * Convenience factory: build a brand-new `BrowserToolRegistry` and
- * pre-populate it with all 8 `Meshctl*Tool`s via `registerOrchestratorTools()`.
+ * pre-populate it with all 13 `Meshctl*Tool`s via `registerOrchestratorTools()`.
  * Equivalent to `registerOrchestratorTools(new BrowserToolRegistry(), orchestrator)`,
  * for a caller who doesn't already have a registry of their own to reuse (see
  * `registerOrchestratorTools()` directly if you do -- e.g. to add
- * non-orchestrator tools into the same registry alongside these 8).
+ * non-orchestrator tools into the same registry alongside these 13).
  *
  * @param {object} orchestrator - See `registerOrchestratorTools()`.
  * @returns {import('./compat.mjs').BrowserToolRegistry}

@@ -663,19 +663,42 @@ are a 1:1 projection of the same verbs: `GET /pods`,
 
 ### Everything else is a projection
 
-The surfaces still to build are all re-expressions of this one service, and
-none of them should re-implement access control, validation or audit:
+The surfaces here are all re-expressions of this one service, and none of
+them re-implement access control, validation or audit:
 
-| Item | Surface | Projects |
-| --- | --- | --- |
-| 3 | `mesh://` routes | the eight verbs as URL paths |
-| 4 | `meshctl` LLM tools | the eight verbs as tool definitions |
-| 5 | external CLI | the eight verbs as subcommands |
-| 6 | supervisor | `restart` policy + `status`/`spawn`/`drain` in a loop |
+| Item | Surface | Projects | Status |
+| --- | --- | --- | --- |
+| 3 | `mesh://` routes | the eight verbs as URL paths | not yet built |
+| 4 | `meshctl` LLM tools | the eight verbs as tool definitions | **done** |
+| 5 | external CLI | the eight verbs as subcommands | not yet built |
+| 6 | supervisor | `restart` policy + `status`/`spawn`/`drain` in a loop | not yet built |
 
 A runnable walkthrough of the whole surface —
 spawn/exec/snapshot/restore/drain, a denied stranger, live lifecycle events
 — is [`examples/13-pod-host-service.mjs`](../examples/13-pod-host-service.mjs).
+
+**Item 4** (`meshctl` LLM tools) does not project all eight verbs 1:1 as
+tools — only the ones a placement-shaped operator action needs:
+`meshctl_spawn`/`meshctl_snapshot`/`meshctl_restore`/`meshctl_hosted_pods`
+(`spawn`/`snapshot`/`restore`/`list`) plus `meshctl_hosts` (a read over
+`MeshOrchestrator`'s new `listPodHosts()`, not a verb at all — it lists
+*hosts*, not pods on one host). `status`/`send`/`exec`/`drain` are reachable
+through `createPodHostClient()` directly, or (for `exec`/`drain` in their
+mesh-peer-level sense) the pre-existing `meshctl_exec`/`meshctl_drain`
+tools, which predate this item and operate on a different gate
+(`mesh-orchestrator.mjs`'s `RISKY_ACTIONS`, not `pod-host-service.mjs`'s own
+`checkAccess()`). `meshctl_spawn`'s `host: 'auto'` auto-selects a host
+matching the requested lane via `listComputeCandidates()`, falling back to
+`listPodHosts()` for the isolate/browser lanes `listComputeCandidates()`
+cannot see (no `exec`, no `compute` capability — see §8a's "Known
+limitation" note in `packages/browsermesh-apps/README.md`'s "Pod host
+service" section). `registerMeshctlBuiltins()`'s `meshctl` text dispatcher
+grew matching `spawn`/`snapshot`/`restore`/`hosted`/`hosts` subcommands.
+See `packages/browsermesh-apps/src/orchestrator.mjs`'s
+`Meshctl{Spawn,Snapshot,Restore,HostedPods,Hosts}Tool` classes,
+`packages/browsermesh-apps/test/meshctl-hosted-pods.test.mjs`, and
+[`examples/15-agent-spawns-hosted-pod.mjs`](../examples/15-agent-spawns-hosted-pod.mjs)
+for a runnable LLM-tool-calling walkthrough.
 
 ## 9. Work packages
 
