@@ -2,3 +2,7 @@ node_modules/
 .turbo/
 *.tgz
 .DS_Store
+
+# Sibling clone used only for local spike verification (relay + signaling
+# servers) — not part of this repo, never commit it.
+/browsermesh-servers/
