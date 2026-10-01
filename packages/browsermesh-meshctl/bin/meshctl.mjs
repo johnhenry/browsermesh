@@ -11,6 +11,17 @@
  * killed mid-write.
  */
 
+// Node >= 25 emits an ExperimentalWarning the first time anything touches
+// `globalThis.localStorage` (a transitive browser-compat probe in the mesh
+// stack). It is noise on a JSON-first CLI's stderr, so filter exactly that
+// one warning and let every other warning through untouched.
+const defaultWarningListeners = process.listeners('warning')
+process.removeAllListeners('warning')
+process.on('warning', (warning) => {
+  if (warning?.name === 'ExperimentalWarning' && /localStorage/.test(String(warning.message))) return
+  for (const listener of defaultWarningListeners) listener(warning)
+})
+
 import { main } from '../src/cli.mjs'
 
 const controller = new AbortController()

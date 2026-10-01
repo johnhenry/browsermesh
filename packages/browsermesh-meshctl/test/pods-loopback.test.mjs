@@ -162,13 +162,23 @@ describe('meshctl pods over --loopback', () => {
       assert.equal(result.chosenVia, 'lane-match')
     })
 
-    it('without --lane is a usage error', async () => {
-      const { code, stderr } = await runCli(
+    it('without --lane infers the lane from --kind (command -> microvm), and fails as a usage error only when neither is given', async () => {
+      // `command` implies the microvm lane; the loopback fixture has no
+      // microvm host, so the inferred lane is honoured and the failure is
+      // "no host for lane", NOT a usage error.
+      const inferred = await runCli(
         ['pods', 'spawn', 'auto', '--name', 'auto3', '--kind', 'command', '--ref', '/bin/sh'],
         { session: fixture.session },
       )
-      assert.equal(code, 2)
-      assert.equal(JSON.parse(stderr).error.code, 'EUSAGE')
+      assert.notEqual(inferred.code, 2)
+      assert.notEqual(JSON.parse(inferred.stderr || '{"error":{}}').error.code, 'EUSAGE')
+
+      const bare = await runCli(
+        ['pods', 'spawn', 'auto', '--name', 'auto4', '--ref', 'x'],
+        { session: fixture.session },
+      )
+      assert.equal(bare.code, 2)
+      assert.equal(JSON.parse(bare.stderr).error.code, 'EUSAGE')
     })
   })
 

@@ -18,6 +18,7 @@
 
 import { readFile } from 'node:fs/promises'
 import { UsageError } from './output.mjs'
+import { validatePodSpec } from '@johnhenry/browsermesh-pod'
 import { selectAutoHost } from './auto-placement.mjs'
 
 /** @param {*} value @returns {string[]} */
@@ -217,10 +218,15 @@ export async function cmdPodsList(session, { positionals }) {
  */
 export async function cmdPodsSpawn(session, { positionals, flags }) {
   const ref = requirePositional(positionals, 0, 'pods spawn')
-  const spec = await buildPodSpec(flags)
+  let spec = await buildPodSpec(flags)
 
   if (ref === 'auto') {
-    if (!spec.lane) throw new UsageError('pods spawn auto: --lane is required to select a host')
+    // Let the protocol's own normalization infer the lane from run.kind
+    // (skill/module -> isolate, command/rootfs -> microvm) before insisting
+    // on --lane; the explicit flag still wins when given.
+    const normalized = validatePodSpec(spec)
+    if (normalized.ok) spec = normalized.value
+    if (!spec.lane) throw new UsageError('pods spawn auto: --lane is required to select a host (or give --kind so it can be inferred)')
     const refs = candidateHostRefs(session, flags)
     const picked = await selectAutoHost({ session, candidateRefs: refs, lane: spec.lane })
     const pod = await session.client.spawn(picked.podId, spec)

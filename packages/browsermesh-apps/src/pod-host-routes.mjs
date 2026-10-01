@@ -327,10 +327,11 @@ function dispatchToDriver(driver, verb, value) {
 function verbRefusal(driver, verb) {
   const caps = typeof driver.capabilities === 'function' ? driver.capabilities() : { verbs: [] }
   const verbs = Array.isArray(caps.verbs) ? caps.verbs : []
-  if (verbs.includes(verb) && typeof driver[verb] === 'function') return null
+  // Lane first, driver second -- same order as pod-host-service.mjs.
   if (!laneSupports(driver.lane, verb)) {
     return new PodHostDriverError(POD_HOST_ERROR.ELANE, `lane '${driver.lane}' cannot '${verb}'`, { verb, lane: driver.lane })
   }
+  if (verbs.includes(verb) && typeof driver[verb] === 'function') return null
   return new PodHostDriverError(POD_HOST_ERROR.ENOTSUP, `host does not implement '${verb}'`, { verb, lane: driver.lane })
 }
 
@@ -416,6 +417,27 @@ export function createPodHostRouter({ driver, api, registry, resource, onLog } =
         ok: false,
         error: { code: POD_HOST_ERROR.EINVAL, message: `missing requester identity ('${MESH_FROM_HEADER}' header)` },
       })
+    }
+
+    // Preferred path: the attached service's own gated dispatch (ONE copy
+    // of gate + validate + lane check + audit + events). Only when the
+    // router was built from a bare driver does it fall through to the
+    // standalone re-implementation below.
+    if (api && typeof api.dispatch === 'function') {
+      const bodyJson = await readHttpRequestBody(request)
+      const rawPayload = buildRawPayload(verb, match.params, bodyJson, url.searchParams)
+      try {
+        const result = await api.dispatch(pubKey, verb, rawPayload)
+        const status = successStatusForVerb(verb)
+        if (status === 204) return new Response(null, { status })
+        return jsonResponse(status, { ok: true, result })
+      } catch (err) {
+        const driverError = PodHostDriverError.from(err)
+        log('pod-host-router:verb-failed', { from: pubKey, verb, code: driverError.code, error: driverError.message })
+        const headers = { 'content-type': 'application/json' }
+        if (driverError.code === POD_HOST_ERROR.ELANE) headers.allow = allowHeaderForLane(resolvedDriver)
+        return new Response(JSON.stringify({ ok: false, error: driverError.toJSON() }), { status: statusForError(driverError.code), headers })
+      }
     }
 
     // 1. Gate -- the same checkAccess() pod-host-service.mjs itself calls.

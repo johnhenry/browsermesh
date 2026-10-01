@@ -281,10 +281,14 @@ export function createPodHostService({
        * @returns {PodHostDriverError|null}
        */
       function verbRefusal(verb) {
-        if (verbs.includes(verb) && typeof driver[verb] === 'function') return null
+        // Lane first, driver second: a driver may not widen its lane by
+        // declaring a verb the lane excludes (found by the browser-lane
+        // extension driver, whose chrome.tabs.discard would otherwise have
+        // slipped through as 'snapshot').
         if (!laneSupports(lane, verb)) {
           return new PodHostDriverError(POD_HOST_ERROR.ELANE, `lane '${lane}' cannot '${verb}'`, { verb, lane })
         }
+        if (verbs.includes(verb) && typeof driver[verb] === 'function') return null
         return new PodHostDriverError(
           POD_HOST_ERROR.ENOTSUP,
           `host does not implement '${verb}'`,
@@ -377,9 +381,37 @@ export function createPodHostService({
           return
         }
 
+        try {
+          const result = await gatedDispatch(pubKey, verb, envelope.payload ?? {}, { requestId })
+          await respond(pubKey, requestId, { ok: true, result })
+        } catch (err) {
+          const driverError = PodHostDriverError.from(err)
+          await respond(pubKey, requestId, { ok: false, error: driverError.toJSON() })
+        }
+      }
+
+      /**
+       * The ONE gated path from "a peer wants `verb`" to the driver: gate,
+       * validate, lane/driver refusal, dispatch, with every audit record and
+       * `ctx.emit()` this service makes. `handleRequest()` (the envelope
+       * path) and `api.dispatch()` (what `pod-host-routes.mjs`'s `mesh://`
+       * router and the HTTP gateway call) both go through here, so there is
+       * exactly one copy of the gate.
+       *
+       * Resolves with the driver's result; rejects with a
+       * `PodHostDriverError` (`EACCES`, `EINVAL`, `ELANE`, `ENOTSUP`, or
+       * whatever the driver threw).
+       *
+       * @param {string} pubKey - The requesting peer.
+       * @param {string} verb
+       * @param {object} rawPayload - Un-normalized payload.
+       * @param {{requestId?: string}} [opts]
+       * @returns {Promise<*>}
+       */
+      async function gatedDispatch(pubKey, verb, rawPayload, { requestId = `local:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 8)}` } = {}) {
         if (verb === POD_HOST_VERB.SPAWN) {
           await recordAudit(PLACEMENT_AUDIT.REQUESTED, {
-            requester: pubKey, requestId, name: envelope.payload?.name ?? null,
+            requester: pubKey, requestId, name: rawPayload?.name ?? null,
           })
         }
 
@@ -390,30 +422,21 @@ export function createPodHostService({
           log('pod-host:denied', { from: pubKey, verb, reason })
           ctx.emit('pod-host:denied', { from: pubKey, verb, requestId, reason })
           await recordAudit(PLACEMENT_AUDIT.DENIED, { requester: pubKey, requestId, verb, reason })
-          await respond(pubKey, requestId, {
-            ok: false,
-            error: { code: POD_HOST_ERROR.EACCES, message: `not authorized for '${resource}:${verb}'` },
-          })
-          return
+          throw new PodHostDriverError(POD_HOST_ERROR.EACCES, `not authorized for '${resource}:${verb}'`, { verb, lane })
         }
 
         // 2. Validate (and normalize) before anything reaches the driver.
-        const validated = validateVerbRequest(verb, envelope.payload ?? {})
+        const validated = validateVerbRequest(verb, rawPayload ?? {})
         if (!validated.ok) {
           ctx.emit('pod-host:completed', { from: pubKey, verb, requestId, ok: false, code: POD_HOST_ERROR.EINVAL })
-          await respond(pubKey, requestId, {
-            ok: false,
-            error: { code: POD_HOST_ERROR.EINVAL, message: validated.errors.join('; ') },
-          })
-          return
+          throw new PodHostDriverError(POD_HOST_ERROR.EINVAL, validated.errors.join('; '), { verb, lane })
         }
 
         // 3. Lane / driver capability.
         const refusal = verbRefusal(verb)
         if (refusal) {
           ctx.emit('pod-host:completed', { from: pubKey, verb, requestId, ok: false, code: refusal.code })
-          await respond(pubKey, requestId, { ok: false, error: refusal.toJSON() })
-          return
+          throw refusal
         }
 
         ctx.emit('pod-host:request', { from: pubKey, verb, requestId })
@@ -442,14 +465,14 @@ export function createPodHostService({
             })
           }
           ctx.emit('pod-host:completed', { from: pubKey, verb, requestId, ok: true, code: null })
-          await respond(pubKey, requestId, { ok: true, result })
+          return result
         } catch (err) {
           const driverError = PodHostDriverError.from(err)
           log('pod-host:verb-failed', { from: pubKey, verb, code: driverError.code, error: driverError.message })
           ctx.emit('pod-host:completed', {
             from: pubKey, verb, requestId, ok: false, code: driverError.code,
           })
-          await respond(pubKey, requestId, { ok: false, error: driverError.toJSON() })
+          throw driverError
         }
       }
 
@@ -494,6 +517,22 @@ export function createPodHostService({
         describe,
         /** @param {object} [extra] @returns {object} */
         runtimePeer(extra) { return podHostRuntimePeer(describe(), extra) },
+        /**
+         * Gated dispatch on behalf of `pubKey` -- the same gate, validation,
+         * lane check, audit and events the envelope path uses. This is what
+         * other projections (`pod-host-routes.mjs`) must call instead of
+         * `api.driver`, which stays raw and UNGATED.
+         * @param {string} pubKey
+         * @param {string} verb
+         * @param {object} [payload]
+         * @returns {Promise<*>}
+         */
+        dispatch(pubKey, verb, payload = {}) {
+          if (!POD_HOST_VERBS.includes(verb)) {
+            return Promise.reject(new PodHostDriverError(POD_HOST_ERROR.EINVAL, `unknown verb '${verb}'`, { verb, lane }))
+          }
+          return gatedDispatch(pubKey, verb, payload)
+        },
       }
 
       return {
