@@ -12,8 +12,14 @@
  */
 
 import { MESH_TYPE } from '@johnhenry/browsermesh-primitives'
-import { ComputeRequest, ResourceDescriptor, ResourceScorer, RUNTIME_CLASS } from './resources.mjs'
+import { ComputeRequest, ResourceDescriptor, ResourceScorer, RUNTIME_CLASS, ISOLATION } from './resources.mjs'
 import { BrowserTool as CompatBrowserTool } from './compat.mjs'
+import {
+  validatePodSpec,
+  POD_LANE,
+  POD_HOST_ERROR,
+  PodHostDriverError,
+} from '@johnhenry/browsermesh-pod'
 
 // A real browser environment (clawser's web/clawser-tools.js) may already
 // have defined a real, richer `globalThis.BrowserTool` -- honored first, as
@@ -26,7 +32,7 @@ import { BrowserTool as CompatBrowserTool } from './compat.mjs'
 // below in Node -- `.spec` composes `{name, description, parameters,
 // required_permission}` from each subclass's own overridden getters, which
 // only exists on compat.mjs's real `BrowserTool`, not the old stub. Using the
-// real class changes nothing about the 8 Meshctl*Tool subclasses' own bodies
+// real class changes nothing about the 13 Meshctl*Tool subclasses' own bodies
 // below (their name/description/parameters/permission getters and execute()
 // methods are all still their own overrides) -- only what `.spec` (and the
 // default `execute()`/`permission` a subclass doesn't override) resolves to.
@@ -476,6 +482,46 @@ export class MeshOrchestrator {
   async listHostedPods(hostPodId) {
     const client = await this.#hostClient()
     return client.list(hostPodId)
+  }
+
+  /**
+   * List known pod hosts (issue #185 control surface item 4's `meshctl_hosts`):
+   * runtime-registry peers whose `describe()` was projected through
+   * `podHostRuntimePeer()` (`pod-host-service.mjs`), i.e. peers carrying a
+   * `metadata.podHost` entry. Read-only, from the same `#runtimeDescriptors()`
+   * source `#collectComputeDescriptors()` already walks -- no audit record,
+   * matching `listHostedPods()`/`listPods()`.
+   *
+   * Deliberately NOT routed through `#collectComputeDescriptors()` /
+   * `listComputeCandidates()`: those drop any pod host with no `exec`
+   * (every ISOLATE-lane host, by lane definition -- see
+   * `pod-host-service.mjs`'s `podHostRuntimePeer()` doc comment and this
+   * package's README "Known limitation" section) before a caller ever gets
+   * a chance to filter on lane. Reading `#runtimeDescriptors()` directly
+   * sidesteps that filter, so an isolate host is listed here even though it
+   * is invisible to `listComputeCandidates()`.
+   *
+   * @returns {Array<{podId: string, lane: string|null, verbs: string[], runtimeClasses: string[], shellBackend: string|null, resource: string, capabilities: string[], hostedBy: string|null}>}
+   */
+  async listPodHosts() {
+    const hosts = []
+    for (const peer of this.#runtimeDescriptors()) {
+      const podHost = peer.metadata?.podHost
+      if (!podHost) continue
+      const podId = this.#descriptorPodId(peer)
+      if (!podId) continue
+      hosts.push({
+        podId,
+        lane: (peer.metadata?.runtimeClasses || [])[0] ?? null,
+        verbs: [...(podHost.verbs || [])],
+        runtimeClasses: [...(peer.metadata?.runtimeClasses || [])],
+        shellBackend: peer.shellBackend ?? null,
+        resource: podHost.resource || 'pod-host',
+        capabilities: [...(peer.capabilities || [])],
+        hostedBy: peer.metadata?.hostedBy || null,
+      })
+    }
+    return hosts
   }
 
   #recordComputeReputation(descriptor, score) {
@@ -1649,12 +1695,388 @@ export class MeshctlDrainTool extends BrowserTool {
 }
 
 // ---------------------------------------------------------------------------
+// Hosted pods control surface (issue #185 §8a item 4) -- meshctl_spawn,
+// meshctl_snapshot, meshctl_restore, meshctl_hosted_pods, meshctl_hosts
+// ---------------------------------------------------------------------------
+
+/**
+ * Lane-aware hints for `POD_HOST_ERROR.ELANE` failures, keyed by verb. Only
+ * `exec`/`snapshot`/`restore` are ever `ELANE` (`POD_LANE_VERBS` in
+ * `host-protocol.mjs`), and only for the `isolate`/`browser` lanes -- a V8
+ * isolate has no shell and no process to freeze to disk; Durable Object
+ * hibernation is automatic, not a verb a caller drives.
+ */
+const ELANE_HINTS = Object.freeze({
+  exec: 'isolate pods cannot exec; use meshctl_deploy or spawn on a microvm host',
+  snapshot: 'isolate pods cannot snapshot; Durable Object hibernation is automatic, not a verb you drive',
+  restore: 'isolate pods cannot restore; Durable Object hibernation is automatic, not a verb you drive',
+})
+
+/**
+ * Turn a `PodHostDriverError` (or anything `PodHostDriverError.from()`
+ * accepts) into a human-readable, lane-aware message for a `meshctl_*`
+ * tool's `error` field or the `meshctl` shell's `stderr`. Never retries or
+ * picks a different host -- "the orchestrator proposes, the host accepts":
+ * an `EACCES` (or any other code) is reported as-is, exactly once.
+ *
+ * @param {*} err
+ * @param {{host?: string, verb?: string}} [ctx]
+ * @returns {string}
+ */
+function formatPodHostError(err, { host, verb } = {}) {
+  const driverError = PodHostDriverError.from(err)
+  const lane = driverError.details?.lane ?? null
+  const name = driverError.details?.name ?? null
+  const where = host ? ` on host '${host}'` : ''
+  switch (driverError.code) {
+    case POD_HOST_ERROR.EACCES:
+      return `not authorized to '${verb}'${where} (grant pod-host:${verb} to this requester)`
+    case POD_HOST_ERROR.ENOENT:
+      return `no pod${name ? ` named '${name}'` : ''} found${where}`
+    case POD_HOST_ERROR.EEXIST:
+      return `pod${name ? ` '${name}'` : ''} already exists${where}`
+    case POD_HOST_ERROR.EINVAL:
+      return `invalid request: ${driverError.message}`
+    case POD_HOST_ERROR.ENOTSUP:
+      return `host${where} does not implement '${verb}' (its lane could, but this driver has not)`
+    case POD_HOST_ERROR.ELANE:
+      return ELANE_HINTS[verb] || `lane '${lane ?? 'unknown'}' structurally cannot '${verb}'`
+    case POD_HOST_ERROR.ETIMEDOUT:
+      return `host${where} did not respond in time`
+    case POD_HOST_ERROR.EBUSY:
+      return `pod${where} is mid-transition; try again`
+    default:
+      return driverError.message
+  }
+}
+
+/**
+ * Pick the best pod host for a given lane -- `meshctl_spawn`'s `host: 'auto'`
+ * path, and the `meshctl spawn <host|auto> ...` shell command's equivalent.
+ * "The orchestrator proposes, the host accepts": this picks exactly one
+ * host and never retries a different one after a refusal (see
+ * `formatPodHostError()` and `MeshctlSpawnTool#execute()`).
+ *
+ * Primary path: `orchestrator.listComputeCandidates()` (the same
+ * `ResourceScorer`-adjacent descriptor list `MeshctlComputeTool` reads),
+ * narrowed to hosts advertising `runtime:<lane>`, preferring one with
+ * `availability: 'online'`.
+ *
+ * Fallback: `orchestrator.listPodHosts()`. This exists because of a
+ * documented gap (`pod-host-service.mjs`'s `podHostRuntimePeer()` doc
+ * comment, and this package's README "Known limitation" section):
+ * `listComputeCandidates()` derives its `compute` capability from `exec`,
+ * so an ISOLATE-lane host (no `exec`, by lane definition -- same for
+ * `browser`) never appears in it at all, regardless of lane filtering.
+ * `listPodHosts()` reads the same runtime-registry peers directly, without
+ * that filter, so it still finds such a host.
+ *
+ * @param {object} orchestrator - A `MeshOrchestrator` (or the tool facade
+ *   `mesh-orchestrator-tools.mjs` builds around one).
+ * @param {string} lane - A `POD_LANE` value.
+ * @returns {Promise<{podId: string, reason: string}|null>}
+ */
+async function pickAutoHost(orchestrator, lane) {
+  const isolation = lane === POD_LANE.ISOLATE
+    ? ISOLATION.ISOLATE
+    : lane === POD_LANE.MICROVM
+      ? ISOLATION.MICROVM
+      : ISOLATION.ANY
+  const candidates = typeof orchestrator.listComputeCandidates === 'function'
+    ? await orchestrator.listComputeCandidates({ isolation })
+    : []
+  const laneCandidates = candidates.filter((c) => c.capabilities.includes(`runtime:${lane}`))
+  const best = laneCandidates.find((c) => c.availability === 'online') || laneCandidates[0] || null
+  if (best) {
+    return {
+      podId: best.podId,
+      reason: `best compute candidate advertising lane '${lane}' (${best.availability}, via ${best.source})`,
+    }
+  }
+
+  if (typeof orchestrator.listPodHosts !== 'function') return null
+  const hosts = await orchestrator.listPodHosts()
+  const laneHosts = hosts.filter((h) => h.lane === lane)
+  if (laneHosts.length === 0) return null
+  return {
+    podId: laneHosts[0].podId,
+    reason: `only known pod host advertising lane '${lane}' (no exec, so invisible to compute-candidate scoring)`,
+  }
+}
+
+/**
+ * Build a podspec from `MeshctlSpawnTool#execute()`'s separate arguments,
+ * omitting any key the caller did not supply -- `validatePodSpec()` treats
+ * an explicit `undefined` the same as a present-but-wrong-typed value
+ * (`rejectUnknownKeys()` walks `Object.keys()`, which includes keys whose
+ * value is `undefined`), so building the object conditionally matters, not
+ * just cosmetically.
+ *
+ * @param {object} args
+ * @returns {object}
+ */
+function buildPodSpec({ name, lane, run, limits, caps, env, budget, restart, labels }) {
+  const spec = { name, run }
+  if (lane !== undefined) spec.lane = lane
+  if (limits !== undefined) spec.limits = limits
+  if (caps !== undefined) spec.caps = caps
+  if (env !== undefined) spec.env = env
+  if (budget !== undefined) spec.budget = budget
+  if (restart !== undefined) spec.restart = restart
+  if (labels !== undefined) spec.labels = labels
+  return spec
+}
+
+// ── meshctl_spawn ─────────────────────────────────────────────────────
+
+export class MeshctlSpawnTool extends BrowserTool {
+  #orchestrator
+
+  constructor(orchestrator) {
+    super()
+    this.#orchestrator = orchestrator
+  }
+
+  get name() { return 'meshctl_spawn' }
+  get description() {
+    return "Spawn a hosted pod (issue #185 control surface) on a pod host, in a V8 isolate or microVM lane. " +
+      "Pass host: 'auto' (or omit it) to let the orchestrator pick a host matching the lane."
+  }
+  get parameters() {
+    return {
+      type: 'object',
+      properties: {
+        host: { type: 'string', description: "Target pod host's pod ID, or 'auto' to let the orchestrator pick one matching the lane (default: auto)" },
+        name: { type: 'string', description: "Pod name, matching [A-Za-z0-9][A-Za-z0-9._-]{0,63}" },
+        lane: { type: 'string', description: "Isolation lane: 'isolate'|'microvm'|'node'|'browser' (default inferred from run.kind: skill/module -> isolate, command/rootfs -> microvm)" },
+        run: {
+          type: 'object',
+          description: 'What to run',
+          properties: {
+            kind: { type: 'string', description: "'skill'|'module'|'rootfs'|'command'" },
+            ref: { type: 'string', description: 'Reference: skill name, module cid, rootfs image, or command path' },
+            entry: { type: 'string', description: 'Entry point, if applicable' },
+            input: { description: 'Input payload, if applicable' },
+          },
+          required: ['kind', 'ref'],
+        },
+        limits: { type: 'object', description: 'Resource limits: vcpus, memMib, timeoutMs, netRateLimiter, blockRateLimiter' },
+        caps: { type: 'array', items: { type: 'string' }, description: 'KERNEL_CAP strings this pod is granted' },
+        env: { type: 'object', description: 'Environment variables (string values)' },
+        budget: { type: 'object', description: 'Budget: credits, currency' },
+        restart: { type: 'object', description: 'Restart policy: policy (never|on-failure|always), maxRestarts, backoffMs' },
+      },
+      required: ['name', 'run'],
+    }
+  }
+  get permission() { return 'network' }
+
+  async execute({ host, name, lane, run, limits, caps, env, budget, restart } = {}) {
+    const validated = validatePodSpec(buildPodSpec({ name, lane, run, limits, caps, env, budget, restart }))
+    if (!validated.ok) {
+      return { success: false, output: '', error: `Invalid podspec: ${validated.errors.join('; ')}` }
+    }
+    const spec = validated.value
+
+    let targetHost = host && host !== 'auto' ? host : null
+    let note = ''
+    if (!targetHost) {
+      const picked = await pickAutoHost(this.#orchestrator, spec.lane)
+      if (!picked) {
+        return { success: false, output: '', error: `No known pod host advertises lane '${spec.lane}' for auto selection` }
+      }
+      targetHost = picked.podId
+      note = `orchestrator proposes host ${targetHost} for lane '${spec.lane}': ${picked.reason}\n`
+    }
+
+    try {
+      const result = await this.#orchestrator.spawnPod(targetHost, spec)
+      return {
+        success: true,
+        output: `${note}spawned '${result.name}' on ${targetHost} (lane '${result.lane}'): state=${result.state}\n${JSON.stringify(result)}`,
+      }
+    } catch (err) {
+      // "The orchestrator proposes, the host accepts": a refusal (EACCES or
+      // otherwise) from the host we picked -- or the one the caller named
+      // explicitly -- is reported as-is, never silently retried elsewhere.
+      return { success: false, output: note, error: formatPodHostError(err, { host: targetHost, verb: 'spawn' }) }
+    }
+  }
+}
+
+// ── meshctl_snapshot ──────────────────────────────────────────────────
+
+export class MeshctlSnapshotTool extends BrowserTool {
+  #orchestrator
+
+  constructor(orchestrator) {
+    super()
+    this.#orchestrator = orchestrator
+  }
+
+  get name() { return 'meshctl_snapshot' }
+  get description() { return 'Freeze a hosted pod to durable storage (microvm/node lanes only; isolate/browser answer ELANE)' }
+  get parameters() {
+    return {
+      type: 'object',
+      properties: {
+        host: { type: 'string', description: 'Pod host pod ID' },
+        name: { type: 'string', description: 'Hosted pod name' },
+      },
+      required: ['host', 'name'],
+    }
+  }
+  get permission() { return 'network' }
+
+  async execute({ host, name } = {}) {
+    try {
+      const result = await this.#orchestrator.snapshotPod(host, name)
+      return { success: true, output: `snapshotted '${name}' on ${host}: state=${result.state}\n${JSON.stringify(result)}` }
+    } catch (err) {
+      return { success: false, output: '', error: formatPodHostError(err, { host, verb: 'snapshot' }) }
+    }
+  }
+}
+
+// ── meshctl_restore ───────────────────────────────────────────────────
+
+export class MeshctlRestoreTool extends BrowserTool {
+  #orchestrator
+
+  constructor(orchestrator) {
+    super()
+    this.#orchestrator = orchestrator
+  }
+
+  get name() { return 'meshctl_restore' }
+  get description() { return 'Thaw a snapshotted hosted pod (microvm/node lanes only; isolate/browser answer ELANE)' }
+  get parameters() {
+    return {
+      type: 'object',
+      properties: {
+        host: { type: 'string', description: 'Pod host pod ID' },
+        name: { type: 'string', description: 'Hosted pod name' },
+      },
+      required: ['host', 'name'],
+    }
+  }
+  get permission() { return 'network' }
+
+  async execute({ host, name } = {}) {
+    try {
+      const result = await this.#orchestrator.restorePod(host, name)
+      return { success: true, output: `restored '${name}' on ${host}: state=${result.state}\n${JSON.stringify(result)}` }
+    } catch (err) {
+      return { success: false, output: '', error: formatPodHostError(err, { host, verb: 'restore' }) }
+    }
+  }
+}
+
+// ── meshctl_hosted_pods ───────────────────────────────────────────────
+
+export class MeshctlHostedPodsTool extends BrowserTool {
+  #orchestrator
+
+  constructor(orchestrator) {
+    super()
+    this.#orchestrator = orchestrator
+  }
+
+  get name() { return 'meshctl_hosted_pods' }
+  get description() { return 'List every pod a pod host is tracking (spawned, snapshotted, or drained tombstones)' }
+  get parameters() {
+    return {
+      type: 'object',
+      properties: {
+        host: { type: 'string', description: 'Pod host pod ID' },
+      },
+      required: ['host'],
+    }
+  }
+  get permission() { return 'read' }
+
+  async execute({ host } = {}) {
+    try {
+      const pods = await this.#orchestrator.listHostedPods(host)
+      if (pods.length === 0) {
+        return { success: true, output: `No hosted pods on ${host}.\n[]` }
+      }
+      const lines = pods.map((p) => `${p.name} | ${p.lane} | ${p.state} | execs:${p.execs ?? 0}`)
+      return {
+        success: true,
+        output: `NAME | LANE | STATE | EXECS\n${lines.join('\n')}\n\n${JSON.stringify(pods)}`,
+      }
+    } catch (err) {
+      return { success: false, output: '', error: formatPodHostError(err, { host, verb: 'list' }) }
+    }
+  }
+}
+
+// ── meshctl_hosts ─────────────────────────────────────────────────────
+
+export class MeshctlHostsTool extends BrowserTool {
+  #orchestrator
+
+  constructor(orchestrator) {
+    super()
+    this.#orchestrator = orchestrator
+  }
+
+  get name() { return 'meshctl_hosts' }
+  get description() { return 'List known pod hosts with their lane, served verbs and runtime classes' }
+  get parameters() {
+    return { type: 'object', properties: {} }
+  }
+  get permission() { return 'read' }
+
+  async execute() {
+    try {
+      const hosts = await this.#orchestrator.listPodHosts()
+      if (hosts.length === 0) {
+        return { success: true, output: 'No pod hosts known.' }
+      }
+      const lines = hosts.map((h) => `${h.podId} | ${h.lane} | verbs: ${h.verbs.join(',')} | runtimeClasses: ${h.runtimeClasses.join(',')}`)
+      return {
+        success: true,
+        output: `HOST | LANE | VERBS | RUNTIME CLASSES\n${lines.join('\n')}`,
+      }
+    } catch (err) {
+      return { success: false, output: '', error: `Failed to list pod hosts: ${err.message}` }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Shell integration helper
 // ---------------------------------------------------------------------------
 
 /**
+ * A tiny `--flag value` parser for `meshctl spawn`'s flag-style arguments
+ * (`--lane`, `--kind`, `--ref`, `--entry`). Deliberately minimal rather than
+ * a dependency: every recognized flag takes exactly one value, order does
+ * not matter, and an unrecognized `--flag` is collected too (the caller
+ * only reads the ones it needs).
+ *
+ * @param {string[]} args
+ * @returns {Record<string, string>}
+ */
+function parseMeshctlFlags(args) {
+  /** @type {Record<string, string>} */
+  const flags = {}
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i]
+    if (arg.startsWith('--')) {
+      flags[arg.slice(2)] = args[i + 1]
+      i += 1
+    }
+  }
+  return flags
+}
+
+/**
  * Register 'meshctl' as a compound command in the shell registry.
- * Subcommands: pods, status, exec, deploy, top, compute, expose, drain
+ * Subcommands: pods, status, exec, deploy, top, compute, expose, drain,
+ * spawn, snapshot, restore, hosted, hosts
  *
  * @param {import('./clawser-shell.js').CommandRegistry} shellRegistry
  * @param {MeshOrchestrator} orchestrator
@@ -1751,10 +2173,79 @@ export function registerMeshctlBuiltins(shellRegistry, orchestrator) {
         return { stdout: '', stderr: `Pod "${podId}" not found.\n`, exitCode: 1 }
       }
 
+      case 'spawn': {
+        const USAGE = 'Usage: meshctl spawn <host|auto> <name> --lane <lane> --kind <kind> --ref <ref> [--entry <entry>]\n'
+        const [hostArg, nameArg, ...flagArgs] = rest
+        if (!hostArg || !nameArg) return { stdout: '', stderr: USAGE, exitCode: 1 }
+        const flags = parseMeshctlFlags(flagArgs)
+        if (!flags.kind || !flags.ref) return { stdout: '', stderr: USAGE, exitCode: 1 }
+        const run = { kind: flags.kind, ref: flags.ref }
+        if (flags.entry) run.entry = flags.entry
+        const spec = buildPodSpec({ name: nameArg, lane: flags.lane, run })
+        const validated = validatePodSpec(spec)
+        if (!validated.ok) return { stdout: '', stderr: `Invalid podspec: ${validated.errors.join('; ')}\n`, exitCode: 1 }
+        try {
+          let host = hostArg
+          let note = ''
+          if (hostArg === 'auto') {
+            const picked = await pickAutoHost(orchestrator, validated.value.lane)
+            if (!picked) return { stdout: '', stderr: `No known pod host advertises lane '${validated.value.lane}'\n`, exitCode: 1 }
+            host = picked.podId
+            note = `orchestrator proposes host ${host} for lane '${validated.value.lane}': ${picked.reason}\n`
+          }
+          const result = await orchestrator.spawnPod(host, validated.value)
+          return { stdout: `${note}spawned '${result.name}' on ${host} (lane '${result.lane}'): state=${result.state}\n`, stderr: '', exitCode: 0 }
+        } catch (err) {
+          return { stdout: '', stderr: formatPodHostError(err, { host: hostArg === 'auto' ? null : hostArg, verb: 'spawn' }) + '\n', exitCode: 1 }
+        }
+      }
+
+      case 'snapshot': {
+        const [host, name] = rest
+        if (!host || !name) return { stdout: '', stderr: 'Usage: meshctl snapshot <host> <name>\n', exitCode: 1 }
+        try {
+          const result = await orchestrator.snapshotPod(host, name)
+          return { stdout: `snapshotted '${name}' on ${host}: state=${result.state}\n`, stderr: '', exitCode: 0 }
+        } catch (err) {
+          return { stdout: '', stderr: formatPodHostError(err, { host, verb: 'snapshot' }) + '\n', exitCode: 1 }
+        }
+      }
+
+      case 'restore': {
+        const [host, name] = rest
+        if (!host || !name) return { stdout: '', stderr: 'Usage: meshctl restore <host> <name>\n', exitCode: 1 }
+        try {
+          const result = await orchestrator.restorePod(host, name)
+          return { stdout: `restored '${name}' on ${host}: state=${result.state}\n`, stderr: '', exitCode: 0 }
+        } catch (err) {
+          return { stdout: '', stderr: formatPodHostError(err, { host, verb: 'restore' }) + '\n', exitCode: 1 }
+        }
+      }
+
+      case 'hosted': {
+        const host = rest[0]
+        if (!host) return { stdout: '', stderr: 'Usage: meshctl hosted <host>\n', exitCode: 1 }
+        try {
+          const pods = await orchestrator.listHostedPods(host)
+          if (pods.length === 0) return { stdout: `No hosted pods on ${host}.\n`, stderr: '', exitCode: 0 }
+          const lines = pods.map((p) => `${p.name}\t${p.lane}\t${p.state}`)
+          return { stdout: lines.join('\n') + '\n', stderr: '', exitCode: 0 }
+        } catch (err) {
+          return { stdout: '', stderr: formatPodHostError(err, { host, verb: 'list' }) + '\n', exitCode: 1 }
+        }
+      }
+
+      case 'hosts': {
+        const hosts = await orchestrator.listPodHosts()
+        if (hosts.length === 0) return { stdout: 'No pod hosts known.\n', stderr: '', exitCode: 0 }
+        const lines = hosts.map((h) => `${h.podId}\t${h.lane}\tverbs:${h.verbs.join(',')}`)
+        return { stdout: lines.join('\n') + '\n', stderr: '', exitCode: 0 }
+      }
+
       default:
         return {
           stdout: '',
-          stderr: `Unknown subcommand: ${subcommand || '(none)'}. Available: pods, status, exec, deploy, top, compute, expose, drain\n`,
+          stderr: `Unknown subcommand: ${subcommand || '(none)'}. Available: pods, status, exec, deploy, top, compute, expose, drain, spawn, snapshot, restore, hosted, hosts\n`,
           exitCode: 1,
         }
     }
@@ -1770,7 +2261,10 @@ export function registerMeshctlBuiltins(shellRegistry, orchestrator) {
 // ---------------------------------------------------------------------------
 
 /**
- * Create all meshctl BrowserTool instances for a given orchestrator.
+ * Create all meshctl BrowserTool instances for a given orchestrator -- the
+ * original 8 (`pods`/`status`/`exec`/`deploy`/`top`/`compute`/`expose`/
+ * `drain`) plus the 5 hosted-pods control surface tools (issue #185 §8a
+ * item 4): `spawn`/`snapshot`/`restore`/`hosted_pods`/`hosts`. 13 total.
  * @param {MeshOrchestrator} orchestrator
  * @returns {BrowserTool[]}
  */
@@ -1784,5 +2278,10 @@ export function createMeshctlTools(orchestrator) {
     new MeshctlComputeTool(orchestrator),
     new MeshctlExposeTool(orchestrator),
     new MeshctlDrainTool(orchestrator),
+    new MeshctlSpawnTool(orchestrator),
+    new MeshctlSnapshotTool(orchestrator),
+    new MeshctlRestoreTool(orchestrator),
+    new MeshctlHostedPodsTool(orchestrator),
+    new MeshctlHostsTool(orchestrator),
   ]
 }

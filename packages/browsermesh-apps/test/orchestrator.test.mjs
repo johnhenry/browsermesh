@@ -983,13 +983,13 @@ describe('BrowserTool subclasses — basics', () => {
     tools = createMeshctlTools(orch)
   })
 
-  it('createMeshctlTools returns array of 8 tools', () => {
-    assert.equal(tools.length, 8)
+  it('createMeshctlTools returns array of 13 tools', () => {
+    assert.equal(tools.length, 13)
   })
 
   it('all have unique names', () => {
     const names = tools.map(t => t.name)
-    assert.equal(new Set(names).size, 8)
+    assert.equal(new Set(names).size, 13)
   })
 
   it('all have descriptions', () => {
@@ -1014,13 +1014,18 @@ describe('BrowserTool subclasses — basics', () => {
       meshctl_compute: 'network',
       meshctl_expose: 'network',
       meshctl_drain: 'network',
+      meshctl_spawn: 'network',
+      meshctl_snapshot: 'network',
+      meshctl_restore: 'network',
+      meshctl_hosted_pods: 'read',
+      meshctl_hosts: 'read',
     }
     for (const tool of tools) {
       assert.equal(tool.permission, expected[tool.name], `${tool.name} permission`)
     }
   })
 
-  it('tool names are meshctl_pods, meshctl_status, meshctl_exec, meshctl_deploy, meshctl_top, meshctl_compute, meshctl_expose, meshctl_drain', () => {
+  it('tool names are meshctl_pods, meshctl_status, meshctl_exec, meshctl_deploy, meshctl_top, meshctl_compute, meshctl_expose, meshctl_drain, meshctl_spawn, meshctl_snapshot, meshctl_restore, meshctl_hosted_pods, meshctl_hosts', () => {
     const names = tools.map(t => t.name).sort()
     assert.deepEqual(names, [
       'meshctl_compute',
@@ -1028,7 +1033,12 @@ describe('BrowserTool subclasses — basics', () => {
       'meshctl_drain',
       'meshctl_exec',
       'meshctl_expose',
+      'meshctl_hosted_pods',
+      'meshctl_hosts',
       'meshctl_pods',
+      'meshctl_restore',
+      'meshctl_snapshot',
+      'meshctl_spawn',
       'meshctl_status',
       'meshctl_top',
     ])

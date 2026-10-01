@@ -72,7 +72,7 @@
  * arbitrary content deployed to this node's filesystem-adjacent skill
  * store, and forcibly disconnecting/migrating this node's own workload,
  * respectively) -- exactly `orchestrator.mjs`'s own header comment's
- * "eight `meshctl`-CLI-shaped agent tools", the three whose `BrowserTool`
+ * "thirteen `meshctl`-CLI-shaped agent tools", the three whose `BrowserTool`
  * subclasses (`MeshctlExecTool`/`MeshctlDeployTool`/`MeshctlDrainTool`)
  * already declare `get permission() { return 'network' }` (vs. `'read'` for
  * the pods/status/top query tools). Before honoring an inbound

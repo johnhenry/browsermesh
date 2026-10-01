@@ -48,7 +48,7 @@ Extracted from the private `clawser` monorepo (previously `packages/browsermesh-
 | mesh-orchestrator | `createOrchestratorService` (`MeshService` wrapper: real, gated wire dispatch for `execOnPod`/`deploySkill`/`drainPod`, ungated local aggregation for `listPods`/`getPodStatus`/`topPods`) |
 | compat | `BrowserTool`, `BrowserToolRegistry` (base class + registry an LLM-drivable agent loop dispatches tool calls through) |
 | agent-runtime | `createAgentRuntime` (the LLM tool-calling dispatch loop: bring-your-own `llmFn`, real registry-backed tool execution) |
-| mesh-orchestrator-tools | `registerOrchestratorTools`, `createOrchestratorToolRegistry` (wires the 8 real `Meshctl*Tool`s into a `BrowserToolRegistry` against a real, attached `MeshOrchestrator`) |
+| mesh-orchestrator-tools | `registerOrchestratorTools`, `createOrchestratorToolRegistry` (wires the 13 real `Meshctl*Tool`s into a `BrowserToolRegistry` against a real, attached `MeshOrchestrator`) |
 | audit | `AuditChain`, `AuditStore`, `detectFork`, `buildMerkleRoot` |
 | visualizations | `TopologyLayout`, `TrustGraphLayout`, `TrustHeatmap` |
 | devtools | `MeshInspector`, `MeshInspectTool` |
@@ -507,22 +507,87 @@ dependency anywhere in this family); `llmFn(messages, toolSpecs) ->
 
 `mesh-orchestrator-tools.mjs`'s `registerOrchestratorTools()` is the worked
 example of wiring a *mesh-backed* capability into this pattern: it
-constructs `orchestrator.mjs`'s 8 real `Meshctl*Tool`s
+constructs `orchestrator.mjs`'s 13 real `Meshctl*Tool`s
 (`meshctl_pods`/`meshctl_status`/`meshctl_exec`/`meshctl_deploy`/
-`meshctl_top`/`meshctl_compute`/`meshctl_expose`/`meshctl_drain`) against a
-real, attached `mesh-orchestrator.mjs` service, so an LLM-requested
-`meshctl_exec` tool call really dispatches through that service's
-`checkAccess()`-gated wire protocol to a real remote peer.
+`meshctl_top`/`meshctl_compute`/`meshctl_expose`/`meshctl_drain`, plus issue
+#185 §8a item 4's hosted-pods control surface five —
+`meshctl_spawn`/`meshctl_snapshot`/`meshctl_restore`/`meshctl_hosted_pods`/
+`meshctl_hosts`) against a real, attached `mesh-orchestrator.mjs` service,
+so an LLM-requested `meshctl_exec` tool call really dispatches through that
+service's `checkAccess()`-gated wire protocol to a real remote peer.
 `createMeshNode({enableAgentRuntime: true, enableOrchestrator: true})` wires
 all of this for you, returning `node.toolRegistry` pre-populated and ready
 to drive `createAgentRuntime({registry: node.toolRegistry, llmFn})`.
 
-`examples/11-agent-tool-calling.mjs` runs the whole story end to end over
+`examples/11-agent-tool-calling.mjs` runs the original eight end to end over
 two real `createMeshNode()` peers, with a deterministic test `llmFn`. See
 `docs/building-mesh-services.md`'s own "`BrowserTool`/`BrowserToolRegistry`/
 agent runtime" section for the full design writeup, including two real bugs
 found while building it and the recommended DI pattern for new tools going
 forward.
+
+### `meshctl_*` tools for hosted pods (issue #185 §8a item 4)
+
+The five hosted-pods tools project `pod-host-service.mjs`'s eight-verb
+control surface (see "Pod host service" below) into the same
+`BrowserTool` shape, each calling straight through to `MeshOrchestrator`'s
+own `spawnPod`/`snapshotPod`/`restorePod`/`listHostedPods`/`listPodHosts`
+methods — which already dispatch over `pod-host-service.mjs`'s own mesh
+protocol and are already gated by the target HOST's own
+`checkAccess()`, independently of `mesh-orchestrator.mjs`'s
+`RISKY_ACTIONS` gate that `meshctl_exec`/`meshctl_deploy`/`meshctl_drain`
+use:
+
+| Tool | Args | Calls |
+| --- | --- | --- |
+| `meshctl_spawn` | `{host, name, lane?, run, limits?, caps?, env?, budget?, restart?}` | `spawnPod()` |
+| `meshctl_snapshot` | `{host, name}` | `snapshotPod()` |
+| `meshctl_restore` | `{host, name}` | `restorePod()` |
+| `meshctl_hosted_pods` | `{host}` | `listHostedPods()` |
+| `meshctl_hosts` | `{}` | `listPodHosts()` |
+
+**Auto host selection** (`meshctl_spawn` with `host: 'auto'`, or omitted):
+the orchestrator "proposes, the host accepts" — it picks exactly one host
+and never silently retries a different one after a refusal (an `EACCES`,
+or any other `PodHostDriverError`, is reported as-is). Selection prefers
+`listComputeCandidates()` (the same descriptor list `meshctl_compute`
+reads), narrowed to hosts advertising `runtime:<lane>` and preferring one
+with `availability: 'online'`. Because an ISOLATE-lane host has no `exec`
+by lane definition, it never produces a compute descriptor at all (see
+"Known limitation" below) — so for `isolate`/`browser` lanes, selection
+falls back to `listPodHosts()`, which reads the same runtime-registry peers
+directly, without that filter. `MeshOrchestrator#listPodHosts()` is new
+read-only bookkeeping this item adds: runtime-registry peers carrying a
+`metadata.podHost` entry (i.e. anything projected through
+`podHostRuntimePeer()`), returned as `{podId, lane, verbs, runtimeClasses,
+shellBackend, resource, capabilities, hostedBy}`.
+
+**Error mapping**: each tool's `error` field turns a `PodHostDriverError`
+code into a lane-aware message rather than the raw errno-shaped code —
+`ELANE` on `snapshot`/`restore` against an isolate host reads "isolate
+pods cannot snapshot/restore; Durable Object hibernation is automatic, not
+a verb you drive" (the same mapping the docs/hosted-pods.md §8a lane table
+documents), `EACCES` names the host and the verb that was denied, and so
+on for `ENOENT`/`EEXIST`/`ENOTSUP`/`ETIMEDOUT`/`EBUSY`.
+
+**The `meshctl` text-command grammar** (`registerMeshctlBuiltins()`) grew
+five subcommands matching the new tools one-for-one, usable from any shell
+wired to `MeshOrchestrator`:
+
+```
+meshctl spawn <host|auto> <name> --lane <lane> --kind <kind> --ref <ref> [--entry <entry>]
+meshctl snapshot <host> <name>
+meshctl restore <host> <name>
+meshctl hosted <host>
+meshctl hosts
+```
+
+`examples/15-agent-spawns-hosted-pod.mjs` runs the whole story end to end:
+a deterministic `llmFn` calls `meshctl_hosts`, then `meshctl_spawn` with
+`host: 'auto'`, then `meshctl_hosted_pods`, `meshctl_snapshot`,
+`meshctl_restore`, and finally the pre-existing `meshctl_drain` to drain
+the host pod itself — composing the five new tools with the original
+eight.
 
 ## Runtime classes and placement lanes
 

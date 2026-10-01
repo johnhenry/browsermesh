@@ -603,7 +603,7 @@ object at the end, not asserted in a test file no one reads.
 `BrowserTool`/`BrowserToolRegistry`/`createAgentRuntime` pattern, not the
 `MeshService` pattern the examples above demonstrate. Two real
 `createMeshNode()` peers (one with `enableOrchestrator` +
-`enableAgentRuntime`, pre-populating `node.toolRegistry` with all 8 real
+`enableAgentRuntime`, pre-populating `node.toolRegistry` with all 13 real
 `Meshctl*Tool`s), a deterministic test `llmFn` (no real LLM API call), and a
 real `createAgentRuntime()` loop: the LLM requests `meshctl_pods`, sees the
 real remote peer in the result, requests the genuinely risky

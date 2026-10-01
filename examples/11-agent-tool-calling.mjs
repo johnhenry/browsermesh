@@ -10,7 +10,7 @@
  * whatever tool calls come back through `registry`, and loops until the LLM
  * stops asking for tools. What makes this example the whole plan's payoff is
  * WHAT gets registered into that registry: `mesh-orchestrator-tools.mjs`'s
- * `registerOrchestratorTools()` (Phase 4) wires the 8 real `Meshctl*Tool`
+ * `registerOrchestratorTools()` (Phase 4) wires the 13 real `Meshctl*Tool`
  * classes (`orchestrator.mjs`) against a real, attached `MeshOrchestrator`
  * (`mesh-orchestrator.mjs`, Phase 3) -- so an LLM-requested `meshctl_pods` or
  * `meshctl_exec` tool call really dispatches to a real orchestrator on a
@@ -20,7 +20,7 @@
  * composition root, not a hand-rolled stand-in):
  *
  *   - alice: `enableOrchestrator` AND `enableAgentRuntime` both set --
- *     `alice.toolRegistry` comes back pre-populated with all 8 meshctl
+ *     `alice.toolRegistry` comes back pre-populated with all 13 meshctl
  *     tools, wired against `alice.orchestrator.api` (the checkAccess()-gated
  *     service, not the raw ungated orchestrator instance -- see
  *     `mesh-orchestrator-tools.mjs`'s own module doc comment for exactly why
@@ -74,8 +74,8 @@ const bob = await createMeshNode({
 })
 
 console.log('1. two real createMeshNode() peers booted: alice (enableOrchestrator + enableAgentRuntime), bob (enableOrchestrator only) ✓')
-assert.equal(alice.toolRegistry.listSpecs().length, 8, 'alice.toolRegistry was pre-populated with all 8 meshctl tools')
-console.log(`   alice.toolRegistry already has all 8 meshctl_* tools registered: ${alice.toolRegistry.list().map((t) => t.name).join(', ')}`)
+assert.equal(alice.toolRegistry.listSpecs().length, 13, 'alice.toolRegistry was pre-populated with all 13 meshctl tools')
+console.log(`   alice.toolRegistry already has all 13 meshctl_* tools registered: ${alice.toolRegistry.list().map((t) => t.name).join(', ')}`)
 
 // bob needs something to actually "run" a shell command against for
 // meshctl_exec -- MeshOrchestrator.execOnPod()'s own local branch calls
