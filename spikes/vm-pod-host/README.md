@@ -56,6 +56,7 @@ spikes/vm-pod-host/
     vm-pod.mjs                lifecycle state machine (issue §5.3)
     vsock-bridge.mjs          host<->guest vsock UDS protocol
     host-pod.mjs               VmPodHost extends Pod, manages a Map<name, VmPod>
+    driver.mjs                 PodHostDriver adapter: podspec -> VmPodHost.spawn()
     cli.mjs                    spawn|exec|snapshot|restore|drain|status, --dry-run
   guest/
     init                       PID 1 for the guest rootfs (not executed, see above)
@@ -69,8 +70,32 @@ spikes/vm-pod-host/
     vsock-bridge.test.mjs
     vm-pod.test.mjs
     host-pod.test.mjs
+    driver.test.mjs
     cli.test.mjs
 ```
+
+### `src/driver.mjs` — speaking the pod host protocol
+
+`createVmPodDriver(vmPodHost, opts)` adapts `VmPodHost` to the
+`PodHostDriver` interface in `@johnhenry/browsermesh-pod`'s
+`host-protocol.mjs`, so `createPodHostService()` in
+`@johnhenry/browsermesh-apps` can serve this host over the mesh with
+`checkAccess()` gating and `PLACEMENT_AUDIT` records. It is a translation
+layer and nothing more — no second state machine:
+
+- **States are identity-mapped.** `VmPod`'s state names came from the same
+  issue §5.3 diagram `POD_LIFECYCLE` did. The one state it has no
+  equivalent for is the terminal `gone`, which the driver synthesizes as a
+  tombstone (`VmPodHost.drain()` forgets the VM entirely, so without one a
+  drained pod would answer `ENOENT` instead of `gone`).
+- **`send` answers `ENOTSUP`, not `ELANE`.** The microvm lane could deliver
+  a message over vsock the way `exec` does; this host agent simply has no
+  such method yet. That is a driver gap, not a lane limit.
+- **Host paths never come from the requester.** Kernel image, snapshot
+  directory and jailer settings are the driver's own construction options.
+  The only podspec fields that reach Firecracker are `limits` (which map
+  1:1 onto `VmPodLimits`) and, for `run.kind: 'rootfs'`, a *rootfs alias*
+  resolved through the driver's `rootfsCatalog`.
 
 ## Running the tests
 
@@ -78,7 +103,7 @@ spikes/vm-pod-host/
 node --test spikes/vm-pod-host/test/
 ```
 
-72 tests, all passing on macOS (Node v26), in well under a second —
+88 tests, all passing on macOS (Node v26), in well under a second —
 no network, no KVM, no sudo.
 
 ## Try it: `cli.mjs --dry-run`

@@ -269,6 +269,10 @@ export class MeshOrchestrator {
   #auditRecorder
   /** @type {object|null} */
   #peerRegistry
+  /** @type {object|null} PodHostClient -- injected, or lazily built from #peerNode */
+  #podHostClient
+  /** @type {Promise<object>|null} In-flight lazy `createPodHostClient()` import */
+  #podHostClientPromise = null
   /** @type {Map<string, object>} podId -> peer info */
   #knownPeers = new Map()
   /** @type {Map<string, object>} name -> { podId, port } */
@@ -293,9 +297,13 @@ export class MeshOrchestrator {
    * @param {object} [opts.resourceRegistry] - ResourceRegistry or null
    * @param {object} [opts.auditRecorder]     - RemoteRuntimeAuditRecorder or null
    * @param {object} [opts.peerRegistry]      - PeerRegistry or null
+   * @param {object} [opts.podHostClient]     - `PodHostClient`
+   *   (`pod-host-service.mjs`) used by `spawnPod()`/`snapshotPod()`/
+   *   `restorePod()`/`listHostedPods()`. Lazily built from `peerNode` on
+   *   first use when omitted.
    * @param {Function} [opts.onLog]           - Logging callback
    */
-  constructor({ peerNode, serviceAdvertiser, serviceBrowser, router, runtimeRegistry, remoteSessionBroker, resourceRegistry, auditRecorder, peerRegistry, onLog }) {
+  constructor({ peerNode, serviceAdvertiser, serviceBrowser, router, runtimeRegistry, remoteSessionBroker, resourceRegistry, auditRecorder, peerRegistry, podHostClient, onLog }) {
     if (!peerNode) {
       throw new Error('peerNode is required')
     }
@@ -308,6 +316,7 @@ export class MeshOrchestrator {
     this.#resourceRegistry = resourceRegistry ?? null
     this.#auditRecorder = auditRecorder ?? null
     this.#peerRegistry = peerRegistry ?? null
+    this.#podHostClient = podHostClient ?? null
     this.#onLog = onLog ?? null
   }
 
@@ -347,6 +356,126 @@ export class MeshOrchestrator {
    */
   async recordPlacement(kind, details = {}) {
     await this.#recordAudit(kind, details)
+  }
+
+  // -- Hosted pods (issue #185 control surface) -----------------------------
+
+  /**
+   * The `PodHostClient` used by `spawnPod()` and friends: the injected one
+   * when the constructor was given a `podHostClient`, otherwise one built
+   * lazily from this orchestrator's own `peerNode`.
+   *
+   * `pod-host-service.mjs` is imported DYNAMICALLY rather than at module
+   * top level on purpose: that module imports `PLACEMENT_AUDIT` from this
+   * one, and a static import in both directions would be a cycle. This is
+   * the same lazy-`await import()` convention `mesh-hardening.mjs` /
+   * `key-distribution.mjs` already use for the apps<->core pair (see
+   * AGENTS.md's "Cross-package relationship" note).
+   *
+   * @returns {Promise<object>} A `PodHostClient`.
+   */
+  async #hostClient() {
+    if (this.#podHostClient) return this.#podHostClient
+    if (!this.#podHostClientPromise) {
+      this.#podHostClientPromise = import('./pod-host-service.mjs')
+        .then(({ createPodHostClient }) => createPodHostClient({ peerNode: this.#peerNode }))
+    }
+    this.#podHostClient = await this.#podHostClientPromise
+    return this.#podHostClient
+  }
+
+  /**
+   * Spawn a hosted pod on a pod host, recording the requester half of the
+   * placement audit trail (`placement_requested` on the way out, then
+   * `placement_ready` or `placement_denied`). The HOST writes its own,
+   * independent `placement_started`/`placement_ready` records -- see
+   * `pod-host-service.mjs`'s module doc comment on why the two chains are
+   * deliberately separate.
+   *
+   * @param {string} hostPodId - The host pod's pubKey/podId.
+   * @param {object} spec - A podspec (`validatePodSpec()` in
+   *   `@johnhenry/browsermesh-pod`), validated host-side.
+   * @returns {Promise<object>} The host's pod status.
+   */
+  async spawnPod(hostPodId, spec) {
+    const client = await this.#hostClient()
+    await this.recordPlacement(PLACEMENT_AUDIT.REQUESTED, {
+      actor: 'operator', hostPodId, name: spec?.name ?? null, lane: spec?.lane ?? null,
+    })
+    try {
+      const result = await client.spawn(hostPodId, spec)
+      await this.recordPlacement(PLACEMENT_AUDIT.READY, {
+        actor: 'operator', hostPodId, name: result?.name ?? spec?.name ?? null,
+        lane: result?.lane ?? null, state: result?.state ?? null,
+      })
+      return result
+    } catch (err) {
+      if (err?.code === 'EACCES') {
+        await this.recordPlacement(PLACEMENT_AUDIT.DENIED, {
+          actor: 'operator', hostPodId, name: spec?.name ?? null, reason: err.message,
+        })
+      }
+      throw err
+    }
+  }
+
+  /**
+   * Snapshot a hosted pod. A snapshotted pod has left the host's live set
+   * (§5.3: the VMM is killed), so this records `placement_evicted`.
+   *
+   * @param {string} hostPodId
+   * @param {string} name
+   * @returns {Promise<object>}
+   */
+  async snapshotPod(hostPodId, name) {
+    const client = await this.#hostClient()
+    const result = await client.snapshot(hostPodId, name)
+    await this.recordPlacement(PLACEMENT_AUDIT.EVICTED, {
+      actor: 'operator', hostPodId, name, reason: 'snapshot', state: result?.state ?? null,
+    })
+    return result
+  }
+
+  /**
+   * Restore a snapshotted hosted pod, recording the same
+   * `placement_requested` -> `placement_ready` pair `spawnPod()` does: from
+   * the requester's point of view a restore IS a placement.
+   *
+   * @param {string} hostPodId
+   * @param {string} name
+   * @returns {Promise<object>}
+   */
+  async restorePod(hostPodId, name) {
+    const client = await this.#hostClient()
+    await this.recordPlacement(PLACEMENT_AUDIT.REQUESTED, {
+      actor: 'operator', hostPodId, name, reason: 'restore',
+    })
+    try {
+      const result = await client.restore(hostPodId, name)
+      await this.recordPlacement(PLACEMENT_AUDIT.READY, {
+        actor: 'operator', hostPodId, name, reason: 'restore', state: result?.state ?? null,
+      })
+      return result
+    } catch (err) {
+      if (err?.code === 'EACCES') {
+        await this.recordPlacement(PLACEMENT_AUDIT.DENIED, {
+          actor: 'operator', hostPodId, name, reason: err.message,
+        })
+      }
+      throw err
+    }
+  }
+
+  /**
+   * List the pods a host is tracking. Read-only: no audit record, matching
+   * `listPods()`.
+   *
+   * @param {string} hostPodId
+   * @returns {Promise<object[]>}
+   */
+  async listHostedPods(hostPodId) {
+    const client = await this.#hostClient()
+    return client.list(hostPodId)
   }
 
   #recordComputeReputation(descriptor, score) {

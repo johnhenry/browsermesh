@@ -351,3 +351,205 @@ export declare function installPodRuntime(opts?: RuntimeOptions): Promise<Pod>;
 export declare const createRuntime: typeof installPodRuntime;
 export declare function createClient(opts?: RuntimeOptions): Promise<Pod>;
 export declare function createServer(opts?: RuntimeOptions): Promise<Pod>;
+
+// ── Pod host protocol (issue #185 control surface) ───────────────────────────
+
+export type PodHostVerb =
+  | "spawn" | "status" | "send" | "exec"
+  | "snapshot" | "restore" | "drain" | "list";
+
+export declare const POD_HOST_VERB: Readonly<{
+  SPAWN: "spawn"; STATUS: "status"; SEND: "send"; EXEC: "exec";
+  SNAPSHOT: "snapshot"; RESTORE: "restore"; DRAIN: "drain"; LIST: "list";
+}>;
+export declare const POD_HOST_VERBS: readonly PodHostVerb[];
+
+export type PodLane = "isolate" | "microvm" | "node" | "browser";
+
+export declare const POD_LANE: Readonly<{
+  ISOLATE: "isolate"; MICROVM: "microvm"; NODE: "node"; BROWSER: "browser";
+}>;
+export declare const POD_LANES: readonly PodLane[];
+export declare const POD_LANE_VERBS: Readonly<Record<PodLane, readonly PodHostVerb[]>>;
+export declare function laneSupports(lane: string, verb: string): boolean;
+
+export type PodLifecycleState =
+  | "cold" | "booting" | "registered" | "serving"
+  | "paused" | "snapshotted" | "restoring" | "draining" | "gone";
+
+export declare const POD_LIFECYCLE: Readonly<{
+  COLD: "cold"; BOOTING: "booting"; REGISTERED: "registered"; SERVING: "serving";
+  PAUSED: "paused"; SNAPSHOTTED: "snapshotted"; RESTORING: "restoring";
+  DRAINING: "draining"; GONE: "gone";
+}>;
+export declare const POD_LIFECYCLE_STATES: readonly PodLifecycleState[];
+export declare const POD_LIFECYCLE_TRANSITIONS: Readonly<
+  Record<PodLifecycleState, readonly PodLifecycleState[]>
+>;
+export declare function canTransition(from: string, to: string): boolean;
+
+export type PodHostErrorCode =
+  | "EACCES" | "ENOENT" | "EEXIST" | "EINVAL"
+  | "ENOTSUP" | "ELANE" | "ETIMEDOUT" | "EBUSY";
+
+export declare const POD_HOST_ERROR: Readonly<Record<PodHostErrorCode, PodHostErrorCode>>;
+
+export declare class PodHostDriverError extends Error {
+  constructor(code: PodHostErrorCode | string, message: string, details?: object | null);
+  code: string;
+  details: object | null;
+  toJSON(): { code: string; message: string };
+  static from(err: unknown): PodHostDriverError;
+}
+
+export declare function createUnsupportedDriverMethod(
+  verb: string,
+  lane?: string,
+  opts?: { code?: string; message?: string },
+): () => Promise<never>;
+
+export interface PodSpecRun {
+  kind: "skill" | "module" | "rootfs" | "command";
+  ref: string;
+  entry?: string;
+  input?: unknown;
+}
+
+export interface PodSpecLimits {
+  vcpus?: number;
+  memMib?: number;
+  timeoutMs?: number;
+  netRateLimiter?: Record<string, unknown>;
+  blockRateLimiter?: Record<string, unknown>;
+}
+
+export interface PodSpecRestart {
+  policy: "never" | "on-failure" | "always";
+  maxRestarts?: number;
+  backoffMs?: number;
+}
+
+export interface PodSpec {
+  name: string;
+  lane?: PodLane;
+  run: PodSpecRun;
+  limits?: PodSpecLimits;
+  caps?: string[];
+  env?: Record<string, string>;
+  budget?: { credits: number; currency?: string };
+  restart?: Partial<PodSpecRestart>;
+  labels?: Record<string, string>;
+}
+
+export interface NormalizedPodSpec extends PodSpec {
+  lane: PodLane;
+  restart: PodSpecRestart;
+}
+
+export type ValidationResult<T> =
+  | { ok: true; value: T }
+  | { ok: false; errors: string[] };
+
+export declare function validatePodSpec(spec: unknown): ValidationResult<NormalizedPodSpec>;
+export declare function validateVerbRequest(
+  verb: string,
+  payload?: unknown,
+): ValidationResult<Record<string, unknown>>;
+
+export declare const POD_HOST_REQUEST: "pod-host:request";
+export declare const POD_HOST_RESPONSE: "pod-host:response";
+export declare const POD_HOST_EVENT: "pod-host:event";
+export declare const POD_HOST_EVENT_KIND: Readonly<{
+  LIFECYCLE: "lifecycle"; LOG: "log"; EXIT: "exit";
+}>;
+
+export interface PodHostRequestEnvelope {
+  type: "pod-host:request";
+  requestId: string;
+  verb: string;
+  payload: Record<string, unknown>;
+  ts: number;
+}
+
+export interface PodHostResponseEnvelope {
+  type: "pod-host:response";
+  requestId: string;
+  ok: boolean;
+  result: unknown;
+  error: { code: string; message: string } | null;
+  ts: number;
+}
+
+export interface PodHostEventEnvelope {
+  type: "pod-host:event";
+  kind: string;
+  data: Record<string, unknown>;
+  ts: number;
+}
+
+export declare function createHostRequest(
+  verb: string,
+  payload?: Record<string, unknown>,
+  opts?: { requestId?: string },
+): PodHostRequestEnvelope;
+
+export declare function createHostResponse(
+  requestId: string,
+  opts: { ok: boolean; result?: unknown; error?: { code: string; message: string } },
+): PodHostResponseEnvelope;
+
+export declare function createHostEvent(
+  kind: string,
+  data?: Record<string, unknown>,
+): PodHostEventEnvelope;
+
+export interface PodHostStatus {
+  name: string;
+  lane: string;
+  state: PodLifecycleState;
+  createdAt: number;
+  updatedAt: number;
+  spec?: NormalizedPodSpec;
+  podId?: string | null;
+  inbox?: number;
+  execs?: number;
+}
+
+export interface PodExecResult {
+  stdout: string;
+  stderr: string;
+  code: number;
+}
+
+export interface PodHostDriver {
+  lane: string;
+  capabilities(): { verbs: string[] };
+  spawn(spec: PodSpec): Promise<PodHostStatus>;
+  status(name: string): Promise<PodHostStatus>;
+  send(name: string, msg: { to?: string; payload: unknown }): Promise<object>;
+  exec(name: string, argv: string[], opts?: { timeoutMs?: number }): Promise<PodExecResult>;
+  snapshot(name: string): Promise<PodHostStatus>;
+  restore(name: string): Promise<PodHostStatus>;
+  drain(name: string, opts?: { cascade?: boolean }): Promise<PodHostStatus>;
+  list(): Promise<PodHostStatus[]>;
+  onEvent?(fn: (event: PodHostEventEnvelope) => void): () => void;
+}
+
+export declare class InMemoryPodHostDriver implements PodHostDriver {
+  constructor(opts?: {
+    lane?: PodLane;
+    verbs?: string[];
+    exec?: (argv: string[], ctx: { name: string; timeoutMs?: number }) => Promise<PodExecResult>;
+  });
+  get lane(): string;
+  capabilities(): { verbs: string[] };
+  onEvent(fn: (event: PodHostEventEnvelope) => void): () => void;
+  spawn(spec: PodSpec): Promise<PodHostStatus>;
+  status(name: string): Promise<PodHostStatus>;
+  send(name: string, msg: { to?: string; payload: unknown }): Promise<{ delivered: boolean; inbox: number }>;
+  exec(name: string, argv: string[], opts?: { timeoutMs?: number }): Promise<PodExecResult>;
+  snapshot(name: string): Promise<PodHostStatus>;
+  restore(name: string): Promise<PodHostStatus>;
+  drain(name: string, opts?: { cascade?: boolean }): Promise<PodHostStatus>;
+  list(): Promise<PodHostStatus[]>;
+}

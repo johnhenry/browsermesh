@@ -22,6 +22,7 @@ Run one with `npm run example:01` (etc.), or all of them with `npm run examples`
 | [`10-mesh-kv-and-observability.mjs`](./10-mesh-kv-and-observability.mjs) | `MeshKv`, a small mesh-native key-value store (`get`/`set`/`delete`/`keys`, no chunking, no encryption-at-rest), doing real ACL-gated multi-peer work — an admin grant, an authorized peer writing back, an unauthorized peer's write refused — while a live `ctx.emit()` event stream feeds an `observability-bridge` instance in real time. Ends by printing the bridge's `VisualizationExporter` topology and trust-heatmap JSON, built entirely from real emitted events, not mock data. See `packages/browsermesh-apps/docs/building-mesh-services.md` (§7-8) for the `ctx.emit()` convention and this service's own retrospective against `09-cloud-storage.mjs`. |
 | [`11-agent-tool-calling.mjs`](./11-agent-tool-calling.mjs) | The issues #90/#92 capstone: two real `createMeshNode()` peers (`enableOrchestrator` + `enableAgentRuntime` on one of them), a deterministic test `llmFn` (no real LLM API call — browsermesh's "bring your own LLM callback" design), and a real `createAgentRuntime()` dispatch loop — the LLM requests `meshctl_pods` then the genuinely risky, `checkAccess()`-gated `meshctl_exec`, both really dispatched through a real `BrowserToolRegistry` to a real `MeshOrchestrator` over a real two-peer mesh, with the results flowing back into the conversation for the final answer. See `packages/browsermesh-apps/docs/building-mesh-services.md`'s "`BrowserTool`/`BrowserToolRegistry`/agent runtime" section for the reusable pattern this example demonstrates, distinct from the `MeshService` pattern the rest of this guide covers. |
 | [`12-hosted-pod-over-websocket.mjs`](./12-hosted-pod-over-websocket.mjs) | Issue #185 ("Hosted pods") work package 1: two `Pod` instances discover each other and exchange a message over `WebSocketTransport` — the adapter that speaks the real `browsermesh-servers` relay/signaling wire protocol (`register`/`registered`, `relay`/`relayed`, `peers`/`peer-joined`/`peer-left`), simulated in-process here, so a `Pod` can run outside a browser tab (a V8 isolate, a microVM, a plain Node process) and still join the mesh. Demonstrates the point-to-point fan-out workaround for the relay's lack of a broadcast primitive, seeded via `peersFromSignaling`. |
+| [`13-pod-host-service.mjs`](./13-pod-host-service.mjs) | Issue #185's **hosted-pods control surface**: alice hosts pods (`createPodHostService()` over an `InMemoryPodHostDriver`, lane `node`), bob is granted all eight verbs and spawns a pod on her, execs in it, snapshots it, restores it and drains it while watching the lifecycle stream back live; carol is refused with `EACCES` and a `pod-host:denied` event, yet can still `describe()` the host, because discovery is deliberately ungated. One lane-agnostic verb set (`spawn, status, send, exec, snapshot, restore, drain, list`) over two real `PeerNode`s — swap in `spikes/vm-pod-host`'s or `spikes/isolate-pod-host`'s driver and nothing above the driver changes. |
 
 These cover the five foundational packages (`browsermesh-primitives`,
 `-pod`, `-netway`, `-kernel`, `-sync`) plus `browsermesh-apps`'s mesh-relay
@@ -45,8 +46,11 @@ process) already supports: same-origin tabs, workers, or an in-process
 `EventEmitterTransport` bus. [`docs/hosted-pods.md`](../docs/hosted-pods.md)
 at the monorepo root designs the next step — running a `Pod` on a machine
 someone else operates, in a V8 isolate or a Firecracker microVM, with the
-orchestrator choosing the lane per job. A runnable
-`12-hosted-pod-over-websocket.mjs` example (two Node pods discovering each
-other through an in-process fake relay) is part of that design's work
-packages and not yet added here — see the design doc's work-package table
-for status.
+orchestrator choosing the lane per job. Two examples above come from that
+design and both run here, headless, with no isolate and no KVM host:
+`12-hosted-pod-over-websocket.mjs` (WP1: two Node pods discovering each
+other through an in-process fake relay) and `13-pod-host-service.mjs` (the
+control surface: spawning and driving hosted pods over the mesh, gated and
+audited). The real lanes live in `spikes/isolate-pod-host` and
+`spikes/vm-pod-host`, which are not part of `npm run examples` because one
+needs `wrangler`/`workerd` and the other needs Linux + `/dev/kvm`.

@@ -29,6 +29,7 @@ Pods automatically generate an Ed25519 cryptographic identity, detect their exec
 - [Wire Protocol](#wire-protocol)
 - [WebSocketTransport (relay-backed)](#websockettransport-relay-backed)
 - [Running a Pod outside the browser](#running-a-pod-outside-the-browser)
+- [Pod host protocol](#pod-host-protocol)
 - [InjectedPod](#injectedpod)
 - [Peer Dependency](#peer-dependency)
 - [License](#license)
@@ -376,6 +377,150 @@ always has been.
 > Workers + Durable Objects) or a Firecracker microVM. See
 > `docs/hosted-pods.md`'s "isolate pod" and "microVM pod" lanes for the two
 > supported designs.
+
+## Pod host protocol
+
+`src/host-protocol.mjs` is the plain-data half of the **hosted-pods control
+surface** ([issue #185](https://github.com/johnhenry/browsermesh/issues/185)):
+one lane-agnostic verb set that every way of driving a hosted pod — the
+mesh service in `@johnhenry/browsermesh-apps`, `mesh://` routes, `meshctl`
+tools, an external CLI, a supervisor — projects.
+
+It lives *here*, not in `browsermesh-apps`, so the two places a hosted pod
+actually runs (a Worker / Durable Object, a microVM host agent) can import
+the verbs, the podspec validator and the wire shapes without pulling in the
+app runtime. Zero dependencies, no browser-only globals, no `node:` imports.
+
+### The verbs
+
+| Verb | Payload | Returns | Notes |
+| --- | --- | --- | --- |
+| `spawn` | a **podspec** (below) | pod status | `EEXIST` if the name is live |
+| `status` | `{name}` | pod status | `ENOENT` if unknown |
+| `send` | `{name, to?, payload}` | driver-defined | delivers a message to the pod |
+| `exec` | `{name, command, timeoutMs?}` | `{stdout, stderr, code}` | `ELANE` on isolate/browser |
+| `snapshot` | `{name}` | pod status | `ELANE` on isolate/browser |
+| `restore` | `{name}` | pod status | `ELANE` on isolate/browser |
+| `drain` | `{name, cascade?}` | pod status | ends at `gone` |
+| `list` | `{}` | pod status[] | every pod the host tracks |
+
+`validateVerbRequest(verb, payload)` returns `{ok: true, value}` with the
+payload normalized (`exec`'s `command` is always a `string[]`; `drain`'s
+`cascade` is always a boolean) or `{ok: false, errors: string[]}`. A string
+`command` becomes a *single-element* argv — it is deliberately not
+shell-split; pass `['sh', '-c', '…']` when a shell is really wanted.
+
+Which lane can do what is static, not a runtime surprise — `POD_LANE_VERBS`
+and `laneSupports(lane, verb)` say so up front:
+
+| Lane | `spawn` | `status` | `send` | `exec` | `snapshot` | `restore` | `drain` | `list` |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `isolate` | ✓ | ✓ | ✓ | `ELANE` | `ELANE` | `ELANE` | ✓ | ✓ |
+| `microvm` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `node` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `browser` | ✓ | ✓ | ✓ | `ELANE` | `ELANE` | `ELANE` | ✓ | ✓ |
+
+`POD_LANE`'s strings are identical to `RUNTIME_CLASS` in
+`@johnhenry/browsermesh-apps`' `resources.mjs`, so a host's lane is also the
+`runtime:<class>` capability the `ResourceScorer` matches on. They are
+duplicated rather than imported on purpose (this package must stay
+importable from a Worker); if one gains a lane, add it to both.
+
+### The podspec
+
+```js
+import { validatePodSpec } from '@johnhenry/browsermesh-pod'
+
+const { ok, value, errors } = validatePodSpec({
+  name: 'greeter',                                 // [A-Za-z0-9][A-Za-z0-9._-]{0,63}
+  lane: 'isolate',                                 // optional — defaulted from run.kind
+  run: { kind: 'skill', ref: 'greeter', entry: 'main.mjs', input: { seed: 1 } },
+  limits: { vcpus: 1, memMib: 128, timeoutMs: 30_000 },
+  caps: ['net', 'mesh'],                           // KERNEL_CAP strings
+  env: { LOG_LEVEL: 'info' },
+  budget: { credits: 10, currency: 'bmc' },
+  restart: { policy: 'on-failure', maxRestarts: 3, backoffMs: 500 },
+  labels: { team: 'core' },
+})
+```
+
+Only two defaults are ever applied: `lane` (`isolate` for a `skill`/`module`
+run, `microvm` for `command`/`rootfs`) and `restart.policy` (`'never'`).
+Optional sections that were absent stay absent, so a driver can tell "no
+limits asked for" from "limits asked for, all defaults". **Unknown keys are
+an error**, at every level — a mistyped `limits.memMB` that silently did
+nothing would be a quota bug nobody notices until the bill.
+
+### Lifecycle
+
+`POD_LIFECYCLE` matches `docs/hosted-pods.md` §5.3 and adds a terminal
+`gone`; `POD_LIFECYCLE_TRANSITIONS` is the frozen `from -> to[]` map and
+`canTransition(from, to)` the predicate drivers enforce with:
+
+```
+cold → booting → registered ⇄ serving
+                 registered → paused → snapshotted → restoring → registered
+                 registered → draining → cold | gone
+```
+
+Every non-terminal state may also jump straight to `gone` — a host losing
+its VMM or isolate is not a graceful drain but still has to be reportable.
+
+### Wire messages
+
+`createHostRequest(verb, payload, {requestId?})`,
+`createHostResponse(requestId, {ok, result?, error?})` and
+`createHostEvent(kind, data)` build the three JSON-safe envelopes
+(`pod-host:request` / `pod-host:response` / `pod-host:event`). Event kinds
+are `lifecycle`, `log` and `exit`. Errors travel as `{code, message}` with
+`code` one of `POD_HOST_ERROR`: `EACCES`, `ENOENT`, `EEXIST`, `EINVAL`,
+`ENOTSUP`, `ELANE`, `ETIMEDOUT`, `EBUSY`. `ELANE` means "this lane
+structurally cannot"; `ENOTSUP` means "this driver did not implement an
+otherwise lane-compatible verb".
+
+### The `PodHostDriver` interface
+
+A driver is **any object** with these members — a typedef, not a base class,
+so a Worker, a Firecracker host agent and an in-memory fake can all be one
+without inheriting anything:
+
+```js
+{
+  lane,                                  // a POD_LANE value
+  capabilities(),                        // -> { verbs: string[] }
+  spawn(spec), status(name), send(name, msg),
+  exec(name, argv, opts), snapshot(name), restore(name),
+  drain(name, opts), list(),             // all Promise-returning
+  onEvent(fn),                           // optional; returns unsubscribe
+}
+```
+
+A verb the driver cannot serve must reject with a `PodHostDriverError`
+carrying `ELANE` or `ENOTSUP`; `createUnsupportedDriverMethod(verb, lane)`
+builds exactly such a method so a partial driver still has all eight.
+
+`InMemoryPodHostDriver` is the complete reference driver: a `Map` of fake
+pods running the real state machine, every verb implemented, an injectable
+`exec` (default: echo the argv), and `onEvent()` fan-out. Tests, examples
+and every later control surface use it when they need a host that behaves
+correctly without a workerd process or a KVM box behind it.
+
+```js
+import { InMemoryPodHostDriver } from '@johnhenry/browsermesh-pod'
+
+const driver = new InMemoryPodHostDriver({ lane: 'node' })
+driver.onEvent((event) => console.log(event.kind, event.data))
+
+await driver.spawn({ name: 'alpha', lane: 'node', run: { kind: 'command', ref: '/bin/echo' } })
+await driver.exec('alpha', ['echo', 'hi'])   // { stdout: 'echo hi', stderr: '', code: 0 }
+await driver.snapshot('alpha')               // -> paused -> snapshotted
+await driver.restore('alpha')                // -> restoring -> registered
+await driver.drain('alpha')                  // -> draining -> gone
+```
+
+The gated, audited mesh service that speaks this protocol over a `PeerNode`
+is `createPodHostService()` in `@johnhenry/browsermesh-apps` — see that
+package's "Pod host service" README section.
 
 ## InjectedPod
 

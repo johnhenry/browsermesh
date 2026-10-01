@@ -23,6 +23,7 @@ Application layer for BrowserMesh: marketplace, chat, payments, compute orchestr
   - [`BrowserMeshWebSocket`](#browsermeshwebsocket)
 - [LLM tool-calling: `BrowserToolRegistry` and `createAgentRuntime`](#llm-tool-calling-browsertoolregistry-and-createagentruntime)
 - [Runtime classes and placement lanes](#runtime-classes-and-placement-lanes)
+- [Pod host service: spawning and controlling hosted pods](#pod-host-service-spawning-and-controlling-hosted-pods)
 - [License](#license)
 
 ## Provenance
@@ -613,8 +614,170 @@ lifecycle this and future work packages write to the audit chain:
 `placement_ready`, `placement_evicted` -- mirroring the existing
 `remote_deploy_*`/`remote_exec_*`/`remote_compute_*` record families.
 `MeshOrchestrator#recordPlacement(kind, details)` writes one through the
-same `#recordAudit` path those use. No placement RPC is implemented yet;
-this is the audit vocabulary WP2/WP3 will write through once they land.
+same `#recordAudit` path those use. The pod host service below is what
+actually writes through it today, from both sides of a placement.
+
+## Pod host service: spawning and controlling hosted pods
+
+`createPodHostService()` is the gated, audited mesh service for **hosted
+pods** — pods running on a machine someone else operates ([issue
+#185](https://github.com/johnhenry/browsermesh/issues/185),
+[`docs/hosted-pods.md`](../../docs/hosted-pods.md)). It serves one
+lane-agnostic verb set:
+
+```
+spawn   status   send   exec   snapshot   restore   drain   list
+```
+
+The protocol itself — the verbs, the podspec, the lifecycle state machine,
+the wire envelopes, the error codes — is plain data in
+`@johnhenry/browsermesh-pod`'s `host-protocol.mjs`, deliberately *outside*
+this package so a Worker or a microVM guest can import it without the app
+runtime. What lives here is everything that needs a `PeerNode`:
+`PeerRegistry.checkAccess()`, the `AuditChain`, and the orchestrator's
+`PLACEMENT_AUDIT` vocabulary.
+
+Every later surface is a projection of this one service: `mesh://` routes,
+`meshctl` LLM tools, an external CLI, a supervisor. None of them should
+re-implement access control, validation or audit.
+
+### Hosting: attach the service
+
+```js
+import { attachService, createPodHostService } from '@johnhenry/browsermesh-apps'
+import { InMemoryPodHostDriver } from '@johnhenry/browsermesh-pod'
+
+const handle = attachService(peerNode, undefined, createPodHostService({
+  driver: new InMemoryPodHostDriver({ lane: 'node' }),  // or a real lane driver
+  resource: 'pod-host',        // ACL resource every verb is checked against
+  auditChain,                  // optional; writes PLACEMENT_AUDIT records
+  hostLabel: 'alice-laptop',
+}))
+
+handle.api.describe()
+// { podId, lane: 'node', verbs: [...8], runtimeClasses: ['node'],
+//   shellBackend: 'pty', deploymentSupport: { canDeploy: true },
+//   capabilities: ['pod-host', 'exec'], resource: 'pod-host', hostLabel }
+
+handle.api.runtimePeer()   // the runtime-registry peer shape the orchestrator reads
+```
+
+The `driver` is any object implementing `PodHostDriver` (a JSDoc typedef,
+not a base class). Three exist today:
+
+| Driver | Lane | Where |
+| --- | --- | --- |
+| `InMemoryPodHostDriver` | configurable (default `node`) | `@johnhenry/browsermesh-pod` — tests, examples, the reference implementation |
+| `createVmPodDriver(vmPodHost)` | `microvm` | `spikes/vm-pod-host/src/driver.mjs` — Firecracker, via WP3's `VmPodHost` |
+| `createIsolatePodDriver({baseUrl})` | `isolate` | `spikes/isolate-pod-host/src/driver.mjs` — workerd/Durable Objects, over HTTP |
+
+### Driving: the client
+
+```js
+import { createPodHostClient } from '@johnhenry/browsermesh-apps'
+
+const client = createPodHostClient({ peerNode, timeoutMs: 10_000 })
+
+await client.spawn(hostPubKey, {
+  name: 'transcoder',
+  lane: 'microvm',
+  run: { kind: 'command', ref: '/usr/bin/ffmpeg' },
+  limits: { vcpus: 2, memMib: 512 },
+  caps: ['net', 'fs'],
+  budget: { credits: 25 },
+  restart: { policy: 'on-failure', maxRestarts: 3 },
+})
+
+await client.exec(hostPubKey, 'transcoder', ['ffmpeg', '-version'])
+await client.snapshot(hostPubKey, 'transcoder')
+await client.restore(hostPubKey, 'transcoder')
+await client.drain(hostPubKey, 'transcoder', { cascade: true })
+await client.list(hostPubKey)
+await client.describe(hostPubKey)
+
+client.onEvent((hostPubKey, event) => {
+  // event.kind is 'lifecycle' | 'log' | 'exit'
+})
+client.close()
+```
+
+One client talks to any number of hosts; responses are correlated by
+`requestId`, so several verbs can be in flight at once. A request with no
+answer inside `timeoutMs` rejects with `PodHostDriverError` / `ETIMEDOUT`,
+and a remote `{code, message}` is rethrown as a local `PodHostDriverError`
+— so `err.code === 'EACCES'` reads the same whether the refusal came from
+the local driver or six hops away.
+
+`MeshOrchestrator` wraps the four placement-shaped verbs and writes the
+requester half of the audit trail itself:
+
+```js
+const orchestrator = new MeshOrchestrator({ peerNode, auditRecorder, podHostClient })
+await orchestrator.spawnPod(hostPodId, spec)   // placement_requested → placement_ready
+await orchestrator.snapshotPod(hostPodId, 'transcoder')  // placement_evicted
+await orchestrator.restorePod(hostPodId, 'transcoder')   // placement_requested → placement_ready
+await orchestrator.listHostedPods(hostPodId)
+```
+
+`podHostClient` is optional — one is built lazily from `peerNode` on first
+use.
+
+### Gating
+
+Every verb is checked as `registry.checkAccess(pubKey, resource, verb)`,
+i.e. the scope grammar is `pod-host:spawn`, `pod-host:exec`, … A denial
+answers `EACCES`, emits `pod-host:denied` on the service's event bus, and
+writes a `placement_denied` audit record. Verbs are independent: granting
+`pod-host:status` does not grant `pod-host:exec`. A host serving several
+tenants gives each its own resource (`resource: 'pod-host:tenant-a'`)
+rather than trying to express tenancy inside one scope.
+
+`describe()` is **not** gated, and travels on its own `pod-host:describe`
+envelope rather than as a ninth verb: it returns only what the host would
+publish in its announce metadata anyway, and a peer has to be able to find
+out a host exists before it can ask to be granted anything on it.
+
+### Which lane can do what
+
+```js
+import { POD_LANE_VERBS, laneSupports } from '@johnhenry/browsermesh-pod'
+```
+
+| Lane | `spawn` | `status` | `send` | `exec` | `snapshot` | `restore` | `drain` | `list` |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `isolate` | ✓ | ✓ | ✓ | `ELANE` | `ELANE` | `ELANE` | ✓ | ✓ |
+| `microvm` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `node` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `browser` | ✓ | ✓ | ✓ | `ELANE` | `ELANE` | `ELANE` | ✓ | ✓ |
+
+`ELANE` means "this lane structurally cannot" (a V8 isolate has no shell);
+`ENOTSUP` means "this driver did not implement an otherwise lane-compatible
+verb" (WP3's `VmPodHost` has no message path yet, so the microvm driver
+answers `send` with `ENOTSUP`). The distinction matters to a caller
+deciding whether to retry elsewhere or give up on the whole lane.
+
+### Observability and audit
+
+The service's `attachService()` handle emits `pod-host:request`,
+`pod-host:denied`, `pod-host:completed` and `pod-host:event`. With an
+`auditChain`, the host writes `placement_requested` / `placement_started` /
+`placement_ready` / `placement_denied` / `placement_evicted`. The requester
+writes its own records through `MeshOrchestrator#recordPlacement()`: the two
+chains are independent, with independent authors, by design — a host's audit
+log is not evidence to the requester and vice versa.
+
+### Known limitation: isolate hosts produce no compute descriptor
+
+`runtimePeerToComputeDescriptor()` only returns a descriptor for peers whose
+capabilities include `shell`/`exec`/`tools`. An isolate-lane pod host has no
+`exec` by definition, so `podHostRuntimePeer()` output for one is correctly
+scored as *not* a compute target and can only be reached through this service
+directly, not through `dispatchCompute()`. Teaching the scorer that "can
+spawn" is a kind of compute even without a shell is a change to WP4's scoring
+surface, not to this service.
+
+A runnable end-to-end walkthrough is
+[`examples/13-pod-host-service.mjs`](../../examples/13-pod-host-service.mjs).
 
 ## License
 

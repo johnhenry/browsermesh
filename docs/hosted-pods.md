@@ -15,7 +15,13 @@ spun out of the issue, each on its own branch:
 | WP4 | Placement: `ComputeRequest.constraints.isolation`, scorer rules, `execOnPod` guard | `agent/wp4-placement` |
 | WP5 | This doc, pod README runtime-requirements section, `node:vm` warning, TransportAdapter conformance suite | `agent/wp5-docs` |
 
-See [§8](#8-work-packages) for per-package detail and checkboxes.
+See [§9](#9-work-packages) for per-package detail and checkboxes.
+
+Beyond those five, the **hosted pods control surface** adds the one API both
+lanes answer to — the eight-verb pod host protocol, the mesh service that
+serves it, and the per-lane drivers. See [§8a](#8a-control-surface);
+items 3-6 of that work (`mesh://` routes, `meshctl` tools, an external CLI,
+a supervisor) are all projections of it.
 
 ## Motivation
 
@@ -565,6 +571,111 @@ lanes (`Paused`/`Snapshotted` in Lane B map to DO hibernation/eviction in
 Lane A). The orchestrator-facing contract is one lifecycle regardless of
 lane: `cold → booting → registered → idle → (paused/hibernated) →
 (restored) → registered → draining → cold`.
+
+## 8a. Control surface
+
+Everything above describes two lanes and a placement decision. This section
+describes the **one API both lanes answer to**, and therefore the thing
+every tool, route and CLI in this design is a projection of.
+
+### One verb set
+
+```
+spawn   status   send   exec   snapshot   restore   drain   list
+```
+
+That is the whole control surface. It is defined as plain data in
+`packages/browsermesh-pod/src/host-protocol.mjs` — verbs, lanes, the
+lifecycle state machine from [§5.3](#53-lifecycle), the podspec validator,
+the wire envelopes (`pod-host:request` / `pod-host:response` /
+`pod-host:event`) and the `POD_HOST_ERROR` codes. It lives in
+`browsermesh-pod`, not `browsermesh-apps`, precisely so the two places a
+hosted pod actually runs — a Worker and a microVM host agent — can import
+it without pulling in the marketplace, payments and quota machinery.
+
+The gated, audited *service* is
+`packages/browsermesh-apps/src/pod-host-service.mjs`:
+`createPodHostService({driver})` (host side) and
+`createPodHostClient({peerNode})` (requester side). That is where the verbs
+meet `PeerRegistry.checkAccess()`, the `AuditChain` and
+[§7](#7-identity-trust-and-what-hosting-cannot-promise)'s `PLACEMENT_AUDIT`
+records.
+
+### Lane capability is static, not a runtime surprise
+
+| Lane | `spawn` | `status` | `send` | `exec` | `snapshot` | `restore` | `drain` | `list` |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `isolate` | ✓ | ✓ | ✓ | `ELANE` | `ELANE` | `ELANE` | ✓ | ✓ |
+| `microvm` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `node` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `browser` | ✓ | ✓ | ✓ | `ELANE` | `ELANE` | `ELANE` | ✓ | ✓ |
+
+`POD_LANE_VERBS` / `laneSupports(lane, verb)` publish this up front.
+`ELANE` means "this lane structurally cannot" — a V8 isolate has no shell,
+and Durable Object hibernation is automatic rather than a verb a caller
+drives. `ENOTSUP` is the different, weaker claim: "this particular driver
+has not implemented an otherwise lane-compatible verb" (WP3's `VmPodHost`
+has no message path yet, so the microvm driver answers `send` that way).
+The distinction is what lets a caller decide between retrying on another
+host in the same lane and giving up on the lane entirely.
+
+### The podspec
+
+`spawn`'s payload, validated and normalized by `validatePodSpec()`:
+
+```js
+{
+  name,                                   // [A-Za-z0-9][A-Za-z0-9._-]{0,63}
+  lane,                                   // defaulted from run.kind
+  run: { kind: 'skill'|'module'|'rootfs'|'command', ref, entry?, input? },
+  limits?: { vcpus?, memMib?, timeoutMs?, netRateLimiter?, blockRateLimiter? },
+  caps?: string[],                        // KERNEL_CAP strings — see §6's mapping table
+  env?: Record<string, string>,
+  budget?: { credits, currency? },        // open question 4, with a field to grow into
+  restart?: { policy: 'never'|'on-failure'|'always', maxRestarts?, backoffMs? },
+  labels?: Record<string, string>,
+}
+```
+
+Two defaults, and only two: `lane` (`isolate` for a `skill`/`module` run,
+`microvm` for `command`/`rootfs`) and `restart.policy` (`'never'`). Unknown
+keys are an error at every level — a mistyped `limits.memMB` that silently
+did nothing would be a quota bug nobody notices until the bill.
+
+### Drivers
+
+A `PodHostDriver` is a JSDoc typedef, not a base class: any object with
+`lane`, `capabilities()`, the eight verb methods and an optional
+`onEvent()`. Three exist:
+
+| Driver | Lane | Where |
+| --- | --- | --- |
+| `InMemoryPodHostDriver` | configurable (default `node`) | `browsermesh-pod` — the reference driver, with the real state machine |
+| `createVmPodDriver(vmPodHost)` | `microvm` | `spikes/vm-pod-host/src/driver.mjs`, over WP3's `VmPodHost` |
+| `createIsolatePodDriver({baseUrl})` | `isolate` | `spikes/isolate-pod-host/src/driver.mjs`, over WP2's Worker routes |
+
+The isolate lane's HTTP routes (`spikes/isolate-pod-host/src/routes.mjs`)
+are a 1:1 projection of the same verbs: `GET /pods`,
+`POST /pods/:name/boot`, `GET /pods/:name/status`, `POST /pods/:name/send`,
+`POST /pods/:name/exec` → `405 {code:'ELANE'}`,
+`POST /pods/:name/snapshot|restore` → `501 {code:'ENOTSUP'}`,
+`DELETE /pods/:name`.
+
+### Everything else is a projection
+
+The surfaces still to build are all re-expressions of this one service, and
+none of them should re-implement access control, validation or audit:
+
+| Item | Surface | Projects |
+| --- | --- | --- |
+| 3 | `mesh://` routes | the eight verbs as URL paths |
+| 4 | `meshctl` LLM tools | the eight verbs as tool definitions |
+| 5 | external CLI | the eight verbs as subcommands |
+| 6 | supervisor | `restart` policy + `status`/`spawn`/`drain` in a loop |
+
+A runnable walkthrough of the whole surface —
+spawn/exec/snapshot/restore/drain, a denied stranger, live lifecycle events
+— is [`examples/13-pod-host-service.mjs`](../examples/13-pod-host-service.mjs).
 
 ## 9. Work packages
 
