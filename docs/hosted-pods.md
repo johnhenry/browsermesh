@@ -153,19 +153,15 @@ same-origin tabs; `EventEmitterTransport` is in-process only. Nothing in
 `browsermesh-pod` can speak to a relay or signaling server over the network.
 This is what WP1's `WebSocketTransport` is for (see [§4](#4-lane-a--isolate-pods)).
 
-**Caveat on the `browsermesh-servers` references below.** The issue's
-original text cites `browsermesh-servers/kernel/server-pod.mjs` as "proof of
-the pattern" (a `ServerPod extends Pod` running `EventEmitterTransport` +
-`NullDiscovery` in Node) and a relay (port 8788) / signaling (port 8787)
-server pair. **Neither exists in this monorepo as checked out** — `git -C
-<repo> ls-files` and a repo-wide search turn up no `browsermesh-servers`
-package and no `ServerPod` class anywhere under `packages/`. The pattern
-itself is sound and is exactly what the pod README's worked example below
-reconstructs directly against `Pod`, but readers should not go looking for a
-`browsermesh-servers` package in *this* repo — it is either a sibling repo
-not covered by this clone, or aspirational text that predates this snapshot.
-Whichever it is, treat any plan that depends on it as needing its own
-verification pass, the same way this section just got one.
+**Where `browsermesh-servers` lives.** The relay (port 8788), signaling
+(port 8787) and `ServerPod` (`kernel/server-pod.mjs`, a `Pod` subclass on
+`EventEmitterTransport` + `NullDiscovery` in Node) referenced throughout this
+doc are **not in this monorepo**. They are the sibling repo
+[johnhenry/browsermesh-servers](https://github.com/johnhenry/browsermesh-servers),
+which consumes the published `@johnhenry/browsermesh-pod` and
+`@johnhenry/browsermesh-primitives` packages. WP1's tests and example 12 use
+an in-process fake of its relay/signaling protocol so this repo stays
+self-contained; WP2's end-to-end harness clones the real servers.
 
 ## 2. The two technologies, side by side
 
@@ -659,10 +655,6 @@ those spikes report.
 5. Multiple data channels over one WebRTC connection (issue #115) would let
    a microVM pod multiplex several hosted services over one peer link;
    related, not blocking.
-6. Where does the `browsermesh-servers` relay/signaling pair referenced
-   throughout this doc actually live? Resolving this is a prerequisite for
-   WP1's spike path, not just a documentation nit — see the caveat in
-   [§1](#what-browsermesh-pod-does-not-yet-have).
 
 ## Non-goals
 
