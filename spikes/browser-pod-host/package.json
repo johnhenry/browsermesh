@@ -1,0 +1,13 @@
+{
+  "name": "browser-pod-host-spike",
+  "version": "0.0.0",
+  "private": true,
+  "description": "CDP (remote debugging protocol) browser pod host spike for browsermesh#185 item 7 (browser lane) — not a published package, not a workspace member (root workspaces stay packages/*)",
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/"
+  },
+  "engines": {
+    "node": ">=26.0.0"
+  }
+}

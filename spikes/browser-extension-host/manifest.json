@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "browsermesh hosted pod — extension lane (spike)",
+  "version": "0.0.1",
+  "description": "issue #185 item 7's browser lane: an extension-driven PodHostDriver spawning and controlling browser-lane pods via chrome.tabs/chrome.scripting. Spike only — see README.md.",
+  "permissions": ["tabs", "scripting", "storage"],
+  "host_permissions": [
+    "https://pods.example/*"
+  ],
+  "background": {
+    "service_worker": "src/background.mjs",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://pods.example/*"],
+      "js": ["src/content.mjs"],
+      "run_at": "document_start",
+      "all_frames": true
+    }
+  ]
+}

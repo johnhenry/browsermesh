@@ -78,13 +78,25 @@ describe('host-protocol constants', () => {
     ])
   })
 
-  it('gives the isolate and browser lanes no exec/snapshot/restore', () => {
-    for (const lane of [POD_LANE.ISOLATE, POD_LANE.BROWSER]) {
-      assert.equal(laneSupports(lane, POD_HOST_VERB.EXEC), false)
-      assert.equal(laneSupports(lane, POD_HOST_VERB.SNAPSHOT), false)
-      assert.equal(laneSupports(lane, POD_HOST_VERB.RESTORE), false)
-      assert.equal(laneSupports(lane, POD_HOST_VERB.SPAWN), true)
-    }
+  it('gives the isolate lane no exec/snapshot/restore (no shell, no caller-driven freeze)', () => {
+    assert.equal(laneSupports(POD_LANE.ISOLATE, POD_HOST_VERB.EXEC), false)
+    assert.equal(laneSupports(POD_LANE.ISOLATE, POD_HOST_VERB.SNAPSHOT), false)
+    assert.equal(laneSupports(POD_LANE.ISOLATE, POD_HOST_VERB.RESTORE), false)
+    assert.equal(laneSupports(POD_LANE.ISOLATE, POD_HOST_VERB.SPAWN), true)
+  })
+
+  it('gives the browser lane exec (evaluate script in the page) but not snapshot/restore', () => {
+    // issue #185 item 7's decision: a browser pod host has no shell, but it
+    // DOES have a JS realm a privileged driver (CDP, extension) can
+    // evaluate expressions in, so `exec` means "evaluate", not "spawn a
+    // process", and is lane-capable rather than `ELANE`. Whether any given
+    // driver actually implements it is separate -- see
+    // `browser-host-driver.test.mjs`'s ENOTSUP case for the in-page driver,
+    // which structurally cannot do this safely and says so.
+    assert.equal(laneSupports(POD_LANE.BROWSER, POD_HOST_VERB.EXEC), true)
+    assert.equal(laneSupports(POD_LANE.BROWSER, POD_HOST_VERB.SNAPSHOT), false)
+    assert.equal(laneSupports(POD_LANE.BROWSER, POD_HOST_VERB.RESTORE), false)
+    assert.equal(laneSupports(POD_LANE.BROWSER, POD_HOST_VERB.SPAWN), true)
   })
 
   it('gives the microvm and node lanes every verb', () => {

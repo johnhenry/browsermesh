@@ -553,3 +553,31 @@ export declare class InMemoryPodHostDriver implements PodHostDriver {
   drain(name: string, opts?: { cascade?: boolean }): Promise<PodHostStatus>;
   list(): Promise<PodHostStatus[]>;
 }
+
+// ── Browser lane: in-page driver ─────────────────────────────────────────
+
+export declare const DEFAULT_DISCOVERY_CHANNEL: string;
+export declare const BROWSER_HOST_READY: "browser-host:ready";
+
+export declare function readPodName(g: object): string | null;
+
+export declare function bootHostedPod(opts?: {
+  globalThis?: object;
+  channel?: string;
+  name?: string;
+  handshakeTimeout?: number;
+  discoveryTimeout?: number;
+  PodClass?: typeof Pod;
+}): Promise<{ pod: Pod; name: string | null }>;
+
+export declare function createInPageDriver(opts: {
+  globalThis?: object;
+  podUrl: string;
+  channel?: string;
+  spawnKind?: "iframe" | "window" | "worker";
+  timeoutMs?: number;
+  childHandshakeTimeoutMs?: number;
+  childDiscoveryTimeoutMs?: number;
+  BCConstructor?: new (name: string) => unknown;
+  driverId?: string;
+}): PodHostDriver & { close(): void };
