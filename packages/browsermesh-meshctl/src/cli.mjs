@@ -26,7 +26,7 @@ import { DEFAULT_IDENTITY_PATH, loadOrCreateIdentity } from './identity.mjs'
 import { connect } from './connect.mjs'
 import {
   cmdHosts, cmdHostDescribe, cmdPodsList, cmdPodsSpawn, cmdPodsStatus, cmdPodsSend, cmdPodsExec,
-  cmdPodsSnapshot, cmdPodsRestore, cmdPodsDrain, cmdWatch,
+  cmdPodsSnapshot, cmdPodsRestore, cmdPodsDrain, cmdPodsSupervise, cmdPodsSupervised, cmdPodsCrash, cmdWatch,
 } from './commands.mjs'
 import { runVmCommand, VM_COMMANDS } from './vm-bridge.mjs'
 
@@ -63,7 +63,11 @@ function usageDocument() {
       'pods snapshot <host> <name>',
       'pods restore <host> <name>',
       'pods drain <host> <name> [--cascade]',
-      'watch <host>',
+      'pods supervise <host|auto> --name <n> --kind <k> --ref <r> [--restart never|on-failure|always] '
+        + '[--max-restarts n] [--backoff ms] [--parent <name>] (same flags as pods spawn otherwise)',
+      'pods supervised',
+      'pods crash <host> <name> [--code n]  (dev-only, --loopback only)',
+      'watch <host>  (also prints supervisor:* events for pods supervised on this session)',
       'vm spawn <name> --dry-run [--kernel <path>] [--rootfs <path>]',
       'vm exec <name> -- <argv...> --dry-run',
       'vm snapshot <name> --dry-run',
@@ -91,9 +95,12 @@ function dispatchPods(cmd, session, parsed) {
     case 'snapshot': return cmdPodsSnapshot(session, parsed)
     case 'restore': return cmdPodsRestore(session, parsed)
     case 'drain': return cmdPodsDrain(session, parsed)
+    case 'supervise': return cmdPodsSupervise(session, parsed)
+    case 'supervised': return cmdPodsSupervised(session)
+    case 'crash': return cmdPodsCrash(session, parsed)
     default:
       throw new UsageError(`pods: unknown subcommand '${cmd}' `
-        + '(expected one of list|spawn|status|send|exec|snapshot|restore|drain)')
+        + '(expected one of list|spawn|status|send|exec|snapshot|restore|drain|supervise|supervised|crash)')
   }
 }
 

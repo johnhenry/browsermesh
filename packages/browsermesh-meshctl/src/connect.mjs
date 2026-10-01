@@ -17,12 +17,27 @@
  *   for a ref that matches no known host; in real mode every ref resolves
  *   (it's trusted to be a pubKey) since there is no fixed host list.
  * @property {(hostPubKey: string) => Promise<void>} ensureConnected
+ * @property {() => Promise<object>} getSupervisor - Lazily build (and cache,
+ *   for the life of this session) a `PodSupervisor`
+ *   (`@johnhenry/browsermesh-apps`'s `pod-supervisor.mjs`, issue #185 item
+ *   6) driven over this session's own `client`/`peerNode`. `close()` stops
+ *   it (clears its backoff timers) automatically.
+ * @property {(ref: string) => object|null} [loopbackDriverFor] - LOOPBACK
+ *   MODE ONLY: the raw `InMemoryPodHostDriver` behind a known host, for
+ *   `meshctl pods crash`'s dev-only demo path. Absent in `mode: 'real'`.
  * @property {() => Promise<void>} close
  */
 
 import { UsageError } from './output.mjs'
 import { createLoopbackSession } from './loopback.mjs'
 import { createRealMeshSession } from './real-mesh.mjs'
+
+// `getSupervisor()` itself is added by each session builder
+// (`loopback.mjs`/`real-mesh.mjs`, via `session-supervisor.mjs`'s
+// `withSupervisor()`) rather than here, so every caller of
+// `createLoopbackSession()`/`createRealMeshSession()` gets it -- including
+// `test/helpers.mjs`'s `buildLoopbackFixture()`, which builds a session
+// directly and never goes through `connect()` at all.
 
 /**
  * @param {object} opts

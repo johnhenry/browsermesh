@@ -20,7 +20,7 @@
  *     is what lets it honor the closing `meshctl_drain` call for real, the
  *     same way `11-agent-tool-calling.mjs`'s `bob` does for `meshctl_exec`.
  *   - `operator`: a `createMeshNode({enableOrchestrator, enableAgentRuntime})`
- *     peer, pre-populated with all 13 `meshctl_*` tools against its own,
+ *     peer, pre-populated with all 15 `meshctl_*` tools against its own,
  *     real `MeshOrchestrator` -- wired with a `runtimeRegistry` carrying
  *     `host`'s `describe()`-derived runtime-registry peer, so
  *     `meshctl_hosts`/`meshctl_spawn`'s auto host selection can see it.
@@ -66,7 +66,7 @@ const hostHandle = attachService(host, undefined, createPodHostService({
 console.log(`1. render-host booted and is serving the pod-host protocol (lane='${hostHandle.api.lane}') ✓`)
 
 // ── Step 2: the operator -- a real createMeshNode() peer, pre-populated
-// with all 13 meshctl_* tools, wired with a runtimeRegistry that already
+// with all 15 meshctl_* tools, wired with a runtimeRegistry that already
 // knows about render-host (the same `podHostRuntimePeer()` projection a
 // real deployment would feed a RemoteRuntimeRegistry on announce).
 function makeRuntimeRegistry(peers) {
@@ -87,7 +87,7 @@ const operator = await createMeshNode({
 })
 
 console.log(`2. operator booted via createMeshNode(): toolRegistry has ${operator.toolRegistry.listSpecs().length} meshctl_* tools ✓`)
-assert.equal(operator.toolRegistry.listSpecs().length, 13)
+assert.equal(operator.toolRegistry.listSpecs().length, 15)
 
 // ── Step 3: link them for real, and grant the operator every pod-host verb
 // PLUS the orchestrator-level 'drain' scope the closing meshctl_drain call

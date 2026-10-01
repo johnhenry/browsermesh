@@ -429,6 +429,12 @@ export interface PodSpecRestart {
   backoffMs?: number;
 }
 
+export interface PodSpecLinks {
+  parent?: string;
+  hostedBy?: string;
+  detachOnParentExit?: boolean;
+}
+
 export interface PodSpec {
   name: string;
   lane?: PodLane;
@@ -439,6 +445,7 @@ export interface PodSpec {
   budget?: { credits: number; currency?: string };
   restart?: Partial<PodSpecRestart>;
   labels?: Record<string, string>;
+  links?: PodSpecLinks;
 }
 
 export interface NormalizedPodSpec extends PodSpec {
@@ -462,6 +469,13 @@ export declare const POD_HOST_EVENT: "pod-host:event";
 export declare const POD_HOST_EVENT_KIND: Readonly<{
   LIFECYCLE: "lifecycle"; LOG: "log"; EXIT: "exit";
 }>;
+
+export interface PodHostExitEventData {
+  name: string;
+  code?: number;
+  reason?: "drained" | "crashed" | "host-lost" | "evicted";
+  restartable: boolean;
+}
 
 export interface PodHostRequestEnvelope {
   type: "pod-host:request";
@@ -551,6 +565,8 @@ export declare class InMemoryPodHostDriver implements PodHostDriver {
   snapshot(name: string): Promise<PodHostStatus>;
   restore(name: string): Promise<PodHostStatus>;
   drain(name: string, opts?: { cascade?: boolean }): Promise<PodHostStatus>;
+  /** TEST-ONLY: force a live pod straight to `gone` with `reason: 'crashed'`. */
+  crash(name: string, opts?: { code?: number }): Promise<PodHostStatus>;
   list(): Promise<PodHostStatus[]>;
 }
 

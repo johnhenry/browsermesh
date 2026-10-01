@@ -1467,7 +1467,7 @@ export async function createMeshNode(options = {}) {
   // exists (and is always empty at minimum) when this flag is set, so a
   // caller wanting only its own non-orchestrator BrowserTools never has to
   // opt into orchestrator wiring it doesn't want. Only pre-populated with the
-  // 13 real Meshctl*Tools when enableOrchestrator was ALSO set -- see
+  // 15 real Meshctl*Tools when enableOrchestrator was ALSO set -- see
   // mesh-orchestrator-tools.mjs's own doc comment for exactly which of those
   // route through the orchestrator service's gated wire dispatch.
   if (enableAgentRuntime) {

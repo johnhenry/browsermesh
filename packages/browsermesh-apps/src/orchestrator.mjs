@@ -279,6 +279,10 @@ export class MeshOrchestrator {
   #podHostClient
   /** @type {Promise<object>|null} In-flight lazy `createPodHostClient()` import */
   #podHostClientPromise = null
+  /** @type {object|null} The lazily-created `PodSupervisor` (issue #185 item 6) -- see `getSupervisor()`. */
+  #supervisor = null
+  /** @type {Promise<object>|null} In-flight lazy `createPodSupervisor()` import/construction. */
+  #supervisorPromise = null
   /** @type {Map<string, object>} podId -> peer info */
   #knownPeers = new Map()
   /** @type {Map<string, object>} name -> { podId, port } */
@@ -522,6 +526,40 @@ export class MeshOrchestrator {
       })
     }
     return hosts
+  }
+
+  /**
+   * The lazily-created `PodSupervisor` (issue #185 item 6: links, monitors,
+   * restart policy over the eight-verb control surface). Built once, on
+   * first use, against THIS orchestrator -- `pod-supervisor.mjs` is
+   * imported DYNAMICALLY for the same reason `#hostClient()` imports
+   * `pod-host-service.mjs` dynamically: `pod-supervisor.mjs` statically
+   * imports both `orchestrator.mjs` (for `pickAutoHost()`) and
+   * `pod-host-service.mjs`, so a static import here would be a cycle (see
+   * AGENTS.md's "Cross-package relationship" note for the established
+   * pattern this follows).
+   *
+   * `drainPod()` reads `#supervisor` directly (not through this method) so
+   * that draining a host never SPINS UP a supervisor that was never asked
+   * for just to find it has nothing to do.
+   *
+   * @param {object} [opts] - Forwarded to `createPodSupervisor()`, minus
+   *   `orchestrator` (always `this`). Pass `{auditChain}` to wire audit
+   *   records; omitted by default since `MeshOrchestrator`'s own
+   *   `#auditRecorder` is a different, simpler shape
+   *   (`.record(operation, data)`, not `AuditChain`'s
+   *   `.append(author, op, data, signFn)`) and the two are not silently
+   *   interchangeable.
+   * @returns {Promise<object>} A `PodSupervisor` (`pod-supervisor.mjs`).
+   */
+  async getSupervisor(opts = {}) {
+    if (this.#supervisor) return this.#supervisor
+    if (!this.#supervisorPromise) {
+      this.#supervisorPromise = import('./pod-supervisor.mjs')
+        .then(({ createPodSupervisor }) => createPodSupervisor({ orchestrator: this, ...opts }))
+    }
+    this.#supervisor = await this.#supervisorPromise
+    return this.#supervisor
   }
 
   #recordComputeReputation(descriptor, score) {
@@ -977,6 +1015,25 @@ export class MeshOrchestrator {
    * @returns {Promise<{ success: boolean, migrated: number }>}
    */
   async drainPod(podId) {
+    // Issue #185 item 6: if a supervisor already exists on this orchestrator
+    // (read directly, NOT through `getSupervisor()` -- draining a pod should
+    // never spin one up just to discover it is tracking nothing) and it is
+    // supervising any pods hosted ON `podId`, cascade-drain those FIRST,
+    // through the pod-host client, before the pre-existing mesh-peer drain
+    // logic below runs. `podId` here is a HOST's pod id (the mesh peer being
+    // drained); its hosted pods are a different, separate population from
+    // `#knownPeers` and have to be told to leave on their own.
+    if (this.#supervisor) {
+      const hosted = this.#supervisor.list().filter((p) => p.host === podId && p.state !== 'dead')
+      for (const p of hosted) {
+        try {
+          await this.#supervisor.drain(p.ref, { cascade: true })
+        } catch (err) {
+          this.#log(`drainPod: supervisor drain of '${p.ref.name}' on host ${podId} failed: ${err?.message || err}`)
+        }
+      }
+    }
+
     const info = this.#knownPeers.get(podId)
     const localPodId = this.localPodId
 
@@ -1776,7 +1833,7 @@ function formatPodHostError(err, { host, verb } = {}) {
  * @param {string} lane - A `POD_LANE` value.
  * @returns {Promise<{podId: string, reason: string}|null>}
  */
-async function pickAutoHost(orchestrator, lane) {
+export async function pickAutoHost(orchestrator, lane) {
   const isolation = lane === POD_LANE.ISOLATE
     ? ISOLATION.ISOLATE
     : lane === POD_LANE.MICROVM
@@ -1815,7 +1872,7 @@ async function pickAutoHost(orchestrator, lane) {
  * @param {object} args
  * @returns {object}
  */
-function buildPodSpec({ name, lane, run, limits, caps, env, budget, restart, labels }) {
+function buildPodSpec({ name, lane, run, limits, caps, env, budget, restart, labels, links }) {
   const spec = { name, run }
   if (lane !== undefined) spec.lane = lane
   if (limits !== undefined) spec.limits = limits
@@ -1824,6 +1881,7 @@ function buildPodSpec({ name, lane, run, limits, caps, env, budget, restart, lab
   if (budget !== undefined) spec.budget = budget
   if (restart !== undefined) spec.restart = restart
   if (labels !== undefined) spec.labels = labels
+  if (links !== undefined) spec.links = links
   return spec
 }
 
@@ -2046,6 +2104,102 @@ export class MeshctlHostsTool extends BrowserTool {
   }
 }
 
+// ── meshctl_supervise ─────────────────────────────────────────────────
+
+export class MeshctlSuperviseTool extends BrowserTool {
+  #orchestrator
+
+  constructor(orchestrator) {
+    super()
+    this.#orchestrator = orchestrator
+  }
+
+  get name() { return 'meshctl_supervise' }
+  get description() {
+    return "Spawn a hosted pod under supervision (issue #185 control surface item 6): links, monitors, " +
+      "and restart policy on top of spawn/drain. Pass host: 'auto' (or omit it) to let the orchestrator " +
+      "pick a host matching the lane. A restart is a NEW spawn request the host may refuse."
+  }
+  get parameters() {
+    return {
+      type: 'object',
+      properties: {
+        host: { type: 'string', description: "Target pod host's pod ID, or 'auto' to let the orchestrator pick one matching the lane (default: auto)" },
+        name: { type: 'string', description: "Pod name, matching [A-Za-z0-9][A-Za-z0-9._-]{0,63}" },
+        lane: { type: 'string', description: "Isolation lane: 'isolate'|'microvm'|'node'|'browser' (default inferred from run.kind)" },
+        run: {
+          type: 'object',
+          description: 'What to run',
+          properties: {
+            kind: { type: 'string', description: "'skill'|'module'|'rootfs'|'command'" },
+            ref: { type: 'string', description: 'Reference: skill name, module cid, rootfs image, or command path' },
+            entry: { type: 'string', description: 'Entry point, if applicable' },
+            input: { description: 'Input payload, if applicable' },
+          },
+          required: ['kind', 'ref'],
+        },
+        limits: { type: 'object', description: 'Resource limits: vcpus, memMib, timeoutMs, netRateLimiter, blockRateLimiter' },
+        caps: { type: 'array', items: { type: 'string' }, description: 'KERNEL_CAP strings this pod is granted' },
+        env: { type: 'object', description: 'Environment variables (string values)' },
+        budget: { type: 'object', description: 'Budget: credits, currency' },
+        restart: { type: 'object', description: 'Restart policy: policy (never|on-failure|always), maxRestarts, backoffMs (default: never)' },
+        links: { type: 'object', description: 'links.parent (cascade on drain), links.hostedBy, links.detachOnParentExit' },
+      },
+      required: ['name', 'run'],
+    }
+  }
+  get permission() { return 'network' }
+
+  async execute({ host, name, lane, run, limits, caps, env, budget, restart, links } = {}) {
+    const spec = buildPodSpec({ name, lane, run, limits, caps, env, budget, restart, links })
+    try {
+      const supervisor = await this.#orchestrator.getSupervisor()
+      const { ref, host: targetHost, status } = await supervisor.supervise(host || 'auto', spec)
+      return {
+        success: true,
+        output: `supervising '${ref.name}' on ${targetHost} (lane '${status.lane}'): state=${status.state}\n${JSON.stringify(status)}`,
+      }
+    } catch (err) {
+      return { success: false, output: '', error: formatPodHostError(err, { host: host || null, verb: 'spawn' }) }
+    }
+  }
+}
+
+// ── meshctl_supervised ────────────────────────────────────────────────
+
+export class MeshctlSupervisedTool extends BrowserTool {
+  #orchestrator
+
+  constructor(orchestrator) {
+    super()
+    this.#orchestrator = orchestrator
+  }
+
+  get name() { return 'meshctl_supervised' }
+  get description() { return 'List every pod this orchestrator is supervising, with host, restart count and state' }
+  get parameters() {
+    return { type: 'object', properties: {} }
+  }
+  get permission() { return 'read' }
+
+  async execute() {
+    try {
+      const supervisor = await this.#orchestrator.getSupervisor()
+      const entries = supervisor.list()
+      if (entries.length === 0) {
+        return { success: true, output: 'No supervised pods.\n[]' }
+      }
+      const lines = entries.map((p) => `${p.ref.name} | ${p.host} | ${p.state} | restarts:${p.restarts}`)
+      return {
+        success: true,
+        output: `NAME | HOST | STATE | RESTARTS\n${lines.join('\n')}\n\n${JSON.stringify(entries)}`,
+      }
+    } catch (err) {
+      return { success: false, output: '', error: `Failed to list supervised pods: ${err.message}` }
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Shell integration helper
 // ---------------------------------------------------------------------------
@@ -2076,7 +2230,7 @@ function parseMeshctlFlags(args) {
 /**
  * Register 'meshctl' as a compound command in the shell registry.
  * Subcommands: pods, status, exec, deploy, top, compute, expose, drain,
- * spawn, snapshot, restore, hosted, hosts
+ * spawn, snapshot, restore, hosted, hosts, supervise, supervised
  *
  * @param {import('./clawser-shell.js').CommandRegistry} shellRegistry
  * @param {MeshOrchestrator} orchestrator
@@ -2242,10 +2396,43 @@ export function registerMeshctlBuiltins(shellRegistry, orchestrator) {
         return { stdout: lines.join('\n') + '\n', stderr: '', exitCode: 0 }
       }
 
+      case 'supervise': {
+        const USAGE = 'Usage: meshctl supervise <host|auto> <name> --kind <kind> --ref <ref> '
+          + '[--lane <lane>] [--entry <entry>] [--restart never|on-failure|always] [--parent <name>]\n'
+        const [hostArg, nameArg, ...flagArgs] = rest
+        if (!hostArg || !nameArg) return { stdout: '', stderr: USAGE, exitCode: 1 }
+        const flags = parseMeshctlFlags(flagArgs)
+        if (!flags.kind || !flags.ref) return { stdout: '', stderr: USAGE, exitCode: 1 }
+        const run = { kind: flags.kind, ref: flags.ref }
+        if (flags.entry) run.entry = flags.entry
+        const restart = flags.restart ? { policy: flags.restart } : undefined
+        const links = flags.parent ? { parent: flags.parent } : undefined
+        const spec = buildPodSpec({ name: nameArg, lane: flags.lane, run, restart, links })
+        try {
+          const supervisor = await orchestrator.getSupervisor()
+          const { ref, host, status } = await supervisor.supervise(hostArg, spec)
+          return {
+            stdout: `supervising '${ref.name}' on ${host} (lane '${status.lane}'): state=${status.state}\n`,
+            stderr: '',
+            exitCode: 0,
+          }
+        } catch (err) {
+          return { stdout: '', stderr: formatPodHostError(err, { host: hostArg === 'auto' ? null : hostArg, verb: 'spawn' }) + '\n', exitCode: 1 }
+        }
+      }
+
+      case 'supervised': {
+        const supervisor = await orchestrator.getSupervisor()
+        const entries = supervisor.list()
+        if (entries.length === 0) return { stdout: 'No supervised pods.\n', stderr: '', exitCode: 0 }
+        const lines = entries.map((p) => `${p.ref.name}\t${p.host}\t${p.state}\trestarts:${p.restarts}`)
+        return { stdout: lines.join('\n') + '\n', stderr: '', exitCode: 0 }
+      }
+
       default:
         return {
           stdout: '',
-          stderr: `Unknown subcommand: ${subcommand || '(none)'}. Available: pods, status, exec, deploy, top, compute, expose, drain, spawn, snapshot, restore, hosted, hosts\n`,
+          stderr: `Unknown subcommand: ${subcommand || '(none)'}. Available: pods, status, exec, deploy, top, compute, expose, drain, spawn, snapshot, restore, hosted, hosts, supervise, supervised\n`,
           exitCode: 1,
         }
     }
@@ -2264,7 +2451,8 @@ export function registerMeshctlBuiltins(shellRegistry, orchestrator) {
  * Create all meshctl BrowserTool instances for a given orchestrator -- the
  * original 8 (`pods`/`status`/`exec`/`deploy`/`top`/`compute`/`expose`/
  * `drain`) plus the 5 hosted-pods control surface tools (issue #185 §8a
- * item 4): `spawn`/`snapshot`/`restore`/`hosted_pods`/`hosts`. 13 total.
+ * item 4): `spawn`/`snapshot`/`restore`/`hosted_pods`/`hosts`, plus item 6's
+ * 2 supervisor tools: `supervise`/`supervised`. 15 total.
  * @param {MeshOrchestrator} orchestrator
  * @returns {BrowserTool[]}
  */
@@ -2283,5 +2471,7 @@ export function createMeshctlTools(orchestrator) {
     new MeshctlRestoreTool(orchestrator),
     new MeshctlHostedPodsTool(orchestrator),
     new MeshctlHostsTool(orchestrator),
+    new MeshctlSuperviseTool(orchestrator),
+    new MeshctlSupervisedTool(orchestrator),
   ]
 }

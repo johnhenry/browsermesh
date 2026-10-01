@@ -336,11 +336,12 @@ const RESTART_POLICIES = Object.freeze(['never', 'on-failure', 'always'])
 /** Pod names are path/URL/CLI-safe: this is the whole grammar. */
 const NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 
-const SPEC_KEYS = Object.freeze(['name', 'lane', 'run', 'limits', 'caps', 'env', 'budget', 'restart', 'labels'])
+const SPEC_KEYS = Object.freeze(['name', 'lane', 'run', 'limits', 'caps', 'env', 'budget', 'restart', 'labels', 'links'])
 const RUN_KEYS = Object.freeze(['kind', 'ref', 'entry', 'input'])
 const LIMIT_KEYS = Object.freeze(['vcpus', 'memMib', 'timeoutMs', 'netRateLimiter', 'blockRateLimiter'])
 const BUDGET_KEYS = Object.freeze(['credits', 'currency'])
 const RESTART_KEYS = Object.freeze(['policy', 'maxRestarts', 'backoffMs'])
+const LINKS_KEYS = Object.freeze(['parent', 'hostedBy', 'detachOnParentExit'])
 
 /** @param {*} value @returns {boolean} */
 function isPlainObject(value) {
@@ -573,6 +574,39 @@ export function validatePodSpec(spec) {
     }
   }
 
+  // -- links (issue #185 item 6: parent/supervision linkage) ----------------
+  /** @type {object|undefined} */
+  let links
+  if (spec.links !== undefined) {
+    if (!isPlainObject(spec.links)) {
+      errors.push('links must be an object')
+    } else {
+      rejectUnknownKeys(spec.links, LINKS_KEYS, 'links', errors)
+      links = {}
+      if (spec.links.parent !== undefined) {
+        if (typeof spec.links.parent !== 'string' || !spec.links.parent) {
+          errors.push('links.parent must be a non-empty string')
+        } else {
+          links.parent = spec.links.parent
+        }
+      }
+      if (spec.links.hostedBy !== undefined) {
+        if (typeof spec.links.hostedBy !== 'string' || !spec.links.hostedBy) {
+          errors.push('links.hostedBy must be a non-empty string')
+        } else {
+          links.hostedBy = spec.links.hostedBy
+        }
+      }
+      if (spec.links.detachOnParentExit !== undefined) {
+        if (typeof spec.links.detachOnParentExit !== 'boolean') {
+          errors.push('links.detachOnParentExit must be a boolean')
+        } else {
+          links.detachOnParentExit = spec.links.detachOnParentExit
+        }
+      }
+    }
+  }
+
   if (errors.length > 0) return { ok: false, errors }
 
   /** @type {Record<string, *>} */
@@ -582,6 +616,7 @@ export function validatePodSpec(spec) {
   if (env !== undefined) value.env = env
   if (budget !== undefined) value.budget = budget
   if (labels !== undefined) value.labels = labels
+  if (links !== undefined) value.links = links
   return { ok: true, value }
 }
 
@@ -726,6 +761,41 @@ export const POD_HOST_EVENT_KIND = Object.freeze({
   LOG: 'log',
   EXIT: 'exit',
 })
+
+/**
+ * The `data` shape of an `EXIT` event (issue #185 item 6, the supervisor).
+ * Every driver that can tell a pod has left the host's live set -- drained,
+ * crashed, or lost along with its host -- emits one of these so a listener
+ * (a supervisor's `monitor()`, `pod-host-service.mjs`'s event forwarding)
+ * can decide, without guessing, whether a restart is worth attempting:
+ *
+ * ```js
+ * {
+ *   name: string,                                   // the pod's name
+ *   code?: number,                                   // exit code, when one exists (e.g. a crashed exec)
+ *   reason?: 'drained' | 'crashed' | 'host-lost' | 'evicted',
+ *   restartable: boolean,                             // false for an intentional drain; true otherwise
+ * }
+ * ```
+ *
+ * `reason` is intentionally optional on the TYPE (a driver that predates
+ * this field, or a lane with no finer-grained signal, may omit it), but
+ * `InMemoryPodHostDriver` always sets it: `'drained'` from `drain()`,
+ * `'crashed'` from the test-only `crash()`. `'host-lost'` is synthesized by
+ * a SUPERVISOR (`pod-supervisor.mjs`, `browsermesh-apps`), not by a driver
+ * -- no driver can know its own host died. `'evicted'` matches
+ * `PLACEMENT_AUDIT.EVICTED` (`orchestrator.mjs`) for a pod removed by
+ * something other than its own drain/crash (e.g. a snapshot). `restartable`
+ * is the one field every EXIT event should set: a drained pod intentionally
+ * left (`restartable: false`), anything else is a candidate for a
+ * supervisor's restart policy to evaluate (`restartable: true`).
+ *
+ * @typedef {object} PodHostExitEventData
+ * @property {string} name
+ * @property {number} [code]
+ * @property {'drained'|'crashed'|'host-lost'|'evicted'} [reason]
+ * @property {boolean} restartable
+ */
 
 /** @type {number} Monotonic suffix making generated request ids unique within a process. */
 let requestCounter = 0
@@ -1046,6 +1116,26 @@ export class InMemoryPodHostDriver {
     }
     this.#emit(createHostEvent(POD_HOST_EVENT_KIND.EXIT, {
       name, lane: this.#lane, code: 0, cascade: opts.cascade === true,
+      reason: 'drained', restartable: false,
+    }))
+    return this.#snapshotOf(record)
+  }
+
+  /**
+   * TEST-ONLY: force a live pod straight to `gone` with `reason: 'crashed'`,
+   * for exercising a supervisor's restart policy without a real failure.
+   * Unlike `drain()`, `restartable` is `true` -- a crash is exactly the
+   * case a supervisor's `on-failure`/`always` restart policy exists for.
+   *
+   * @param {string} name
+   * @param {{code?: number}} [opts]
+   * @returns {Promise<PodHostStatus>}
+   */
+  async crash(name, { code = 1 } = {}) {
+    const record = this.#requireLive(name)
+    this.#transition(record, POD_LIFECYCLE.GONE, 'crash')
+    this.#emit(createHostEvent(POD_HOST_EVENT_KIND.EXIT, {
+      name, lane: this.#lane, code, reason: 'crashed', restartable: true,
     }))
     return this.#snapshotOf(record)
   }

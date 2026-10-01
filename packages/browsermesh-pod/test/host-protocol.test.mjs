@@ -342,6 +342,40 @@ describe('validatePodSpec', () => {
     assert.equal(result.ok, false)
     assert.ok(result.errors.length >= 4, `expected several errors, got ${result.errors.length}`)
   })
+
+  // -- links (issue #185 item 6) --------------------------------------------
+
+  it('validates links.parent/hostedBy as non-empty strings and detachOnParentExit as boolean', () => {
+    const ok = validatePodSpec(minimalSpec({
+      links: { parent: 'mom', hostedBy: 'host-1', detachOnParentExit: true },
+    }))
+    assert.equal(ok.ok, true)
+    assert.deepEqual(ok.value.links, { parent: 'mom', hostedBy: 'host-1', detachOnParentExit: true })
+
+    assert.match(
+      validatePodSpec(minimalSpec({ links: { parent: '' } })).errors.join(),
+      /links.parent must be a non-empty string/,
+    )
+    assert.match(
+      validatePodSpec(minimalSpec({ links: { hostedBy: 1 } })).errors.join(),
+      /links.hostedBy must be a non-empty string/,
+    )
+    assert.match(
+      validatePodSpec(minimalSpec({ links: { detachOnParentExit: 'yes' } })).errors.join(),
+      /links.detachOnParentExit must be a boolean/,
+    )
+    assert.match(
+      validatePodSpec(minimalSpec({ links: { bogus: 1 } })).errors.join(),
+      /links: unknown key 'bogus'/,
+    )
+    assert.match(validatePodSpec(minimalSpec({ links: 'nope' })).errors.join(), /links must be an object/)
+  })
+
+  it('omits links from the normalized value when absent, and keeps only the given keys when present', () => {
+    assert.equal('links' in validatePodSpec(minimalSpec()).value, false)
+    const { value } = validatePodSpec(minimalSpec({ links: { parent: 'mom' } }))
+    assert.deepEqual(value.links, { parent: 'mom' })
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -714,6 +748,55 @@ describe('InMemoryPodHostDriver', () => {
     await driver.spawn(minimalSpec({ lane: POD_LANE.NODE }))
     await driver.drain('alpha', { cascade: true })
     assert.equal(exits[0].cascade, true)
+  })
+
+  it("drain's exit event carries reason 'drained' and restartable: false", async () => {
+    const driver = new InMemoryPodHostDriver()
+    /** @type {object[]} */
+    const exits = []
+    driver.onEvent((event) => { if (event.kind === POD_HOST_EVENT_KIND.EXIT) exits.push(event.data) })
+    await driver.spawn(minimalSpec({ lane: POD_LANE.NODE }))
+    await driver.drain('alpha')
+    assert.deepEqual(
+      { reason: exits[0].reason, restartable: exits[0].restartable },
+      { reason: 'drained', restartable: false },
+    )
+  })
+
+  it("crash() moves a live pod to gone and emits an exit event with reason 'crashed', restartable: true", async () => {
+    const driver = new InMemoryPodHostDriver()
+    /** @type {object[]} */
+    const events = []
+    driver.onEvent((event) => events.push(event))
+    await driver.spawn(minimalSpec({ lane: POD_LANE.NODE }))
+
+    const crashed = await driver.crash('alpha', { code: 17 })
+    assert.equal(crashed.state, POD_LIFECYCLE.GONE)
+    assert.equal((await driver.status('alpha')).state, POD_LIFECYCLE.GONE)
+
+    const exits = events.filter((e) => e.kind === POD_HOST_EVENT_KIND.EXIT)
+    assert.equal(exits.length, 1)
+    assert.deepEqual(exits[0].data, {
+      name: 'alpha', lane: POD_LANE.NODE, code: 17, reason: 'crashed', restartable: true,
+    })
+
+    const lifecycle = events
+      .filter((e) => e.kind === POD_HOST_EVENT_KIND.LIFECYCLE)
+      .map((e) => `${e.data.from}->${e.data.to}`)
+    assert.deepEqual(lifecycle, ['cold->booting', 'booting->registered', 'registered->gone'])
+  })
+
+  it('crash() defaults code to 1 and rejects an unknown or already-gone pod with ENOENT', async () => {
+    const driver = new InMemoryPodHostDriver()
+    await assert.rejects(driver.crash('ghost'), (err) => err.code === POD_HOST_ERROR.ENOENT)
+
+    await driver.spawn(minimalSpec({ lane: POD_LANE.NODE }))
+    /** @type {object[]} */
+    const exits = []
+    driver.onEvent((event) => { if (event.kind === POD_HOST_EVENT_KIND.EXIT) exits.push(event.data) })
+    await driver.crash('alpha')
+    assert.equal(exits[0].code, 1)
+    await assert.rejects(driver.crash('alpha'), (err) => err.code === POD_HOST_ERROR.ENOENT)
   })
 
   it('isolates a throwing event subscriber and supports unsubscribe', async () => {

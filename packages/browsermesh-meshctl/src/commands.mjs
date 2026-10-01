@@ -302,6 +302,85 @@ export async function cmdPodsDrain(session, { positionals, flags }) {
 }
 
 // ---------------------------------------------------------------------------
+// supervise / supervised / crash (issue #185 item 6)
+// ---------------------------------------------------------------------------
+
+/**
+ * `meshctl pods supervise <host|auto> --name ... --kind ... --ref ... `
+ * `[--restart never|on-failure|always] [--max-restarts n] [--backoff ms] [--parent name]`.
+ *
+ * Same podspec assembly as `pods spawn` (`buildPodSpec()`), plus the
+ * restart/links knobs: `session.getSupervisor()` is a `PodSupervisor`
+ * (`@johnhenry/browsermesh-apps`) kept alive for the life of this
+ * `MeshctlSession` -- it only keeps restarting the pod while THIS process
+ * (or, in tests, this in-process session) stays open; see `connect.mjs`'s
+ * `withSupervisor()`.
+ * @param {import('./connect.mjs').MeshctlSession} session
+ * @param {{positionals: string[], flags: object}} parsed
+ */
+export async function cmdPodsSupervise(session, { positionals, flags }) {
+  const ref = requirePositional(positionals, 0, 'pods supervise')
+  let spec = await buildPodSpec(flags)
+  if (flags['max-restarts'] !== undefined || flags.backoff !== undefined || flags.restart !== undefined) {
+    spec.restart = {
+      policy: flags.restart || 'never',
+      ...(flags['max-restarts'] !== undefined ? { maxRestarts: Number(flags['max-restarts']) } : {}),
+      ...(flags.backoff !== undefined ? { backoffMs: Number(flags.backoff) } : {}),
+    }
+  }
+  if (flags.parent !== undefined) spec.links = { ...(spec.links || {}), parent: flags.parent }
+
+  const supervisor = await session.getSupervisor()
+
+  if (ref === 'auto') {
+    const normalized = validatePodSpec(spec)
+    if (normalized.ok) spec = normalized.value
+    if (!spec.lane) throw new UsageError('pods supervise auto: --lane is required to select a host (or give --kind so it can be inferred)')
+    const refs = candidateHostRefs(session, flags)
+    const picked = await selectAutoHost({ session, candidateRefs: refs, lane: spec.lane })
+    const { ref: podRef, host, status } = await supervisor.supervise(picked.podId, spec)
+    return { host, chosenVia: picked.via, ref: podRef, pod: status }
+  }
+
+  const podId = await resolveAndConnect(session, ref)
+  const { ref: podRef, host, status } = await supervisor.supervise(podId, spec)
+  return { host, ref: podRef, pod: status }
+}
+
+/**
+ * `meshctl pods supervised` -- list every pod `session.getSupervisor()` is
+ * tracking.
+ * @param {import('./connect.mjs').MeshctlSession} session
+ */
+export async function cmdPodsSupervised(session) {
+  const supervisor = await session.getSupervisor()
+  return supervisor.list()
+}
+
+/**
+ * `meshctl pods crash <host> <name> [--code n]` -- DEV-ONLY demo path:
+ * forces a loopback host's `InMemoryPodHostDriver` straight to `gone` with
+ * `reason: 'crashed'` (`host-protocol.mjs`'s test-only `crash()`), to show
+ * a supervised pod's restart policy actually fire without waiting for a
+ * real process to fail. Refuses outright in `mode: 'real'` -- there is no
+ * wire verb for this (a real host cannot be told "pretend you crashed"),
+ * and it would be a safety footgun to let an operator even try.
+ * @param {import('./connect.mjs').MeshctlSession} session
+ * @param {{positionals: string[], flags: object}} parsed
+ */
+export async function cmdPodsCrash(session, { positionals, flags }) {
+  const ref = requirePositional(positionals, 0, 'pods crash')
+  const name = requirePositional(positionals, 1, 'pods crash', '<name>')
+  if (session.mode !== 'loopback' || typeof session.loopbackDriverFor !== 'function') {
+    throw new UsageError('pods crash: only available over --loopback (dev-only demo of a supervised restart)')
+  }
+  const driver = session.loopbackDriverFor(ref)
+  if (!driver) throw new UsageError(`pods crash: unknown loopback host '${ref}'`)
+  const code = flags.code !== undefined ? Number(flags.code) : undefined
+  return driver.crash(name, code !== undefined ? { code } : {})
+}
+
+// ---------------------------------------------------------------------------
 // watch
 // ---------------------------------------------------------------------------
 
@@ -326,6 +405,12 @@ export async function cmdPodsDrain(session, { positionals, flags }) {
  * @param {number} [io.pollMs=250]
  * @returns {Promise<{stopped: true, events: number}>}
  */
+/** Every event `PodSupervisor#on()` (`pod-supervisor.mjs`) emits -- there is no wildcard subscription, so `watch` subscribes to each by name. */
+const SUPERVISOR_EVENT_NAMES = Object.freeze([
+  'supervisor:restart-scheduled', 'supervisor:restarted', 'supervisor:gave-up',
+  'supervisor:cascade', 'supervisor:host-lost',
+])
+
 export async function cmdWatch(session, { positionals }, { writeLine, signal, pollMs = 250 }) {
   const ref = requirePositional(positionals, 0, 'watch')
   const podId = await resolveAndConnect(session, ref)
@@ -336,6 +421,19 @@ export async function cmdWatch(session, { positionals }, { writeLine, signal, po
     eventCount += 1
     writeLine(JSON.stringify({ host: hostPubKey, kind: event.kind, data: event.data, ts: event.ts }))
   })
+
+  // Also print this session's own supervisor activity (issue #185 item 6),
+  // scoped to pods supervised on THIS host -- a supervisor's restart is a
+  // local decision this session made, not a wire event the host sent, so
+  // it is a separate subscription rather than something `session.client
+  // .onEvent()` could ever see.
+  const supervisor = await session.getSupervisor()
+  const unsubscribeSupervisor = SUPERVISOR_EVENT_NAMES.map((name) => supervisor.on(name, (data) => {
+    const host = data.host || data.ref?.host || data.parent?.host
+    if (host !== podId) return
+    eventCount += 1
+    writeLine(JSON.stringify({ host: podId, kind: name, data, ts: Date.now() }))
+  }))
 
   const seen = new Set()
   async function registerInterest() {
@@ -363,5 +461,6 @@ export async function cmdWatch(session, { positionals }, { writeLine, signal, po
 
   clearInterval(timer)
   unsubscribe()
+  for (const off of unsubscribeSupervisor) off()
   return { stopped: true, events: eventCount }
 }

@@ -182,9 +182,9 @@ describe('hosted-pods meshctl tools: parameter schemas', () => {
     assert.equal(byName.meshctl_hosts.parameters.required, undefined)
   })
 
-  it('createMeshctlTools() returns 13 tools including the five new ones', () => {
+  it('createMeshctlTools() returns 15 tools including the five hosted-pods ones', () => {
     const all = createMeshctlTools(orch)
-    assert.equal(all.length, 13)
+    assert.equal(all.length, 15)
     const names = all.map((t) => t.name)
     for (const name of ['meshctl_spawn', 'meshctl_snapshot', 'meshctl_restore', 'meshctl_hosted_pods', 'meshctl_hosts']) {
       assert.ok(names.includes(name))
@@ -614,7 +614,7 @@ describe('createOrchestratorToolRegistry(): exposes the five new hosted-pods too
     const raw = new MeshOrchestrator({ peerNode: nodes.get(alice.podId), peerRegistry: alice.registry })
 
     const registry = createOrchestratorToolRegistry(raw)
-    assert.equal(registry.listSpecs().length, 13)
+    assert.equal(registry.listSpecs().length, 15)
     for (const name of ['meshctl_spawn', 'meshctl_snapshot', 'meshctl_restore', 'meshctl_hosted_pods', 'meshctl_hosts']) {
       assert.ok(registry.get(name), `${name} should be registered`)
     }
@@ -626,7 +626,7 @@ describe('createOrchestratorToolRegistry(): exposes the five new hosted-pods too
     const raw = new MeshOrchestrator({ peerNode: nodes.get(alice.podId), peerRegistry: alice.registry })
     const registry = new BrowserToolRegistry()
     const tools = registerOrchestratorTools(registry, raw)
-    assert.equal(tools.length, 13)
+    assert.equal(tools.length, 15)
     assert.ok(registry.get('meshctl_hosts').execute)
   })
 

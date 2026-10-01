@@ -109,11 +109,11 @@ function createStubSignalingTransport() {
 }
 
 // -----------------------------------------------------------------------
-// All 13 tools register with the expected names/schemas.
+// All 15 tools register with the expected names/schemas.
 // -----------------------------------------------------------------------
 
-describe('registerOrchestratorTools: all 13 Meshctl*Tools register correctly', () => {
-  it('registers all 13 tools with the expected names, appearing in registry.listSpecs()', async () => {
+describe('registerOrchestratorTools: all 15 Meshctl*Tools register correctly', () => {
+  it('registers all 15 tools with the expected names, appearing in registry.listSpecs()', async () => {
     const alice = await createTestPeer('alice');
     const mesh = wireFullMesh([alice]);
     const { api } = attachService(mesh[alice.podId], undefined, createOrchestratorService());
@@ -121,7 +121,7 @@ describe('registerOrchestratorTools: all 13 Meshctl*Tools register correctly', (
     const registry = new BrowserToolRegistry();
     const tools = registerOrchestratorTools(registry, api);
 
-    assert.equal(tools.length, 13);
+    assert.equal(tools.length, 15);
     const specs = registry.listSpecs();
     const names = specs.map((s) => s.name).sort();
     assert.deepEqual(names, [
@@ -137,6 +137,8 @@ describe('registerOrchestratorTools: all 13 Meshctl*Tools register correctly', (
       'meshctl_snapshot',
       'meshctl_spawn',
       'meshctl_status',
+      'meshctl_supervise',
+      'meshctl_supervised',
       'meshctl_top',
     ]);
 
@@ -161,7 +163,7 @@ describe('registerOrchestratorTools: all 13 Meshctl*Tools register correctly', (
 
     const registry = createOrchestratorToolRegistry(api);
     assert.ok(registry instanceof BrowserToolRegistry);
-    assert.equal(registry.listSpecs().length, 13);
+    assert.equal(registry.listSpecs().length, 15);
   });
 
   it('throws a clear error when registry is missing register()', () => {
@@ -186,7 +188,7 @@ describe('registerOrchestratorTools: all 13 Meshctl*Tools register correctly', (
 
     const registry = new BrowserToolRegistry();
     const tools = registerOrchestratorTools(registry, raw);
-    assert.equal(tools.length, 13);
+    assert.equal(tools.length, 15);
 
     // Local-only queries still work fine straight off the raw instance.
     const result = await registry.get('meshctl_pods').execute({});
@@ -428,7 +430,7 @@ describe('createMeshNode({ enableAgentRuntime })', () => {
       skipBoot: true,
     });
     assert.ok(node.toolRegistry instanceof BrowserToolRegistry);
-    assert.equal(node.toolRegistry.listSpecs().length, 13);
+    assert.equal(node.toolRegistry.listSpecs().length, 15);
     assert.ok(node.toolRegistry.get('meshctl_pods'));
     assert.ok(node.toolRegistry.get('meshctl_exec'));
 

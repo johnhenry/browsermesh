@@ -26,6 +26,7 @@ import {
   DEFAULT_POD_HOST_RESOURCE,
 } from '@johnhenry/browsermesh-apps'
 import { InMemoryPodHostDriver, POD_LANE, POD_HOST_VERBS } from '@johnhenry/browsermesh-pod'
+import { withSupervisor } from './session-supervisor.mjs'
 
 /** Default hosts a bare `--loopback` run spins up: one per shell-capable lane plus one without. */
 export const DEFAULT_LOOPBACK_HOSTS = Object.freeze([
@@ -122,8 +123,9 @@ export async function createLoopbackSession({ cliIdentity, hosts = DEFAULT_LOOPB
     await linkNodes(cliPeerNode, node)
 
     let handle = null
+    let driver = null
     if (spec.attach !== false) {
-      const driver = new InMemoryPodHostDriver({ lane: spec.lane })
+      driver = new InMemoryPodHostDriver({ lane: spec.lane })
       handle = attachService(node, undefined, createPodHostService({
         driver,
         hostLabel: spec.label,
@@ -135,7 +137,7 @@ export async function createLoopbackSession({ cliIdentity, hosts = DEFAULT_LOOPB
         POD_HOST_VERBS.map((verb) => `${DEFAULT_POD_HOST_RESOURCE}:${verb}`),
       )
     }
-    hostRecords.push({ label: spec.label, lane: spec.lane, podId: peer.podId, node, handle })
+    hostRecords.push({ label: spec.label, lane: spec.lane, podId: peer.podId, node, handle, driver })
   }
 
   const client = createPodHostClient({ peerNode: cliPeerNode, timeoutMs })
@@ -145,13 +147,24 @@ export async function createLoopbackSession({ cliIdentity, hosts = DEFAULT_LOOPB
     return hostRecords.find((h) => h.podId === ref || h.label === ref) || null
   }
 
-  return {
+  return withSupervisor({
     mode: 'loopback',
     podId: cliIdentity.podId,
     peerNode: cliPeerNode,
     client,
     knownHosts: () => hostRecords.map((h) => h.podId),
     resolveHost,
+    // Dev-only escape hatch for `meshctl pods crash` (issue #185 item 6's
+    // demo path): the RAW `InMemoryPodHostDriver` behind a loopback host,
+    // bypassing the gate entirely -- there is no wire verb for "crash a
+    // pod", so this reaches straight past `pod-host-service.mjs` the same
+    // way a real failure would (the driver itself has no gate to bypass).
+    // `commands.mjs`'s `cmdPodsCrash()` refuses to call this at all in
+    // `mode: 'real'` (there is no such method on that session shape).
+    loopbackDriverFor(ref) {
+      const host = resolveHost(ref)
+      return host ? host.driver : null
+    },
     // Loopback hosts are linked at connect time (see `linkNodes()` above),
     // so there is never a separate negotiation step -- unlike the real-mesh
     // session, where `ensureConnected()` actually does something.
@@ -164,5 +177,5 @@ export async function createLoopbackSession({ cliIdentity, hosts = DEFAULT_LOOPB
       }
       await cliPeerNode.shutdown()
     },
-  }
+  })
 }

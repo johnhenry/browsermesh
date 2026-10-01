@@ -446,6 +446,7 @@ const { ok, value, errors } = validatePodSpec({
   budget: { credits: 10, currency: 'bmc' },
   restart: { policy: 'on-failure', maxRestarts: 3, backoffMs: 500 },
   labels: { team: 'core' },
+  links: { parent: 'greeter-supervisor', detachOnParentExit: false },
 })
 ```
 
@@ -455,6 +456,17 @@ Optional sections that were absent stay absent, so a driver can tell "no
 limits asked for" from "limits asked for, all defaults". **Unknown keys are
 an error**, at every level — a mistyped `limits.memMB` that silently did
 nothing would be a quota bug nobody notices until the bill.
+
+`links` (issue #185 item 6, the supervisor) declares this pod's place in a
+parent/child tree: `links.parent` names the pod that should drain this one
+when *it* drains (cascade), `links.hostedBy` optionally records the pod
+host for the same bookkeeping a `ResourceDescriptor.hostedBy` already does
+at the resource layer, and `links.detachOnParentExit` (default `false`)
+opts a child with `restart.policy: 'always'` out of being drained when its
+parent exits — it keeps running and restarting on its own instead. None of
+this is enforced by `validatePodSpec()` beyond shape (strings, booleans);
+the cascade/restart behavior itself lives in `@johnhenry/browsermesh-apps`'
+`pod-supervisor.mjs`.
 
 ### Lifecycle
 
@@ -520,8 +532,16 @@ await driver.spawn({ name: 'alpha', lane: 'node', run: { kind: 'command', ref: '
 await driver.exec('alpha', ['echo', 'hi'])   // { stdout: 'echo hi', stderr: '', code: 0 }
 await driver.snapshot('alpha')               // -> paused -> snapshotted
 await driver.restore('alpha')                // -> restoring -> registered
-await driver.drain('alpha')                  // -> draining -> gone
+await driver.drain('alpha')                  // -> draining -> gone, exit {reason: 'drained', restartable: false}
+await driver.crash('alpha', { code: 1 })     // TEST-ONLY -> gone, exit {reason: 'crashed', restartable: true}
 ```
+
+Every `EXIT` event's `data` matches `PodHostExitEventData`: `{ name, code?,
+reason?: 'drained'|'crashed'|'host-lost'|'evicted', restartable }` — see
+`host-protocol.mjs`'s own doc comment on `POD_HOST_EVENT_KIND`. A
+supervisor (`@johnhenry/browsermesh-apps`' `pod-supervisor.mjs`) is the
+first consumer that actually branches on `reason`/`restartable` rather than
+just logging the event.
 
 The gated, audited mesh service that speaks this protocol over a `PeerNode`
 is `createPodHostService()` in `@johnhenry/browsermesh-apps` — see that

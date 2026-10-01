@@ -174,7 +174,10 @@ meshctl <group> <cmd> [args] [flags]
 | `pods snapshot <host> <name>` | Freeze a pod to durable storage (lane-dependent). |
 | `pods restore <host> <name>` | Thaw a snapshotted pod (lane-dependent). |
 | `pods drain <host> <name> [--cascade]` | Stop a pod, notifying peers. |
-| `watch <host>` | Streams `pod-host:event`s as NDJSON until `SIGINT`. |
+| `pods supervise <host\|auto> --name <n> --kind <k> --ref <r> [--lane <l>] [--restart never\|on-failure\|always] [--max-restarts n] [--backoff ms] [--parent <name>]` | Same flags as `pods spawn`, plus restart policy and link-to-parent. Spawns under a `PodSupervisor` kept alive for this session -- see [Supervision](#supervision) below. |
+| `pods supervised` | Lists every pod this session's supervisor is tracking: `ref`, `host`, `state`, `restarts`. |
+| `pods crash <host> <name> [--code n]` | **Dev-only, `--loopback` only.** Forces the loopback host's in-memory driver to report the pod crashed, to demo a restart without waiting for a real failure. Refuses in `mode: 'real'`. |
+| `watch <host>` | Streams `pod-host:event`s as NDJSON until `SIGINT`, interleaved with this session's own `supervisor:*` events for pods supervised on that host. |
 | `vm ...` | A different connection model entirely -- [see below](#vm-a-different-animal). |
 
 **Global flags**, valid everywhere: `--loopback`, `--signaling <ws://...>`,
@@ -196,6 +199,33 @@ orchestrator's scorer requires (it has no `exec`, by design --
 isolate` always falls back to directly matching `describe().lane`. For
 `microvm`/`node` hosts (which do advertise `compute`), the orchestrator
 path runs first.
+
+### Supervision
+
+`meshctl pods supervise`/`pods supervised`/`pods crash` project issue
+#185 item 6's `PodSupervisor` (`@johnhenry/browsermesh-apps`'s
+`pod-supervisor.mjs`) onto this CLI. The OTP precedent: **links** cascade a
+drain from parent to child, **monitors** watch a pod's lifecycle without
+owning it, and **supervisors** apply a `restart` policy by re-issuing
+`spawn` -- and that restart is a NEW `spawn` request the host may refuse,
+same as everywhere else in this control surface.
+
+The supervisor lives on the `MeshctlSession` (`connect.mjs`'s
+`withSupervisor()`), lazily built on first `getSupervisor()` call and
+stopped when the session closes. Concretely, that means it only keeps
+restarting a pod while the PROCESS (or, in a test driving several commands
+through one in-process session, that session) that ran `pods supervise`
+stays open -- a `pods supervise` immediately followed by the CLI exiting
+supervises nothing after the fact. `meshctl watch <host>` is the
+long-running command that keeps a session (and therefore its supervisor)
+alive to actually observe restarts happen.
+
+```
+meshctl pods supervise node-host --name web --kind command --ref /bin/sh \
+  --lane node --restart on-failure --max-restarts 3 --backoff 1000 --loopback
+meshctl pods supervised --loopback
+meshctl pods crash node-host web --loopback   # dev-only: demo a restart
+```
 
 ## `vm`: a different animal
 

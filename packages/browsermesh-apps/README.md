@@ -48,7 +48,7 @@ Extracted from the private `clawser` monorepo (previously `packages/browsermesh-
 | mesh-orchestrator | `createOrchestratorService` (`MeshService` wrapper: real, gated wire dispatch for `execOnPod`/`deploySkill`/`drainPod`, ungated local aggregation for `listPods`/`getPodStatus`/`topPods`) |
 | compat | `BrowserTool`, `BrowserToolRegistry` (base class + registry an LLM-drivable agent loop dispatches tool calls through) |
 | agent-runtime | `createAgentRuntime` (the LLM tool-calling dispatch loop: bring-your-own `llmFn`, real registry-backed tool execution) |
-| mesh-orchestrator-tools | `registerOrchestratorTools`, `createOrchestratorToolRegistry` (wires the 13 real `Meshctl*Tool`s into a `BrowserToolRegistry` against a real, attached `MeshOrchestrator`) |
+| mesh-orchestrator-tools | `registerOrchestratorTools`, `createOrchestratorToolRegistry` (wires the 15 real `Meshctl*Tool`s into a `BrowserToolRegistry` against a real, attached `MeshOrchestrator`) |
 | audit | `AuditChain`, `AuditStore`, `detectFork`, `buildMerkleRoot` |
 | visualizations | `TopologyLayout`, `TrustGraphLayout`, `TrustHeatmap` |
 | devtools | `MeshInspector`, `MeshInspectTool` |
@@ -507,7 +507,7 @@ dependency anywhere in this family); `llmFn(messages, toolSpecs) ->
 
 `mesh-orchestrator-tools.mjs`'s `registerOrchestratorTools()` is the worked
 example of wiring a *mesh-backed* capability into this pattern: it
-constructs `orchestrator.mjs`'s 13 real `Meshctl*Tool`s
+constructs `orchestrator.mjs`'s 15 real `Meshctl*Tool`s
 (`meshctl_pods`/`meshctl_status`/`meshctl_exec`/`meshctl_deploy`/
 `meshctl_top`/`meshctl_compute`/`meshctl_expose`/`meshctl_drain`, plus issue
 #185 §8a item 4's hosted-pods control surface five —
@@ -588,6 +588,13 @@ a deterministic `llmFn` calls `meshctl_hosts`, then `meshctl_spawn` with
 `meshctl_restore`, and finally the pre-existing `meshctl_drain` to drain
 the host pod itself — composing the five new tools with the original
 eight.
+
+**Item 6's supervisor tools** (`meshctl_supervise`/`meshctl_supervised`,
+and the `meshctl supervise`/`meshctl supervised` text commands) bring the
+tool count to 15. `meshctl_supervise` accepts the same args as
+`meshctl_spawn` plus `restart`/`links`, and calls
+`orchestrator.getSupervisor()` then that supervisor's own `supervise()` —
+see "Pod supervisor" above.
 
 ## Runtime classes and placement lanes
 
@@ -843,6 +850,75 @@ surface, not to this service.
 
 A runnable end-to-end walkthrough is
 [`examples/13-pod-host-service.mjs`](../../examples/13-pod-host-service.mjs).
+
+## Pod supervisor
+
+`createPodSupervisor()` (`pod-supervisor.mjs`) is [issue
+#185](https://github.com/johnhenry/browsermesh/issues/185)'s item 6: the
+last row of the control-surface table, `restart` policy + `status`/`spawn`/
+`drain` in a loop. The precedent is OTP, three ideas composed rather than
+reinvented:
+
+- **links** — parent/child pod relationships that cascade on drain (a
+  general form of [§7](../../docs/hosted-pods.md#7-identity-trust-and-what-hosting-cannot-promise)'s
+  "hosted pods are child-role pods of the host").
+- **monitors** — be told when a pod you care about dies, without taking
+  responsibility for it.
+- **supervisors** — `podspec.restart` (`host-protocol.mjs`) finally gets an
+  implementation.
+
+**The one rule that matters: a restart is a NEW `spawn` request the host
+may refuse.** Every (re)spawn goes through `orchestrator.spawnPod()` (the
+gated `PodHostClient` round trip, which also writes the requester-side
+`PLACEMENT_AUDIT` trail for free) or, with no orchestrator, straight
+through an injected `PodHostClient` — never the driver directly, never
+bypassing `pod-host-service.mjs`'s gate.
+
+```js
+import { createPodSupervisor } from '@johnhenry/browsermesh-apps'
+
+const supervisor = createPodSupervisor({ orchestrator }) // or { client, peerNode }
+
+const { ref } = await supervisor.supervise(hostPodId, {
+  name: 'worker', lane: 'node', run: { kind: 'command', ref: '/bin/worker' },
+  restart: { policy: 'on-failure', maxRestarts: 3, backoffMs: 1000 },
+})
+
+supervisor.monitor(ref, ({ ref, event }) => console.log(ref.name, event.kind, event.data))
+supervisor.on('supervisor:restarted', ({ ref, attempt, host }) => { /* ... */ })
+
+await supervisor.drain(ref, { cascade: true })  // children first, depth-first, then ref itself
+supervisor.stop()                               // clears every pending backoff timer
+```
+
+Everything is event-driven by default — the `PodHostClient`'s own
+`onEvent()` (`lifecycle`/`log`/`exit`) and, for host loss, the `PeerNode`'s
+`'peer:disconnect'` signal, synthesizing `{reason: 'host-lost',
+restartable: true}` for every pod that host was running. An opt-in,
+slow `reconcileIntervalMs` sweep is a safety net for an event that never
+arrives, not the primary mechanism. `links.parent`/`links.detachOnParentExit`
+on the podspec (`host-protocol.mjs`) imply a `link()` call at `supervise()`
+time; `drain(parent, {cascade: true})` drains every descendant depth-first
+(grandchildren, then children, then the parent) and emits
+`supervisor:cascade` with the full order.
+
+`AutoMigrator` (`peer-health.mjs`) already does "move work when a peer
+degrades" for the MESH-PEER population; this does the analogous thing for
+the HOSTED-POD population. They watch different signals and move different
+things, so a mesh using both gets whole-peer failover from one and
+single-pod supervision from the other with no overlap.
+
+`MeshOrchestrator#getSupervisor()` lazily builds one supervisor per
+orchestrator, and `drainPod(hostPodId)` consults it (without creating one
+it didn't need) to cascade-drain every pod that host supervises before the
+pre-existing mesh-peer drain logic runs. `meshctl_supervise`/
+`meshctl_supervised` (`orchestrator.mjs`) are the LLM-tool and
+`meshctl supervise`/`meshctl supervised` the text-command projections —
+see [`packages/browsermesh-meshctl`'s README](../browsermesh-meshctl/README.md#supervision)
+for the external-CLI surface, and
+[`examples/16-supervised-hosted-pods.mjs`](../../examples/16-supervised-hosted-pods.mjs)
+for a runnable walkthrough (crash a pod twice, watch backoff and two
+restarts, then drain the parent with cascade).
 
 ## Pod host over mesh:// and the HTTP gateway
 

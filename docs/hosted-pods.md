@@ -687,11 +687,72 @@ them re-implement access control, validation or audit:
 | 3 | `mesh://` routes | the eight verbs as URL paths | **done**, see below |
 | 4 | `meshctl` LLM tools | the eight verbs as tool definitions | **done**, see below |
 | 5 | external CLI | the eight verbs as subcommands | **done** -- `packages/browsermesh-meshctl` (`meshctl`); see that package's README |
-| 6 | supervisor | `restart` policy + `status`/`spawn`/`drain` in a loop | not yet built |
+| 6 | supervisor | `restart` policy + `status`/`spawn`/`drain` in a loop | **done**, see [Supervision](#supervision) below |
 
 A runnable walkthrough of the whole surface —
 spawn/exec/snapshot/restore/drain, a denied stranger, live lifecycle events
 — is [`examples/13-pod-host-service.mjs`](../examples/13-pod-host-service.mjs).
+
+### Supervision
+
+[Issue #185](https://github.com/johnhenry/browsermesh/issues/185) item 6's
+`createPodSupervisor()` (`packages/browsermesh-apps/src/pod-supervisor.mjs`)
+is the last control-surface row: `restart` policy plus `status`/`spawn`/
+`drain` run in a loop, composed from three OTP ideas rather than invented
+fresh:
+
+- **Links** — parent/child pod relationships that cascade on drain, the
+  general form of this doc's own [§7](#7-identity-trust-and-what-hosting-cannot-promise)
+  rule that a hosted pod is a `child`-role pod of its host and
+  `drainPod()` must cascade. A podspec's `links.parent` (`host-protocol.mjs`)
+  implies a `link()` call at `supervise()` time; `drain(parent, {cascade:
+  true})` drains every descendant depth-first (grandchildren, then
+  children, then the parent) and emits `supervisor:cascade` with the full
+  order. A child whose parent exits unexpectedly is drained too — never
+  restarted — unless its own podspec set `restart.policy: 'always'`
+  together with `links.detachOnParentExit: true`, in which case it is left
+  running and restarts on its own, independent of its parent's fate.
+- **Monitors** — `monitor(ref, fn)` fires `fn({ref, event})` for a
+  watched pod's lifecycle/exit events, without the watcher taking any
+  responsibility for restarting it. That includes a synthesized
+  `{reason: 'host-lost', restartable: true}` exit when the pod's host
+  itself disconnects (the `PeerNode`'s own `'peer:disconnect'` signal) —
+  every supervised pod on that host gets one, and the restart policy
+  decides from there. This is "the same lifecycle, two implementations"
+  promise from [§8](#8-lifecycle) paying off: whether a pod left because it
+  crashed or because its whole host vanished, a monitor sees one `exit`
+  event shape either way.
+- **Supervisors** — `podspec.restart` (`never`/`on-failure`/`always`,
+  `maxRestarts`, `backoffMs`) finally gets an implementation. Backoff
+  doubles per attempt, capped at 60s; exceeding `maxRestarts` (default 3)
+  marks the pod `dead` and emits `supervisor:gave-up`.
+
+**The one rule that matters: a restart is a NEW `spawn` request the host
+may refuse.** A restart never calls a driver directly and never bypasses
+`pod-host-service.mjs`'s gate — it re-issues `spawn` through the exact same
+gated `PodHostClient` round trip (via `orchestrator.spawnPod()`, which also
+writes the requester-side `PLACEMENT_AUDIT` trail for free) a fresh spawn
+would use. A host refusing with `EACCES`/`EBUSY`, or a restart whose host
+is itself gone (`reason: 'host-lost'`), is re-placed on a different host
+via `pickHost` (default: the same `pickAutoHost()` selection
+`meshctl_spawn`/`meshctl spawn auto` use) — never retried against the same
+refusing host, "the orchestrator proposes, the host accepts" all the way
+down.
+
+`MeshOrchestrator#getSupervisor()` lazily builds one supervisor per
+orchestrator, and `drainPod(hostPodId)` consults it (without creating one
+it didn't need) so draining a HOST pod cascades into every pod it
+supervises before the pre-existing mesh-peer drain logic runs.
+`meshctl_supervise`/`meshctl_supervised` (`orchestrator.mjs`) and
+`meshctl supervise`/`meshctl supervised`/`meshctl pods crash` (the
+external CLI, dev-only demo path for forcing a restart without waiting on
+a real failure) are both projections of the same supervisor, same as every
+other surface in this section. See
+`packages/browsermesh-apps/README.md`'s "Pod supervisor" section for the
+full API and
+[`examples/16-supervised-hosted-pods.mjs`](../examples/16-supervised-hosted-pods.mjs)
+for a runnable walkthrough: two restarts with doubling backoff, a linked
+child, and a cascaded drain.
 
 **Item 3** lives in `packages/browsermesh-apps/src/pod-host-routes.mjs`
 (`POD_HOST_ROUTES`/`matchPodHostRoute()`, `createPodHostRouter()`,

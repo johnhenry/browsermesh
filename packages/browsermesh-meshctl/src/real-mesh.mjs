@@ -63,6 +63,7 @@ import {
 import { MeshTransportNegotiator, WebRTCMeshManager, mergeIceServers } from '@johnhenry/browsermesh-transport'
 import { WebSocketTransport } from '@johnhenry/browsermesh-pod'
 import { UsageError } from './output.mjs'
+import { withSupervisor } from './session-supervisor.mjs'
 
 /**
  * @param {object} opts
@@ -149,7 +150,7 @@ export async function createRealMeshSession({
     await node.connectToPeer(hostPubKey, { webrtc: hostPubKey }, {})
   }
 
-  return {
+  return withSupervisor({
     mode: 'real',
     podId,
     peerNode: node,
@@ -171,5 +172,5 @@ export async function createRealMeshSession({
       if (relayTransport) await relayTransport.close()
       await node.shutdown()
     },
-  }
+  })
 }
