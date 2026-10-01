@@ -1,0 +1,89 @@
+#!/bin/sh
+# guest/init — PID 1 for the vm-pod-host demo rootfs.
+#
+# This is NOT executed by this spike (no KVM on the dev machine — see the
+# top-level README.md "what was and wasn't run" section). It is written,
+# reviewed, and shipped as source; a real Linux+KVM host run is the next
+# step, not part of this change.
+#
+# Boots into this by setting the Firecracker boot_args to include
+# `init=/init` (see src/vm-pod.mjs's `putBootSource` call) and copying this
+# file to `/init` in the rootfs image (see build-rootfs.sh). Firecracker
+# passes everything in `boot_args` through as the guest kernel cmdline, so
+# this script also reads its own configuration back out of
+# `/proc/cmdline` — there is no other channel into the guest pre-boot
+# (no MMDS is configured in this spike; see the host-pod README "open
+# questions" about whether to adopt MMDS instead of cmdline args later).
+#
+# Responsibilities, in order:
+#   1. Mount proc/sys (nothing else works without them).
+#   2. Parse `ip=` and `signaling_url=` off /proc/cmdline and bring up
+#      eth0 (the single virtio-net device Firecracker always presents
+#      as `eth0` inside the guest).
+#   3. Start the tiny vsock exec responder in the background (see
+#      "vsock exec protocol" below) so the host can run commands via
+#      VmPodHost#exec() even before the Node kernel is listening.
+#   4. Exec `node /opt/browsermesh-servers/kernel/index.mjs` as the
+#      foreground process (PID 1 waits on it) with SIGNALING_URL set —
+#      this is the exact same ServerPod entry point
+#      browsermesh-servers/kernel/index.mjs uses outside a microVM, so
+#      the guest shows up in the mesh identically to any other
+#      always-on Node peer.
+#
+# kernel cmdline contract (set via boot_args in vm-pod.mjs):
+#   console=ttyS0 reboot=k panic=1 root=/dev/vda rw init=/init \
+#   ip=<guest-ip>::<gateway-ip>:<netmask>::eth0:off \
+#   signaling_url=<ws://host:port>
+#
+# The `ip=` syntax is the Linux kernel's own NFS-root autoconfiguration
+# format (Documentation/admin-guide/nfs/nfsroot.rst): we reuse it here
+# purely as a convenient way to hand a static IP to a shell script
+# parsing /proc/cmdline — the guest kernel itself does nothing with it
+# (no NFS, no DHCP), this script implements the parsing and `ip addr add`
+# by hand.
+#
+# vsock exec protocol (host <-> guest, see src/host-pod.mjs#exec and
+# src/vsock-bridge.mjs):
+#   Node has no built-in AF_VSOCK support (it's not exposed by node:net,
+#   and this project is zero-dependency so no native vsock addon is
+#   pulled in). We bridge AF_VSOCK <-> a local AF_UNIX socket with
+#   `socat` (present in the Alpine base — see build-rootfs.sh) and let a
+#   plain Node script speak the exec protocol over that UNIX socket:
+#     host writes:  EXEC <base64 JSON argv>\n
+#     guest writes: RESULT <base64 JSON {stdout,stderr,code}>\n
+
+set -e
+
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
+
+CMDLINE="$(cat /proc/cmdline)"
+
+# Extract `ip=<ip>::<gw>:<mask>::eth0:off` and bring up eth0 with it.
+IP_PARAM="$(printf '%s\n' "$CMDLINE" | tr ' ' '\n' | grep '^ip=' | head -n1 | cut -d= -f2-)"
+if [ -n "$IP_PARAM" ]; then
+  GUEST_IP="$(echo "$IP_PARAM" | cut -d: -f1)"
+  GATEWAY_IP="$(echo "$IP_PARAM" | cut -d: -f3)"
+  NETMASK="$(echo "$IP_PARAM" | cut -d: -f4)"
+  ip link set lo up
+  ip link set eth0 up
+  ip addr add "${GUEST_IP}/${NETMASK}" dev eth0
+  [ -n "$GATEWAY_IP" ] && ip route add default via "$GATEWAY_IP" dev eth0
+fi
+
+SIGNALING_URL="$(printf '%s\n' "$CMDLINE" | tr ' ' '\n' | grep '^signaling_url=' | head -n1 | cut -d= -f2-)"
+export SIGNALING_URL
+export DATA_DIR=/data
+export POD_LABEL="${POD_LABEL:-vm-pod-guest}"
+
+mkdir -p /run /data
+
+# Start the tiny exec responder listening on a local UNIX socket first,
+# then bridge vsock port 52 (EXEC_VSOCK_PORT in src/host-pod.mjs) to it —
+# socat's UNIX-CONNECT side needs something already listening.
+node /opt/vsock-exec-responder.mjs &
+sleep 0.2
+socat VSOCK-LISTEN:52,fork UNIX-CONNECT:/run/vsock-exec.sock &
+
+exec node /opt/browsermesh-servers/kernel/index.mjs
