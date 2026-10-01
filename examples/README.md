@@ -37,3 +37,16 @@ higher-level packages built on top of them
 exercised end-to-end in a real browser by
 [clawser](https://github.com/erisera-code/clawser)'s Mesh and Peers panels;
 see their own package READMEs for API-level usage.
+
+## Hosted pods
+
+Every example above runs a `Pod` the way the browser (or a single Node
+process) already supports: same-origin tabs, workers, or an in-process
+`EventEmitterTransport` bus. [`docs/hosted-pods.md`](../docs/hosted-pods.md)
+at the monorepo root designs the next step — running a `Pod` on a machine
+someone else operates, in a V8 isolate or a Firecracker microVM, with the
+orchestrator choosing the lane per job. A runnable
+`12-hosted-pod-over-websocket.mjs` example (two Node pods discovering each
+other through an in-process fake relay) is part of that design's work
+packages and not yet added here — see the design doc's work-package table
+for status.

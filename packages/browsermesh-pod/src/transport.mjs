@@ -51,7 +51,9 @@ export class BroadcastChannelTransport {
     if (this.#channel) return
     this.#channel = new this.#BCConstructor(this.#channelName)
     this.#channel.onmessage = (event) => {
-      if (this.#handler) this.#handler(event.data)
+      if (this.#handler) {
+        try { this.#handler(event.data) } catch { /* listener errors don't crash the pod */ }
+      }
     }
   }
 
