@@ -31,6 +31,36 @@ export const COMPUTE_RESULT = MESH_TYPE.COMPUTE_RESULT;
 export const COMPUTE_PROGRESS = MESH_TYPE.COMPUTE_PROGRESS;
 
 // ---------------------------------------------------------------------------
+// Runtime classes and isolation lanes (issue #185, WP4)
+// ---------------------------------------------------------------------------
+
+/**
+ * Canonical runtime class values a `ResourceDescriptor` advertises as
+ * `runtime:<class>` capabilities, and that `ComputeRequest.constraints`
+ * reasons about. See the "Runtime classes and placement lanes" section of
+ * this package's README and https://github.com/johnhenry/browsermesh/issues/185.
+ */
+export const RUNTIME_CLASS = Object.freeze({
+  BROWSER: 'browser',
+  NODE: 'node',
+  ISOLATE: 'isolate',
+  MICROVM: 'microvm',
+});
+
+/**
+ * Isolation lane a `ComputeRequest` may require: `'any'` lets the scorer
+ * prefer a lane, `'isolate'`/`'microvm'` hard-require it.
+ */
+export const ISOLATION = Object.freeze({
+  ANY: 'any',
+  ISOLATE: 'isolate',
+  MICROVM: 'microvm',
+});
+
+const VALID_MODULE_TYPES = new Set(['wasm', 'js', 'shell']);
+const VALID_ISOLATIONS = new Set(Object.values(ISOLATION));
+
+// ---------------------------------------------------------------------------
 // ResourceDescriptor
 // ---------------------------------------------------------------------------
 
@@ -51,6 +81,9 @@ export class ResourceDescriptor {
    * @param {'online'|'busy'|'offline'} [opts.availability]
    * @param {number} [opts.updatedAt]
    * @param {number} [opts.ttl]  - Time-to-live in ms (default 60 000)
+   * @param {string|null} [opts.hostedBy] - podId of the host pod, for pods
+   *   placed on a lane host (issue #185 §7: "hosted pods are child-role
+   *   pods of the host pod"). `null`/omitted for a self-hosted pod.
    */
   constructor({
     podId,
@@ -59,6 +92,7 @@ export class ResourceDescriptor {
     availability = 'online',
     updatedAt,
     ttl,
+    hostedBy,
   }) {
     if (!podId || typeof podId !== 'string') {
       throw new Error('podId is required and must be a non-empty string');
@@ -75,6 +109,7 @@ export class ResourceDescriptor {
     this.availability = availability;
     this.updatedAt = updatedAt ?? Date.now();
     this.ttl = ttl ?? 60_000;
+    this.hostedBy = hostedBy || null;
   }
 
   /**
@@ -120,7 +155,7 @@ export class ResourceDescriptor {
   }
 
   toJSON() {
-    return {
+    const json = {
       podId: this.podId,
       resources: { ...this.resources },
       capabilities: [...this.capabilities],
@@ -128,6 +163,8 @@ export class ResourceDescriptor {
       updatedAt: this.updatedAt,
       ttl: this.ttl,
     };
+    if (this.hostedBy) json.hostedBy = this.hostedBy;
+    return json;
   }
 
   /**
@@ -142,6 +179,7 @@ export class ResourceDescriptor {
       availability: data.availability,
       updatedAt: data.updatedAt,
       ttl: data.ttl,
+      hostedBy: data.hostedBy,
     });
   }
 }
@@ -277,13 +315,15 @@ export class ComputeRequest {
   /**
    * @param {object} opts
    * @param {string} [opts.jobId]
-   * @param {'wasm'|'js'} opts.moduleType
+   * @param {'wasm'|'js'|'shell'} opts.moduleType
    * @param {string} opts.moduleCid - Content-addressed ID of the module
    * @param {string} opts.entry     - Entry function name
    * @param {*} [opts.input]        - Serializable input payload
    * @param {object} [opts.constraints]
    * @param {string} [opts.constraints.prefer] - 'gpu'|'cpu'|'any'
    * @param {string} [opts.constraints.preferRuntimeClass]
+   * @param {'any'|'isolate'|'microvm'} [opts.constraints.isolation] - Required
+   *   placement lane (issue #185 §6). Default `'any'`.
    * @param {string[]} [opts.constraints.capabilities]
    * @param {number} [opts.constraints.timeoutMs]
    * @param {number} [opts.constraints.maxMemoryMb]
@@ -301,6 +341,14 @@ export class ComputeRequest {
     requesterId,
     timestamp,
   }) {
+    if (moduleType != null && !VALID_MODULE_TYPES.has(moduleType)) {
+      throw new Error(`moduleType must be one of 'wasm', 'js', 'shell' (got "${moduleType}")`);
+    }
+    const isolation = constraints.isolation ?? ISOLATION.ANY;
+    if (!VALID_ISOLATIONS.has(isolation)) {
+      throw new Error(`constraints.isolation must be one of 'any', 'isolate', 'microvm' (got "${isolation}")`);
+    }
+
     this.jobId = jobId ?? _genId();
     this.moduleType = moduleType;
     this.moduleCid = moduleCid;
@@ -310,6 +358,7 @@ export class ComputeRequest {
       ...constraints,
       prefer: constraints.prefer ?? 'any',
       preferRuntimeClass: constraints.preferRuntimeClass ?? null,
+      isolation,
       capabilities: [...(constraints.capabilities || [])],
       timeoutMs: constraints.timeoutMs ?? 30_000,
       maxMemoryMb: constraints.maxMemoryMb ?? null,
@@ -430,6 +479,9 @@ export class ComputeResult {
  * Scoring heuristic (0-100+ scale):
  *   - Base: 50 points for being online
  *   - Preference match (gpu/cpu): +20
+ *   - preferRuntimeClass match: +60 / mismatch: -15
+ *   - Isolation lane ('isolate'/'microvm' hard requirement; 'any' prefers
+ *     isolate for js/wasm and microvm for shell, +25): see issue #185 §6
  *   - Memory headroom: up to +15
  *   - CPU count: up to +10
  *   - Bandwidth: up to +5
@@ -448,6 +500,29 @@ export class ResourceScorer {
     if (descriptor.availability === 'online') s += 50;
     else if (descriptor.availability === 'busy') s += 30;
     else return 0; // offline nodes score zero
+
+    // -- Isolation lane (issue #185 §6) --------------------------------------
+    const isolation = request.constraints?.isolation ?? ISOLATION.ANY;
+    const moduleType = request.moduleType;
+
+    // A 'shell' module can only ever run in a microvm pod, regardless of the
+    // requested isolation lane.
+    if (moduleType === 'shell' && !descriptor.capabilities.includes(`runtime:${RUNTIME_CLASS.MICROVM}`)) {
+      return 0;
+    }
+
+    if (isolation === ISOLATION.ISOLATE || isolation === ISOLATION.MICROVM) {
+      if (!descriptor.capabilities.includes(`runtime:${isolation}`)) {
+        return 0;
+      }
+    } else if (isolation === ISOLATION.ANY) {
+      if (moduleType !== 'shell' && (moduleType === 'js' || moduleType === 'wasm')
+        && descriptor.capabilities.includes(`runtime:${RUNTIME_CLASS.ISOLATE}`)) {
+        s += 25;
+      } else if (moduleType === 'shell' && descriptor.capabilities.includes(`runtime:${RUNTIME_CLASS.MICROVM}`)) {
+        s += 25;
+      }
+    }
 
     // Preference match
     const prefer = request.constraints?.prefer ?? 'any';
@@ -503,6 +578,36 @@ export class ResourceScorer {
       }
     }
     return best;
+  }
+
+  /**
+   * Compute the effective placement lane for a request, for logging/audit
+   * purposes (issue #185 §6/§8 WP4). Does not consult any descriptor -- it
+   * is purely a function of the request's own `moduleType`/
+   * `constraints.isolation`.
+   *
+   * @param {ComputeRequest} request
+   * @returns {{ required: 'isolate'|'microvm'|null, preferred: 'isolate'|'microvm'|null }}
+   *   `required` is set when the lane is a hard constraint (an explicit
+   *   `isolation` of `'isolate'`/`'microvm'`, or `moduleType: 'shell'`
+   *   which always requires `microvm`). `preferred` is set when
+   *   `isolation` is `'any'` and the module type implies a preferred lane
+   *   (`js`/`wasm` -> `isolate`, `shell` -> `microvm`).
+   */
+  static lane(request) {
+    const isolation = request.constraints?.isolation ?? ISOLATION.ANY;
+    const moduleType = request.moduleType;
+
+    if (moduleType === 'shell') {
+      return { required: RUNTIME_CLASS.MICROVM, preferred: null };
+    }
+    if (isolation === ISOLATION.ISOLATE || isolation === ISOLATION.MICROVM) {
+      return { required: isolation, preferred: null };
+    }
+    if (moduleType === 'js' || moduleType === 'wasm') {
+      return { required: null, preferred: RUNTIME_CLASS.ISOLATE };
+    }
+    return { required: null, preferred: null };
   }
 }
 
