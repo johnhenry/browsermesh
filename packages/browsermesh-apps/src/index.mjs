@@ -62,6 +62,8 @@ export * from './serverless-sites.mjs';
 export * from './observability-bridge.mjs';
 export * from './mesh-kv.mjs';
 export * from './pod-host-service.mjs';
+export * from './pod-host-routes.mjs';
+export * from './pod-host-gateway.mjs';
 export * from './peer-payments.mjs';
 export * from './peer-registry.mjs';
 export * from './peer-routing.mjs';

@@ -668,7 +668,7 @@ none of them should re-implement access control, validation or audit:
 
 | Item | Surface | Projects |
 | --- | --- | --- |
-| 3 | `mesh://` routes | the eight verbs as URL paths |
+| 3 | `mesh://` routes | the eight verbs as URL paths — **done**, see below |
 | 4 | `meshctl` LLM tools | the eight verbs as tool definitions |
 | 5 | external CLI | the eight verbs as subcommands |
 | 6 | supervisor | `restart` policy + `status`/`spawn`/`drain` in a loop |
@@ -676,6 +676,20 @@ none of them should re-implement access control, validation or audit:
 A runnable walkthrough of the whole surface —
 spawn/exec/snapshot/restore/drain, a denied stranger, live lifecycle events
 — is [`examples/13-pod-host-service.mjs`](../examples/13-pod-host-service.mjs).
+
+**Item 3** lives in `packages/browsermesh-apps/src/pod-host-routes.mjs`
+(`POD_HOST_ROUTES`/`matchPodHostRoute()`, `createPodHostRouter()`,
+`podHostFetch()`) and `pod-host-gateway.mjs`
+(`createPodHostGatewayHandler()`, `serveNodeGateway()`) — the route table,
+the `mesh://` host-side mount (`createPodHostMeshRpcHandler()`, over
+`createMeshRpcService({onRequest})`, NOT a change to `mesh-fetch.mjs`
+itself, which was already composable there), and a Node HTTP gateway for
+driving the same eight verbs from entirely outside the mesh under the
+gateway's own mesh identity. See `packages/browsermesh-apps/README.md`'s
+"Pod host over mesh:// and the HTTP gateway" section for the full route
+table and the gateway's identity caveat, and
+[`examples/14-pod-host-over-mesh-fetch.mjs`](../examples/14-pod-host-over-mesh-fetch.mjs)
+for both transports run end to end against one host.
 
 ## 9. Work packages
 

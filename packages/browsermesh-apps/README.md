@@ -779,6 +779,133 @@ surface, not to this service.
 A runnable end-to-end walkthrough is
 [`examples/13-pod-host-service.mjs`](../../examples/13-pod-host-service.mjs).
 
+## Pod host over mesh:// and the HTTP gateway
+
+[Issue #185](https://github.com/johnhenry/browsermesh/issues/185) control-surface
+item 3: an HTTP-shaped view of the pod host service above, two ways --
+`pod-host-routes.mjs` projects the eight verbs onto `mesh://` routes for
+mesh peers, and `pod-host-gateway.mjs` fronts the same client with a real
+Node HTTP server for callers who aren't on the mesh at all. Neither
+re-implements access control, validation or audit -- see below for exactly
+how each reuses `pod-host-service.mjs`'s gate.
+
+### The route table
+
+| Method | Path | Verb |
+| --- | --- | --- |
+| `GET` | `/pods` | `list` |
+| `POST` | `/pods` | `spawn` (body = podspec) |
+| `GET` | `/pods/:name` | `status` |
+| `POST` | `/pods/:name/send` | `send` |
+| `POST` | `/pods/:name/exec` | `exec` |
+| `POST` | `/pods/:name/snapshot` | `snapshot` |
+| `POST` | `/pods/:name/restore` | `restore` |
+| `DELETE` | `/pods/:name` | `drain` (`?cascade=true`) |
+| `GET` | `/host` | `describe` (ungated, like the envelope protocol's `pod-host:describe`) |
+
+Status mapping: `ok` → 200 (201 for `spawn`, 204 for `drain` -- no body, per
+HTTP's own rule); `EINVAL` → 400; `EACCES` → 403; `ENOENT` → 404; `EEXIST` →
+409; `ELANE` → 405 with an `Allow` header listing the verbs the driver's
+lane supports; `ENOTSUP` → 501; `ETIMEDOUT` → 504; `EBUSY` → 409; anything
+else → 500. Bodies are JSON `{ok, result}` or `{ok: false, error: {code,
+message}}`. `matchPodHostRoute(method, pathname) -> {verb, params}|null`
+and `POD_HOST_ROUTES` are exported for anything that wants to reuse the
+table itself.
+
+### Mounting the router on `mesh://`
+
+`browserMeshFetch('mesh://<podId>/path')` is answered, host-side, by
+whatever `onRequest` a peer attached via `createMeshRpcService({onRequest})`
+(see "`fetch()`/`WebSocket`-shaped mesh access" above) -- that slot was
+already fully composable, so no change to `mesh-fetch.mjs`/`mesh-rpc.mjs`
+was needed to mount this router there:
+
+```js
+import {
+  attachService, createMeshRpcService,
+  createPodHostRouter, createPodHostMeshRpcHandler,
+} from '@johnhenry/browsermesh-apps'
+
+const router = createPodHostRouter({ driver, registry: peerNode.registry })
+attachService(peerNode, undefined, createMeshRpcService({
+  onRequest: createPodHostMeshRpcHandler(router),
+}))
+```
+
+`createPodHostRouter({driver|api, registry, resource?, onLog?})`'s `route(request)
+-> Promise<Response|null>` is shaped exactly like `@johnhenry/browsermesh-discovery`'s
+`MeshFetchRouter.route()` -- useful on its own (e.g. for tests), and reused
+unmodified by the HTTP gateway below. **`registry` (`peerNode.registry`) is
+required and cannot be defaulted or derived from `api`**: `createPodHostService()`'s
+`attach()` returns an `api` with `driver`/`resource`/`describe()` but no
+gated-dispatch method, so routing straight through `api.driver` would bypass
+`checkAccess()` entirely. This router instead calls
+`registry.checkAccess(pubKey, resource, verb)` itself, exactly where
+`pod-host-service.mjs`'s own `handleRequest()` does -- never create a second
+code path around that gate.
+
+`podHostFetch(hostPodId, {fetch})` is the matching client, "control from
+within" for code that would rather call fetch-shaped methods than build
+`pod-host:*` envelopes by hand:
+
+```js
+import { createBrowserMeshFetch, podHostFetch } from '@johnhenry/browsermesh-apps'
+
+const browserMeshFetch = createBrowserMeshFetch(meshRpcApi) // bound to YOUR peerNode
+const pods = podHostFetch(hostPodId, { fetch: browserMeshFetch })
+
+await pods.spawn({ name: 'alpha', lane: 'node', run: { kind: 'command', ref: '/bin/echo' } })
+await pods.exec('alpha', ['echo', 'hi'])
+await pods.drain('alpha', { cascade: true })
+```
+
+### The HTTP gateway: control from outside the mesh
+
+`createPodHostGatewayHandler({client|peerNode, resolveHost, auth})` is a
+plain `(req: Request) => Promise<Response>` handler -- Web-standard only, so
+it runs in a Worker, Deno, or (via `serveNodeGateway()`) Node's `node:http`.
+Paths are `/hosts/:hostPodId/pods...` (plus `GET /hosts`, listing the hosts
+`resolveHost` knows about), mapped onto the identical route table above.
+
+**Identity caveat, worth repeating because it's easy to miss:** the gateway
+is itself a mesh peer. `checkAccess()` on the remote host sees the
+*gateway's own* mesh identity (`client`'s pubKey), never whoever made the
+HTTP request -- exactly like an API gateway in front of a backend that
+trusts mTLS client certs, where the backend sees the gateway's cert, not the
+original caller's. Because of this, `auth(req) -> {ok, pubKey?}` is a
+REQUIRED argument -- there is no default-open gateway -- and deciding who
+gets to use the gateway's mesh identity, and how (bearer token, mTLS
+terminated upstream, a signed JWT...), is entirely the **operator's**
+responsibility; this package has no opinion on the scheme:
+
+```js
+import {
+  createPodHostClient, createPodHostGatewayHandler, serveNodeGateway,
+} from '@johnhenry/browsermesh-apps'
+
+const client = createPodHostClient({ peerNode: gatewayPeerNode })
+const handler = createPodHostGatewayHandler({
+  client,
+  resolveHost: { alice: aliceHostPodId }, // token in the URL -> real pubKey
+  auth: (req) => {
+    const token = (req.headers.get('authorization') || '').replace('Bearer ', '')
+    return { ok: token === process.env.GATEWAY_TOKEN }
+  },
+})
+
+const gateway = await serveNodeGateway({ handler, port: 0 })
+// POST http://127.0.0.1:<port>/hosts/alice/pods, Authorization: Bearer <token>
+await gateway.close()
+```
+
+`serveNodeGateway()` `await import('node:http')`s lazily, so this module
+stays reachable from the package root's `export *` graph without breaking
+in a browser bundle merely by being imported.
+
+A runnable end-to-end walkthrough of both transports against the same host
+is
+[`examples/14-pod-host-over-mesh-fetch.mjs`](../../examples/14-pod-host-over-mesh-fetch.mjs).
+
 ## License
 
 MIT
