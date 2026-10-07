@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.1.0
+
+### Minor Changes
+
+- 3414bbb: Add the browser lane's in-page `PodHostDriver` (issue #185 item 7): spawning and controlling pages (iframes, `window.open()` windows, dedicated workers) that each boot a `Pod`, from inside a browser tab, with zero new dependencies.
+
+  - `createInPageDriver({podUrl, spawnKind, channel, ...})` in `src/browser-host-driver.mjs` — `lane: 'browser'`, serving `spawn`/`status`/`send`/`drain`/`list` via `iframe`/`window.open`/`Worker` plus a shared `BroadcastChannel` for the `browser-host:ready` handshake, and `postMessage` for `send`. `exec`/`snapshot`/`restore` are `ENOTSUP`: a parent tab has no safe way to evaluate code in a child it spawned (same-origin or not), and no durable page-heap snapshot exists yet.
+  - `bootHostedPod({globalThis, channel, name})` and `readPodName(g)` in `src/browser-host-child.mjs` — the ~20-line bootstrap any pod page or worker runs to boot a `Pod` and announce itself, reading its name from `window.name`/`self.name`/a `#name=…` URL-hash fallback so no new field was needed on `createHello()`.
+  - `POD_LANE_VERBS[POD_LANE.BROWSER]` now includes `exec`: the browser lane decision is that `exec` means **"evaluate an expression in the page's JS context,"** not a shell command, and that is a real lane-level capability (the CDP and extension drivers in `spikes/browser-pod-host` / `spikes/browser-extension-host` implement it) even though this package's own in-page driver does not. `snapshot`/`restore` stay `ELANE` on the browser lane.
+
+  See `docs/hosted-pods.md` §8b for the full three-driver picture (in-page, CDP, extension) and the trust caveat: a tab is not a privilege boundary against the page it hosts.
+
+- 3414bbb: Issue #185 item 6 (the hosted-pods supervisor) ground-level support in `host-protocol.mjs`: `InMemoryPodHostDriver` now emits a structured `EXIT` event payload — `{ name, code?, reason?: 'drained'|'crashed'|'host-lost'|'evicted', restartable: boolean }` — on both `drain()` (`reason: 'drained'`, `restartable: false`) and a new test-only `crash(name, { code })` method (`reason: 'crashed'`, `restartable: true`), so a supervisor can tell an intentional stop from a failure without guessing. The podspec gains an optional `links` section — `{ parent?, hostedBy?, detachOnParentExit? }` (validated: non-empty strings, boolean) — so a spawn can declare its place in a parent/child supervision tree.
+- 3414bbb: Add the pod host protocol (`src/host-protocol.mjs`, issue #185's hosted-pods control surface): the one lane-agnostic verb set — `spawn`, `status`, `send`, `exec`, `snapshot`, `restore`, `drain`, `list` — that every later surface (the `browsermesh-apps` pod-host service, `mesh://` routes, `meshctl` tools, an external CLI, a supervisor) projects.
+
+  - `POD_HOST_VERB` / `POD_LANE` / `POD_LIFECYCLE` plus `POD_LIFECYCLE_TRANSITIONS` and `canTransition(from, to)` — the `docs/hosted-pods.md` §5.3 state machine as data, with a terminal `gone`.
+  - `POD_LANE_VERBS` / `laneSupports(lane, verb)`: which lane can honour which verb is static, not a runtime surprise. `exec`/`snapshot`/`restore` are `ELANE` on the `isolate` and `browser` lanes today.
+  - `validatePodSpec(spec)` and `validateVerbRequest(verb, payload)` returning `{ok, value}` / `{ok, errors}`. Only two defaults are applied (`lane` from `run.kind`, `restart.policy: 'never'`); unknown keys are an error at every level rather than silently ignored.
+  - Wire shapes `createHostRequest` / `createHostResponse` / `createHostEvent` over `pod-host:request|response|event`, with `POD_HOST_ERROR` codes (`EACCES`, `ENOENT`, `EEXIST`, `EINVAL`, `ENOTSUP`, `ELANE`, `ETIMEDOUT`, `EBUSY`) and a `PodHostDriverError` carrying them.
+  - The `PodHostDriver` interface as a JSDoc typedef (not a base class) plus `createUnsupportedDriverMethod(verb, lane)`, and `InMemoryPodHostDriver` — a complete reference driver with a configurable lane, a real lifecycle state machine, an injectable `exec` and `onEvent()` fan-out.
+
+  This module lives in `browsermesh-pod`, not `browsermesh-apps`, deliberately: a Worker or a microVM guest can import the protocol without pulling in the app/agent runtime. `POD_LANE`'s strings are kept identical to `browsermesh-apps`' `RUNTIME_CLASS` rather than imported across the package boundary.
+
+- 987055a: Add `WebSocketTransport` (issue #185, work package 1): a `TransportAdapter` that speaks the `browsermesh-servers` relay/signaling wire protocol, so a `Pod` can run outside a browser tab — in a plain Node process, a V8 isolate, or a microVM — and still join the mesh. Same injectable-constructor pattern as `BroadcastChannelTransport`'s `BCConstructor` (`opts.WebSocket`, default `globalThis.WebSocket`).
+
+  - `send(msg)` relays point-to-point (`{type:'relay', target, envelope}`) when `msg.to` names a specific peer, and fans a `to`-less or `to:'*'` message (discovery's `hello`/`goodbye`) out point-to-point to every peer in `knownPeers`, since the relay server has no broadcast primitive.
+  - `knownPeers` is seeded from relayed senders seen so far, plus — when `peersFromSignaling: true` and `signalingUrl` is set — a second connection to the signaling server that consumes `peers`/`peer-joined`/`peer-left`.
+  - Exponential-backoff reconnect with re-registration (`reconnect: {baseMs, maxMs, maxAttempts}`); `ready` is false while disconnected; responds to `ping` with `pong`; `close()` clears all timers.
+  - Exported from the package root and typed in `index.d.ts`.
+
+  **Protocol gap found while implementing this against the real servers**: the design sketch in issue #185 describes the relay protocol using `to`/`from` fields, but `browsermesh-servers/relay/index.mjs` and `signaling/index.mjs` actually use `target`/`source` for `relay`/`signal` and their replies. `WebSocketTransport` speaks the servers' real field names (`target`/`source`) and remaps to the Pod message shape (`from`) only on the way in, so it interoperates with the servers as they exist on `main` today. The issue's protocol description should be corrected to match.
+
+### Patch Changes
+
+- 987055a: Documented how to run `Pod` outside the browser (exact runtime requirements, the `TransportAdapter`/`DiscoveryAdapter` contracts, a worked `EventEmitterTransport` + `NullDiscovery` Node example, and an explicit `node:vm`/`worker_threads`-are-not-a-security-boundary warning) in a new README section, and added a shared TransportAdapter conformance suite (`test/helpers/transport-conformance.mjs`) wired up for `BroadcastChannelTransport`, `EventEmitterTransport`, and `NullTransport`. Writing the suite surfaced one real bug it was built to catch: `BroadcastChannelTransport`'s `onmessage` callback did not guard against handler exceptions the way `EventEmitterTransport`'s dispatch loop and `Pod`'s own event emitter already do ("listener errors don't crash the pod") — a throwing handler would propagate as an uncaught exception instead of being isolated. Fixed with the same try/catch pattern already used elsewhere in this package. See `docs/hosted-pods.md` at the monorepo root (new) for the full hosted-pods design this work package is part of, tracking issue #185.
+
 ## 0.0.3
 
 ### Patch Changes
