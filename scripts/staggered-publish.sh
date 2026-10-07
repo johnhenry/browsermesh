@@ -17,6 +17,9 @@
 
 set -e
 
+# Provenance needs a CI identity (GitHub Actions OIDC); locally, publish without it.
+PROVENANCE="${GITHUB_ACTIONS:+--provenance}"
+
 DELAY_BETWEEN_PACKAGES=${DELAY_BETWEEN_PACKAGES:-5}
 DELAY_BETWEEN_BATCHES=${DELAY_BETWEEN_BATCHES:-30}
 DRY_RUN=false
@@ -46,11 +49,11 @@ publish_package() {
   echo -e "${BLUE}[$TOTAL/10]${NC} Publishing ${YELLOW}$pkg${NC}..."
 
   if $DRY_RUN; then
-    echo "  -> Would run: npm publish --workspace=$pkg --access public"
+    echo "  -> Would run: npm publish --workspace=$pkg --access public $PROVENANCE"
     SUCCESS=$((SUCCESS + 1))
   else
     local output
-    if output=$(npm publish --workspace="$pkg" --access public 2>&1); then
+    if output=$(npm publish --workspace="$pkg" --access public $PROVENANCE 2>&1); then
       echo "$output"
       echo -e "  ${GREEN}Published successfully${NC}"
       SUCCESS=$((SUCCESS + 1))
