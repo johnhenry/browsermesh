@@ -9,7 +9,7 @@
 > conventions.
 
 Peer-to-peer mesh networking for browser environments. npm workspaces monorepo,
-ten packages under `packages/`, Node >= 24, `node:test` throughout.
+ten packages under `packages/`, Node >= 26, `node:test` throughout.
 
 ```bash
 npm test               # turbo run test --concurrency=4, all workspaces

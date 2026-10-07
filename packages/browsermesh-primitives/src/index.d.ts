@@ -43,6 +43,18 @@ export declare class PodIdentity {
   constructor(opts: { keyPair: CryptoKeyPair; podId: string });
   static generate(): Promise<PodIdentity>;
   sign(data: BufferSource): Promise<Uint8Array>;
+  sign(opts: { message: BufferSource }): Promise<Uint8Array>;
+  /** Canonical form (preferred): named fields, no argument-order pitfalls. */
+  static verify(opts: {
+    publicKey: CryptoKey;
+    signature: BufferSource;
+    message: BufferSource;
+  }): Promise<boolean>;
+  /**
+   * Positional form, kept for compatibility. WARNING: order is
+   * (publicKey, DATA, SIGNATURE) -- unlike WebCrypto/wsh (key, signature, data)
+   * and raijin (message, signature, key). Prefer the object form.
+   */
   static verify(publicKey: CryptoKey, data: BufferSource, signature: BufferSource): Promise<boolean>;
 }
 
