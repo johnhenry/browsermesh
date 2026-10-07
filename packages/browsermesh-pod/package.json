@@ -1,6 +1,6 @@
 {
   "name": "@johnhenry/browsermesh-pod",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Pod base class for browser execution contexts with Ed25519 identity, BroadcastChannel discovery, and peer messaging",
   "type": "module",
   "main": "./src/index.mjs",
@@ -35,7 +35,7 @@
     "test": "node --test test/*.test.mjs"
   },
   "peerDependencies": {
-    "@johnhenry/browsermesh-primitives": ">=0.0.1 <1.0.0"
+    "@johnhenry/browsermesh-primitives": ">=0.2.0 <1.0.0"
   },
   "devDependencies": {
     "@johnhenry/browsermesh-primitives": "^0.2.0"

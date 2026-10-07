@@ -218,6 +218,7 @@
  */
 
 import { ORSet, encodeBase64url, decodeBase64url } from '@johnhenry/browsermesh-primitives'
+import { guardVerifyMethod, isVerifyOrderError } from './internal/verify-order.mjs'
 
 /** Default `envelope.type` used to route GrantLog payloads on the shared `onIncomingData()` bus. */
 const DEFAULT_ENVELOPE_TYPE = 'grant-log'
@@ -308,6 +309,7 @@ export class GrantLog {
    * `.getPublicKeyBytes(podId)` are used (the real `IdentityWallet`'s
    * confirmed API, see identity-wallet.mjs / identity.mjs). */
   #wallet
+  #verifyWallet
 
   /** @type {import('./peer-registry.mjs').PeerRegistry} */
   #registry
@@ -376,6 +378,7 @@ export class GrantLog {
       throw new Error('GrantLog: registry is required and must provide grantCapabilities()/revokeCapabilities()')
     }
 
+    this.#verifyWallet = guardVerifyMethod(wallet, 'GrantLog wallet.verify')
     this.#resource = resource
     this.#localPodId = localPodId
     this.#wallet = wallet
@@ -550,8 +553,9 @@ export class GrantLog {
       if (derivedPodId !== signedBy) return false
 
       const payload = new TextEncoder().encode(signedPayloadOf({ pubKey, scope, action, at, signedBy }))
-      return await this.#wallet.verify(rawPubKeyBytes, sigBytes, payload)
-    } catch {
+      return await this.#verifyWallet(rawPubKeyBytes, sigBytes, payload)
+    } catch (err) {
+      if (isVerifyOrderError(err)) throw err
       // Malformed base64url, wrong-length keys/signatures, etc. are all
       // "reject", never a thrown error the caller has to remember to catch.
       return false

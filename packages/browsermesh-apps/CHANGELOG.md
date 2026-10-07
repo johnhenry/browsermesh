@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.9.0
+
+### Minor Changes
+
+- BREAKING: the last two verify callbacks now use the canonical `(identity, signature, data)` order, the same as `PodIdentity.verify` and `crypto.subtle.verify`.
+
+  - `TimestampProof.verify(verifyFn)` calls `verifyFn(signerPodId, signature, data)` (was `(signature, data, signerPodId)`), and `TimestampAuthority`'s `identity.verify` duck-type takes `(signerPodId, signature, data)`. A 64-byte signature in the first position throws a `TypeError`.
+  - `Attestation.verify(verifyFn)` calls `verifyFn(podId, signature, resultHash)` (was `(podId, resultHash, signature)`).
+  - Caller-supplied verify callbacks (`PaymentChannel` `verifyFn`, chat service `verifyFn`, `GrantLog` and key-distribution `wallet.verify`) are now probed once with a known-good Ed25519 vector. A callback that rejects the new order but accepts `(publicKey, data, signature)` makes the call that used it throw a `TypeError` naming the new order, instead of silently returning `false`. Skipped when `NODE_ENV` is `production`; the callback sees one extra call with `Uint8Array` arguments.
+  - The peer range on `@johnhenry/browsermesh-primitives` is now `>=0.2.0 <1.0.0`.
+
 ## 0.8.0
 
 ### Minor Changes

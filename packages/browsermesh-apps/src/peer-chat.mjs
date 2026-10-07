@@ -147,6 +147,8 @@ function base64ToBytes(b64) {
 // ---------------------------------------------------------------------------
 // PeerChat
 // ---------------------------------------------------------------------------
+import { guardVerifyFn, isVerifyOrderError } from './internal/verify-order.mjs'
+
 
 /**
  * P2P chat, transport-agnostic beyond a caller-supplied `send()` function.
@@ -211,7 +213,7 @@ export class PeerChat {
     this.#localPubKey = localPubKey
     this.#send = send
     this.#signFn = signFn || null
-    this.#verifyFn = verifyFn || null
+    this.#verifyFn = guardVerifyFn(verifyFn, 'ChatService') || null
     this.#maxHistory = maxHistory ?? 1000
     this.#autoResponder = autoResponder || null
     this.#onLog = onLog || (() => {})
@@ -351,6 +353,7 @@ export class PeerChat {
         const sigBytes = base64ToBytes(message.signature)
         message.verified = await this.#verifyFn(fromPubKey, sigBytes, data)
       } catch (err) {
+        if (isVerifyOrderError(err)) throw err
         this.#onLog(1, `Signature verification failed: ${err.message}`)
         message.verified = false
       }

@@ -16,6 +16,8 @@
  *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-peer-timestamp.test.mjs
  */
 
+import { assertIdentityFirst, isVerifyOrderError } from './internal/verify-order.mjs'
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -95,7 +97,10 @@ export class TimestampProof {
    * themselves -- so `issuedBy` is the pod whose key `verifyFn` must resolve,
    * for witness entries as much as for the proof itself.
    *
-   * @param {Function} [verifyFn] - async (signature: Uint8Array, data: string, signerPodId: string) => boolean
+   * @param {Function} [verifyFn] - async (signerPodId: string, signature: Uint8Array, data: string) => boolean
+   *   (identity, signature, data) -- the same order as `PodIdentity.verify` and
+   *   `crypto.subtle.verify`. BREAKING: this was (signature, data, signerPodId).
+   *   A 64-byte signature in the first position throws a TypeError.
    * @returns {Promise<{ valid: boolean, confidence: number, checked: 'structure'|'signatures', reason?: string }>}
    */
   async verify(verifyFn) {
@@ -119,10 +124,12 @@ export class TimestampProof {
     }
 
     const check = async (signature, data, what) => {
+      assertIdentityFirst(this.issuedBy, 'TimestampProof.verify')
       let ok
       try {
-        ok = await verifyFn(fromBase64(signature), data, this.issuedBy)
+        ok = await verifyFn(this.issuedBy, fromBase64(signature), data)
       } catch (err) {
+        if (isVerifyOrderError(err)) throw err
         return `verifying ${what} threw: ${err.message}`
       }
       return ok === true ? null : `${what} failed verification`
@@ -348,7 +355,8 @@ export class TimestampAuthority {
    * Verify a TimestampProof.
    *
    * Checks every signature in the proof against the key of the pod that
-   * issued it. This requires `identity.verify(signature, data, signerPodId)`.
+   * issued it. This requires `identity.verify(signerPodId, signature, data)` (BREAKING:
+   * was `(signature, data, signerPodId)`).
    * Without it the only check available is re-signing with THIS authority's
    * own key, which answers a different question -- "did I issue this?" -- and
    * is reported as such rather than as authenticity.
@@ -363,7 +371,10 @@ export class TimestampAuthority {
 
     if (this.#identity.verify) {
       const result = await proof.verify(
-        (signature, data, signerPodId) => this.#identity.verify(signature, data, signerPodId),
+        (signerPodId, signature, data) => {
+          assertIdentityFirst(signerPodId, 'TimestampAuthority identity.verify')
+          return this.#identity.verify(signerPodId, signature, data)
+        },
       )
       if (!result.valid) {
         return { valid: false, checked: result.checked, reason: result.reason }

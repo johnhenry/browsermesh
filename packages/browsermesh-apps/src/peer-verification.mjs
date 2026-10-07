@@ -97,11 +97,13 @@ export class Attestation {
   /**
    * Verify this attestation using the provided verification function.
    *
-   * @param {Function} verifyFn - (podId, resultHash, signature) => boolean
+   * @param {Function} verifyFn - (podId, signature, resultHash) => boolean
+   *   (identity, signature, data), the same order as every other verify in
+   *   BrowserMesh. BREAKING: this was (podId, resultHash, signature).
    * @returns {boolean}
    */
   verify(verifyFn) {
-    return verifyFn(this.podId, this.resultHash, this.signature)
+    return verifyFn(this.podId, this.signature, this.resultHash)
   }
 
   /**

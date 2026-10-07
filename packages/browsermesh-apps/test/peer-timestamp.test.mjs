@@ -34,7 +34,7 @@ function createMockIdentity(podId = 'pod-local') {
       const bytes = encoder.encode(`sig:${podId}:${data}`)
       return new Uint8Array(bytes)
     },
-    async verify(signature, data, signerPodId) {
+    async verify(signerPodId, signature, data) {
       const encoder = new TextEncoder()
       const expected = encoder.encode(`sig:${signerPodId}:${data}`)
       if (signature.length !== expected.length) return false
@@ -463,9 +463,9 @@ describe('TimestampProof.verify — signatures', () => {
     const proof = await authority.stamp('abc123', new Map([['pod-a', now], ['pod-b', now]]))
 
     const seen = []
-    const result = await proof.verify(async (signature, data, signerPodId) => {
+    const result = await proof.verify(async (signerPodId, signature, data) => {
       seen.push({ data, signerPodId, bytes: signature instanceof Uint8Array })
-      return identity.verify(signature, data, signerPodId)
+      return identity.verify(signerPodId, signature, data)
     })
 
     assert.equal(result.valid, true)
