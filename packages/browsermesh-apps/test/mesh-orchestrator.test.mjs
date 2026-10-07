@@ -2,7 +2,7 @@
 //
 // MeshOrchestrator's own local bookkeeping (PodInfo/PodStatus/
 // PodResourceInfo construction, ResourceScorer-driven compute target
-// selection, the eight Meshctl*Tool BrowserTool subclasses) is already
+// selection, the thirteen Meshctl*Tool BrowserTool subclasses) is already
 // covered by orchestrator.test.mjs against a hand-rolled peerNode mock. This
 // file covers the MeshService WRAPPER Phase 3 of the agent-runtime plan
 // (issue #92) adds: constructing a real MeshOrchestrator against a real

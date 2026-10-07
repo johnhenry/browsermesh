@@ -15,7 +15,15 @@ spun out of the issue, each on its own branch:
 | WP4 | Placement: `ComputeRequest.constraints.isolation`, scorer rules, `execOnPod` guard | `agent/wp4-placement` |
 | WP5 | This doc, pod README runtime-requirements section, `node:vm` warning, TransportAdapter conformance suite | `agent/wp5-docs` |
 
-See [§8](#8-work-packages) for per-package detail and checkboxes.
+See [§9](#9-work-packages) for per-package detail and checkboxes.
+
+Beyond those five, the **hosted pods control surface** adds the one API both
+lanes answer to — the eight-verb pod host protocol, the mesh service that
+serves it, and the per-lane drivers. See [§8a](#8a-control-surface);
+items 3-6 of that work (`mesh://` routes, `meshctl` tools, an external CLI,
+a supervisor) are all projections of it. Item 7, the **browser lane**, adds
+a third lane with three drivers of its own (in-page, CDP, extension) —
+see [§8b](#8b-lane-c--browser-pods).
 
 ## Motivation
 
@@ -566,6 +574,328 @@ lanes (`Paused`/`Snapshotted` in Lane B map to DO hibernation/eviction in
 Lane A). The orchestrator-facing contract is one lifecycle regardless of
 lane: `cold → booting → registered → idle → (paused/hibernated) →
 (restored) → registered → draining → cold`.
+
+## 8a. Control surface
+
+Everything above describes two lanes and a placement decision. This section
+describes the **one API both lanes answer to**, and therefore the thing
+every tool, route and CLI in this design is a projection of.
+
+### One verb set
+
+```
+spawn   status   send   exec   snapshot   restore   drain   list
+```
+
+That is the whole control surface. It is defined as plain data in
+`packages/browsermesh-pod/src/host-protocol.mjs` — verbs, lanes, the
+lifecycle state machine from [§5.3](#53-lifecycle), the podspec validator,
+the wire envelopes (`pod-host:request` / `pod-host:response` /
+`pod-host:event`) and the `POD_HOST_ERROR` codes. It lives in
+`browsermesh-pod`, not `browsermesh-apps`, precisely so the two places a
+hosted pod actually runs — a Worker and a microVM host agent — can import
+it without pulling in the marketplace, payments and quota machinery.
+
+The gated, audited *service* is
+`packages/browsermesh-apps/src/pod-host-service.mjs`:
+`createPodHostService({driver})` (host side) and
+`createPodHostClient({peerNode})` (requester side). That is where the verbs
+meet `PeerRegistry.checkAccess()`, the `AuditChain` and
+[§7](#7-identity-trust-and-what-hosting-cannot-promise)'s `PLACEMENT_AUDIT`
+records.
+
+### Lane capability is static, not a runtime surprise
+
+| Lane | `spawn` | `status` | `send` | `exec` | `snapshot` | `restore` | `drain` | `list` |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `isolate` | ✓ | ✓ | ✓ | `ELANE` | `ELANE` | `ELANE` | ✓ | ✓ |
+| `microvm` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `node` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `browser` | ✓ | ✓ | ✓ | ✓* | `ELANE` | `ELANE` | ✓ | ✓ |
+
+\* Issue #185 item 7's decision, made while building the browser lane's
+drivers (see [§8b](#8b-lane-c--browser-pods)): `exec` on the browser lane
+means **"evaluate an expression in the page's JS context,"** not "spawn a
+shell command" — a tab has no shell, but it does have a JS realm, and two
+of the browser lane's three drivers (CDP, extension) can genuinely drive
+that safely from outside the page. So `exec` is lane-capable (`true`), not
+`ELANE`; the in-page driver, which has no safe way to do this from inside
+the page it hosts, answers `ENOTSUP` for it instead — a driver gap, not a
+lane law. `snapshot`/`restore` stay `ELANE`: no browser-lane driver in this
+wave durably freezes a page's JS heap and thaws it byte-for-byte.
+
+`POD_LANE_VERBS` / `laneSupports(lane, verb)` publish this up front.
+`ELANE` means "this lane structurally cannot" — a V8 isolate has no shell,
+and Durable Object hibernation is automatic rather than a verb a caller
+drives. `ENOTSUP` is the different, weaker claim: "this particular driver
+has not implemented an otherwise lane-compatible verb" (WP3's `VmPodHost`
+has no message path yet, so the microvm driver answers `send` that way).
+The distinction is what lets a caller decide between retrying on another
+host in the same lane and giving up on the lane entirely.
+
+### The podspec
+
+`spawn`'s payload, validated and normalized by `validatePodSpec()`:
+
+```js
+{
+  name,                                   // [A-Za-z0-9][A-Za-z0-9._-]{0,63}
+  lane,                                   // defaulted from run.kind
+  run: { kind: 'skill'|'module'|'rootfs'|'command', ref, entry?, input? },
+  limits?: { vcpus?, memMib?, timeoutMs?, netRateLimiter?, blockRateLimiter? },
+  caps?: string[],                        // KERNEL_CAP strings — see §6's mapping table
+  env?: Record<string, string>,
+  budget?: { credits, currency? },        // open question 4, with a field to grow into
+  restart?: { policy: 'never'|'on-failure'|'always', maxRestarts?, backoffMs? },
+  labels?: Record<string, string>,
+}
+```
+
+Two defaults, and only two: `lane` (`isolate` for a `skill`/`module` run,
+`microvm` for `command`/`rootfs`) and `restart.policy` (`'never'`). Unknown
+keys are an error at every level — a mistyped `limits.memMB` that silently
+did nothing would be a quota bug nobody notices until the bill.
+
+### Drivers
+
+A `PodHostDriver` is a JSDoc typedef, not a base class: any object with
+`lane`, `capabilities()`, the eight verb methods and an optional
+`onEvent()`. Three exist:
+
+| Driver | Lane | Where |
+| --- | --- | --- |
+| `InMemoryPodHostDriver` | configurable (default `node`) | `browsermesh-pod` — the reference driver, with the real state machine |
+| `createVmPodDriver(vmPodHost)` | `microvm` | `spikes/vm-pod-host/src/driver.mjs`, over WP3's `VmPodHost` |
+| `createIsolatePodDriver({baseUrl})` | `isolate` | `spikes/isolate-pod-host/src/driver.mjs`, over WP2's Worker routes |
+| `createInPageDriver({podUrl, ...})` | `browser` | `browsermesh-pod/src/browser-host-driver.mjs` — in-page, zero deps, see [§8b](#8b-lane-c--browser-pods) |
+| `createCdpDriver({cdp, podUrl})` | `browser` | `spikes/browser-pod-host/src/driver.mjs` — remote debugging protocol |
+| `createExtensionDriver({chrome})` | `browser` | `spikes/browser-extension-host/src/driver.mjs` — MV3 extension |
+
+The isolate lane's HTTP routes (`spikes/isolate-pod-host/src/routes.mjs`)
+are a 1:1 projection of the same verbs: `GET /pods`,
+`POST /pods/:name/boot`, `GET /pods/:name/status`, `POST /pods/:name/send`,
+`POST /pods/:name/exec` → `405 {code:'ELANE'}`,
+`POST /pods/:name/snapshot|restore` → `501 {code:'ENOTSUP'}`,
+`DELETE /pods/:name`.
+
+### Everything else is a projection
+
+The surfaces here are all re-expressions of this one service, and none of
+them re-implement access control, validation or audit:
+
+| Item | Surface | Projects | Status |
+| --- | --- | --- | --- |
+| 3 | `mesh://` routes | the eight verbs as URL paths | **done**, see below |
+| 4 | `meshctl` LLM tools | the eight verbs as tool definitions | **done**, see below |
+| 5 | external CLI | the eight verbs as subcommands | **done** -- `packages/browsermesh-meshctl` (`meshctl`); see that package's README |
+| 6 | supervisor | `restart` policy + `status`/`spawn`/`drain` in a loop | **done**, see [Supervision](#supervision) below |
+
+A runnable walkthrough of the whole surface —
+spawn/exec/snapshot/restore/drain, a denied stranger, live lifecycle events
+— is [`examples/13-pod-host-service.mjs`](../examples/13-pod-host-service.mjs).
+
+### Supervision
+
+[Issue #185](https://github.com/johnhenry/browsermesh/issues/185) item 6's
+`createPodSupervisor()` (`packages/browsermesh-apps/src/pod-supervisor.mjs`)
+is the last control-surface row: `restart` policy plus `status`/`spawn`/
+`drain` run in a loop, composed from three OTP ideas rather than invented
+fresh:
+
+- **Links** — parent/child pod relationships that cascade on drain, the
+  general form of this doc's own [§7](#7-identity-trust-and-what-hosting-cannot-promise)
+  rule that a hosted pod is a `child`-role pod of its host and
+  `drainPod()` must cascade. A podspec's `links.parent` (`host-protocol.mjs`)
+  implies a `link()` call at `supervise()` time; `drain(parent, {cascade:
+  true})` drains every descendant depth-first (grandchildren, then
+  children, then the parent) and emits `supervisor:cascade` with the full
+  order. A child whose parent exits unexpectedly is drained too — never
+  restarted — unless its own podspec set `restart.policy: 'always'`
+  together with `links.detachOnParentExit: true`, in which case it is left
+  running and restarts on its own, independent of its parent's fate.
+- **Monitors** — `monitor(ref, fn)` fires `fn({ref, event})` for a
+  watched pod's lifecycle/exit events, without the watcher taking any
+  responsibility for restarting it. That includes a synthesized
+  `{reason: 'host-lost', restartable: true}` exit when the pod's host
+  itself disconnects (the `PeerNode`'s own `'peer:disconnect'` signal) —
+  every supervised pod on that host gets one, and the restart policy
+  decides from there. This is "the same lifecycle, two implementations"
+  promise from [§8](#8-lifecycle) paying off: whether a pod left because it
+  crashed or because its whole host vanished, a monitor sees one `exit`
+  event shape either way.
+- **Supervisors** — `podspec.restart` (`never`/`on-failure`/`always`,
+  `maxRestarts`, `backoffMs`) finally gets an implementation. Backoff
+  doubles per attempt, capped at 60s; exceeding `maxRestarts` (default 3)
+  marks the pod `dead` and emits `supervisor:gave-up`.
+
+**The one rule that matters: a restart is a NEW `spawn` request the host
+may refuse.** A restart never calls a driver directly and never bypasses
+`pod-host-service.mjs`'s gate — it re-issues `spawn` through the exact same
+gated `PodHostClient` round trip (via `orchestrator.spawnPod()`, which also
+writes the requester-side `PLACEMENT_AUDIT` trail for free) a fresh spawn
+would use. A host refusing with `EACCES`/`EBUSY`, or a restart whose host
+is itself gone (`reason: 'host-lost'`), is re-placed on a different host
+via `pickHost` (default: the same `pickAutoHost()` selection
+`meshctl_spawn`/`meshctl spawn auto` use) — never retried against the same
+refusing host, "the orchestrator proposes, the host accepts" all the way
+down.
+
+`MeshOrchestrator#getSupervisor()` lazily builds one supervisor per
+orchestrator, and `drainPod(hostPodId)` consults it (without creating one
+it didn't need) so draining a HOST pod cascades into every pod it
+supervises before the pre-existing mesh-peer drain logic runs.
+`meshctl_supervise`/`meshctl_supervised` (`orchestrator.mjs`) and
+`meshctl supervise`/`meshctl supervised`/`meshctl pods crash` (the
+external CLI, dev-only demo path for forcing a restart without waiting on
+a real failure) are both projections of the same supervisor, same as every
+other surface in this section. See
+`packages/browsermesh-apps/README.md`'s "Pod supervisor" section for the
+full API and
+[`examples/16-supervised-hosted-pods.mjs`](../examples/16-supervised-hosted-pods.mjs)
+for a runnable walkthrough: two restarts with doubling backoff, a linked
+child, and a cascaded drain.
+
+**Item 3** lives in `packages/browsermesh-apps/src/pod-host-routes.mjs`
+(`POD_HOST_ROUTES`/`matchPodHostRoute()`, `createPodHostRouter()`,
+`podHostFetch()`) and `pod-host-gateway.mjs`
+(`createPodHostGatewayHandler()`, `serveNodeGateway()`) — the route table,
+the `mesh://` host-side mount (`createPodHostMeshRpcHandler()`, over
+`createMeshRpcService({onRequest})`, NOT a change to `mesh-fetch.mjs`
+itself, which was already composable there), and a Node HTTP gateway for
+driving the same eight verbs from entirely outside the mesh under the
+gateway's own mesh identity. See `packages/browsermesh-apps/README.md`'s
+"Pod host over mesh:// and the HTTP gateway" section for the full route
+table and the gateway's identity caveat, and
+[`examples/14-pod-host-over-mesh-fetch.mjs`](../examples/14-pod-host-over-mesh-fetch.mjs)
+for both transports run end to end against one host.
+
+**Item 4** (`meshctl` LLM tools) does not project all eight verbs 1:1 as
+tools — only the ones a placement-shaped operator action needs:
+`meshctl_spawn`/`meshctl_snapshot`/`meshctl_restore`/`meshctl_hosted_pods`
+(`spawn`/`snapshot`/`restore`/`list`) plus `meshctl_hosts` (a read over
+`MeshOrchestrator`'s new `listPodHosts()`, not a verb at all — it lists
+*hosts*, not pods on one host). `status`/`send`/`exec`/`drain` are reachable
+through `createPodHostClient()` directly, or (for `exec`/`drain` in their
+mesh-peer-level sense) the pre-existing `meshctl_exec`/`meshctl_drain`
+tools, which predate this item and operate on a different gate
+(`mesh-orchestrator.mjs`'s `RISKY_ACTIONS`, not `pod-host-service.mjs`'s own
+`checkAccess()`). `meshctl_spawn`'s `host: 'auto'` auto-selects a host
+matching the requested lane via `listComputeCandidates()`, falling back to
+`listPodHosts()` for the isolate/browser lanes `listComputeCandidates()`
+cannot see (no `exec`, no `compute` capability — see §8a's "Known
+limitation" note in `packages/browsermesh-apps/README.md`'s "Pod host
+service" section). `registerMeshctlBuiltins()`'s `meshctl` text dispatcher
+grew matching `spawn`/`snapshot`/`restore`/`hosted`/`hosts` subcommands.
+See `packages/browsermesh-apps/src/orchestrator.mjs`'s
+`Meshctl{Spawn,Snapshot,Restore,HostedPods,Hosts}Tool` classes,
+`packages/browsermesh-apps/test/meshctl-hosted-pods.test.mjs`, and
+[`examples/15-agent-spawns-hosted-pod.mjs`](../examples/15-agent-spawns-hosted-pod.mjs)
+for a runnable LLM-tool-calling walkthrough.
+
+## 8b. Lane C — browser pods
+
+Lanes A and B host a pod somewhere the REQUESTER does not control (a
+Worker, a microVM). The **browser lane** (`POD_LANE.BROWSER`, issue #185
+item 7) is the opposite case: the host and the hosted pod are both inside
+*someone's own browser* — a tab spawning and controlling windows, iframes,
+and workers that each boot a `Pod`. The verb set, the podspec, and the
+gated/audited service are identical; only the driver changes, and this
+lane has **three** of them, trading how much of the browser they can touch
+for how much setup they need.
+
+```mermaid
+flowchart TB
+  subgraph Browser["One browser"]
+    subgraph InPage["In-page driver (browsermesh-pod/src/browser-host-driver.mjs)"]
+      HostTab["Host tab<br/>createInPageDriver()"]
+      Iframe["iframe pod"]
+      Window["window.open() pod"]
+      Worker["Worker pod"]
+      HostTab -- "iframe.src / postMessage" --> Iframe
+      HostTab -- "window.open() / postMessage" --> Window
+      HostTab -- "new Worker() / postMessage" --> Worker
+      HostTab -. "BroadcastChannel: browser-host:ready" .- Iframe
+      HostTab -. "BroadcastChannel: browser-host:ready" .- Window
+      HostTab -. "BroadcastChannel: browser-host:ready" .- Worker
+    end
+
+    subgraph ExtHost["Extension driver (spikes/browser-extension-host)"]
+      SW["MV3 service worker<br/>createExtensionDriver()"]
+      Tab1["chrome.tabs pod"]
+      SW -- "chrome.tabs.create / sendMessage" --> Tab1
+      SW -. "chrome.scripting.executeScript (exec)" .- Tab1
+    end
+  end
+
+  subgraph Remote["Anywhere with a debugging port"]
+    Operator["Operator process<br/>(spikes/browser-pod-host)<br/>createCdpDriver()"]
+    subgraph HeadlessChrome["Headless Chrome (launchChrome())"]
+      Ctx1["BrowserContext A<br/>(tenant 1)"]
+      Ctx2["BrowserContext B<br/>(tenant 2)"]
+      PodA["pod page"]
+      PodB["pod page"]
+      Ctx1 --> PodA
+      Ctx2 --> PodB
+    end
+    Operator -- "CDP: Target.createTarget, Runtime.evaluate" --> HeadlessChrome
+  end
+
+  subgraph MicroVM["Lane B: a Firecracker microVM (spikes/vm-pod-host)"]
+    Guest["guest agent"]
+    GuestChrome["headless Chrome, driven by createCdpDriver()"]
+    Guest --> GuestChrome
+    GuestChrome -. "same CDP driver, nested" .-> GuestPods["pod pages inside the guest"]
+  end
+
+  Remote -. "Lane B host agent could run the CDP driver\ninside the guest instead of on the host" .-> MicroVM
+```
+
+### The three drivers
+
+| Driver | Needs | Trust model | `exec` | `snapshot`/`restore` |
+| --- | --- | --- | --- | --- |
+| **In-page** (`browser-host-driver.mjs`) | Nothing — a page's own JS | None: the driver IS a page, with no privilege over what it spawns | `ENOTSUP` — no safe way to evaluate in a child from inside the page that hosts it | `ENOTSUP` (IndexedDB soft-snapshot is a documented follow-up) |
+| **CDP** (`spikes/browser-pod-host`) | A `--remote-debugging-port`, raw `WebSocket` | An external operator with full remote control of the browser | **Supported** — `Runtime.evaluate(expression)`, gated by `checkAccess()` like any exec | `ENOTSUP` (not implemented this wave) |
+| **Extension** (`spikes/browser-extension-host`) | An installed MV3 extension | Extension privileges (host permissions, `scripting`) over pages it is allowed to touch | **Supported** — `chrome.scripting.executeScript` in the page's isolated world, gated | `snapshot` ≈ `chrome.tabs.discard` / `restore` ≈ reload — a real pause, but a WEAKER promise than a microVM snapshot (documented honestly in that spike's README, not wired into the standard gated verb set) |
+
+All three answer `spawn`/`status`/`send`/`drain`/`list` and share the same
+lifecycle (`cold → booting → registered → … → draining → gone`). What
+differs is `exec`'s availability — see `host-protocol.mjs`'s
+`POD_LANE_VERBS` doc comment for the full "why `exec` is lane-capable but
+driver-optional" reasoning — and, for the extension driver only, an
+honestly-weaker `snapshot`/`restore` pair kept out of the gated verb set
+on purpose.
+
+### Nesting with Lane B
+
+The CDP driver does not care whether the Chrome it is driving is on the
+operator's own laptop or inside a Lane B microVM guest: `launchChrome()`
+just spawns a binary and speaks WebSocket to it. That means **"Firecracker
+runs headless Chrome runs pod pages"** is not a new capability to build —
+it is this driver, pointed at a Chrome binary a Lane B host agent launched
+inside its own guest instead of on the host. A Lane B `VmPodHost` could,
+in principle, use `createCdpDriver()` as its OWN `exec` implementation for
+a `run.kind: 'command'` pod whose command happens to be "run a browser
+workload" — two lanes' drivers composing rather than a third thing to
+design.
+
+### Trust caveat
+
+**A tab is not a trust boundary against the page it hosts.** The in-page
+driver's `spawn()` creates an iframe/window/worker the same way any script
+on that page could; nothing stops the hosted page from doing anything a
+same-privileged script can already do (reading `document`, making
+requests as the user, etc.) — `postMessage`/`BroadcastChannel` give
+ADDRESSABILITY, not isolation. Running a stranger's code in this lane
+means trusting the page's own content, same as opening any other URL.
+
+For actually-untrusted hosted-pod code, do not reach for the browser
+lane's in-page driver at all: use the **CDP driver inside a microVM**
+(Lane B's isolation, with a real headless Chrome inside it) so a hostile
+pod page is contained by the guest/host boundary Firecracker already
+provides, not by browser same-origin policy. The extension driver sits in
+between — it has no sandbox either, but at least confines itself to pages
+the extension's `host_permissions` were explicitly scoped to.
 
 ## 9. Work packages
 

@@ -1,11 +1,12 @@
 // Run with: node --import ./test/_setup-globals.mjs --test test/mesh-orchestrator-tools.test.mjs
 //
-// Phase 4 of the agent-runtime plan (issues #90/#92): registerOrchestratorTools()/
-// createOrchestratorToolRegistry() (mesh-orchestrator-tools.mjs) wire the 8 real
-// Meshctl*Tool classes (orchestrator.mjs) into a real BrowserToolRegistry
+// Phase 4 of the agent-runtime plan (issues #90/#92), extended by issue #185
+// §8a item 4's hosted-pods control surface: registerOrchestratorTools()/
+// createOrchestratorToolRegistry() (mesh-orchestrator-tools.mjs) wire the 13
+// real Meshctl*Tool classes (orchestrator.mjs) into a real BrowserToolRegistry
 // (compat.mjs, Phase 1) against a real, attached MeshOrchestrator
 // (mesh-orchestrator.mjs, Phase 3). This file proves:
-//   1. all 8 tools register with the expected names/schemas;
+//   1. all 13 tools register with the expected names/schemas;
 //   2. invoking one through the registry really calls through to a real
 //      MeshOrchestrator on a real multi-peer mesh;
 //   3. meshctl_exec/meshctl_deploy/meshctl_drain, reached THROUGH the
@@ -108,11 +109,11 @@ function createStubSignalingTransport() {
 }
 
 // -----------------------------------------------------------------------
-// All 8 tools register with the expected names/schemas.
+// All 15 tools register with the expected names/schemas.
 // -----------------------------------------------------------------------
 
-describe('registerOrchestratorTools: all 8 Meshctl*Tools register correctly', () => {
-  it('registers all 8 tools with the expected names, appearing in registry.listSpecs()', async () => {
+describe('registerOrchestratorTools: all 15 Meshctl*Tools register correctly', () => {
+  it('registers all 15 tools with the expected names, appearing in registry.listSpecs()', async () => {
     const alice = await createTestPeer('alice');
     const mesh = wireFullMesh([alice]);
     const { api } = attachService(mesh[alice.podId], undefined, createOrchestratorService());
@@ -120,7 +121,7 @@ describe('registerOrchestratorTools: all 8 Meshctl*Tools register correctly', ()
     const registry = new BrowserToolRegistry();
     const tools = registerOrchestratorTools(registry, api);
 
-    assert.equal(tools.length, 8);
+    assert.equal(tools.length, 15);
     const specs = registry.listSpecs();
     const names = specs.map((s) => s.name).sort();
     assert.deepEqual(names, [
@@ -129,8 +130,15 @@ describe('registerOrchestratorTools: all 8 Meshctl*Tools register correctly', ()
       'meshctl_drain',
       'meshctl_exec',
       'meshctl_expose',
+      'meshctl_hosted_pods',
+      'meshctl_hosts',
       'meshctl_pods',
+      'meshctl_restore',
+      'meshctl_snapshot',
+      'meshctl_spawn',
       'meshctl_status',
+      'meshctl_supervise',
+      'meshctl_supervised',
       'meshctl_top',
     ]);
 
@@ -155,7 +163,7 @@ describe('registerOrchestratorTools: all 8 Meshctl*Tools register correctly', ()
 
     const registry = createOrchestratorToolRegistry(api);
     assert.ok(registry instanceof BrowserToolRegistry);
-    assert.equal(registry.listSpecs().length, 8);
+    assert.equal(registry.listSpecs().length, 15);
   });
 
   it('throws a clear error when registry is missing register()', () => {
@@ -180,7 +188,7 @@ describe('registerOrchestratorTools: all 8 Meshctl*Tools register correctly', ()
 
     const registry = new BrowserToolRegistry();
     const tools = registerOrchestratorTools(registry, raw);
-    assert.equal(tools.length, 8);
+    assert.equal(tools.length, 15);
 
     // Local-only queries still work fine straight off the raw instance.
     const result = await registry.get('meshctl_pods').execute({});
@@ -413,7 +421,7 @@ describe('createMeshNode({ enableAgentRuntime })', () => {
     assert.equal(node.toolRegistry.listSpecs().length, 1);
   });
 
-  it('pre-populates node.toolRegistry with all 8 Meshctl*Tools when BOTH enableAgentRuntime AND enableOrchestrator are set', async () => {
+  it('pre-populates node.toolRegistry with all 13 Meshctl*Tools when BOTH enableAgentRuntime AND enableOrchestrator are set', async () => {
     const node = await createMeshNode({
       label: 'alice',
       signalingTransport: createStubSignalingTransport(),
@@ -422,7 +430,7 @@ describe('createMeshNode({ enableAgentRuntime })', () => {
       skipBoot: true,
     });
     assert.ok(node.toolRegistry instanceof BrowserToolRegistry);
-    assert.equal(node.toolRegistry.listSpecs().length, 8);
+    assert.equal(node.toolRegistry.listSpecs().length, 15);
     assert.ok(node.toolRegistry.get('meshctl_pods'));
     assert.ok(node.toolRegistry.get('meshctl_exec'));
 

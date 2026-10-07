@@ -1,0 +1,61 @@
+{
+  "name": "@johnhenry/browsermesh-meshctl",
+  "version": "0.1.0",
+  "private": true,
+  "description": "External CLI for the hosted-pods control surface (issue #185 item 5) -- meshctl is itself a pod: it joins the mesh and issues pod-host:request envelopes directly. Private for now; see README's Publishing note.",
+  "type": "module",
+  "main": "./src/index.mjs",
+  "exports": {
+    ".": {
+      "default": "./src/index.mjs"
+    }
+  },
+  "bin": {
+    "meshctl": "./bin/meshctl.mjs"
+  },
+  "files": [
+    "src",
+    "bin",
+    "LICENSE",
+    "README.md"
+  ],
+  "keywords": [
+    "mesh",
+    "p2p",
+    "cli",
+    "pod-host",
+    "hosted-pods"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/johnhenry/browsermesh",
+    "directory": "packages/browsermesh-meshctl"
+  },
+  "homepage": "https://opensource.johnhenry.me/browsermesh/",
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "peerDependencies": {
+    "@johnhenry/browsermesh-primitives": ">=0.2.0 <1.0.0",
+    "@johnhenry/browsermesh-pod": ">=0.1.0 <1.0.0",
+    "@johnhenry/browsermesh-core": ">=0.5.0 <1.0.0",
+    "@johnhenry/browsermesh-apps": ">=0.12.0 <1.0.0",
+    "@johnhenry/browsermesh-transport": ">=0.1.0 <1.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@johnhenry/browsermesh-transport": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@johnhenry/browsermesh-primitives": ">=0.0.1 <1.0.0",
+    "@johnhenry/browsermesh-pod": ">=0.0.1 <1.0.0",
+    "@johnhenry/browsermesh-core": ">=0.1.0 <1.0.0",
+    "@johnhenry/browsermesh-apps": ">=0.0.1 <1.0.0",
+    "@johnhenry/browsermesh-transport": ">=0.1.0 <1.0.0"
+  },
+  "engines": {
+    "node": ">=26.0.0"
+  }
+}
