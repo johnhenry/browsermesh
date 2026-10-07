@@ -10,9 +10,21 @@
  * it runs the normal pod:hello/pod:hello-ack discovery protocol.
  *
  * Routes (all called by the Worker in `worker.mjs` via `stub.fetch(...)`):
- *   POST /boot   — idempotent; boots the pod if not already booted
- *   GET  /status — { podId, kind, role, peers, booted }
+ *   POST /boot   — idempotent; boots the pod if not already booted.
+ *                  Body `{name, spec}`: the normalized podspec is persisted
+ *                  in `ctx.storage` so `/status` can report it back and a
+ *                  restarted DO still knows what it was asked to run.
+ *   GET  /status — the protocol's pod-status shape (`name`, `lane`, `state`,
+ *                  `spec`, `createdAt`, `updatedAt`, `podId`) PLUS the
+ *                  WP2-era fields (`kind`, `role`, `peers`, `booted`) the
+ *                  original end-to-end test asserts on.
  *   POST /send   — { to, payload } → pod.send(to, payload)
+ *   POST /drain  — shut the pod down, close the transport, mark it `gone`
+ *
+ * One DO instance, `idFromName('__roster__')`, is used by the Worker as a
+ * plain list of spawned pod names rather than as a pod (a DO namespace
+ * cannot be enumerated). It answers the `/roster*` routes below and never
+ * boots anything.
  *
  * Keepalive: `ctx.storage.setAlarm()` every 30s; `alarm()` re-arms itself
  * and nudges the transport to reconnect if it dropped.
@@ -23,7 +35,10 @@
  * Hibernation API only covers WebSockets the DO *accepts* as a server.
  */
 
-import { Pod, TransportDiscovery, POD_MESSAGE, WebSocketTransport } from '@johnhenry/browsermesh-pod'
+import {
+  Pod, TransportDiscovery, POD_MESSAGE, WebSocketTransport,
+  POD_LANE, POD_LIFECYCLE,
+} from '@johnhenry/browsermesh-pod'
 import { WorkerClientWebSocket } from './worker-websocket.mjs'
 import { loadOrCreateIdentity } from './identity-jwk.mjs'
 
@@ -76,7 +91,9 @@ export class PodObject extends DurableObject {
     const url = new URL(request.url)
     try {
       if (request.method === 'POST' && url.pathname === '/boot') {
-        return Response.json(await this.#boot())
+        const raw = await request.text()
+        const body = raw.trim().length > 0 ? JSON.parse(raw) : {}
+        return Response.json(await this.#boot(body))
       }
       if (request.method === 'GET' && url.pathname === '/status') {
         return Response.json(await this.#status())
@@ -85,7 +102,23 @@ export class PodObject extends DurableObject {
         const body = await request.json()
         return Response.json(await this.#send(body))
       }
-      return new Response('not found', { status: 404 })
+      if (request.method === 'POST' && url.pathname === '/drain') {
+        return Response.json(await this.#drain())
+      }
+      // Roster routes — only ever addressed on the '__roster__' instance.
+      if (request.method === 'GET' && url.pathname === '/roster') {
+        return Response.json({ names: (await this.ctx.storage.get('roster')) || [] })
+      }
+      if (request.method === 'POST' && (url.pathname === '/roster/add' || url.pathname === '/roster/remove')) {
+        const { name } = await request.json()
+        const names = new Set((await this.ctx.storage.get('roster')) || [])
+        if (url.pathname.endsWith('/add')) names.add(name)
+        else names.delete(name)
+        const next = [...names]
+        await this.ctx.storage.put('roster', next)
+        return Response.json({ names: next })
+      }
+      return Response.json({ code: 'ENOENT', message: 'not found' }, { status: 404 })
     } catch (err) {
       return Response.json(
         { error: String((err && err.stack) || err) },
@@ -114,7 +147,19 @@ export class PodObject extends DurableObject {
 
   // ── Routes ───────────────────────────────────────────────────────
 
-  async #boot() {
+  async #boot(body = {}) {
+    // Persist what we were asked to run BEFORE booting, so a crashed boot
+    // still leaves a record a later /status can report.
+    const existing = (await this.ctx.storage.get('record')) || null
+    const record = {
+      name: body.name ?? existing?.name ?? null,
+      spec: body.spec ?? existing?.spec ?? null,
+      createdAt: existing?.createdAt ?? Date.now(),
+      updatedAt: Date.now(),
+      state: POD_LIFECYCLE.BOOTING,
+    }
+    await this.ctx.storage.put('record', record)
+
     if (this.#bootPromise) return this.#bootPromise
     this.#bootPromise = this.#doBoot().catch((err) => {
       // Allow a subsequent /boot call to retry after a failure.
@@ -126,6 +171,7 @@ export class PodObject extends DurableObject {
 
   async #doBoot() {
     if (this.#pod && this.#pod.state === 'ready') {
+      await this.#updateRecord({ state: POD_LIFECYCLE.REGISTERED })
       return { ...(await this.#statusSnapshot()), alreadyBooted: true, bootMs: 0 }
     }
 
@@ -177,6 +223,7 @@ export class PodObject extends DurableObject {
     this.#transport = transport
     this.#bootedAtMs = Date.now()
 
+    await this.#updateRecord({ state: POD_LIFECYCLE.REGISTERED })
     await this.ctx.storage.setAlarm(Date.now() + KEEPALIVE_MS)
 
     return {
@@ -193,12 +240,22 @@ export class PodObject extends DurableObject {
     // podId if we have one so callers can tell "known but asleep" apart
     // from "never booted".
     const stored = await this.ctx.storage.get('identity')
-    return { podId: stored ? stored.podId : null, kind: null, role: null, peers: [], booted: false }
+    return {
+      ...(await this.#protocolFields()),
+      podId: stored ? stored.podId : null,
+      kind: null,
+      role: null,
+      peers: [],
+      booted: false,
+    }
   }
 
   async #statusSnapshot() {
-    if (!this.#pod) return { podId: null, kind: null, role: null, peers: [], booted: false }
+    if (!this.#pod) {
+      return { ...(await this.#protocolFields()), podId: null, kind: null, role: null, peers: [], booted: false }
+    }
     return {
+      ...(await this.#protocolFields()),
       podId: this.#pod.podId,
       kind: this.#pod.kind,
       role: this.#pod.role,
@@ -206,6 +263,64 @@ export class PodObject extends DurableObject {
       booted: this.#pod.state === 'ready',
       bootedAtMs: this.#bootedAtMs,
     }
+  }
+
+  /**
+   * The `PodHostStatus` fields of the shared protocol, read back out of
+   * durable storage. Merged UNDER the WP2-era fields above so `podId`
+   * always reflects the live pod when there is one.
+   * @returns {Promise<object>}
+   */
+  async #protocolFields() {
+    const record = (await this.ctx.storage.get('record')) || null
+    return {
+      name: record?.name ?? null,
+      lane: POD_LANE.ISOLATE,
+      state: record?.state ?? POD_LIFECYCLE.COLD,
+      spec: record?.spec ?? null,
+      createdAt: record?.createdAt ?? 0,
+      updatedAt: record?.updatedAt ?? 0,
+    }
+  }
+
+  /**
+   * @param {object} patch
+   * @returns {Promise<object>} The merged record.
+   */
+  async #updateRecord(patch) {
+    const record = { ...((await this.ctx.storage.get('record')) || {}), ...patch, updatedAt: Date.now() }
+    await this.ctx.storage.put('record', record)
+    return record
+  }
+
+  /**
+   * Drain: shut the pod down (which sends `pod:goodbye` to its peers),
+   * close the transport so the relay/signaling sockets go away, cancel the
+   * keepalive alarm, and mark the pod `gone`. Idempotent.
+   * @returns {Promise<object>}
+   */
+  async #drain() {
+    if (this.#pod) {
+      try {
+        await this.#pod.shutdown({ silent: false })
+      } catch (err) {
+        console.log(`[pod-object] drain: shutdown failed: ${err && err.message}`)
+      }
+    }
+    if (this.#transport) {
+      try {
+        this.#transport.close()
+      } catch (err) {
+        console.log(`[pod-object] drain: transport close failed: ${err && err.message}`)
+      }
+    }
+    this.#pod = null
+    this.#transport = null
+    this.#bootPromise = null
+    this.#bootedAtMs = null
+    await this.ctx.storage.deleteAlarm()
+    await this.#updateRecord({ state: POD_LIFECYCLE.GONE })
+    return { ...(await this.#protocolFields()), podId: null, kind: null, role: null, peers: [], booted: false }
   }
 
   async #send({ to, payload }) {

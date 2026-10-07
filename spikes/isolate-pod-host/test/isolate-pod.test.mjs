@@ -47,8 +47,12 @@ import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import fs from 'node:fs'
 
-import { Pod, TransportDiscovery, WebSocketTransport } from '../../../packages/browsermesh-pod/src/index.mjs'
+import {
+  Pod, TransportDiscovery, WebSocketTransport,
+  POD_HOST_ERROR, POD_LANE, POD_LIFECYCLE,
+} from '../../../packages/browsermesh-pod/src/index.mjs'
 import { PodIdentity } from '../../../packages/browsermesh-primitives/src/index.mjs'
+import { createIsolatePodDriver } from '../src/driver.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const SPIKE_ROOT = path.resolve(__dirname, '..')
@@ -314,6 +318,53 @@ test('DO pod boots and a Node pod discovers it through the relay within 10s', as
   timings.messageRttMs = rtt
   t.diagnostic(`message RTT through relay: ${rtt}ms`)
   assert.ok(rtt >= 0 && rtt < 5000, `RTT out of expected range: ${rtt}ms`)
+})
+
+test('the pod host verb routes answer correctly through a real cf dev', async (t) => {
+  if (!cfDevAvailable) {
+    t.skip(skipReason)
+    return
+  }
+
+  // The same Node-side driver `browsermesh-apps`' pod host service would
+  // dispatch to, pointed at the real Worker rather than a fake fetch (which
+  // is what test/routes.test.mjs covers). This is the only place the route
+  // table, the Durable Object's storage-backed pod record and
+  // createIsolatePodDriver()'s error translation are exercised together on
+  // real workerd.
+  const driver = createIsolatePodDriver({ baseUrl: `http://localhost:${workerPort}` })
+
+  assert.equal(driver.lane, POD_LANE.ISOLATE)
+
+  const spawned = await driver.spawn({
+    name: 'beta',
+    lane: POD_LANE.ISOLATE,
+    run: { kind: 'skill', ref: 'greeter' },
+    labels: { suite: 'wp2' },
+  })
+  assert.equal(spawned.name, 'beta')
+  assert.equal(spawned.state, POD_LIFECYCLE.REGISTERED)
+  assert.equal(spawned.spec.labels.suite, 'wp2')
+  assert.equal(spawned.spec.restart.policy, 'never')
+
+  const status = await driver.status('beta')
+  assert.equal(status.booted, true)
+  assert.equal(status.podId, spawned.podId)
+
+  const names = (await driver.list()).map((pod) => pod.name).sort()
+  assert.deepEqual(names, ['alpha', 'beta'], `unexpected roster: ${JSON.stringify(names)}`)
+
+  await assert.rejects(driver.exec('beta', ['ls']), (err) => {
+    assert.equal(err.code, POD_HOST_ERROR.ELANE)
+    return true
+  })
+  for (const call of [() => driver.snapshot('beta'), () => driver.restore('beta')]) {
+    await assert.rejects(call(), (err) => err.code === POD_HOST_ERROR.ENOTSUP)
+  }
+
+  assert.equal((await driver.drain('beta')).state, POD_LIFECYCLE.GONE)
+  assert.deepEqual((await driver.list()).map((pod) => pod.name), ['alpha'])
+  t.diagnostic('verb routes exercised against real workerd: spawn/status/list/exec/snapshot/restore/drain')
 })
 
 test('report measured timings', (t) => {
