@@ -27,10 +27,17 @@
  *     invoking `callback(pubKey, envelope)` only for envelopes whose `.type`
  *     matches `types` (a single string or an array of strings). Returns an
  *     unsubscribe function, exactly like the underlying `onIncomingData()`.
- *   - `ctx.sendTo(pubKey, type, payload)` -- wraps `peerNode.sendTo()`,
+ *     A real transport carries an envelope as JSON text, so a string that
+ *     is a JSON object/array is parsed before the `type` check -- `callback`
+ *     always receives the parsed envelope object.
+ *   - `ctx.sendTo(pubKey, type, payload, { channel })` -- wraps `peerNode.sendTo()`,
  *     merging `{ type, ...payload }` into the envelope sent, matching the
  *     `{ type: envelopeType, ...payload }` shape both `mesh-sync.mjs` and
- *     `mesh-relay-host.mjs` already send.
+ *     `mesh-relay-host.mjs` already send. The optional fourth argument
+ *     `{ channel: 'control'|'bulk' }` picks the transport's data channel
+ *     (default `'control'`); use `'bulk'` for large payloads such as file
+ *     chunks so they cannot queue in front of control traffic. Transports
+ *     without a bulk lane ignore it.
  *   - `ctx.registry` -- the node's `PeerRegistry`, for `checkAccess()`.
  *   - `ctx.peerNode` -- the raw `PeerNode`, for anything not covered above.
  *   - `ctx.network` -- the `VirtualNetwork` passed to `attachService()`, if
@@ -125,6 +132,8 @@
  *
  * No browser-only imports at module level.
  */
+
+import { decodeWireData } from './internal/wire-envelope.mjs'
 
 /** Default scheme a descriptor's `createBackend` backend is registered under, if `backendScheme` is omitted. */
 const DEFAULT_BACKEND_SCHEME = 'svc'
@@ -226,8 +235,12 @@ function createEventBus() {
  * @property {(types: string|string[], callback: (pubKey: string, envelope: object) => void) => (() => void)} onIncomingData
  *   Envelope-type-filtered subscription. `callback` only fires for envelopes
  *   whose `.type` is in `types`. Returns an unsubscribe function.
- * @property {(pubKey: string, type: string, payload?: object) => Promise<void>} sendTo
+ * @property {(pubKey: string, type: string, payload?: object, opts?: { channel?: 'control'|'bulk' }) => Promise<void>} sendTo
  *   Sends `{ type, ...payload }` to `pubKey` via `peerNode.sendTo()`.
+ *   `opts.channel` picks the transport's data channel: `'control'` (the
+ *   default) or `'bulk'` (the second, unordered channel meant for large
+ *   payloads such as file chunks, so they cannot queue in front of control
+ *   traffic). A transport with no bulk lane ignores it. See `PeerNode.sendTo()`.
  * @property {(event: string, data?: object) => void} emit
  *   Publishes a curated, meaningful state-transition event for anything
  *   subscribed via `attachService()`'s returned handle (`handle.on()`/
@@ -286,7 +299,12 @@ function createServiceContext({ peerNode, network, eventBus }) {
 
     onIncomingData(types, callback) {
       const typeSet = new Set(Array.isArray(types) ? types : [types])
-      return peerNode.onIncomingData((pubKey, data) => {
+      return peerNode.onIncomingData((pubKey, rawData) => {
+        // A real transport (RTCDataChannel, WebSocket) can only carry
+        // strings/binary, so an envelope may arrive as its JSON text --
+        // parse it before the `type` check. Already-parsed objects (every
+        // in-process node, and transports that parse for us) pass through.
+        const data = decodeWireData(rawData)
         if (!data || typeof data !== 'object' || !typeSet.has(data.type)) return
         // `peerNode.onIncomingData()`'s own dispatch loop only catches a
         // SYNCHRONOUS throw from this callback. Every real handler in this
@@ -308,8 +326,12 @@ function createServiceContext({ peerNode, network, eventBus }) {
       })
     },
 
-    async sendTo(pubKey, type, payload = {}) {
-      await peerNode.sendTo(pubKey, { type, ...payload })
+    async sendTo(pubKey, type, payload = {}, { channel } = {}) {
+      // `channel` is forwarded only when the caller picked one, so a node
+      // (or duck-typed test double) that predates the option sees exactly
+      // the two-argument call it always did.
+      if (channel === undefined) await peerNode.sendTo(pubKey, { type, ...payload })
+      else await peerNode.sendTo(pubKey, { type, ...payload }, { channel })
     },
 
     emit(event, data) {

@@ -24,6 +24,7 @@ Extracted from the private `clawser` monorepo (previously `packages/browsermesh-
 |--------|-------------|
 | transport | `MeshTransport`, `MockMeshTransport`, `MeshTransportNegotiator` |
 | websocket | `WebSocketTransport`, `WebRTCTransport`, `WebTransportTransport`, `NATTraversal`, `TransportFactory` |
+| wire-data | `encodeWireData`, `isWireNative` |
 | webrtc | `WebRTCPeerConnection`, `WebRTCMeshManager`, `WebRTCTransportAdapter` |
 | webtransport | `WebTransportBridge`, `WebTransportAdapterFactory` |
 | relay | `MeshRelayClient`, `MockRelayServer` |
@@ -45,6 +46,20 @@ npm install @johnhenry/browsermesh-transport @johnhenry/browsermesh-primitives
 ```js
 import { MeshTransport, WebSocketTransport, StreamMultiplexer } from '@johnhenry/browsermesh-transport';
 ```
+
+## What `send()` puts on the wire
+
+`RTCDataChannel.send()` and `WebSocket.send()` accept only a string or binary
+and quietly turn anything else into the text `"[object Object]"`. Every
+transport here therefore sends strings and binary (`ArrayBuffer`, typed arrays,
+`Blob`) unchanged and any other value as its JSON text (`encodeWireData()`; it
+throws a `TypeError` for `undefined` or a function rather than send the text
+`"undefined"`). The receiving side gets a string; a consumer that wants objects
+parses it (`@johnhenry/browsermesh-apps`' `ctx.onIncomingData()` does). A custom
+`MeshTransport` should follow the same rule.
+
+`WebRTCTransport.send(data, { channel })` takes `'control'` (default) or
+`'bulk'` and falls back to control when the bulk channel is not open.
 
 ## License
 

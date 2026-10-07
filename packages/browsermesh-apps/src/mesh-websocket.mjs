@@ -229,6 +229,7 @@
  */
 
 import { createLazyRequire } from './internal/lazy-node-require.mjs'
+import { decodeWireData } from './internal/wire-envelope.mjs'
 
 /** Default `envelope.type` used to route mesh-websocket payloads on the shared `onIncomingData()` bus. */
 const DEFAULT_ENVELOPE_TYPE = 'mesh-websocket'
@@ -434,7 +435,8 @@ export class BrowserMeshWebSocket {
   // -----------------------------------------------------------------------
 
   #subscribe() {
-    this.#unsubscribe = this.#peerNode.onIncomingData((fromPubKey, data) => {
+    this.#unsubscribe = this.#peerNode.onIncomingData((fromPubKey, rawData) => {
+      const data = decodeWireData(rawData)
       if (!data || typeof data !== 'object') return
       if (data.type !== this.#envelopeType || data.connectionId !== this.#connectionId) return
       this.#handleEnvelope(fromPubKey, data)

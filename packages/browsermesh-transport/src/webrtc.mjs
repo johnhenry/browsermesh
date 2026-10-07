@@ -14,6 +14,7 @@
 
 import { MeshTransport } from './transport.mjs'
 import { silentCatch } from './silent-catch.mjs'
+import { encodeWireData } from './wire-data.mjs'
 
 // ---------------------------------------------------------------------------
 // Feature detection
@@ -544,9 +545,9 @@ export class WebRTCPeerConnection {
     if (dc.readyState !== 'open') {
       throw new Error('Data channel not open')
     }
-    const str = typeof data === 'string' ? data : JSON.stringify(data)
+    const str = encodeWireData(data)
     dc.send(str)
-    this.#stats.bytesSent += str.length
+    this.#stats.bytesSent += str.length ?? str.byteLength ?? str.size ?? 0
     this.#stats.messagesOut += 1
   }
 

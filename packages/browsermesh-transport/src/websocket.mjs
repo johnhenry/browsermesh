@@ -1,4 +1,5 @@
 import { silentCatch } from './silent-catch.mjs'
+import { encodeWireData } from './wire-data.mjs'
 /**
 // STATUS: INTEGRATED — wired into ClawserPod lifecycle, proven via E2E testing
  * clawser-mesh-websocket.js -- WebSocket, WebRTC & WebTransport Adapters.
@@ -201,14 +202,18 @@ export class WebSocketTransport {
   }
 
   /**
-   * Send data over the WebSocket.
+   * Send data over the WebSocket. Strings and binary go out verbatim; any
+   * other value (an envelope object) is sent as its JSON text -- a raw
+   * `WebSocket.send(object)` would transmit the string `"[object Object]"`.
+   * See `wire-data.mjs`.
    * @param {*} data
    */
   send(data) {
     if (!this.connected) throw new Error('Not connected');
-    this.#ws.send(data);
+    const wire = encodeWireData(data);
+    this.#ws.send(wire);
     this.#stats.messagesSent++;
-    this.#stats.bytesOut += byteLength(data);
+    this.#stats.bytesOut += byteLength(wire);
   }
 
   /**
@@ -691,7 +696,10 @@ export class WebRTCTransport {
   }
 
   /**
-   * Send data over a data channel.
+   * Send data over a data channel. Strings and binary go out verbatim; any
+   * other value (an envelope object) is sent as its JSON text -- a raw
+   * `RTCDataChannel.send(object)` would transmit the string
+   * `"[object Object]"`. See `wire-data.mjs`.
    * @param {*} data
    * @param {object} [opts]
    * @param {'control'|'bulk'} [opts.channel='control'] - `'control'` is the
@@ -710,9 +718,10 @@ export class WebRTCTransport {
       ? this.#bulkChannel
       : this.#dataChannel;
     if (!dc) throw new Error('Not connected');
-    dc.send(data);
+    const wire = encodeWireData(data);
+    dc.send(wire);
     this.#stats.messagesSent++;
-    this.#stats.bytesOut += byteLength(data);
+    this.#stats.bytesOut += byteLength(wire);
   }
 
   /**
@@ -943,12 +952,13 @@ export class WebTransportTransport {
    */
   async send(data) {
     if (!this.connected) throw new Error('Not connected');
-    const encoded = typeof data === 'string'
-      ? new TextEncoder().encode(data)
-      : data;
+    const wire = encodeWireData(data);
+    const encoded = typeof wire === 'string'
+      ? new TextEncoder().encode(wire)
+      : wire;
     await this.#writer.write(encoded);
     this.#stats.messagesSent++;
-    this.#stats.bytesOut += byteLength(data);
+    this.#stats.bytesOut += byteLength(wire);
   }
 
   /**

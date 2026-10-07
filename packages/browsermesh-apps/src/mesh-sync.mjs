@@ -26,6 +26,7 @@
  */
 
 import { MeshSyncEngine, IndexedDBSyncStorage } from '@johnhenry/browsermesh-sync'
+import { decodeWireData } from './internal/wire-envelope.mjs'
 
 /** Default `envelope.type` used to route sync payloads on the shared `onIncomingData()` bus. */
 const DEFAULT_ENVELOPE_TYPE = 'mesh-sync'
@@ -169,6 +170,7 @@ export class MeshSyncBinding {
    * @param {*} data
    */
   #handleIncoming(pubKey, data) {
+    data = decodeWireData(data)
     if (!data || typeof data !== 'object' || data.type !== this.#envelopeType) return
     const { docId, docType, payload } = data
     if (!docId || !payload) return
