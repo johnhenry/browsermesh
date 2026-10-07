@@ -23,6 +23,7 @@ export * from './peer-files.mjs';
 export * from './peer-health.mjs';
 export * from './peer-ipfs.mjs';
 export * from './peer-node.mjs';
+export * from './peer-node-transport.mjs';
 export * from './signaling.mjs';
 export * from './webrtc-negotiator.mjs';
 export * from './mesh-bootstrap.mjs';

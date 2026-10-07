@@ -553,6 +553,14 @@ export class PeerNode {
    * @param {object} [opts]
    * @param {string} [opts.connectionId] - Target this specific connection's
    *   session (issue #116) rather than "most recently created".
+   * @param {'control'|'bulk'} [opts.channel] - Which of the transport's data
+   *   channels to send on. Omit (or pass `'control'`) for the ordered control
+   *   lane; `'bulk'` selects the second, unordered `mesh-bulk` channel, so
+   *   large payloads (file/torrent chunks) cannot queue in front of control
+   *   traffic. Passed through as `transport.send(data, { channel })` only
+   *   when given; a transport with no bulk lane ignores it (the WebRTC
+   *   transport falls back to its control channel when the bulk channel is
+   *   not open). Any other value throws a `TypeError`.
    * @returns {Promise<void>} Resolves when the underlying transport
    *   has accepted the send (transport-defined; some are fire-and-
    *   forget, others await an ack).
@@ -560,8 +568,11 @@ export class PeerNode {
    * @example
    *   await peerNode.sendTo('podid_abc', JSON.stringify({ type: 'ping' }));
    */
-  async sendTo(pubKey, data, { connectionId } = {}) {
+  async sendTo(pubKey, data, { connectionId, channel } = {}) {
     this.#ensureRunning('sendTo');
+    if (channel !== undefined && channel !== 'control' && channel !== 'bulk') {
+      throw new TypeError(`PeerNode.sendTo: unknown channel ${JSON.stringify(channel)} (expected 'control' or 'bulk')`);
+    }
     let session = null;
     for (const [, s] of this.#sessions) {
       if (s.pubKey !== pubKey || s.state !== 'active') continue;
@@ -575,7 +586,86 @@ export class PeerNode {
     if (!session.transportInstance || typeof session.transportInstance.send !== 'function') {
       throw new Error(`PeerNode.sendTo: session for ${pubKey} has no transport.send`);
     }
-    return session.transportInstance.send(data);
+    return channel === undefined
+      ? session.transportInstance.send(data)
+      : session.transportInstance.send(data, { channel });
+  }
+
+  /**
+   * Send `data` to every connected peer (one active session per peer, the
+   * most recently created one -- the same session `sendTo(pubKey, data)`
+   * would pick), fanning out through `sendTo()` so each send gets the same
+   * session selection, `channel` handling and error behaviour as a direct
+   * one.
+   *
+   * Errors are collected, never thrown: one dead peer must not stop the
+   * message reaching the others. A peer whose send throws or rejects is
+   * reported in `failed` and the rest carry on.
+   *
+   * Emits a `'broadcast'` event (payload: the result object) after the
+   * fan-out settles.
+   *
+   * @param {*} data - Wire payload, exactly as for `sendTo()`.
+   * @param {object} [opts]
+   * @param {'control'|'bulk'} [opts.channel] - As for `sendTo()`.
+   * @param {string[]|Set<string>|((pubKey: string) => boolean)} [opts.exclude]
+   *   Peers to skip: a list/Set of pubKeys, or a predicate returning true to
+   *   skip. (A node never has a session with itself, so there is no need to
+   *   exclude yourself.)
+   * @param {number} [opts.concurrency=8] - Max sends in flight at once.
+   *   `1` sends strictly one after another.
+   * @returns {Promise<{ sent: string[], failed: { pubKey: string, error: string }[] }>}
+   *   `sent` lists the pubKeys whose send resolved, `failed` those whose send
+   *   threw or rejected. Both are in session order. With no connected peers
+   *   both are empty (not an error).
+   *
+   * @example
+   *   const { sent, failed } = await peerNode.broadcast({ type: 'hello' })
+   */
+  async broadcast(data, { channel, exclude, concurrency = 8 } = {}) {
+    this.#ensureRunning('broadcast');
+    if (channel !== undefined && channel !== 'control' && channel !== 'bulk') {
+      throw new TypeError(`PeerNode.broadcast: unknown channel ${JSON.stringify(channel)} (expected 'control' or 'bulk')`);
+    }
+    const skip = typeof exclude === 'function'
+      ? exclude
+      : (() => { const set = new Set(exclude || []); return (pk) => set.has(pk); })();
+
+    // One target per peer, in first-session order, however many sessions it has.
+    const targets = [];
+    const seen = new Set();
+    for (const s of this.#sessions.values()) {
+      if (s.state !== 'active' || seen.has(s.pubKey)) continue;
+      if (!s.transportInstance || typeof s.transportInstance.send !== 'function') continue;
+      seen.add(s.pubKey);
+      if (skip(s.pubKey)) continue;
+      targets.push(s.pubKey);
+    }
+
+    const outcome = new Map();
+    const limit = Math.max(1, Math.floor(Number(concurrency)) || 1);
+    let next = 0;
+    const worker = async () => {
+      while (next < targets.length) {
+        const pubKey = targets[next++];
+        try {
+          await this.sendTo(pubKey, data, channel === undefined ? undefined : { channel });
+          outcome.set(pubKey, null);
+        } catch (err) {
+          outcome.set(pubKey, err?.message || String(err));
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(limit, targets.length) }, worker));
+
+    const result = { sent: [], failed: [] };
+    for (const pubKey of targets) {
+      const error = outcome.get(pubKey);
+      if (error === null) result.sent.push(pubKey);
+      else result.failed.push({ pubKey, error });
+    }
+    this.#emit('broadcast', result);
+    return result;
   }
 
   /**
@@ -771,6 +861,8 @@ export class PeerNode {
    *     those that don't. See issue #110.
    *   - 'peer:transport-error' — same, for onError(). Payload:
    *     `{pubKey, sessionId, transport, error}`.
+   *   - 'broadcast'       — fired after a `broadcast()` fan-out settles.
+   *     Payload: `{sent, failed}` (see `broadcast()`).
    *   - 'boot'            — fired after successful boot
    *   - 'shutdown'        — fired after shutdown
    *

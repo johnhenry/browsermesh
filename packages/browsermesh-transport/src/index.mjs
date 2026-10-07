@@ -10,3 +10,4 @@ export * from './cross-origin.mjs';
 export * from './wsh-bridge.mjs';
 export * from './wisp.mjs';
 export * from './channel-relay.mjs';
+export * from './wire-data.mjs';

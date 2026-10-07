@@ -51,6 +51,7 @@
  */
 
 import { createLazyRequire } from './internal/lazy-node-require.mjs'
+import { decodeWireData } from './internal/wire-envelope.mjs'
 
 /** Default `envelope.type` used to route relay payloads on the shared `onIncomingData()` bus. */
 const DEFAULT_ENVELOPE_TYPE = 'mesh-relay'
@@ -222,6 +223,7 @@ function resolveMeshRelayBackendClass() {
 
   /** @param {*} data */
   async #handleIncoming(data) {
+    data = decodeWireData(data)
     if (!data || typeof data !== 'object' || data.type !== this.#envelopeType) return
     const { op, connId } = data
     if (!connId || typeof connId !== 'string') return

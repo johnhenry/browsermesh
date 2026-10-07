@@ -64,8 +64,12 @@ touching `PeerNode` internals directly:
 - `ctx.onIncomingData(types, callback)` — envelope-type-filtered
   subscription. `callback(pubKey, envelope)` only fires for envelopes whose
   `.type` matches `types` (string or array). Returns an unsubscribe function.
-- `ctx.sendTo(pubKey, type, payload)` — sends `{ type, ...payload }` via
-  `peerNode.sendTo()`.
+  Over a real data channel an envelope travels as JSON text; `ctx` parses a
+  JSON object/array string before matching, so `envelope` is always the parsed
+  object.
+- `ctx.sendTo(pubKey, type, payload, { channel })` — sends `{ type, ...payload }`
+  via `peerNode.sendTo()`. `channel` is `'control'` (default) or `'bulk'`; see
+  "the bulk lane" below.
 - `ctx.registry` — the node's `PeerRegistry`, for `checkAccess()`.
 - `ctx.peerNode` / `ctx.network` — escape hatches for anything not covered
   above.
@@ -119,6 +123,18 @@ not by a second transport mechanism.**
   future revision could swap in raw binary DataChannel frames with real
   backpressure without touching any other phase's contract, because nothing
   outside `chunk-replication.mjs` depends on *how* the bytes moved.
+
+  **The bulk lane.** The data plane no longer shares a queue with the control
+  plane: the WebRTC transport has a second, unordered `mesh-bulk` data channel,
+  and `ctx.sendTo(pubKey, type, payload, { channel: 'bulk' })` (or
+  `peerNode.sendTo(pubKey, data, { channel: 'bulk' })`) puts a message on it,
+  so a burst of chunks cannot hold up a grant or an ack behind it. Chunk
+  replication's `chunk-push` / `chunk-fetch-response` and the torrent
+  service's `chunk-response` use it; requests and acks stay on control. A
+  transport without a bulk lane ignores the option and the WebRTC transport
+  falls back to control when the bulk channel is not open, so it is safe to
+  ask for. A new service should send its large or bursty payloads this way and
+  everything else on the default lane.
 
 **Why not `PeerSession`/`peer-files.mjs`'s `FileClient`?** The CloudStorage
 plan's own original text suggested investigating `peer-files.mjs`'s existing

@@ -44,6 +44,8 @@
  */
 
 /** Default `envelope.type` used to route relay payloads on the shared `onIncomingData()` bus. */
+import { decodeWireData } from './internal/wire-envelope.mjs'
+
 const DEFAULT_ENVELOPE_TYPE = 'mesh-relay'
 
 // ---------------------------------------------------------------------------
@@ -193,6 +195,7 @@ export class MeshRelayHost {
    * @param {*} data
    */
   async #handleIncoming(fromPubKey, data) {
+    data = decodeWireData(data)
     if (!data || typeof data !== 'object' || data.type !== this.#envelopeType) return
     const { op, connId } = data
     if (!connId || typeof connId !== 'string') return

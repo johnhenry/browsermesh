@@ -19,6 +19,7 @@ Application layer for BrowserMesh: marketplace, chat, payments, compute orchestr
 - [CloudStorage: the ergonomic SDK](#cloudstorage-the-ergonomic-sdk)
 - [Torrent service: durable stores, authorization and serve limits](#torrent-service-durable-stores-authorization-and-serve-limits)
 - [Putting it all together: sync + kernel-gated mesh + relay on one connection](#putting-it-all-together-sync--kernel-gated-mesh--relay-on-one-connection)
+- [Sending to peers: wire format, the bulk lane and `broadcast()`](#sending-to-peers-wire-format-the-bulk-lane-and-broadcast)
 - [`fetch()`/`WebSocket`-shaped mesh access: `browserMeshFetch` and `BrowserMeshWebSocket`](#fetchwebsocket-shaped-mesh-access-browsermeshfetch-and-browsermeshwebsocket)
   - [`browserMeshFetch`](#browsermeshfetch)
   - [`BrowserMeshWebSocket`](#browsermeshwebsocket)
@@ -62,6 +63,7 @@ Extracted from the private `clawser` monorepo (previously `packages/browsermesh-
 | peer-health | `HealthMonitor`, `AutoMigrator` |
 | peer-ipfs | `IPFSStore` (also exported as `MeshLocalCidStore`): a mesh-local content-addressed store. CIDs are SHA-256 hex digests, not IPFS CIDs, and nothing talks to the IPFS network |
 | peer-node | `PeerNode` |
+| peer-node-transport | `createPeerNodeTransport` |
 | peer-payments | `CreditLedger`, `WebLNProvider` |
 | peer-registry | `PeerRegistry` |
 | peer-routing | `MeshRouter`, `ServerSharing` |
@@ -419,6 +421,76 @@ connection, including `mesh-sync`/`mesh-relay`-typed envelopes not meant for
 it (harmless -- those envelopes are just plain objects with a `.type` field
 tenant code can filter on itself if it cares, but worth knowing rather than
 assuming the view is pre-filtered).
+
+## Sending to peers: wire format, the bulk lane and `broadcast()`
+
+**What goes on the wire.** A real transport (`RTCDataChannel`, `WebSocket`)
+carries only strings and binary. `PeerNode.sendTo(pubKey, envelopeObject)` and
+`ctx.sendTo()` hand the transport an object; the transports in
+`@johnhenry/browsermesh-transport` encode it as JSON text (strings and binary
+go out unchanged -- see `encodeWireData()` there), and a service receives it
+back as the parsed object through `ctx.onIncomingData()`. That parse accepts
+either form, so it works for transports that deliver text and for in-process
+nodes that pass objects. `PeerNode.onIncomingData()` is the raw bus: it hands
+subscribers exactly what the transport delivered, so a direct subscriber that
+wants objects should parse JSON-object text itself. If you write your own
+transport, make `send()` follow the same rule -- forwarding an object to
+`RTCDataChannel.send()` turns it into the text `"[object Object]"` with no
+error.
+
+**The bulk lane.** The WebRTC transport opens a second, unordered `mesh-bulk`
+data channel so a large payload does not sit in front of control traffic.
+Select it per send:
+
+```js
+await peerNode.sendTo(pubKey, envelope, { channel: 'bulk' })   // PeerNode
+await ctx.sendTo(pubKey, 'chunk-response', payload, { channel: 'bulk' }) // MeshService ctx
+```
+
+`channel` is `'control'` (the default; the transport is then called exactly as
+before) or `'bulk'`; anything else throws a `TypeError`. It reaches the
+transport as `send(data, { channel })`. A transport with no bulk lane ignores
+the option, and the WebRTC transport falls back to its control channel when the
+bulk channel is not open, so the same code works against an older peer. The
+chunk-carrying services -- chunk replication (`chunk-push`,
+`chunk-fetch-response`) and the torrent service (`chunk-response`) -- already
+send on the bulk lane; requests and acknowledgements stay on control. Use it in
+your own service for any payload that is large or arrives in a burst.
+
+**Sending to everyone.** `PeerNode.broadcast(data, { channel, exclude, concurrency })`
+sends to every connected peer -- one send per peer, at most `concurrency` (default
+8) in flight. A peer whose send fails does not stop the others: errors are
+collected, never thrown.
+
+```js
+const { sent, failed } = await peerNode.broadcast({ type: 'hello' }, { exclude: [somePubKey] })
+// sent: ['pk1', 'pk2'], failed: [{ pubKey: 'pk3', error: 'Data channel not open' }]
+peerNode.on('broadcast', ({ sent, failed }) => { /* fires after each fan-out */ })
+```
+
+`exclude` is an array, a `Set` or a `(pubKey) => boolean` predicate.
+
+**Wiring payments, consensus, migration and group keys.** `PaymentRouter`,
+`ConsensusManager`, `MigrationEngine` (`@johnhenry/browsermesh-sync`) and
+`GroupKeyManager` (`@johnhenry/browsermesh-core`) each take a host-supplied
+`wireTransport(broadcastFn, subscribeFn)`. `createPeerNodeTransport(peerNode)`
+builds that pair from a `PeerNode`:
+
+```js
+import { createPeerNodeTransport } from '@johnhenry/browsermesh-apps'
+
+const { broadcastFn, subscribeFn } = createPeerNodeTransport(peerNode)
+paymentRouter.wireTransport(broadcastFn, subscribeFn)
+consensus.wireTransport(broadcastFn, subscribeFn)
+```
+
+Messages travel as `{ type: <wire type>, payload, from }`. The `fromPodId` a
+handler receives is the peer the message actually arrived from, not the
+envelope's own `from` field, which a remote peer could set to anything.
+`broadcastFn` never rejects, so it is safe to call fire-and-forget.
+
+`test/real-peer/wire-envelope.test.mjs` runs all three over a real
+`RTCPeerConnection` pair (`npm run test:real-peer`).
 
 ## `fetch()`/`WebSocket`-shaped mesh access: `browserMeshFetch` and `BrowserMeshWebSocket`
 

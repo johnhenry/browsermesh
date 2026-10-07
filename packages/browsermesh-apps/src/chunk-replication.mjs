@@ -467,7 +467,7 @@ export function createChunkReplicationService({
           return
         }
 
-        await ctx.sendTo(fromPubKey, envelopeType, { bucketId, kind: 'chunk-fetch-response', requestId: msg.requestId, cid: msg.cid, data: toBase64(bytes) }).catch((err) => {
+        await ctx.sendTo(fromPubKey, envelopeType, { bucketId, kind: 'chunk-fetch-response', requestId: msg.requestId, cid: msg.cid, data: toBase64(bytes) }, { channel: 'bulk' }).catch((err) => {
           log('chunk-replication:fetch-response-send-failed', { bucketId, to: fromPubKey, cid: msg.cid, error: err?.message || String(err) })
         })
       }
@@ -530,7 +530,7 @@ export function createChunkReplicationService({
             const bytes = chunkBytesByCid.get(cid)
             if (!bytes) continue // we don't hold this chunk ourselves -- nothing to push
             sends.push(
-              ctx.sendTo(target, envelopeType, { bucketId, kind: 'chunk-push', requestId, cid, data: toBase64(bytes) }).catch((err) => {
+              ctx.sendTo(target, envelopeType, { bucketId, kind: 'chunk-push', requestId, cid, data: toBase64(bytes) }, { channel: 'bulk' }).catch((err) => {
                 log('chunk-replication:push-send-failed', { bucketId, to: target, cid, error: err?.message || String(err) })
               }),
             )
