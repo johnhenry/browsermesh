@@ -1,6 +1,6 @@
 {
   "name": "@johnhenry/browsermesh-core",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Identity, crypto, peer management, and trust primitives for BrowserMesh",
   "type": "module",
   "main": "./src/index.mjs",
