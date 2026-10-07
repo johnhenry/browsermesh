@@ -397,7 +397,7 @@ describe('PaymentChannel', () => {
 // ---------------------------------------------------------------------------
 //
 // A fake Ed25519-shaped signFn/verifyFn pair, matching the shape of
-// MeshIdentityManager.sign(podId, data) / .verify(pubKey, data, sig) from
+// MeshIdentityManager.sign(podId, data) / .verify(pubKey, sig, data) from
 // @johnhenry/browsermesh-core -- see identity.mjs. Each fake "identity" has
 // its own keyed HMAC-ish digest so tamper/cross-identity detection is real,
 // not just a boolean stub.
@@ -424,7 +424,7 @@ function registerIdentity(seed) {
   return identity;
 }
 
-async function fakeVerify(pubKey, data, signature) {
+async function fakeVerify(pubKey, signature, data) {
   const seed = KNOWN_SECRETS.get(Buffer.from(pubKey).toString('base64'));
   if (!seed) return false;
   const expected = crypto.createHmac('sha256', `secret:${seed}`).update(data).digest();
@@ -1478,7 +1478,7 @@ describe('PaymentChannel.receive amount validation', () => {
       channelId: 'ch-signed',
       capacity: 1000,
       remotePublicKey: malloryPub,
-      verifyFn: async (pub, data, sig) => {
+      verifyFn: async (pub, sig, data) => {
         const key = await crypto.subtle.importKey('raw', pub, { name: 'Ed25519' }, false, ['verify']);
         return crypto.subtle.verify('Ed25519', key, sig, data);
       },

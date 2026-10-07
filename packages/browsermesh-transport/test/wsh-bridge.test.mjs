@@ -228,7 +228,7 @@ describe('MeshWshBridge', () => {
       const data = new TextEncoder().encode('bridge test');
       const sig = await meshMgr.sign(podId, data);
       const pubBytes = await meshMgr.getPublicKeyBytes(podId);
-      const valid = await meshMgr.verify(pubBytes, data, sig);
+      const valid = await meshMgr.verify(pubBytes, sig, data);
       assert.equal(valid, true);
     });
   });

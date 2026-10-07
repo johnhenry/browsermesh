@@ -506,10 +506,10 @@ describe('createChatService', () => {
       signFn: (data) => alice.wallet.sign(alice.podId, data),
     }))
     const { api: bobChat } = attachService(nodeB, undefined, createChatService({
-      verifyFn: (fromPubKey, data, sig) => {
+      verifyFn: (fromPubKey, sig, data) => {
         const pubKeyBytes = pubKeyDirectory.get(fromPubKey)
         if (!pubKeyBytes) return false
-        return bob.wallet.verify(pubKeyBytes, data, sig)
+        return bob.wallet.verify(pubKeyBytes, sig, data)
       },
     }))
 
@@ -533,10 +533,10 @@ describe('createChatService', () => {
       signFn: (data) => mallory.wallet.sign(mallory.podId, data),
     }))
     const { api: bobChat } = attachService(nodeB, undefined, createChatService({
-      verifyFn: (fromPubKey, data, sig) => {
+      verifyFn: (fromPubKey, sig, data) => {
         const pubKeyBytes = pubKeyDirectory.get(fromPubKey)
         if (!pubKeyBytes) return false
-        return bob.wallet.verify(pubKeyBytes, data, sig)
+        return bob.wallet.verify(pubKeyBytes, sig, data)
       },
     }))
 

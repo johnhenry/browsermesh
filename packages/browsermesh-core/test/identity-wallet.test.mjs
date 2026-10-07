@@ -27,7 +27,8 @@ function createMockIdentityManager() {
     setDefault(podId) { if (!identities.has(podId)) throw new Error('unknown'); defaultId = podId; },
     getDefault() { return defaultId ? identities.get(defaultId) : null; },
     async sign(podId, data) { return new Uint8Array([1, 2, 3]); },
-    async verify() { return true; },
+    verifyArgs: null,
+    async verify(...args) { this.verifyArgs = args; return true; },
     async getPublicKeyBytes(podId) { return new Uint8Array([4, 5, 6]); },
     toDID(podId) { return `did:key:z${podId}`; },
     get size() { return identities.size; },
@@ -320,8 +321,19 @@ describe('IdentityWallet', () => {
     });
 
     it('verify delegates to identityManager', async () => {
-      const ok = await wallet.verify(new Uint8Array([4, 5, 6]), new Uint8Array([10]), new Uint8Array([1, 2, 3]));
+      const ok = await wallet.verify(new Uint8Array([4, 5, 6]), new Uint8Array([1, 2, 3]), new Uint8Array([10]));
       assert.equal(ok, true);
+    });
+
+    it('verify forwards (publicKey, signature, data) in that order', async () => {
+      const key = new Uint8Array([4, 5, 6]);
+      const sig = new Uint8Array([1, 2, 3]);
+      const data = new Uint8Array([10]);
+      await wallet.verify(key, sig, data);
+      const [k, s, d] = mgr.verifyArgs;
+      assert.equal(k, key);
+      assert.equal(s, sig);
+      assert.equal(d, data);
     });
 
     it('getPublicKeyBytes delegates to identityManager', async () => {

@@ -452,7 +452,7 @@ export function createKeyDistributionService({
         const payload = new TextEncoder().encode(signedPayloadOf({ resource, ephemeralPublicKey: envelope.ephemeralPublicKey, wrappedKey: envelope.wrappedKey, iv: envelope.iv, at, signedBy }))
         let validSig = false
         try {
-          validSig = await peerNode.wallet.verify(rawPubKeyBytes, payload, sigBytes)
+          validSig = await peerNode.wallet.verify(rawPubKeyBytes, sigBytes, payload)
         } catch {
           validSig = false
         }

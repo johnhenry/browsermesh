@@ -195,7 +195,7 @@ export class PeerChat {
    *   an envelope -- the caller, typically `createChatService()`, adds
    *   whatever envelope shape its own transport needs).
    * @param {Function} [opts.signFn] - async (data: Uint8Array) => Uint8Array
-   * @param {Function} [opts.verifyFn] - async (fromPubKey, data, sig) => boolean
+   * @param {Function} [opts.verifyFn] - async (fromPubKey, sig, data) => boolean
    * @param {number} [opts.maxHistory=1000] - Maximum messages to retain
    * @param {Function} [opts.autoResponder] - async (message) => string|null
    * @param {Function} [opts.onLog] - Logging callback
@@ -349,7 +349,7 @@ export class PeerChat {
           timestamp: message.timestamp,
         }))
         const sigBytes = base64ToBytes(message.signature)
-        message.verified = await this.#verifyFn(fromPubKey, data, sigBytes)
+        message.verified = await this.#verifyFn(fromPubKey, sigBytes, data)
       } catch (err) {
         this.#onLog(1, `Signature verification failed: ${err.message}`)
         message.verified = false
@@ -498,7 +498,7 @@ export class PeerChat {
  * @param {object} [opts]
  * @param {Function} [opts.signFn] - async (data: Uint8Array) => Uint8Array.
  *   Passed straight through to `PeerChat`; omit to send unsigned messages.
- * @param {Function} [opts.verifyFn] - async (fromPubKey, data, sig) => boolean.
+ * @param {Function} [opts.verifyFn] - async (fromPubKey, sig, data) => boolean.
  *   Passed straight through to `PeerChat`; called with each message's real
  *   sender, not a fixed key -- see module doc comment's point 2.
  * @param {number} [opts.maxHistory=1000]

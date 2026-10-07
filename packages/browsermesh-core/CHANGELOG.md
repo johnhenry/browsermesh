@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.0
+
+### Minor Changes
+
+- BREAKING: `MeshIdentityManager.verify` and `IdentityWallet.verify` now take `(publicKey, signature, data)`, the same order as `crypto.subtle.verify` and `PodIdentity.verify`; they previously took `(publicKey, data, signature)`. Swap the last two arguments at every call site. An old-order call (64-byte `data` with a non-64-byte `signature`) throws a `TypeError` naming the new order instead of silently returning `false`.
+
 ## 0.4.0
 
 ### Minor Changes

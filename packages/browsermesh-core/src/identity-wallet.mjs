@@ -405,12 +405,15 @@ export class IdentityWallet {
    * Verify a signature against a public key (raw bytes).
    *
    * @param {Uint8Array} pubKeyBytes
-   * @param {BufferSource} data
+   * Argument order is `(publicKey, signature, data)`, like WebCrypto.
+   * BREAKING in core 0.5.0: previously `(publicKey, data, signature)`.
+   *
    * @param {BufferSource} sig
+   * @param {BufferSource} data
    * @returns {Promise<boolean>}
    */
-  async verify(pubKeyBytes, data, sig) {
-    return this.#identityManager.verify(pubKeyBytes, data, sig);
+  async verify(pubKeyBytes, sig, data) {
+    return this.#identityManager.verify(pubKeyBytes, sig, data);
   }
 
   /**

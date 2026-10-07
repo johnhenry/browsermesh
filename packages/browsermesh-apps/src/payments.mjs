@@ -63,7 +63,7 @@ function generateEscrowId() {
 // in without this published, general-purpose package taking a hard
 // dependency on it. Shape matches peer-chat.mjs's convention:
 //   signFn:   async (data: Uint8Array) => Uint8Array
-//   verifyFn: async (pubKey: Uint8Array, data: Uint8Array, sig: Uint8Array) => boolean
+//   verifyFn: async (pubKey: Uint8Array, sig: Uint8Array, data: Uint8Array) => boolean
 
 /**
  * Encode a Uint8Array to a base64 string.
@@ -436,7 +436,7 @@ export class PaymentChannel {
    * @param {Function} [opts.signFn] - async (data: Uint8Array) => Uint8Array.
    *   When omitted, PaymentUpdate/close signatures stay `null` and close()
    *   stays unilateral -- fully backward compatible.
-   * @param {Function} [opts.verifyFn] - async (pubKey, data, sig) => boolean
+   * @param {Function} [opts.verifyFn] - async (pubKey, sig, data) => boolean
    * @param {Uint8Array} [opts.remotePublicKey] - Remote pod's raw public key,
    *   required alongside verifyFn to verify incoming updates/claims.
    * @param {string} [opts.channelId] - Use this exact channel ID instead of
@@ -682,7 +682,7 @@ export class PaymentChannel {
     try {
       const data = canonicalBytes(fields);
       const sigBytes = base64ToBytes(signatureB64);
-      return await this.#verifyFn(this.#remotePublicKey, data, sigBytes);
+      return await this.#verifyFn(this.#remotePublicKey, sigBytes, data);
     } catch {
       return false;
     }
