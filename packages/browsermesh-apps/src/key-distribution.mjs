@@ -168,6 +168,18 @@
  */
 
 import { encodeBase64url, decodeBase64url } from '@johnhenry/browsermesh-primitives'
+import { guardVerifyMethod, isVerifyOrderError } from './internal/verify-order.mjs'
+
+// One order self-test per wallet object (see internal/verify-order.mjs).
+const guardedWalletVerify = new WeakMap()
+function verifyViaWallet(wallet) {
+  let fn = guardedWalletVerify.get(wallet)
+  if (!fn) {
+    fn = guardVerifyMethod(wallet, 'key-distribution wallet.verify')
+    guardedWalletVerify.set(wallet, fn)
+  }
+  return fn
+}
 // @johnhenry/browsermesh-core (an optional peerDependency) is imported
 // lazily, at each of the three call sites below, rather than eagerly here
 // -- so this module doesn't force it on every consumer of this package's
@@ -452,8 +464,9 @@ export function createKeyDistributionService({
         const payload = new TextEncoder().encode(signedPayloadOf({ resource, ephemeralPublicKey: envelope.ephemeralPublicKey, wrappedKey: envelope.wrappedKey, iv: envelope.iv, at, signedBy }))
         let validSig = false
         try {
-          validSig = await peerNode.wallet.verify(rawPubKeyBytes, sigBytes, payload)
-        } catch {
+          validSig = await verifyViaWallet(peerNode.wallet)(rawPubKeyBytes, sigBytes, payload)
+        } catch (err) {
+          if (isVerifyOrderError(err)) throw err
           validSig = false
         }
         if (!validSig) {

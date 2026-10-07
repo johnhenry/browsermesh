@@ -12,6 +12,7 @@
 
 import { MESH_TYPE } from '@johnhenry/browsermesh-primitives';
 import { silentCatch } from './silent-catch.mjs'
+import { guardVerifyFn, isVerifyOrderError } from './internal/verify-order.mjs'
 
 // ---------------------------------------------------------------------------
 // Wire constants — imported from canonical registry
@@ -64,6 +65,9 @@ function generateEscrowId() {
 // dependency on it. Shape matches peer-chat.mjs's convention:
 //   signFn:   async (data: Uint8Array) => Uint8Array
 //   verifyFn: async (pubKey: Uint8Array, sig: Uint8Array, data: Uint8Array) => boolean
+//     (canonical (publicKey, signature, data) order; an old-order callback is
+//     detected by a one-time self-test and throws a TypeError, see
+//     internal/verify-order.mjs)
 
 /**
  * Encode a Uint8Array to a base64 string.
@@ -456,7 +460,7 @@ export class PaymentChannel {
     this.#ttlMs = opts.ttlMs || DEFAULT_TTL_MS;
     this.#createdAt = Date.now();
     this.#signFn = opts.signFn || null;
-    this.#verifyFn = opts.verifyFn || null;
+    this.#verifyFn = guardVerifyFn(opts.verifyFn, 'PaymentChannel') || null;
     this.#remotePublicKey = opts.remotePublicKey || null;
   }
 
@@ -683,7 +687,8 @@ export class PaymentChannel {
       const data = canonicalBytes(fields);
       const sigBytes = base64ToBytes(signatureB64);
       return await this.#verifyFn(this.#remotePublicKey, sigBytes, data);
-    } catch {
+    } catch (err) {
+      if (isVerifyOrderError(err)) throw err;
       return false;
     }
   }

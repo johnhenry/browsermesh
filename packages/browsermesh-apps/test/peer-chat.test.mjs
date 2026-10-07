@@ -280,7 +280,7 @@ describe('PeerChat', () => {
       const verifyingChat = new PeerChat({
         localPubKey: 'local',
         send,
-        verifyFn: async (fromPubKey) => { seen.push(fromPubKey); return true },
+        verifyFn: async (fromPubKey) => { if (typeof fromPubKey === 'string') seen.push(fromPubKey); return true },
       })
       await verifyingChat.receiveEnvelope('alice', { from: 'alice', text: 'hi', timestamp: Date.now(), signature: Buffer.from([1, 2, 3]).toString('base64') })
       await verifyingChat.receiveEnvelope('bob', { from: 'bob', text: 'hi', timestamp: Date.now(), signature: Buffer.from([1, 2, 3]).toString('base64') })

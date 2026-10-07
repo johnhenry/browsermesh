@@ -137,7 +137,7 @@ describe('Attestation', () => {
     })
 
     const calls = []
-    const verifyFn = (podId, resultHash, signature) => {
+    const verifyFn = (podId, signature, resultHash) => {
       calls.push({ podId, resultHash, signature })
       return true
     }

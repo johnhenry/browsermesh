@@ -522,6 +522,41 @@ agent runtime" section for the full design writeup, including two real bugs
 found while building it and the recommended DI pattern for new tools going
 forward.
 
+## Verify argument order (caller-supplied callbacks)
+
+Every signature check in BrowserMesh takes `(identity, signature, data)`, the
+same as `crypto.subtle.verify`. This applies to the callbacks you hand in:
+
+| Where | Callback shape |
+|-------|----------------|
+| `PaymentChannel` `opts.verifyFn` | `(publicKey, signature, data) => boolean` |
+| chat service / `PeerChat` `verifyFn` | `(fromPubKey, signature, data) => boolean` |
+| `GrantLog` / key-distribution `wallet.verify` | `(publicKeyBytes, signature, data) => boolean` |
+| `TimestampProof.verify(verifyFn)` and `identity.verify` on `TimestampAuthority` | `(signerPodId, signature, data) => boolean` |
+| `Attestation.verify(verifyFn)` | `(podId, signature, resultHash) => boolean` |
+
+**BREAKING (apps 0.9.0):** `peer-timestamp` previously used
+`(signature, data, signerPodId)` and `Attestation.verify` used
+`(podId, resultHash, signature)`. Update those callbacks; swap the arguments.
+
+An old-order callback used to return `false` for every message, silently,
+because the library catches errors around callbacks. To make that loud, the
+`PaymentChannel`, chat, `GrantLog` and key-distribution paths run a one-time
+self-test the first time a callback is used (the probe is started when the
+callback is passed in): the callback is called with a known-good Ed25519 test
+vector (RFC 8032, test 2) in the new order. If it rejects that but accepts
+`(publicKey, data, signature)`, a `TypeError` naming the new order is thrown
+from the call that used it (for example `channel.receive()` or
+`chat.receiveEnvelope()`), and every later call rejects the same way. A
+callback that accepts the new order, or that rejects both orders (for example
+it looks keys up in a directory the test key is not in), is left alone. The
+self-test is skipped when `NODE_ENV` is `production`. Because the test vector
+is fed to your callback once, spies on `verifyFn` see one extra call with
+`Uint8Array` arguments.
+
+The `peer-timestamp` paths also throw a `TypeError` if the first argument is a
+64-byte signature.
+
 ## License
 
 MIT
