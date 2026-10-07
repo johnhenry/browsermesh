@@ -57,7 +57,7 @@ publish_package() {
       echo "$output"
       echo -e "  ${GREEN}Published successfully${NC}"
       SUCCESS=$((SUCCESS + 1))
-    elif echo "$output" | grep -q "cannot publish over the previously published"; then
+    elif echo "$output" | grep -qE "EPUBLISHCONFLICT|cannot publish over (the )?previously published"; then
       echo -e "  ${YELLOW}Skipped (version already published)${NC}"
       SKIPPED=$((SKIPPED + 1))
     else
