@@ -49,12 +49,6 @@ export declare class PodIdentity {
    * TypeError if the old order is detected (64-byte data, non-64-byte signature).
    */
   static verify(publicKey: CryptoKey, signature: BufferSource, data: BufferSource): Promise<boolean>;
-  /**
-   * Positional form, kept for compatibility. WARNING: order is
-   * (publicKey, DATA, SIGNATURE) -- unlike WebCrypto/wsh (key, signature, data)
-   * and raijin (message, signature, key). Prefer the object form.
-   */
-  static verify(publicKey: CryptoKey, data: BufferSource, signature: BufferSource): Promise<boolean>;
 }
 
 export declare const messageTypeRegistry: Map<number, string>;

@@ -304,7 +304,7 @@ export class GrantLog {
   #localPodId
 
   /** @type {import('@johnhenry/browsermesh-core').IdentityWallet} Duck-typed:
-   * only `.sign(podId, data)`, `.verify(pubKeyBytes, data, sig)`,
+   * only `.sign(podId, data)`, `.verify(pubKeyBytes, sig, data)`,
    * `.getPublicKeyBytes(podId)` are used (the real `IdentityWallet`'s
    * confirmed API, see identity-wallet.mjs / identity.mjs). */
   #wallet
@@ -550,7 +550,7 @@ export class GrantLog {
       if (derivedPodId !== signedBy) return false
 
       const payload = new TextEncoder().encode(signedPayloadOf({ pubKey, scope, action, at, signedBy }))
-      return await this.#wallet.verify(rawPubKeyBytes, payload, sigBytes)
+      return await this.#wallet.verify(rawPubKeyBytes, sigBytes, payload)
     } catch {
       // Malformed base64url, wrong-length keys/signatures, etc. are all
       // "reject", never a thrown error the caller has to remember to catch.

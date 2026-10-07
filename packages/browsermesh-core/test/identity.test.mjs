@@ -229,6 +229,18 @@ describe('MeshIdentityManager', () => {
   // -- sign / verify ------------------------------------------------------
 
   describe('sign / verify', () => {
+    it('throws a TypeError on the old (publicKey, data, signature) order', async () => {
+      const id = await mgr.create('old-order');
+      const pubBytes = await mgr.getPublicKeyBytes(id.podId);
+      const data = new TextEncoder().encode('old order');
+      const sig = await mgr.sign(id.podId, data);
+      assert.equal(sig.byteLength, 64);
+      await assert.rejects(
+        mgr.verify(pubBytes, data, sig),
+        (err) => err instanceof TypeError && /\(publicKey, signature, data\)/.test(err.message)
+      );
+    });
+
     it('signs and verifies data', async () => {
       const s = await mgr.create('signer');
       const data = new TextEncoder().encode('test message');
@@ -237,7 +249,7 @@ describe('MeshIdentityManager', () => {
       assert.ok(sig.length > 0);
 
       const pubBytes = await mgr.getPublicKeyBytes(s.podId);
-      const valid = await mgr.verify(pubBytes, data, sig);
+      const valid = await mgr.verify(pubBytes, sig, data);
       assert.equal(valid, true);
     });
 
@@ -248,7 +260,7 @@ describe('MeshIdentityManager', () => {
 
       const pubBytes = await mgr.getPublicKeyBytes(s.podId);
       const tampered = new TextEncoder().encode('tampered');
-      const valid = await mgr.verify(pubBytes, tampered, sig);
+      const valid = await mgr.verify(pubBytes, sig, tampered);
       assert.equal(valid, false);
     });
 
@@ -322,7 +334,7 @@ describe('MeshIdentityManager', () => {
       const data = new TextEncoder().encode('check');
       const sig = await mgr2.sign(s2.podId, data);
       const pubBytes = await mgr.getPublicKeyBytes(s.podId);
-      const valid = await mgr.verify(pubBytes, data, sig);
+      const valid = await mgr.verify(pubBytes, sig, data);
       assert.equal(valid, true);
     });
 
@@ -587,7 +599,7 @@ describe('VaultIdentityStorage', () => {
     const data = new TextEncoder().encode('vault check');
     const sig = await mgr2.sign(s1.podId, data);
     const pubBytes = await mgr1.getPublicKeyBytes(s1.podId);
-    const valid = await mgr1.verify(pubBytes, data, sig);
+    const valid = await mgr1.verify(pubBytes, sig, data);
     assert.equal(valid, true);
   });
 });
@@ -1111,7 +1123,7 @@ describe('encrypted export round-trips through import', () => {
     const message = new TextEncoder().encode('a message to sign');
     const signature = await target.sign(restored.podId, message);
     const sourcePublicKey = await source.getPublicKeyBytes(created.podId);
-    assert.equal(await source.verify(sourcePublicKey, message, signature), true);
+    assert.equal(await source.verify(sourcePublicKey, signature, message), true);
   });
 
   it('a plaintext export still imports, with no passphrase', async () => {

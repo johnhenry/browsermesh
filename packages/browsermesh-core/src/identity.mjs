@@ -614,12 +614,17 @@ export class MeshIdentityManager {
   /**
    * Verify a signature against a public key (raw bytes).
    *
+   * Argument order is `(publicKey, signature, data)`, the same as
+   * `crypto.subtle.verify`. BREAKING in core 0.5.0: previously
+   * `(publicKey, data, signature)`. Throws a TypeError when the old order is
+   * detected (64-byte data with a non-64-byte signature).
+   *
    * @param {Uint8Array} publicKeyBytes - Raw Ed25519 public key (32 bytes)
+   * @param {BufferSource} signature - Ed25519 signature (64 bytes)
    * @param {BufferSource} data
-   * @param {BufferSource} signature
    * @returns {Promise<boolean>}
    */
-  async verify(publicKeyBytes, data, signature) {
+  async verify(publicKeyBytes, signature, data) {
     const publicKey = await crypto.subtle.importKey(
       'raw',
       publicKeyBytes,

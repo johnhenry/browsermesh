@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.0
+
+### Minor Changes
+
+- BREAKING: follow core's `verify(publicKey, signature, data)` order. `GrantLog` and key distribution now call `wallet.verify(pubKeyBytes, sig, data)`, so a custom duck-typed wallet must use that order. The injected `verifyFn` callbacks of `PaymentChannel` and the chat service change from `(pubKey, data, sig)` to `(pubKey, sig, data)`. The optional peer range on `@johnhenry/browsermesh-core` is raised to `>=0.5.0`.
+
 ## 0.7.1
 
 ### Patch Changes
