@@ -764,10 +764,24 @@ export class LWWMap {
     this.#entries = new Map();
   }
 
-  /** @returns {Record<string, *>} Plain object of live key-value pairs */
+  /**
+   * Entries in canonical (sorted by key, UTF-16 code unit order) order.
+   * Insertion order differs per replica after a merge; every serialising
+   * or iterating accessor goes through this so converged replicas agree.
+   * @returns {Array<[string, LWWRegister]>}
+   */
+  #sorted() {
+    return [...this.#entries].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  }
+
+  /**
+   * Plain object of live key-value pairs. Keys are in sorted order, so
+   * converged replicas produce identical `JSON.stringify` output.
+   * @returns {Record<string, *>}
+   */
   get value() {
     const obj = {};
-    for (const [key, reg] of this.#entries) {
+    for (const [key, reg] of this.#sorted()) {
       if (reg.value !== TOMBSTONE) {
         obj[key] = reg.value;
       }
@@ -862,23 +876,23 @@ export class LWWMap {
     return merged;
   }
 
-  /** @returns {IterableIterator<string>} Live keys */
+  /** @returns {IterableIterator<string>} Live keys, sorted */
   *keys() {
-    for (const [key, reg] of this.#entries) {
+    for (const [key, reg] of this.#sorted()) {
       if (reg.value !== TOMBSTONE) yield key;
     }
   }
 
-  /** @returns {IterableIterator<*>} Live values */
+  /** @returns {IterableIterator<*>} Live values, in sorted key order */
   *values() {
-    for (const reg of this.#entries.values()) {
+    for (const [, reg] of this.#sorted()) {
       if (reg.value !== TOMBSTONE) yield reg.value;
     }
   }
 
-  /** @returns {IterableIterator<[string, *]>} Live entries */
+  /** @returns {IterableIterator<[string, *]>} Live entries, sorted by key */
   *entries() {
-    for (const [key, reg] of this.#entries) {
+    for (const [key, reg] of this.#sorted()) {
       if (reg.value !== TOMBSTONE) yield [key, reg.value];
     }
   }
@@ -890,9 +904,10 @@ export class LWWMap {
     return new Map(this.#entries);
   }
 
+  /** Entries are emitted in sorted key order (canonical across replicas). */
   toJSON() {
     const entries = {};
-    for (const [key, reg] of this.#entries) {
+    for (const [key, reg] of this.#sorted()) {
       const s = reg.state();
       entries[key] = {
         value: s.value === TOMBSTONE ? null : s.value,
