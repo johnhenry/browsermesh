@@ -2,11 +2,15 @@
  * clawser-peer-payments.js -- Payment mechanisms for resource sharing.
  *
  * Provides a PaymentProvider abstraction with two implementations:
- * 1. CreditLedger — internal credit system (no real money)
+ * 1. MultiPartyCreditLedger — internal credit system (no real money)
  * 2. WebLNProvider — Lightning Network payments (optional, requires browser extension)
  *
- * CreditLedger manages multi-peer balances and transaction history with
- * resource-based cost calculation. WebLNProvider wraps the WebLN browser API
+ * MultiPartyCreditLedger manages every peer's balance in one book, with a
+ * transaction history and resource-based cost calculation. It is NOT the
+ * package's `CreditLedger`: that name is the single-owner ledger in
+ * `payments.mjs` (one pod, one balance). This class was also called
+ * `CreditLedger` before 0.13, which collided with it; see the README's
+ * "Ledgers and escrow" table. WebLNProvider wraps the WebLN browser API
  * for optional real-money Lightning payments.
  *
  * No browser-only imports at module level. All dependencies injected.
@@ -43,16 +47,19 @@ function generateTxId() {
 }
 
 // ---------------------------------------------------------------------------
-// CreditLedger
+// MultiPartyCreditLedger
 // ---------------------------------------------------------------------------
 
 /**
- * Multi-peer credit ledger for resource sharing.
+ * Multi-peer credit ledger for resource sharing: one book holding a balance
+ * per pod (`charge(podId, amount)` / `credit(podId, amount)` /
+ * `transfer(from, to, amount)`). For one pod's own balance see `CreditLedger`
+ * in `payments.mjs`.
  *
  * Tracks per-pod balances with automatic initialization at a configurable
  * credit amount. Maintains a transaction log with optional capping.
  */
-export class CreditLedger {
+export class MultiPartyCreditLedger {
   /** @type {Map<string, number>} podId -> balance */
   #balances = new Map()
 
@@ -336,12 +343,12 @@ export class CreditLedger {
   }
 
   /**
-   * Restore a CreditLedger from serialized data.
+   * Restore a MultiPartyCreditLedger from serialized data.
    * @param {object} data
-   * @returns {CreditLedger}
+   * @returns {MultiPartyCreditLedger}
    */
   static fromJSON(data) {
-    const ledger = new CreditLedger({
+    const ledger = new MultiPartyCreditLedger({
       initialCredits: data.initialCredits,
       maxTransactions: data.maxTransactions,
     })

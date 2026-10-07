@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import {
   CreditLedger,
   PaymentChannel,
-  EscrowManager,
+  SimpleEscrowBook,
   PaymentRouter,
   PAYMENT_OPEN,
   PAYMENT_UPDATE,
@@ -671,13 +671,13 @@ describe('PaymentChannel signing (opt-in, backward compatible)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// EscrowManager
+// SimpleEscrowBook
 // ---------------------------------------------------------------------------
 
-describe('EscrowManager', () => {
+describe('SimpleEscrowBook', () => {
   let em;
   beforeEach(() => {
-    em = new EscrowManager();
+    em = new SimpleEscrowBook();
   });
 
   it('starts empty', () => {
@@ -906,8 +906,8 @@ describe('PaymentRouter', () => {
   });
 
   describe('getEscrow', () => {
-    it('returns an EscrowManager', () => {
-      assert.ok(router.getEscrow() instanceof EscrowManager);
+    it('returns a SimpleEscrowBook', () => {
+      assert.ok(router.getEscrow() instanceof SimpleEscrowBook);
     });
 
     it('returns the same instance on multiple calls', () => {
@@ -1055,12 +1055,12 @@ describe('Wire constants', () => {
 });
 
 // ---------------------------------------------------------------------------
-// EscrowManager.pruneExpiredDetailed
+// SimpleEscrowBook.pruneExpiredDetailed
 // ---------------------------------------------------------------------------
 
-describe('EscrowManager.pruneExpiredDetailed', () => {
+describe('SimpleEscrowBook.pruneExpiredDetailed', () => {
   it('returns the expired escrow records, not just a count', () => {
-    const em = new EscrowManager();
+    const em = new SimpleEscrowBook();
     const e1 = em.create('payer', 'payee', 10, { timeout: 100 });
     const e2 = em.create('payer', 'payee', 20, { timeout: 100 });
 
@@ -1071,14 +1071,14 @@ describe('EscrowManager.pruneExpiredDetailed', () => {
   });
 
   it('pruneExpired (count) stays consistent with pruneExpiredDetailed', () => {
-    const em = new EscrowManager();
+    const em = new SimpleEscrowBook();
     em.create('payer', 'payee', 10, { timeout: 50 });
     const count = em.pruneExpired(Date.now() + 999999);
     assert.equal(count, 1);
   });
 
   it('returns an empty array when nothing is expired', () => {
-    const em = new EscrowManager();
+    const em = new SimpleEscrowBook();
     em.create('payer', 'payee', 10, { timeout: 999999 });
     assert.deepEqual(em.pruneExpiredDetailed(Date.now()), []);
   });

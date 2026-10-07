@@ -252,6 +252,7 @@ export class TimestampAuthority {
   #identity
   #clockSkewMs
   #onLog
+  #now
 
   /**
    * @param {object} opts
@@ -259,8 +260,11 @@ export class TimestampAuthority {
    * @param {object} opts.identity - Object with sign(data) and podId
    * @param {number} [opts.clockSkewMs] - Max allowed clock skew in ms (default 30000)
    * @param {Function} [opts.onLog] - Logging callback (level, msg)
+   * @param {() => number} [opts.now] - Local clock in ms, default `Date.now`.
+   *   Injected by tests so outlier rejection (which compares peer clocks to the
+   *   local one) does not depend on how long the test took to run.
    */
-  constructor({ sessions, identity, clockSkewMs, onLog }) {
+  constructor({ sessions, identity, clockSkewMs, onLog, now }) {
     if (!sessions || typeof sessions.listSessions !== 'function') {
       throw new Error('sessions is required and must have listSessions()')
     }
@@ -272,6 +276,10 @@ export class TimestampAuthority {
     this.#identity = identity
     this.#clockSkewMs = clockSkewMs ?? TIMESTAMP_DEFAULTS.clockSkewMs
     this.#onLog = onLog ?? (() => {})
+    if (now !== undefined && typeof now !== 'function') {
+      throw new Error('now must be a function returning milliseconds')
+    }
+    this.#now = now ?? Date.now
   }
 
   /**
@@ -290,7 +298,7 @@ export class TimestampAuthority {
       throw new Error('eventHash is required and must be a non-empty string')
     }
 
-    const localTime = Date.now()
+    const localTime = this.#now()
     const localPodId = this.#identity.podId
 
     // Build the full timestamp map: local + peers
@@ -423,7 +431,7 @@ export class TimestampAuthority {
    * @returns {number} Median timestamp in ms
    */
   getNetworkTime(peerTimestamps) {
-    const values = [Date.now()]
+    const values = [this.#now()]
 
     if (peerTimestamps) {
       for (const ts of peerTimestamps.values()) {

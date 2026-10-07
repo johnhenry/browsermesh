@@ -18,6 +18,13 @@ import {
   TIMESTAMP_DEFAULTS,
 } from '../src/peer-timestamp.mjs'
 
+// A fixed local clock. The authority compares peer clocks to its own, so a test
+// that built its peer timestamps from one `Date.now()` and let `stamp()` read
+// another could see the two differ by a millisecond or more under load and tip
+// a boundary case over (#219). Every authority below gets this clock instead.
+const T0 = 1_760_000_000_000
+const fixedNow = () => T0
+
 // ---------------------------------------------------------------------------
 // Mock helpers
 // ---------------------------------------------------------------------------
@@ -93,8 +100,8 @@ describe('TimestampAuthority', () => {
   // -- Test 1: stamp returns canonical timestamp with witnesses ---------------
 
   it('stamp returns canonical timestamp with witnesses', async () => {
-    authority = new TimestampAuthority({ sessions, identity })
-    const now = Date.now()
+    authority = new TimestampAuthority({ now: fixedNow, sessions, identity })
+    const now = T0
     const peerTimestamps = new Map([
       ['pod-a', now - 100],
       ['pod-b', now + 50],
@@ -117,8 +124,8 @@ describe('TimestampAuthority', () => {
   // -- Test 2: verify confirms valid proof ------------------------------------
 
   it('verify confirms valid proof', async () => {
-    authority = new TimestampAuthority({ sessions, identity })
-    const now = Date.now()
+    authority = new TimestampAuthority({ now: fixedNow, sessions, identity })
+    const now = T0
     const peerTimestamps = new Map([
       ['pod-a', now - 100],
       ['pod-b', now + 50],
@@ -135,8 +142,8 @@ describe('TimestampAuthority', () => {
   // -- Test 3: verify rejects proof with tampered eventHash -------------------
 
   it('verify rejects proof with tampered eventHash', async () => {
-    authority = new TimestampAuthority({ sessions, identity })
-    const now = Date.now()
+    authority = new TimestampAuthority({ now: fixedNow, sessions, identity })
+    const now = T0
     const peerTimestamps = new Map([
       ['pod-a', now],
       ['pod-b', now],
@@ -158,7 +165,7 @@ describe('TimestampAuthority', () => {
   // -- Test 4: getNetworkTime returns median of peer clocks -------------------
 
   it('getNetworkTime returns median of peer clocks', () => {
-    authority = new TimestampAuthority({ sessions, identity })
+    authority = new TimestampAuthority({ now: fixedNow, sessions, identity })
     const peerTimestamps = new Map([
       ['pod-a', 1000],
       ['pod-b', 2000],
@@ -175,8 +182,8 @@ describe('TimestampAuthority', () => {
   // -- Test 5: outlier peer clock rejected (>30s skew from median) ------------
 
   it('outlier peer clock rejected (>30s skew from median)', async () => {
-    authority = new TimestampAuthority({ sessions, identity })
-    const now = Date.now()
+    authority = new TimestampAuthority({ now: fixedNow, sessions, identity })
+    const now = T0
     const peerTimestamps = new Map([
       ['pod-a', now],
       ['pod-b', now + 100],
@@ -195,7 +202,7 @@ describe('TimestampAuthority', () => {
 
   it('single peer (no sessions) uses local clock only', async () => {
     const emptySessions = createMockSessions([])
-    authority = new TimestampAuthority({ sessions: emptySessions, identity })
+    authority = new TimestampAuthority({ now: fixedNow, sessions: emptySessions, identity })
 
     const proof = await authority.stamp('abc123')
 
@@ -211,8 +218,8 @@ describe('TimestampAuthority', () => {
   // -- Test 7: all peers agree -> confidence 1.0 ------------------------------
 
   it('all peers agree -> confidence 1.0', async () => {
-    authority = new TimestampAuthority({ sessions, identity })
-    const now = Date.now()
+    authority = new TimestampAuthority({ now: fixedNow, sessions, identity })
+    const now = T0
     const peerTimestamps = new Map([
       ['pod-a', now],
       ['pod-b', now + 10],
@@ -228,22 +235,49 @@ describe('TimestampAuthority', () => {
   // -- Test 8: split clocks with some rejected -> lower confidence ------------
 
   it('split clocks with some rejected -> lower confidence', async () => {
-    authority = new TimestampAuthority({ sessions, identity })
-    const now = Date.now()
+    authority = new TimestampAuthority({ now: fixedNow, sessions, identity })
+    const now = T0
+    // Five clocks: local (T0) plus four peers. The median is pod-d's now+1000,
+    // so now/now+500/now+1000 sit well inside the 30s tolerance and the two
+    // far-off clocks are clear outliers. Nothing here lands on the tolerance
+    // boundary, so the result cannot depend on timing.
     const peerTimestamps = new Map([
-      ['pod-a', now],
+      ['pod-a', now + 500],
       ['pod-b', now + 60_000],  // 60s off — outlier
       ['pod-c', now + 90_000],  // 90s off — outlier
+      ['pod-d', now + 1000],
     ])
 
     const proof = await authority.stamp('abc123', peerTimestamps)
 
-    assert.ok(proof.confidence < 1.0)
-    assert.ok(proof.confidence > 0)
-    // At least local + pod-a should be accepted
-    const witnessIds = proof.witnesses.map(w => w.podId)
-    assert.ok(witnessIds.includes('pod-local'))
-    assert.ok(witnessIds.includes('pod-a'))
+    assert.equal(proof.confidence, 0.6) // 3 of 5 accepted
+    const witnessIds = proof.witnesses.map(w => w.podId).sort()
+    assert.deepEqual(witnessIds, ['pod-a', 'pod-d', 'pod-local'])
+  })
+
+  // The previous version of the test above put pod-a exactly on the boundary
+  // (|pod-a - median| === clockSkewMs when the local clock equals `now`). It
+  // passed only when stamp()'s own Date.now() read returned the very same
+  // millisecond as the test's, and failed whenever the machine was slow enough
+  // for them to differ. With the clock injected the boundary is exact and
+  // repeatable: one millisecond of local drift flips pod-a to rejected.
+  it('the injected clock decides outlier rejection exactly (boundary case, #219)', async () => {
+    const peers = () => new Map([
+      ['pod-a', T0],
+      ['pod-b', T0 + 60_000],
+      ['pod-c', T0 + 90_000],
+    ])
+    const exact = new TimestampAuthority({ now: () => T0, sessions, identity })
+    const onBoundary = await exact.stamp('abc123', peers())
+    assert.ok(onBoundary.witnesses.some(w => w.podId === 'pod-a'), 'on the boundary pod-a is accepted')
+
+    const drifted = new TimestampAuthority({ now: () => T0 + 1, sessions, identity })
+    const past = await drifted.stamp('abc123', peers())
+    assert.ok(!past.witnesses.some(w => w.podId === 'pod-a'), 'one ms later pod-a is an outlier')
+  })
+
+  it('rejects a non-function now option', () => {
+    assert.throws(() => new TimestampAuthority({ now: 5, sessions, identity }), /now must be a function/)
   })
 
   // -- Test 10: clock skew tolerance is configurable --------------------------
@@ -251,11 +285,12 @@ describe('TimestampAuthority', () => {
   it('clock skew tolerance is configurable', async () => {
     // Use 500ms tolerance — tight enough to reject seconds-off peers
     authority = new TimestampAuthority({
+      now: fixedNow,
       sessions,
       identity,
       clockSkewMs: 500,
     })
-    const now = Date.now()
+    const now = T0
     // pod-a and pod-b are close (within 500ms), pod-c is far away.
     // 4 values: [now, now+50, now+100, now+60_000]
     // Median = (now+50 + now+100)/2 = now+75
@@ -281,7 +316,7 @@ describe('TimestampAuthority', () => {
   // -- Test 11: empty event hash throws --------------------------------------
 
   it('empty event hash throws', async () => {
-    authority = new TimestampAuthority({ sessions, identity })
+    authority = new TimestampAuthority({ now: fixedNow, sessions, identity })
 
     await assert.rejects(
       () => authority.stamp(''),
@@ -343,7 +378,7 @@ describe('TimestampProof', () => {
 
     // Odd count: 3 peers + 1 local = 4 values (even array, but tests median logic)
     const sessionsOdd = createMockSessions(['pod-a', 'pod-b', 'pod-c'])
-    const authorityOdd = new TimestampAuthority({ sessions: sessionsOdd, identity })
+    const authorityOdd = new TimestampAuthority({ now: fixedNow, sessions: sessionsOdd, identity })
 
     // With values [100, 200, 300, 400] sorted, median = (200 + 300) / 2 = 250
     const medianEven = authorityOdd.getNetworkTime(new Map([
@@ -357,14 +392,14 @@ describe('TimestampProof', () => {
 
     // Test with 3 values (odd count): median = middle value
     const sessions2 = createMockSessions(['pod-a', 'pod-b'])
-    const authority3 = new TimestampAuthority({ sessions: sessions2, identity })
+    const authority3 = new TimestampAuthority({ now: fixedNow, sessions: sessions2, identity })
     // 3 values: [100, 200, 300] (local=200, pod-a=100, pod-b=300)
     // We can't control local clock easily, so let's test getNetworkTime
     // with explicit peer timestamps and check the math indirectly
 
     // Odd count: [100, 200, 300] -> median = 200
     const sessions0 = createMockSessions([])
-    const authority1 = new TimestampAuthority({ sessions: sessions0, identity })
+    const authority1 = new TimestampAuthority({ now: fixedNow, sessions: sessions0, identity })
     // Only local clock — result equals local
     const single = authority1.getNetworkTime(new Map())
     assert.equal(typeof single, 'number')
@@ -373,7 +408,7 @@ describe('TimestampProof', () => {
     // Even count: [100, 200, 300, 400] -> median = 250
     // We test this indirectly through the authority
     const sessions3 = createMockSessions(['pod-a', 'pod-b', 'pod-c'])
-    const authority4 = new TimestampAuthority({ sessions: sessions3, identity })
+    const authority4 = new TimestampAuthority({ now: fixedNow, sessions: sessions3, identity })
     // Override local clock behavior by providing 4 peer timestamps and no local
     // Actually, local is always included. Let's just verify the math:
 
@@ -381,7 +416,7 @@ describe('TimestampProof', () => {
     // The spec says the median is used, so let's verify both even and odd paths
     // by controlling all inputs via peerTimestamps
     const evenSessions = createMockSessions([])
-    const evenAuthority = new TimestampAuthority({ sessions: evenSessions, identity })
+    const evenAuthority = new TimestampAuthority({ now: fixedNow, sessions: evenSessions, identity })
 
     // 1 value (local only): median = local
     const t1 = evenAuthority.getNetworkTime(new Map())
@@ -398,8 +433,8 @@ describe('TimestampProof', () => {
       // Even: [100, 200, 300, 400] -> median = 250
       // We need to know local clock, so this test verifies the return is reasonable
       const s4 = createMockSessions(['a', 'b', 'c'])
-      const a4 = new TimestampAuthority({ sessions: s4, identity })
-      const now = Date.now()
+      const a4 = new TimestampAuthority({ now: fixedNow, sessions: s4, identity })
+      const now = T0
       const nt = a4.getNetworkTime(new Map([
         ['a', now - 100],
         ['b', now + 100],
@@ -458,8 +493,8 @@ describe('TimestampProof.verify — signatures', () => {
   it('calls verifyFn for the authority signature and every witness', async () => {
     const identity = createMockIdentity('pod-local')
     const sessions = createMockSessions(['pod-a', 'pod-b'])
-    const authority = new TimestampAuthority({ sessions, identity })
-    const now = Date.now()
+    const authority = new TimestampAuthority({ now: fixedNow, sessions, identity })
+    const now = T0
     const proof = await authority.stamp('abc123', new Map([['pod-a', now], ['pod-b', now]]))
 
     const seen = []
@@ -482,8 +517,8 @@ describe('TimestampProof.verify — signatures', () => {
   it('rejects a proof whose witness timestamp was edited after signing', async () => {
     const identity = createMockIdentity('pod-local')
     const sessions = createMockSessions(['pod-a', 'pod-b'])
-    const authority = new TimestampAuthority({ sessions, identity })
-    const now = Date.now()
+    const authority = new TimestampAuthority({ now: fixedNow, sessions, identity })
+    const now = T0
     const proof = await authority.stamp('abc123', new Map([['pod-a', now], ['pod-b', now]]))
 
     const json = proof.toJSON()
@@ -523,12 +558,14 @@ describe('TimestampAuthority.verify — proofs issued by another pod', () => {
   it('verifies a proof issued by a different authority', async () => {
     const alice = createMockIdentity('pod-alice')
     const proof = await new TimestampAuthority({
+      now: fixedNow,
       sessions: createMockSessions(['pod-a']),
       identity: alice,
-    }).stamp('abc123', new Map([['pod-a', Date.now()]]))
+    }).stamp('abc123', new Map([['pod-a', T0]]))
 
     // Bob has his own signing key, and a verify() that resolves by podId.
     const bob = new TimestampAuthority({
+      now: fixedNow,
       sessions: createMockSessions([]),
       identity: createMockIdentity('pod-bob'),
     })
@@ -540,6 +577,7 @@ describe('TimestampAuthority.verify — proofs issued by another pod', () => {
 
   it('rejects a foreign proof forged in Bob’s name', async () => {
     const bob = new TimestampAuthority({
+      now: fixedNow,
       sessions: createMockSessions([]),
       identity: createMockIdentity('pod-bob'),
     })
@@ -552,13 +590,14 @@ describe('TimestampAuthority.verify — proofs issued by another pod', () => {
       podId: 'pod-bob',
       async sign(data) { return new TextEncoder().encode(`sig:pod-bob:${data}`) },
     }
-    const bob = new TimestampAuthority({ sessions: createMockSessions([]), identity: signOnly })
+    const bob = new TimestampAuthority({ now: fixedNow, sessions: createMockSessions([]), identity: signOnly })
 
     const alice = createMockIdentity('pod-alice')
     const proof = await new TimestampAuthority({
+      now: fixedNow,
       sessions: createMockSessions(['pod-a']),
       identity: alice,
-    }).stamp('abc123', new Map([['pod-a', Date.now()]]))
+    }).stamp('abc123', new Map([['pod-a', T0]]))
 
     const result = await bob.verify(proof)
     assert.equal(result.valid, false)
