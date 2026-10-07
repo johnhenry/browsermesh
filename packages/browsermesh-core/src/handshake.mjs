@@ -282,25 +282,28 @@ export class SignalingClient {
   /**
    * Register callback for incoming SDP offers.
    * @param {Function} cb - Receives (offer, fromPodId)
+   * @returns {() => void} Unsubscribe
    */
   onOffer(cb) {
-    this.on('offer', cb)
+    return this.on('offer', cb)
   }
 
   /**
    * Register callback for incoming SDP answers.
    * @param {Function} cb - Receives (answer, fromPodId)
+   * @returns {() => void} Unsubscribe
    */
   onAnswer(cb) {
-    this.on('answer', cb)
+    return this.on('answer', cb)
   }
 
   /**
    * Register callback for incoming ICE candidates.
    * @param {Function} cb - Receives (candidate, fromPodId)
+   * @returns {() => void} Unsubscribe
    */
   onIceCandidate(cb) {
-    this.on('ice-candidate', cb)
+    return this.on('ice-candidate', cb)
   }
 
   // -- Generic send / event system ------------------------------------------
@@ -339,12 +342,14 @@ export class SignalingClient {
    * Register a listener for a given event type.
    * @param {string} event
    * @param {Function} cb
+   * @returns {() => void} Unsubscribe (same as `off(event, cb)`)
    */
   on(event, cb) {
     if (!this.#listeners.has(event)) {
       this.#listeners.set(event, new Set())
     }
     this.#listeners.get(event).add(cb)
+    return () => this.off(event, cb)
   }
 
   /**

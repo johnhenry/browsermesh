@@ -462,6 +462,15 @@ export class WebRTCTransport {
   /** @type {{ open: Function[], message: Function[], close: Function[], error: Function[], 'ice-candidate': Function[] }} */
   #callbacks = { open: [], message: [], close: [], error: [], 'ice-candidate': [] };
 
+  /**
+   * Unsubscribe functions for the listeners this transport put on the shared
+   * signaler (when the signaler returns them), so a finished or closed
+   * transport stops receiving -- and acting on -- every later answer and ICE
+   * candidate on that signaler.
+   * @type {Function[]}
+   */
+  #signalerOffs = [];
+
   /** @type {{ messagesSent: number, messagesReceived: number, bytesIn: number, bytesOut: number, iceState: string }} */
   #stats = { messagesSent: 0, messagesReceived: 0, bytesIn: 0, bytesOut: 0, iceState: 'new' };
 
@@ -501,6 +510,40 @@ export class WebRTCTransport {
   /** Remote pod identifier. */
   get remotePodId() { return this.#remotePodId; }
 
+
+  /**
+   * True when a signaling message came from this transport's own remote peer.
+   *
+   * A signaler is shared: one SignalingClient serves every negotiation a pod
+   * has in flight, and it hands EVERY answer and ICE candidate to EVERY
+   * listener along with the sender's podId. A transport that ignores that
+   * second argument applies a third peer's answer to its own
+   * RTCPeerConnection (and the right answer, arriving later, then fails with
+   * "wrong state: stable") -- with three pods, one link comes up one-way and
+   * a pod can end with no sessions. A signaler that does not say who a
+   * message is from (a bare two-party channel) is trusted as before.
+   *
+   * @param {string|undefined|null} fromPodId
+   * @returns {boolean}
+   */
+  #isFromRemote(fromPodId) {
+    return fromPodId === undefined || fromPodId === null || fromPodId === this.#remotePodId;
+  }
+
+  /** Remember a signaler subscription's unsubscribe function, if it returned one. */
+  #track(off) {
+    if (typeof off === 'function') this.#signalerOffs.push(off);
+  }
+
+  /** Stop listening on the shared signaler. Idempotent. */
+  #detachSignaler() {
+    const offs = this.#signalerOffs;
+    this.#signalerOffs = [];
+    for (const off of offs) {
+      try { off(); } catch (e) { silentCatch('clawser-mesh-websocket', 'signaler-unsubscribe', e) }
+    }
+  }
+
   // -- Public API ------------------------------------------------------------
 
   /**
@@ -530,13 +573,15 @@ export class WebRTCTransport {
       if (this.#pc.connectionState === 'failed' || this.#pc.connectionState === 'closed') {
         if (this.#state !== 'closed' && this.#state !== 'closing') {
           this.#state = 'closed';
+          this.#detachSignaler();
           this._fireEvent('close');
         }
       }
     });
 
     // Set up signaler listeners for remote ICE candidates
-    this.#signaler.onIceCandidate((data) => {
+    this.#track(this.#signaler.onIceCandidate((data, fromPodId) => {
+      if (!this.#isFromRemote(fromPodId)) return;
       if (this.#pc) {
         // The promise must not be dropped. addIceCandidate rejects on a
         // malformed candidate and on one that arrives before the remote
@@ -548,7 +593,7 @@ export class WebRTCTransport {
           silentCatch('clawser-mesh-websocket', 'ignore-rejected-ice-candidate', e);
         });
       }
-    });
+    }));
 
     // Create data channels and offer. A second createDataChannel() call on
     // the same RTCPeerConnection is a second SCTP stream, not a second
@@ -571,7 +616,13 @@ export class WebRTCTransport {
         reject(new Error('WebRTC answer timeout'));
       }, 30000);
 
-      this.#signaler.onAnswer(async (data) => {
+      // eslint-disable-next-line prefer-const
+      let offAnswer;
+      offAnswer = this.#signaler.onAnswer(async (data, fromPodId) => {
+        // Not ours: another negotiation's answer on the shared signaler.
+        if (!this.#isFromRemote(fromPodId)) return;
+        // An offer gets one answer; a repeat must not re-apply to a stable pc.
+        if (typeof offAnswer === 'function') offAnswer();
         clearTimeout(timeout);
         try {
           await this.#pc.setRemoteDescription(data.answer);
@@ -595,6 +646,7 @@ export class WebRTCTransport {
           this.#dataChannel.addEventListener('open', onDCOpen);
         }
       });
+      this.#track(offAnswer);
     });
   }
 
@@ -629,12 +681,14 @@ export class WebRTCTransport {
         if (this.#pc.connectionState === 'failed' || this.#pc.connectionState === 'closed') {
           if (this.#state !== 'closed' && this.#state !== 'closing') {
             this.#state = 'closed';
+            this.#detachSignaler();
             this._fireEvent('close');
           }
         }
       });
 
-      this.#signaler.onIceCandidate((data) => {
+      this.#track(this.#signaler.onIceCandidate((data, fromPodId) => {
+        if (!this.#isFromRemote(fromPodId)) return;
         if (this.#pc) {
           // See connect()'s identical handler: the promise must not be
           // dropped, for the same reason.
@@ -642,7 +696,7 @@ export class WebRTCTransport {
             silentCatch('clawser-mesh-websocket', 'ignore-rejected-ice-candidate', e);
           });
         }
-      });
+      }));
     }
     this.#state = 'connecting';
 
@@ -740,6 +794,7 @@ export class WebRTCTransport {
       this.#pc.close();
     }
     this.#state = 'closed';
+    this.#detachSignaler();
     this._fireEvent('close');
   }
 
