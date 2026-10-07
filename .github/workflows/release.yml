@@ -31,6 +31,12 @@ jobs:
   publish-npm:
     name: Publish to NPM
     runs-on: ubuntu-latest
+    # id-token: write lets npm publish through trusted publishing (each
+    # package trusts this repo's release.yml) and sign provenance.
+    # NPM_TOKEN below is only a fallback until it's removed.
+    permissions:
+      contents: read
+      id-token: write
     needs: validate
     steps:
       - name: Checkout code
