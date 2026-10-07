@@ -1,6 +1,6 @@
 {
   "name": "@johnhenry/browsermesh-pod",
-  "version": "0.0.3",
+  "version": "0.1.0",
   "description": "Pod base class for browser execution contexts with Ed25519 identity, BroadcastChannel discovery, and peer messaging",
   "type": "module",
   "main": "./src/index.mjs",

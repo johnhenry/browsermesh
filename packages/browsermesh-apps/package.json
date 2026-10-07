@@ -1,6 +1,6 @@
 {
   "name": "@johnhenry/browsermesh-apps",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "description": "Application layer: marketplace, chat, payments, compute, orchestration, and agent tools for BrowserMesh",
   "type": "module",
   "main": "./src/index.mjs",
@@ -59,7 +59,7 @@
   },
   "devDependencies": {
     "@johnhenry/andbox": ">=0.0.1 <1.0.0",
-    "@johnhenry/browsermesh-pod": "^0.0.3",
+    "@johnhenry/browsermesh-pod": "^0.1.0",
     "node-datachannel": "^0.33.4",
     "fake-indexeddb": "^6.2.5",
     "webgpu": "^0.6.1"
