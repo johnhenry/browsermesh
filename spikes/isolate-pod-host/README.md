@@ -181,7 +181,7 @@ comments, since it never depended on wrangler or cf at runtime.
 
 ## Measured numbers
 
-All measurements from `node --test test/` on this machine (Apple Silicon
+All measurements from `npm test` (`node --test test/*.test.mjs`) on this machine (Apple Silicon
 macOS, Node v26.9.0, cf 1.0.0-beta.9, @cloudflare/vite-plugin 1.62.3, Vite
 8.3.1, workerd 1.20260930.2), relay + signaling + `cf dev` all on localhost
 loopback. Re-run `npm test` to reproduce — numbers are printed as test
@@ -196,6 +196,19 @@ diagnostics.
 | Wake on message after idle | < 50 ms (via hibernation) | **≈ same as cold boot (~1.5s)** | See "What wasn't achievable" — hibernation does not apply to this topology, so there is no fast-resume path. Verified empirically (pre-migration, under `wrangler dev`): killed and restarted the dev server process (simulating an isolate restart) and re-booted the same pod name; the identity was correctly reloaded from storage (same `podId` both times) but the second boot took 1522ms vs. 1533ms for the first — statistically indistinguishable. Not re-verified under `cf dev` as part of this migration, but nothing about the mechanism (storage-backed identity, fixed discovery window) is cf/wrangler-specific. |
 | Message RTT, Node pod ↔ DO pod, via relay | < 2× browser↔browser via relay | **1 ms** | Loopback-only; no browser↔browser relay baseline was measured in this spike to compare against, and production RTT will include real network latency on both legs. Directionally very good — the relay hop itself adds negligible overhead. |
 | `cf dev` cold start (process spawn → `/health` 200) | — | **~4.0 s** (observed range ~4–13 s across runs) | Not a pod metric, but it's the dominant fixed cost in the test suite's wall time. Slower and more variable than `wrangler dev`'s ~1.0–1.1 s (pre-migration baseline) — `cf dev` delegates to a cold `npx vite`, which pays Vite's own startup cost on top of miniflare/workerd init; this is a beta rough edge worth re-measuring once `cf dev` has a faster path for plain-Worker (non-framework) projects. |
+
+### Re-run on NixOS x86_64 (after rebasing onto main)
+
+Same suite, CPU-only x86_64 NixOS box, Node v26.5.0, workerd 1.20260930.2,
+Vite 8.3.1, cf `1.0.0-beta.9` (the lockfile pin) and again with
+`1.0.0-beta.13` (the npm `latest` at the time; the `^1.0.0-beta.9` range
+admits it): build and 3/3 tests pass on both. DO pod registered in ~0.5 s,
+`Pod.boot()` ~2 s, message RTT 79 ms and 493 ms in the two runs (noisy; the
+figures above are loopback on a faster laptop), and `cf dev` took
+~28-29 s to come up on first start here, far slower than the macOS figure
+because Vite and rolldown start cold on this CPU. On a fresh checkout,
+`npm install` followed by `npm rebuild workerd esbuild` is needed, since
+npm 11 does not run dependency install scripts by default.
 
 ## What was and wasn't achievable
 
