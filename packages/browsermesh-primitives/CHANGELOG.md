@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.0
+
+### Minor Changes
+
+- 90bb906: Add the canonical object form `PodIdentity.verify({ publicKey, signature, message })` (and `identity.sign({ message })`), matching the sibling libraries. The positional `verify(publicKey, data, signature)` form is unchanged; its argument order is now documented loudly because it differs from WebCrypto and wsh (key, signature, data).
+
 ## 0.0.3 (2026-09-26)
 
 ### Patch Changes
@@ -11,7 +17,7 @@
   from `src/identity.mjs`) since before the package shipped declarations at
   all, but none were added to `src/index.d.ts`. TypeScript consumers hit
   `TS2305` ("has no exported member") and had to write a local `declare
-  module` augmentation just to call any of them. `src/index.d.ts` now
+module` augmentation just to call any of them. `src/index.d.ts` now
   declares `probeEd25519Support(): Promise<boolean>` (never throws; resolves
   `true`/`false` and caches the answer), `supportsEd25519(): boolean | null`
   (the cached answer, `null` until the probe first resolves), and
