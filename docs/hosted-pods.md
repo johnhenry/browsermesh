@@ -649,8 +649,21 @@ signaling on loopback):
 | Message RTT via relay | 1–2 ms | Loopback |
 | Memory per idle pod | not measured | workerd does not expose per-isolate memory under `wrangler dev` |
 
-Lane B, WP3 (`spikes/vm-pod-host`): built and tested on macOS against a fake
-Firecracker API only. No numbers until it runs on a KVM host.
+Lane B, WP3 (`spikes/vm-pod-host`): built on macOS against a fake Firecracker
+API. Since then the spike's `FirecrackerClient` has been run against a real
+Firecracker v1.16.1 on an x86_64 KVM host with a stock CI kernel and a
+busybox initramfs (not the Alpine + Node guest, no jailer, no network):
+
+| Measure | Measured | Note |
+| --- | --- | --- |
+| `start()` → guest `/init` running | ~585 ms | Guest reports 0.35 s uptime; this is kernel boot only, not a `registered` pod |
+| Snapshot create (Full, 128 MiB) | ~460 ms | |
+| `loadSnapshot` + resume | 8 ms | API call; guest resumed ticking immediately |
+| Firecracker RSS, idle after restore | ~19 MB | Memory is file-backed and lazily faulted |
+
+The `registered` figures need the real guest image and root on a KVM host
+(jailer, TAP, rootfs build). See the spike's README for what the run exposed
+in `VmPod.restore()`.
 
 These numbers are targets for WP2/WP3's spikes to measure, not yet-measured
 results — this table should gain a second column with real numbers once
