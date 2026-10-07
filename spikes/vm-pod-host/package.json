@@ -5,7 +5,7 @@
   "description": "Firecracker microVM pod host spike for browsermesh#185 WP3 — not a published package, not a workspace member (root workspaces stay packages/*)",
   "type": "module",
   "scripts": {
-    "test": "node --test test/"
+    "test": "node --test test/*.test.mjs"
   },
   "engines": {
     "node": ">=26.0.0"

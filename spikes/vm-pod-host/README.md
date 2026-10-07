@@ -75,7 +75,7 @@ spikes/vm-pod-host/
 ## Running the tests
 
 ```sh
-node --test spikes/vm-pod-host/test/
+node --test spikes/vm-pod-host/test/*.test.mjs
 ```
 
 72 tests, all passing on macOS (Node v26), in well under a second —

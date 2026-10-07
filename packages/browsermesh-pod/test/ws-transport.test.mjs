@@ -71,6 +71,62 @@ describe('WebSocketTransport — register handshake', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Wire encoding (matches browsermesh-transport's encodeWireData contract)
+// ---------------------------------------------------------------------------
+
+describe('WebSocketTransport — wire encoding', () => {
+  function spyNetwork() {
+    const net = createFakeWebSocketNetwork()
+    const relay = net.createRelayServer()
+    net.registerServer('ws://relay.test', relay)
+    const sent = []
+    const sockets = []
+    class SpyWebSocket extends net.FakeWebSocket {
+      constructor(url) { super(url); sockets.push(this) }
+      send(raw) { sent.push(raw); super.send(raw) }
+    }
+    return { net, relay, sent, sockets, SpyWebSocket }
+  }
+
+  it('hands the socket exactly one JSON text per frame, with the pod message as a nested object', async () => {
+    const { sent, SpyWebSocket } = spyNetwork()
+    const alice = track(new WebSocketTransport({ url: 'ws://relay.test', podId: 'alice', WebSocket: SpyWebSocket }))
+    await alice.open()
+    sent.length = 0
+
+    const msg = { type: 'pod:message', to: 'bob', payload: { text: 'hi' } }
+    // bob is unknown to the relay (error reply), the frame is still what we assert on
+    alice.send(msg)
+
+    assert.equal(sent.length, 1)
+    assert.equal(typeof sent[0], 'string')
+    const frame = JSON.parse(sent[0])
+    assert.equal(frame.type, 'relay')
+    assert.equal(frame.target, 'bob')
+    assert.equal(typeof frame.envelope, 'object', 'envelope must not be a pre-encoded string (double encoding)')
+    assert.deepEqual(frame.envelope, msg)
+  })
+
+  it('reads a binary (ArrayBuffer / typed array) frame as UTF-8 JSON', async () => {
+    const { sockets, SpyWebSocket } = spyNetwork()
+    const bob = track(new WebSocketTransport({ url: 'ws://relay.test', podId: 'bob', WebSocket: SpyWebSocket }))
+    await bob.open()
+    const received = []
+    bob.onMessage((m) => received.push(m))
+
+    const enc = (o) => new TextEncoder().encode(JSON.stringify(o))
+    const ws = sockets[0]
+    ws._dispatch('message', { data: enc({ type: 'relayed', source: 'alice', envelope: { type: 'pod:message', payload: 1 } }).buffer })
+    ws._dispatch('message', { data: enc({ type: 'relayed', source: 'alice', envelope: { type: 'pod:message', payload: 2 } }) })
+    // a Blob cannot be read synchronously and is ignored rather than turned into "[object Blob]"
+    ws._dispatch('message', { data: new Blob(['{"type":"relayed","source":"alice","envelope":{"payload":3}}']) })
+    await wait(5)
+
+    assert.deepEqual(received.map((m) => m.payload), [1, 2])
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Point-to-point relay
 // ---------------------------------------------------------------------------
 

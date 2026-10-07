@@ -54,7 +54,7 @@ npm run dev            # wrangler dev, serves on :8787... (wrangler picks a port
 npm run dry-run        # wrangler deploy --dry-run --outdir dist
 
 # Full end-to-end test (spawns relay + signaling + wrangler dev itself):
-npm test               # node --test test/
+npm test               # node --test test/*.test.mjs
 ```
 
 Once running, boot a pod and check its status:

@@ -260,7 +260,18 @@ export class WebSocketTransport {
 
   #parse(event) {
     try {
-      const raw = typeof event.data === 'string' ? event.data : String(event.data)
+      // Wire contract (same rule as @johnhenry/browsermesh-transport's
+      // encodeWireData): strings pass through untouched, binary is read as
+      // UTF-8 text, and the only JSON step is this one parse of the frame.
+      // Outbound, #send stringifies each control frame exactly once; the
+      // pod message rides inside it as a nested object, never as a
+      // pre-encoded string, so nothing is double-encoded.
+      const d = event.data
+      let raw
+      if (typeof d === 'string') raw = d
+      else if (d instanceof ArrayBuffer) raw = new TextDecoder().decode(d)
+      else if (ArrayBuffer.isView(d)) raw = new TextDecoder().decode(d)
+      else return null // Blob (async read) or anything else: not a frame we can read
       return JSON.parse(raw)
     } catch {
       return null
