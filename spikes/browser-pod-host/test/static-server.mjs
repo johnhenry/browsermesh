@@ -60,8 +60,9 @@ export async function startStaticServer() {
       res.writeHead(200, { 'content-type': type, 'cache-control': 'no-store' })
       res.end(body)
     } catch (err) {
+      console.error('[static-server]', err)
       res.writeHead(500, { 'content-type': 'text/plain' })
-      res.end(String(err?.message || err))
+      res.end('internal error')
     }
   })
 

@@ -63,7 +63,7 @@ export async function loadOrCreateIdentity({
 } = {}) {
   const identityManager = new MeshIdentityManager({})
   let podId
-  let resolvedLabel = label
+  let resolvedLabel
   let created = false
 
   const stored = await readStoredIdentity(identityPath)

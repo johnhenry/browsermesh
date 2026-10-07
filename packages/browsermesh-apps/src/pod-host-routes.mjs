@@ -120,7 +120,13 @@ export const POD_HOST_ROUTES = Object.freeze([
 
 /** @param {string} pathname @returns {string[]} */
 function splitPath(pathname) {
-  const trimmed = String(pathname || '').replace(/^\/+|\/+$/g, '')
+  // Linear scan rather than a regex: this runs on attacker-supplied paths.
+  const text = String(pathname || '')
+  let start = 0
+  let end = text.length
+  while (start < end && text[start] === '/') start++
+  while (end > start && text[end - 1] === '/') end--
+  const trimmed = text.slice(start, end)
   return trimmed === '' ? [] : trimmed.split('/')
 }
 
