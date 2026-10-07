@@ -122,6 +122,8 @@ import {
   WebRTCTransportAdapter,
   WebRTCAdapterFactory,
   mergeIceServers,
+  hasTurnServer,
+  resolveIceTransportPolicy,
   DEFAULT_ICE_SERVERS,
   PUBLIC_STUN_SERVERS,
   DEFAULT_CONNECTION_ID,
@@ -633,6 +635,122 @@ describe('default ICE configuration', () => {
     }
     assert.ok(seenConfig, 'RTCPeerConnection was never constructed')
     assert.deepEqual(seenConfig.iceServers, [], `leaked ICE servers: ${JSON.stringify(seenConfig.iceServers)}`)
+  })
+})
+
+// ── iceTransportPolicy (#190) ─────────────────────────────────────────
+//
+// 'relay' makes the browser gather TURN candidates only, so a pod that
+// configured TURN to hide its address does not leak host/srflx candidates.
+// A mock cannot gather candidates, so these assert what matters: the policy
+// reaches the RTCConfiguration of every RTCPeerConnection the classes build,
+// and the unusable combination (relay, no TURN) fails fast.
+
+describe('iceTransportPolicy (#190)', () => {
+  const TURN = [{ urls: 'turn:relay.example.com:3478', username: 'u', credential: 'c' }]
+
+  /** Run `fn` with a RTCPeerConnection spy; returns every config it was built with. */
+  async function withSpy(fn) {
+    const configs = []
+    class SpyPC extends MockRTCPeerConnection {
+      constructor(config) { super(config); configs.push(config) }
+    }
+    const prev = globalThis.RTCPeerConnection
+    globalThis.RTCPeerConnection = SpyPC
+    try { await fn() } finally { globalThis.RTCPeerConnection = prev }
+    return configs
+  }
+
+  it('hasTurnServer recognises turn:/turns: in string and array urls', () => {
+    assert.equal(hasTurnServer(TURN), true)
+    assert.equal(hasTurnServer([{ urls: ['stun:a.example', 'turns:b.example:443'] }]), true)
+    assert.equal(hasTurnServer([{ urls: 'stun:a.example' }]), false)
+    assert.equal(hasTurnServer([]), false)
+    assert.equal(hasTurnServer(undefined), false)
+  })
+
+  it('resolveIceTransportPolicy validates and leaves the default alone', () => {
+    assert.equal(resolveIceTransportPolicy(undefined, []), undefined)
+    assert.equal(resolveIceTransportPolicy('all', []), 'all')
+    assert.equal(resolveIceTransportPolicy('relay', TURN), 'relay')
+    assert.throws(() => resolveIceTransportPolicy('relay', []), /requires at least one turn/)
+    assert.throws(() => resolveIceTransportPolicy('relay', [{ urls: 'stun:x' }]), /requires at least one turn/)
+    assert.throws(() => resolveIceTransportPolicy('host', TURN), TypeError)
+  })
+
+  it("offerer's RTCPeerConnection gets iceTransportPolicy 'relay' verbatim", async () => {
+    const configs = await withSpy(async () => {
+      const conn = new WebRTCPeerConnection({
+        localPodId: 'a', remotePodId: 'b', iceServers: TURN, iceTransportPolicy: 'relay',
+      })
+      await conn.createOffer()
+    })
+    assert.equal(configs.length, 1)
+    assert.equal(configs[0].iceTransportPolicy, 'relay')
+    assert.deepEqual(configs[0].iceServers, TURN)
+  })
+
+  it("answerer's RTCPeerConnection gets iceTransportPolicy 'relay' too", async () => {
+    const configs = await withSpy(async () => {
+      const conn = new WebRTCPeerConnection({
+        localPodId: 'b', remotePodId: 'a', iceServers: TURN, iceTransportPolicy: 'relay',
+      })
+      await conn.handleOffer({ type: 'offer', sdp: 'mock-offer-sdp' })
+    })
+    assert.equal(configs.length, 1)
+    assert.equal(configs[0].iceTransportPolicy, 'relay')
+  })
+
+  it('negative control: with no policy the config carries no iceTransportPolicy key', async () => {
+    const configs = await withSpy(async () => {
+      const conn = new WebRTCPeerConnection({ localPodId: 'a', remotePodId: 'b', iceServers: TURN })
+      await conn.createOffer()
+    })
+    assert.equal('iceTransportPolicy' in configs[0], false)
+  })
+
+  it("'all' is forwarded as given", async () => {
+    const configs = await withSpy(async () => {
+      const conn = new WebRTCPeerConnection({
+        localPodId: 'a', remotePodId: 'b', iceServers: TURN, iceTransportPolicy: 'all',
+      })
+      await conn.createOffer()
+    })
+    assert.equal(configs[0].iceTransportPolicy, 'all')
+  })
+
+  it("'relay' without a TURN server throws at construction instead of gathering nothing", () => {
+    assert.throws(
+      () => new WebRTCPeerConnection({ localPodId: 'a', remotePodId: 'b', iceTransportPolicy: 'relay' }),
+      /requires at least one turn/,
+    )
+    assert.throws(
+      () => new WebRTCPeerConnection({
+        localPodId: 'a', remotePodId: 'b', iceServers: PUBLIC_STUN_SERVERS, iceTransportPolicy: 'relay',
+      }),
+      /requires at least one turn/,
+    )
+  })
+
+  it('WebRTCMeshManager forwards the policy to every connection it creates', async () => {
+    const configs = await withSpy(async () => {
+      const mgr = new WebRTCMeshManager({
+        localPodId: 'node-1', iceServers: TURN, iceTransportPolicy: 'relay',
+      })
+      const c1 = await mgr.connectToPeer('peer-a')
+      const c2 = await mgr.connectToPeer('peer-b', { connectionId: 'bulk' })
+      await c1.createOffer()
+      await c2.createOffer()
+    })
+    assert.equal(configs.length, 2)
+    for (const config of configs) assert.equal(config.iceTransportPolicy, 'relay')
+  })
+
+  it("WebRTCMeshManager 'relay' without TURN fails fast", () => {
+    assert.throws(
+      () => new WebRTCMeshManager({ localPodId: 'node-1', iceTransportPolicy: 'relay' }),
+      /requires at least one turn/,
+    )
   })
 })
 

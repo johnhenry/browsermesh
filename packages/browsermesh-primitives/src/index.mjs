@@ -30,3 +30,6 @@ export {
   TestMesh,
   TESTMESH_LIMITS,
 } from "./test-transport.mjs";
+
+// Size-bucket padding (relay-blind envelopes)
+export { DEFAULT_PAD_BUCKETS, PAD_TRAILER_BYTES, paddedLength, padTo, unpad } from "./padding.mjs";

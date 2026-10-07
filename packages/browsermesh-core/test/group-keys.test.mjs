@@ -349,6 +349,64 @@ describe('GroupKeyManager', () => {
       const { ciphertext, iv } = await mgr.encrypt(plaintext)
       await assert.rejects(() => mgr.decrypt(ciphertext, iv, 999), /No key for epoch 999/)
     })
+
+    // #191: opt-in size-bucket padding so a relay sees buckets, not lengths.
+    describe('padding (#191)', () => {
+      const sizes = [3, 17, 90, 140, 200, 240, 300, 900, 2000, 5000]
+      const msg = (n) => Uint8Array.from({ length: n }, (_, i) => (i * 31 + 7) & 0xff)
+
+      it('negative control: padding off leaks every distinct plaintext length', async () => {
+        await mgr.initGroup(['pod-a'])
+        const lengths = []
+        for (const n of sizes) lengths.push((await mgr.encrypt(msg(n))).ciphertext.length)
+        assert.equal(new Set(lengths).size, sizes.length)
+        assert.deepEqual(lengths, sizes.map((n) => n + 16))
+      })
+
+      it('padding on yields only bucket-sized ciphertexts and round-trips', async () => {
+        await mgr.initGroup(['pod-a'])
+        const buckets = new Set()
+        for (const n of sizes) {
+          const { ciphertext, iv, epoch } = await mgr.encrypt(msg(n), { padding: true })
+          buckets.add(ciphertext.length - 16)
+          assert.deepEqual(await mgr.decrypt(ciphertext, iv, epoch, { padding: true }), msg(n))
+        }
+        assert.deepEqual([...buckets].sort((a, b) => a - b), [256, 1024, 4096, 16384])
+      })
+
+      it('custom buckets are honoured', async () => {
+        await mgr.initGroup(['pod-a'])
+        const opts = { padding: { buckets: [128, 512] } }
+        const a = await mgr.encrypt(msg(5), opts)
+        const b = await mgr.encrypt(msg(200), opts)
+        assert.equal(a.ciphertext.length, 128 + 16)
+        assert.equal(b.ciphertext.length, 512 + 16)
+        assert.deepEqual(await mgr.decrypt(b.ciphertext, b.iv, b.epoch, opts), msg(200))
+      })
+
+      it('constructor default applies to encrypt and decrypt, and a call can opt out', async () => {
+        const padded = new GroupKeyManager({ localPodId: 'pod-local', groupId: 'g', padding: true })
+        await padded.initGroup(['pod-a'])
+        const sealed = await padded.encrypt(msg(10))
+        assert.equal(sealed.ciphertext.length, 256 + 16)
+        assert.deepEqual(await padded.decrypt(sealed.ciphertext, sealed.iv, sealed.epoch), msg(10))
+        const plain = await padded.encrypt(msg(10), { padding: false })
+        assert.equal(plain.ciphertext.length, 10 + 16)
+      })
+
+      it('the padding is inside the seal: a padded and an unpadded sender never mismatch silently', async () => {
+        await mgr.initGroup(['pod-a'])
+        const sealed = await mgr.encrypt(msg(10), { padding: true })
+        // Receiver that forgot to unpad gets the padded bytes, not the message.
+        const raw = await mgr.decrypt(sealed.ciphertext, sealed.iv, sealed.epoch)
+        assert.equal(raw.length, 256)
+      })
+
+      it('rejects a malformed padding option', async () => {
+        await mgr.initGroup(['pod-a'])
+        await assert.rejects(() => mgr.encrypt(msg(1), { padding: 'yes' }), TypeError)
+      })
+    })
   })
 
   // -----------------------------------------------------------------------

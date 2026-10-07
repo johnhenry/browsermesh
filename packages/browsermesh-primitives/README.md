@@ -130,6 +130,13 @@ console.log(set.has('item')) // true
 
 With several grants for one grantee, the engine returns the reason from the last grant it examined.
 
+### Padding
+
+- `padTo(bytes, { buckets? })` / `unpad(padded)` -- round a payload up to a size bucket (default 256 / 1024 / 4096 / 16384; larger payloads round up to a multiple of the largest) with a length trailer, and strip it again
+- `paddedLength(length, { buckets? })`, `DEFAULT_PAD_BUCKETS`, `PAD_TRAILER_BYTES`
+
+Apply `padTo()` before sealing (encrypting) a message, so a relay that only sees ciphertext learns the bucket rather than the exact length; the trailer is plaintext, so padding already-encrypted bytes hides nothing. Size only, no timing or cover traffic.
+
 ### CRDTs
 
 - `VectorClock` -- partial-order logical clock with merge

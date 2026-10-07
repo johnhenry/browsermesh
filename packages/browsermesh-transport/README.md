@@ -61,6 +61,51 @@ parses it (`@johnhenry/browsermesh-apps`' `ctx.onIncomingData()` does). A custom
 `WebRTCTransport.send(data, { channel })` takes `'control'` (default) or
 `'bulk'` and falls back to control when the bulk channel is not open.
 
+## TURN-only pods: `iceTransportPolicy`
+
+By default a pod that has configured a TURN server still gathers host and
+server-reflexive candidates, so its public IP reaches every peer it negotiates
+with. To avoid that, pass `iceTransportPolicy: 'relay'`; the browser then
+gathers only relayed (TURN) candidates:
+
+```js
+const mesh = new WebRTCMeshManager({
+  localPodId,
+  iceServers: [{ urls: 'turns:turn.example.com:443', username, credential }],
+  iceTransportPolicy: 'relay',
+});
+```
+
+It is accepted by `WebRTCPeerConnection`, `WebRTCMeshManager`, `WebRTCTransport`
+(also as `config.iceTransportPolicy`) and `TransportFactory` (a default for the
+`'webrtc'` transports it creates), and forwarded verbatim to
+`RTCPeerConnection`. `'relay'` with no `turn:`/`turns:` entry in `iceServers`
+throws at construction, because relay-only gathering without a TURN server
+yields zero candidates and the connection would just hang. Leaving the option
+out keeps the browser default (`'all'`).
+
+## Size-bucket padding and send jitter (opt-in)
+
+A relay that only sees ciphertext still learns exact payload sizes, which for
+short agent messages distinguishes message types. Padding rounds each message
+up to a bucket size (`padTo()`/`unpad()` in `@johnhenry/browsermesh-primitives`;
+default buckets 256 / 1024 / 4096 / 16384 bytes, larger payloads round up to a
+multiple of 16384). It is off by default. Hiding sizes from a relay requires
+padding *inside* the end-to-end seal:
+
+- **Group-key envelopes** (`@johnhenry/browsermesh-core`):
+  `groupKeys.encrypt(bytes, { padding: true })` and
+  `groupKeys.decrypt(ct, iv, epoch, { padding: true })`.
+- **`WebSocketTransport`** (what talks to a relay): `new WebSocketTransport({ url,
+  padding: true })` sends every frame as a binary frame padded to a bucket
+  (text and binary round-trip; both ends must enable it) and `jitterMs: 50`
+  adds a random 0..50 ms delay to each send, order preserved. A transport-level
+  frame is visible to whoever terminates the WebSocket, so on its own this
+  hides sizes from network observers, not from the relay; combine it with
+  padding inside the seal for relay-blind payloads.
+
+Constant-rate cover traffic is deliberately not provided.
+
 ## License
 
 MIT
