@@ -11,6 +11,9 @@ import {
   MeshFileAcceptTool,
   MeshFileListTool,
   MeshFileCancelTool,
+  IoTListTool,
+  IoTSendTool,
+  IoTTelemetryTool,
   registerMeshTools,
 } from '../src/tools.mjs';
 import { StreamMultiplexer } from '@johnhenry/browsermesh-transport';
@@ -385,27 +388,74 @@ describe('MeshFileCancelTool', () => {
 // ---------------------------------------------------------------------------
 
 describe('registerMeshTools', () => {
-  it('registers all 15 tools', () => {
+  const noIot = [
+    'mesh_stream_open', 'mesh_stream_close', 'mesh_stream_list',
+    'mesh_file_send', 'mesh_file_accept', 'mesh_file_list', 'mesh_file_cancel',
+    'dht_store', 'dht_lookup', 'dht_peers', 'gpu_train_start', 'gpu_train_status',
+  ];
+  const iotBridge = {
+    listDevices: () => [{ deviceId: 'd1', name: 'lamp', protocol: 'mqtt', capabilities: ['read', 'write'] }],
+    send: async () => {},
+  };
+  const iotTelemetry = {
+    query: () => [{ ts: 1700000000000, value: 21.5 }],
+    getStats: () => ({ min: 20, max: 22, avg: 21, count: 2, last: 21.5 }),
+  };
+  const collect = (...args) => {
     const registered = [];
-    const registry = { register(tool) { registered.push(tool); } };
-    registerMeshTools(registry);
-    assert.equal(registered.length, 15);
-    const names = registered.map(t => t.name);
-    assert.ok(names.includes('mesh_stream_open'));
-    assert.ok(names.includes('mesh_stream_close'));
-    assert.ok(names.includes('mesh_stream_list'));
-    assert.ok(names.includes('mesh_file_send'));
-    assert.ok(names.includes('mesh_file_accept'));
-    assert.ok(names.includes('mesh_file_list'));
-    assert.ok(names.includes('mesh_file_cancel'));
-    assert.ok(names.includes('dht_store'));
-    assert.ok(names.includes('dht_lookup'));
-    assert.ok(names.includes('dht_peers'));
-    assert.ok(names.includes('gpu_train_start'));
-    assert.ok(names.includes('gpu_train_status'));
-    assert.ok(names.includes('iot_list'));
-    assert.ok(names.includes('iot_send'));
-    assert.ok(names.includes('iot_telemetry'));
+    registerMeshTools({ register(tool) { registered.push(tool); } }, ...args);
+    return registered.map(t => t.name);
+  };
+
+  beforeEach(() => {
+    meshToolsContext.setIoTBridge(null);
+    meshToolsContext.setIoTTelemetry(null);
+  });
+
+  it('registers the 12 non-IoT tools by default and no IoT tools (#192)', () => {
+    const names = collect();
+    assert.deepEqual(names, noIot);
+    assert.ok(!names.some(n => n.startsWith('iot_')));
+  });
+
+  it('registers iot_list and iot_send only when an iotBridge is supplied', () => {
+    const names = collect(undefined, undefined, { iotBridge });
+    assert.deepEqual(names, [...noIot, 'iot_list', 'iot_send']);
+    assert.equal(meshToolsContext.getIoTBridge(), iotBridge);
+  });
+
+  it('registers iot_telemetry only when iotTelemetry is supplied', () => {
+    const names = collect(undefined, undefined, { iotTelemetry });
+    assert.deepEqual(names, [...noIot, 'iot_telemetry']);
+    assert.equal(meshToolsContext.getIoTTelemetry(), iotTelemetry);
+  });
+
+  it('registers all 15 tools when both are supplied', () => {
+    const names = collect(undefined, undefined, { iotBridge, iotTelemetry });
+    assert.equal(names.length, 15);
+    for (const n of ['iot_list', 'iot_send', 'iot_telemetry']) assert.ok(names.includes(n));
+  });
+
+  it('rejects a bridge or telemetry that does not implement the documented duck type', () => {
+    assert.throws(() => collect(undefined, undefined, { iotBridge: { listDevices() {} } }), /iotBridge must implement send\(\)/);
+    assert.throws(() => collect(undefined, undefined, { iotBridge: {} }), /iotBridge must implement listDevices\(\)/);
+    assert.throws(() => collect(undefined, undefined, { iotTelemetry: { query() {} } }), /iotTelemetry must implement getStats\(\)/);
+  });
+
+  it('the supplied bridge drives the tools end to end', async () => {
+    const sent = [];
+    registerMeshTools({ register() {} }, undefined, undefined, {
+      iotBridge: { ...iotBridge, send: async (id, payload) => { sent.push([id, payload]); } },
+      iotTelemetry,
+    });
+    const list = await new IoTListTool().execute({ protocol: 'mqtt' });
+    assert.equal(list.success, true);
+    assert.match(list.output, /d1 \| lamp \| mqtt \| \[read,write\]/);
+    const send = await new IoTSendTool().execute({ deviceId: 'd1', payload: { on: true } });
+    assert.equal(send.success, true);
+    assert.deepEqual(sent, [['d1', { on: true }]]);
+    const stats = await new IoTTelemetryTool().execute({ deviceId: 'd1', stats: true });
+    assert.match(stats.output, /min=20 max=22 avg=21\.00 count=2 last=21\.5/);
   });
 
   it('sets context when multiplexer and fileTransfer provided', () => {
@@ -417,12 +467,17 @@ describe('registerMeshTools', () => {
     assert.equal(meshToolsContext.getFileTransfer(), ft);
   });
 
-  it('registers all 15 tools into a real BrowserToolRegistry', () => {
+  it('registers the tools into a real BrowserToolRegistry', () => {
     const registry = new BrowserToolRegistry();
-    registerMeshTools(registry);
+    registerMeshTools(registry, undefined, undefined, { iotBridge, iotTelemetry });
     assert.equal(registry.list().length, 15);
     assert.ok(registry.get('mesh_stream_open') instanceof MeshStreamOpenTool);
     const specs = registry.listSpecs();
     assert.ok(specs.some((s) => s.name === 'iot_telemetry'));
+
+    const bare = new BrowserToolRegistry();
+    registerMeshTools(bare);
+    assert.equal(bare.list().length, 12);
+    assert.ok(!bare.listSpecs().some((s) => s.name.startsWith('iot_')));
   });
 });

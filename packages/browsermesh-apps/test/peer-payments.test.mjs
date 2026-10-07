@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 
 import {
   PAYMENT_DEFAULTS,
-  CreditLedger,
+  MultiPartyCreditLedger,
   WebLNProvider,
 } from '../src/peer-payments.mjs';
 
@@ -29,14 +29,14 @@ describe('PAYMENT_DEFAULTS', () => {
   });
 });
 
-// ── CreditLedger ──────────────────────────────────────────────────
+// ── MultiPartyCreditLedger ──────────────────────────────────────────────────
 
-describe('CreditLedger', () => {
-  /** @type {CreditLedger} */
+describe('MultiPartyCreditLedger', () => {
+  /** @type {MultiPartyCreditLedger} */
   let ledger;
 
   beforeEach(() => {
-    ledger = new CreditLedger();
+    ledger = new MultiPartyCreditLedger();
   });
 
   // -- initialCredits for new peers --
@@ -46,7 +46,7 @@ describe('CreditLedger', () => {
   });
 
   it('uses custom initialCredits', () => {
-    const custom = new CreditLedger({ initialCredits: 500 });
+    const custom = new MultiPartyCreditLedger({ initialCredits: 500 });
     assert.equal(custom.getBalance('pod-x'), 500);
   });
 
@@ -257,7 +257,7 @@ describe('CreditLedger', () => {
       ledger.transfer('pod-alice', 'pod-bob', 10);
 
       const json = ledger.toJSON();
-      const restored = CreditLedger.fromJSON(json);
+      const restored = MultiPartyCreditLedger.fromJSON(json);
 
       assert.equal(restored.getBalance('pod-alice'), 120);
       assert.equal(restored.getBalance('pod-bob'), 110);
@@ -265,7 +265,7 @@ describe('CreditLedger', () => {
     });
 
     it('preserves initialCredits and maxTransactions', () => {
-      const custom = new CreditLedger({
+      const custom = new MultiPartyCreditLedger({
         initialCredits: 200,
         maxTransactions: 50,
       });
@@ -275,7 +275,7 @@ describe('CreditLedger', () => {
       assert.equal(json.initialCredits, 200);
       assert.equal(json.maxTransactions, 50);
 
-      const restored = CreditLedger.fromJSON(json);
+      const restored = MultiPartyCreditLedger.fromJSON(json);
       // New peer should get 200 initial credits
       assert.equal(restored.getBalance('pod-new'), 200);
     });
@@ -344,7 +344,7 @@ describe('CreditLedger', () => {
 
   describe('maxTransactions cap', () => {
     it('drops oldest transactions when cap exceeded', () => {
-      const small = new CreditLedger({
+      const small = new MultiPartyCreditLedger({
         initialCredits: 1000,
         maxTransactions: 5,
       });

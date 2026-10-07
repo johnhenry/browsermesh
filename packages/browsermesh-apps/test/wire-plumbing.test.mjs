@@ -26,6 +26,15 @@ import { createTorrentService } from '../src/mesh-torrent.mjs'
 import { PaymentRouter, PAYMENT_OPEN } from '../src/payments.mjs'
 import { ConsensusManager, CONSENSUS_VOTE } from '../src/consensus.mjs'
 import { MeshSyncBinding } from '../src/mesh-sync.mjs'
+import { MeshRelayHost } from '../src/mesh-relay-host.mjs'
+import { createMeshRelayBackend } from '../src/mesh-relay-backend.mjs'
+import { PeerRegistry } from '../src/peer-registry.mjs'
+import { MeshSyncEngine } from '@johnhenry/browsermesh-sync'
+import { MeshPeerManager, TrustGraph, MeshACL } from '@johnhenry/browsermesh-core'
+import { VirtualNetwork } from '@johnhenry/browsermesh-netway'
+import { readdirSync, readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { dirname, join } from 'node:path'
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -478,5 +487,124 @@ describe('#193: createPeerNodeTransport() wires the four wireTransport() consume
     cm.broadcastVote('p1', 'alice', 'yes', 1)
     await tick()
     assert.equal(seen[0].proposalId, 'p1')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #221 -- audit of every raw PeerNode.onIncomingData() subscriber
+// ---------------------------------------------------------------------------
+//
+// `ctx.onIncomingData()` (MeshService) decodes JSON text off a real wire, but
+// `PeerNode.onIncomingData()` is the raw bus: it hands subscribers whatever the
+// transport delivered, which for a real RTCDataChannel/WebSocket is a STRING.
+// A raw subscriber that reads `data.type` off that string sees `undefined` and
+// silently drops everything (the bug class fixed for the pod-host client in
+// #188). The audit found the remaining raw subscribers -- mesh-sync, the relay
+// host and backend, the pod-host service, the mesh-websocket binding, the
+// PeerNode transport -- all already route through `decodeWireData`; these tests
+// keep it that way and prove it over a string-only wire.
+
+describe('#221: raw PeerNode.onIncomingData() subscribers decode JSON text', () => {
+  it('every source file that subscribes to the raw bus imports and uses decodeWireData', () => {
+    const srcDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'src')
+    const walk = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
+      e.isDirectory() ? walk(join(dir, e.name)) : e.name.endsWith('.mjs') ? [join(dir, e.name)] : [])
+    const rawSubscribers = []
+    for (const file of walk(srcDir)) {
+      const code = readFileSync(file, 'utf8')
+        .replace(/\/\*[\s\S]*?\*\//g, '')   // block comments
+        .replace(/(^|[^:])\/\/.*$/gm, '$1')    // line comments
+      // A call on anything but a MeshService ctx (which decodes for you).
+      const raw = [...code.matchAll(/([\w$.#]+)\.onIncomingData\(/g)].filter((m) => !/(^|\.)ctx$/.test(m[1]))
+      if (raw.length === 0) continue
+      rawSubscribers.push(file)
+      assert.match(code, /import \{[^}]*\bdecodeWireData\b[^}]*\} from '[^']*wire-envelope\.mjs'/, `${file} subscribes to the raw bus but does not import decodeWireData`)
+      assert.match(code, /\bdecodeWireData\(/, `${file} imports decodeWireData but never calls it`)
+    }
+    // The audited set. A new raw subscriber must be added here deliberately.
+    const names = rawSubscribers.map((f) => f.split('/').pop()).sort()
+    assert.deepEqual(names, [
+      'mesh-relay-backend.mjs', 'mesh-relay-host.mjs', 'mesh-service.mjs', 'mesh-sync.mjs',
+      'mesh-websocket.mjs', 'peer-node-transport.mjs', 'pod-host-service.mjs',
+    ])
+  })
+
+  it('MeshSyncBinding merges a document sent as JSON text between two real PeerNodes', async () => {
+    const alice = await makeNode('alice')
+    const bob = await makeNode('bob')
+    const wire = await link(alice, bob)
+    const engineA = new MeshSyncEngine({ nodeId: 'alice' })
+    const engineB = new MeshSyncEngine({ nodeId: 'bob' })
+    const bindingA = new MeshSyncBinding({ node: alice, engine: engineA })
+    const bindingB = new MeshSyncBinding({ node: bob, engine: engineB })
+
+    engineA.create('notes', 'lww-map')
+    engineA.update('notes', (m) => m.set('title', 'hello', 1, 'alice'))
+    await bindingA.syncDocWithPeer('bob', 'notes')
+    await tick()
+
+    assert.equal(typeof wire.sentByA[0].data, 'object', 'PeerNode.sendTo handed the transport an envelope object')
+    assert.deepEqual(engineB.getState('notes'), { title: 'hello' }, 'bob parsed the text and merged it')
+    bindingA.detach()
+    bindingB.detach()
+  })
+
+  it('MeshRelayHost and MeshRelayBackend frame connect -> data -> close over a string-only wire', async () => {
+    const alice = await makeNode('alice')
+    const bob = await makeNode('bob')
+    await link(alice, bob)
+
+    const network = new VirtualNetwork()
+    const listener = await network.listen('mem://localhost:9100')
+    ;(async () => {
+      for (;;) {
+        const sock = await listener.accept()
+        if (!sock) return
+        ;(async () => {
+          try { for (;;) { const c = await sock.read(); if (c === null) return; await sock.write(c) } } catch { /* closed */ }
+        })()
+      }
+    })()
+
+    const registry = new PeerRegistry({
+      localPodId: 'alice', peerManager: new MeshPeerManager({}), trustGraph: new TrustGraph(), acl: new MeshACL({ owner: 'alice' }),
+    })
+    const host = new MeshRelayHost({ node: alice, network, registry })
+    host.exposeService('echo', 'mem://localhost:9100')
+    registry.grantCapabilities('bob', ['mesh-relay:echo:connect'])
+    const backend = createMeshRelayBackend({ node: bob, relayPeerPubKey: 'alice', connectTimeoutMs: 2000 })
+
+    try {
+      // The host must parse the connect request text, and the backend the ok reply text.
+      const socket = await backend.connect('echo')
+      await socket.write(new TextEncoder().encode('over text'))
+      const echoed = await socket.read()
+      assert.equal(new TextDecoder().decode(echoed), 'over text')
+      await socket.close()
+    } finally {
+      await backend.close()
+      await host.detach()
+      await network.close()
+    }
+  })
+
+  it('an ungranted peer is refused with a real refusal, not a timeout (the backend parsed the refusal text)', async () => {
+    const alice = await makeNode('alice')
+    const bob = await makeNode('bob')
+    await link(alice, bob)
+    const network = new VirtualNetwork()
+    const registry = new PeerRegistry({
+      localPodId: 'alice', peerManager: new MeshPeerManager({}), trustGraph: new TrustGraph(), acl: new MeshACL({ owner: 'alice' }),
+    })
+    const host = new MeshRelayHost({ node: alice, network, registry })
+    host.exposeService('echo', 'mem://localhost:9101')
+    const backend = createMeshRelayBackend({ node: bob, relayPeerPubKey: 'alice', connectTimeoutMs: 2000 })
+    try {
+      await assert.rejects(() => backend.connect('echo'), (err) => err.name === 'ConnectionRefusedError')
+    } finally {
+      await backend.close()
+      await host.detach()
+      await network.close()
+    }
   })
 })

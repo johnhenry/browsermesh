@@ -215,6 +215,65 @@ describeIfReal('wire envelope against real WebRTC peers (#208, #198, #193)', () 
     assert.deepEqual(seen.map((m) => m.data).sort(), ['AAAA', 'BBBB'])
   })
 
+  // #221: the raw PeerNode.onIncomingData() subscribers (not ctx.onIncomingData())
+  // read `data.type` straight off whatever the transport delivers, which on a
+  // real data channel is JSON text. They must parse it first.
+  it('MeshSyncBinding (a raw-bus subscriber) merges a document that crossed the real data channel as text (#221)', async () => {
+    const { MeshSyncBinding } = await import('../../src/mesh-sync.mjs')
+    const { MeshSyncEngine } = await import('@johnhenry/browsermesh-sync')
+    const engineA = new MeshSyncEngine({ nodeId: 'alice' })
+    const engineB = new MeshSyncEngine({ nodeId: 'bob' })
+    const bindingA = new MeshSyncBinding({ node: alice, engine: engineA, envelopeType: 'rp-sync' })
+    const bindingB = new MeshSyncBinding({ node: bob, engine: engineB, envelopeType: 'rp-sync' })
+    try {
+      engineA.create('notes', 'lww-map')
+      engineA.update('notes', (m) => m.set('title', 'over a real data channel', 1, 'alice'))
+      await bindingA.syncDocWithPeer('bob', 'notes')
+      await waitFor(() => engineB.get('notes') && engineB.getState('notes')?.title === 'over a real data channel', 10_000, 'bob to merge the document')
+    } finally {
+      bindingA.detach()
+      bindingB.detach()
+    }
+  })
+
+  it('MeshRelayHost + MeshRelayBackend (raw-bus subscribers) relay bytes over the real data channel (#221)', async () => {
+    const { MeshRelayHost } = await import('../../src/mesh-relay-host.mjs')
+    const { createMeshRelayBackend } = await import('../../src/mesh-relay-backend.mjs')
+    const { PeerRegistry } = await import('../../src/peer-registry.mjs')
+    const { MeshPeerManager, TrustGraph, MeshACL } = await import('@johnhenry/browsermesh-core')
+    const { VirtualNetwork } = await import('@johnhenry/browsermesh-netway')
+
+    const network = new VirtualNetwork()
+    const listener = await network.listen('mem://localhost:9200')
+    ;(async () => {
+      for (;;) {
+        const sock = await listener.accept()
+        if (!sock) return
+        ;(async () => {
+          try { for (;;) { const c = await sock.read(); if (c === null) return; await sock.write(c) } } catch { /* closed */ }
+        })()
+      }
+    })()
+    const registry = new PeerRegistry({
+      localPodId: 'alice', peerManager: new MeshPeerManager({}), trustGraph: new TrustGraph(), acl: new MeshACL({ owner: 'alice' }),
+    })
+    registry.grantCapabilities('bob', ['mesh-relay:echo:connect'])
+    const host = new MeshRelayHost({ node: alice, network, registry, envelopeType: 'rp-relay' })
+    host.exposeService('echo', 'mem://localhost:9200')
+    const backend = createMeshRelayBackend({ node: bob, relayPeerPubKey: 'alice', envelopeType: 'rp-relay', connectTimeoutMs: 10_000 })
+    try {
+      const socket = await backend.connect('echo')
+      await socket.write(new TextEncoder().encode('relayed over real SCTP'))
+      const echoed = await socket.read()
+      assert.equal(new TextDecoder().decode(echoed), 'relayed over real SCTP')
+      await socket.close()
+    } finally {
+      await backend.close()
+      await host.detach()
+      await network.close()
+    }
+  })
+
   it('broadcast() reaches the real peer', async () => {
     const seen = []
     attachService(bob, undefined, {

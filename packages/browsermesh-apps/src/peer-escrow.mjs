@@ -4,8 +4,11 @@
  * Enables trustless compute marketplace, dispute resolution, and
  * guaranteed payment for services.
  *
- * `EscrowManager` itself is plain and dependency-injected (`{creditLedger,
- * onLog}`), with no `PeerNode`/mesh-transport awareness of its own -- see
+ * `EscrowManager` is the package's one escrow implementation under that name:
+ * conditional release, disputes, expiry, and real balance movement through the
+ * ledger it is given. (`payments.mjs`'s flat `SimpleEscrowBook`, which
+ * `PaymentRouter` keeps, only records holds and moves nothing.) It is plain and
+ * dependency-injected (`{creditLedger, onLog}`), with no `PeerNode`/mesh-transport awareness of its own -- see
  * `createEscrowService()` below (issue #117, `mesh-service.mjs`'s `MeshService`
  * convention) for the wrapper that wires it onto a real `PeerNode`'s
  * `ctx.sendTo()`/`ctx.onIncomingData()`/`ctx.registry.checkAccess()`.
@@ -235,8 +238,20 @@ export class EscrowContract {
 /**
  * Manages escrow contracts — creation, funding, release, refund, dispute.
  *
- * Works with a credit ledger (e.g. CreditLedger from clawser-peer-payments.js)
- * to hold funds in escrow until conditions are met.
+ * Works with a credit ledger to hold funds in escrow until conditions are met.
+ * Two ledgers are understood out of the box:
+ *
+ * - `CreditLedger` (`payments.mjs`, one pod's own balance): `create()` calls
+ *   `debit(amount, payerPodId, memo)`, release/refund call
+ *   `credit(amount, podId, memo)`. That ledger has a single balance, so every
+ *   mutation lands on it whatever `podId` says -- use it when the local pod is
+ *   the payer, or supply `mutateLedger` to account for the counterparty.
+ * - `MultiPartyCreditLedger` (`peer-payments.mjs`, a balance per pod):
+ *   `create()` calls `charge(payerPodId, amount, memo)` (an insufficient balance
+ *   throws, as the single-owner `debit()` does) and release/refund call
+ *   `credit(podId, amount, memo)`, so payer and payee each move their own balance.
+ *
+ * Anything else can be wired with `mutateLedger`.
  */
 export class EscrowManager {
   /** @type {Map<string, EscrowContract>} */
@@ -256,7 +271,9 @@ export class EscrowManager {
 
   /**
    * @param {object} opts
-   * @param {object} opts.creditLedger - Must have charge(), credit(), getBalance()
+   * @param {object} opts.creditLedger - A `CreditLedger` (`debit()`/`credit()`) or a
+   *   `MultiPartyCreditLedger` (`charge()`/`credit()`); see the class comment.
+   *   Without a `mutateLedger` hook it must be one of those two shapes.
    * @param {Function} [opts.onLog] - Logging callback (level, msg)
    * @param {(op: 'debit'|'credit', amount: number, podId: string, memo: string) => (any|Promise<any>)} [opts.mutateLedger] -
    *   Async (or sync) hook invoked in place of a direct `creditLedger.debit()`/`.credit()`
@@ -281,11 +298,32 @@ export class EscrowManager {
     }
     this.#creditLedger = opts.creditLedger
     this.#onLog = opts.onLog ?? (() => {})
-    this.#mutateLedger = opts.mutateLedger ?? ((op, amount, podId, memo) => (
-      op === 'debit'
-        ? this.#creditLedger.debit(amount, podId, memo)
-        : this.#creditLedger.credit(amount, podId, memo)
-    ))
+    if (opts.mutateLedger) {
+      this.#mutateLedger = opts.mutateLedger
+      return
+    }
+    const ledger = this.#creditLedger
+    if (typeof ledger.debit === 'function' && typeof ledger.credit === 'function') {
+      // Single-owner CreditLedger: debit(amount, toPodId, memo) / credit(amount, fromPodId, memo)
+      this.#mutateLedger = (op, amount, podId, memo) => (
+        op === 'debit' ? ledger.debit(amount, podId, memo) : ledger.credit(amount, podId, memo)
+      )
+    } else if (typeof ledger.charge === 'function' && typeof ledger.credit === 'function') {
+      // MultiPartyCreditLedger: charge(podId, amount, memo) / credit(podId, amount, memo)
+      this.#mutateLedger = (op, amount, podId, memo) => {
+        if (op === 'credit') return ledger.credit(podId, amount, memo)
+        const result = ledger.charge(podId, amount, memo)
+        if (!result.success) {
+          throw new Error(`Insufficient balance: ${podId} needs ${amount}, has ${result.balance}`)
+        }
+        return result
+      }
+    } else {
+      throw new Error(
+        'EscrowManager: creditLedger must implement debit()/credit() (CreditLedger) or ' +
+        'charge()/credit() (MultiPartyCreditLedger), or pass a mutateLedger hook',
+      )
+    }
   }
 
   // ── Create ─────────────────────────────────────────────────────
@@ -755,7 +793,7 @@ const DEFAULT_ESCROW_REQUEST_TIMEOUT_MS = 10000
 
 /**
  * @param {object} opts
- * @param {object} opts.creditLedger - Must have charge(), credit(), getBalance() -- forwarded to `new EscrowManager()`.
+ * @param {object} opts.creditLedger - A `CreditLedger` or `MultiPartyCreditLedger` (see `EscrowManager`) -- forwarded to `new EscrowManager()`.
  * @param {Function} [opts.onLog] - Logging callback (level, msg) -- forwarded to `EscrowManager`'s own `onLog`, PLUS this wrapper's own wire-level logging (send/handling failures, denied requests).
  * @param {string} [opts.envelopeType='escrow'] - `envelope.type` used for request/response traffic.
  * @param {number} [opts.requestTimeoutMs=10000] - How long `requestCreate()`/`requestRelease()`/`requestRefund()`/`requestDispute()` wait for a response.

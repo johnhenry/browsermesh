@@ -138,7 +138,10 @@ function canonicalBytes(fields) {
 // ---------------------------------------------------------------------------
 
 /**
- * Double-entry accounting ledger for a single pod.
+ * Double-entry accounting ledger for a single pod -- the package's canonical
+ * `CreditLedger` (one owner, one balance, `credit(amount, from)` /
+ * `debit(amount, to)` / `transfer(peerLedger, amount)`). For a book that holds
+ * every peer's balance see `MultiPartyCreditLedger` in `peer-payments.mjs`.
  *
  * Every mutation produces an immutable LedgerEntry recording amount,
  * counterparty, running balance, and optional memo.
@@ -985,14 +988,22 @@ export class PaymentChannel {
  */
 
 // ---------------------------------------------------------------------------
-// EscrowManager
+// SimpleEscrowBook
 // ---------------------------------------------------------------------------
 
 /**
- * Manages escrow holds between pods. Funds are locked until
- * explicitly released, refunded, or expired.
+ * A flat record of escrow holds between pods: `held` then `released`,
+ * `refunded` or `expired`. It is a book only -- it does NOT move any balance,
+ * and has no release conditions, disputes or ledger hook. `PaymentRouter` keeps
+ * one (`getEscrow()`) to track the `ESCROW_CREATE` wire messages it receives.
+ *
+ * It is NOT the package's `EscrowManager`: that name is the conditional escrow
+ * in `peer-escrow.mjs`, which does move funds and supports conditions,
+ * disputes and a `mutateLedger` hook. This class was also called
+ * `EscrowManager` before 0.13, which collided with it; see the README's
+ * "Ledgers and escrow" table.
  */
-export class EscrowManager {
+export class SimpleEscrowBook {
   /** @type {Map<string, object>} escrowId -> Escrow */
   #escrows = new Map();
 
@@ -1155,7 +1166,7 @@ export class PaymentRouter {
   /** @type {Map<string, PaymentChannel>} remotePodId -> channel */
   #channels = new Map();
 
-  /** @type {EscrowManager} */
+  /** @type {SimpleEscrowBook} */
   #escrow;
 
   /** @type {function|null} */
@@ -1179,7 +1190,7 @@ export class PaymentRouter {
     }
     this.#localPodId = localPodId;
     this.#ledger = new CreditLedger(localPodId);
-    this.#escrow = new EscrowManager();
+    this.#escrow = new SimpleEscrowBook();
   }
 
   /**
@@ -1297,7 +1308,7 @@ export class PaymentRouter {
   /**
    * Get the escrow manager.
    *
-   * @returns {EscrowManager}
+   * @returns {SimpleEscrowBook}
    */
   getEscrow() {
     return this.#escrow;
@@ -1305,7 +1316,7 @@ export class PaymentRouter {
 
   /**
    * Start periodic escrow-timeout enforcement. Without this,
-   * `EscrowManager.pruneExpired()` exists but nothing ever calls it, so
+   * `SimpleEscrowBook.pruneExpired()` exists but nothing ever calls it, so
    * timed-out escrows sit in `held` status forever.
    *
    * There is no dedicated wire message for escrow expiry in the mesh

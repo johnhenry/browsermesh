@@ -2,8 +2,12 @@
 // STATUS: INTEGRATED — wired into ClawserPod lifecycle, proven via E2E testing
  * clawser-peer-torrent.js -- WebTorrent integration for P2P file distribution.
  *
- * CDN-loads webtorrent browser bundle for swarm-based file sharing.
- * Falls back to direct chunked transfer when WebTorrent unavailable.
+ * Uses a WebTorrent client the caller supplies (`new TorrentManager({
+ * webtorrent })`: the `WebTorrent` constructor or a ready client) or one
+ * already on `window.WebTorrent`/`globalThis.WebTorrent`, for swarm-based file
+ * sharing. This module never fetches WebTorrent itself -- there is no CDN or
+ * other runtime import -- so it works offline and under a strict CSP. Without
+ * a client it falls back to direct chunked transfer.
  *
  * DURABILITY (fallback path only): by default the fallback keeps whole blobs
  * in a private in-memory map. Pass `chunkStore` and/or `manifestStore`
@@ -122,13 +126,20 @@ class FallbackStore {
 /**
  * Manages WebTorrent-based file sharing across the mesh.
  *
- * When WebTorrent is available (browser with CDN access), uses real
- * BitTorrent swarming. When unavailable (Node.js tests, offline), falls
- * back to an in-memory store that mimics the seed/download API.
+ * When a WebTorrent client is available (injected through the `webtorrent`
+ * option, or on `window`/`globalThis`), uses real BitTorrent swarming. When
+ * none is (Node.js tests, offline), falls back to an in-memory store that
+ * mimics the seed/download API.
  */
 export class TorrentManager {
-  /** @type {object|null} WebTorrent client instance (lazy-loaded) */
+  /** @type {object|null} WebTorrent client instance (created on ensureLoaded) */
   #client = null
+
+  /** @type {Function|object|null} Injected WebTorrent constructor or client */
+  #webtorrent = null
+
+  /** @type {boolean} True when `#client` was built here (from a constructor/global), so destroy() may destroy it */
+  #ownsClient = false
 
   /** @type {Map<string, TorrentInfo>} magnetURI -> TorrentInfo */
   #activeTorrents = new Map()
@@ -180,8 +191,20 @@ export class TorrentManager {
    *   keyed by magnet URI (sync or async). Defaults to in-memory when only
    *   `chunkStore` is given.
    * @param {number} [opts.chunkSize=65536] - Piece size when `chunkStore` is used.
+   * @param {Function|object} [opts.webtorrent] - The WebTorrent library to use
+   *   for real BitTorrent swarming: either the `WebTorrent` constructor (this
+   *   class instantiates and later destroys the client) or an already-built
+   *   client with `seed()`/`add()`/`remove()`/`destroy()` (yours; `destroy()`
+   *   here leaves it running). Nothing is ever loaded from the network. Omit it
+   *   and `window.WebTorrent`/`globalThis.WebTorrent` is used if present,
+   *   otherwise the in-memory fallback.
    */
   constructor(opts = {}) {
+    if (opts.webtorrent !== undefined && opts.webtorrent !== null
+      && typeof opts.webtorrent !== 'function' && typeof opts.webtorrent !== 'object') {
+      throw new TypeError('TorrentManager: webtorrent must be the WebTorrent constructor or a client instance')
+    }
+    this.#webtorrent = opts.webtorrent ?? null
     this.#trackerUrl = opts.trackerUrl ?? TORRENT_DEFAULTS.trackerUrl
     this.#onLog = opts.onLog || (() => {})
     this.#chunkSize = opts.chunkSize ?? TORRENT_DEFAULTS.chunkSize
@@ -191,42 +214,48 @@ export class TorrentManager {
     }
   }
 
-  // ── CDN Loading ──────────────────────────────────────────────────────
+  // ── WebTorrent client ─────────────────────────────────────────────────
 
   /**
-   * Lazy-load WebTorrent from CDN.
-   * Sets #wtAvailable based on whether the load succeeded.
+   * Set up the WebTorrent client from what the caller provided, and restore
+   * persisted torrents when running on the fallback store.
+   *
+   * Order: the injected `webtorrent` option, then `window.WebTorrent`, then
+   * `globalThis.WebTorrent`. Nothing is fetched; with none of them present
+   * `available` stays false and the in-memory fallback is used.
+   * Sets #wtAvailable based on whether a client was created.
    */
   async ensureLoaded() {
     if (this.#loaded) return
 
     try {
-      // Only attempt in browser-like environments with dynamic import support
-      if (typeof window !== 'undefined' && typeof window.WebTorrent === 'function') {
+      const injected = this.#webtorrent
+      if (injected && typeof injected === 'object') {
+        this.#client = injected
+        this.#ownsClient = false
+        this.#wtAvailable = true
+        this.#onLog(2, 'WebTorrent client supplied by the caller')
+      } else if (typeof injected === 'function') {
+        this.#client = new injected()
+        this.#ownsClient = true
+        this.#wtAvailable = true
+        this.#onLog(2, 'WebTorrent client created from the injected constructor')
+      } else if (typeof window !== 'undefined' && typeof window.WebTorrent === 'function') {
         this.#client = new window.WebTorrent()
+        this.#ownsClient = true
         this.#wtAvailable = true
         this.#onLog(2, 'WebTorrent client initialized from window.WebTorrent')
       } else if (typeof globalThis.WebTorrent === 'function') {
         this.#client = new globalThis.WebTorrent()
+        this.#ownsClient = true
         this.#wtAvailable = true
         this.#onLog(2, 'WebTorrent client initialized from globalThis.WebTorrent')
       } else {
-        // Try CDN load via esm.sh — this will fail in Node.js test env
-        try {
-          const mod = await import('https://esm.sh/webtorrent@2.8.5')
-          const WT = mod.default || mod.WebTorrent
-          if (typeof WT === 'function') {
-            globalThis.WebTorrent = WT
-            this.#client = new WT()
-            this.#wtAvailable = true
-            this.#onLog(2, 'WebTorrent loaded from CDN (esm.sh)')
-          }
-        } catch {
-          this.#wtAvailable = false
-          this.#onLog(1, 'WebTorrent CDN load failed — using fallback store')
-        }
+        this.#wtAvailable = false
+        this.#onLog(1, 'No WebTorrent client supplied (pass { webtorrent }) — using fallback store')
       }
     } catch (err) {
+      this.#client = null
       this.#wtAvailable = false
       this.#onLog(1, `WebTorrent initialization failed: ${err.message}`)
     }
@@ -718,8 +747,8 @@ export class TorrentManager {
     this.#fallback.clear()
     this.#listeners.clear()
 
-    // Destroy real client if present
-    if (this.#client) {
+    // Destroy the real client if we built it; one the caller passed in stays theirs.
+    if (this.#client && this.#ownsClient) {
       try {
         await new Promise((resolve, reject) => {
           this.#client.destroy((err) => {
@@ -730,8 +759,9 @@ export class TorrentManager {
       } catch {
         // best effort
       }
-      this.#client = null
     }
+    this.#client = null
+    this.#ownsClient = false
 
     this.#loaded = false
     this.#wtAvailable = false
