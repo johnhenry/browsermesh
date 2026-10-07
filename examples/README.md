@@ -1,7 +1,7 @@
 # browsermesh examples
 
 Small, self-contained, runnable demonstrations of real browsermesh behavior.
-Every example runs headless under plain Node (>= 24) with no browser, no
+Every example runs headless under plain Node (>= 26) with no browser, no
 network, and no server — peers, transports, and sockets are simulated
 in-process, but the actual protocol/CRDT/capability logic exercised is
 exactly what runs in production.

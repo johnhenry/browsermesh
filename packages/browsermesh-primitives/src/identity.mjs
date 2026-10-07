@@ -147,10 +147,22 @@ export class PodIdentity {
   /**
    * Sign data with this identity's private key.
    *
-   * @param {BufferSource} data - Data to sign
+   * Two call forms:
+   * - `sign(data)` -- positional (original form).
+   * - `sign({ message })` -- canonical object form shared with the sibling
+   *   libraries.
+   *
+   * @param {BufferSource | { message: BufferSource }} data - Data to sign, or
+   *   an object carrying it as `message`
    * @returns {Promise<Uint8Array>} Ed25519 signature
    */
   async sign(data) {
+    if (isPlainObject(data)) {
+      if (data.message === undefined) {
+        throw new TypeError('PodIdentity.sign({ message }) requires `message`');
+      }
+      data = data.message;
+    }
     return new Uint8Array(
       await crypto.subtle.sign('Ed25519', this.keyPair.privateKey, data)
     );
@@ -159,12 +171,43 @@ export class PodIdentity {
   /**
    * Verify a signature against a public key.
    *
-   * @param {CryptoKey} publicKey - Ed25519 public key
-   * @param {BufferSource} data - Original data
-   * @param {BufferSource} signature - Signature to verify
+   * Two call forms:
+   *
+   * - **Canonical (preferred):** `verify({ publicKey, signature, message })`.
+   *   Named fields, so argument order cannot be confused.
+   * - **Positional (kept for compatibility):** `verify(publicKey, data, signature)`.
+   *   WARNING: this order is (key, DATA, SIGNATURE), the odd one out. WebCrypto's
+   *   own `crypto.subtle.verify` and wsh use (key, SIGNATURE, DATA); raijin uses
+   *   (message, signature, key). Swapping data and signature here silently
+   *   returns `false` rather than throwing. Prefer the object form.
+   *
+   * @param {CryptoKey | { publicKey: CryptoKey, signature: BufferSource, message: BufferSource }} publicKey
+   *   Ed25519 public key, or the canonical options object
+   * @param {BufferSource} [data] - Original data (positional form only)
+   * @param {BufferSource} [signature] - Signature to verify (positional form only)
    * @returns {Promise<boolean>}
    */
   static async verify(publicKey, data, signature) {
+    if (isPlainObject(publicKey)) {
+      ({ publicKey, signature, message: data } = publicKey);
+      if (!publicKey || signature === undefined || data === undefined) {
+        throw new TypeError(
+          'PodIdentity.verify({ publicKey, signature, message }) requires all three fields'
+        );
+      }
+    }
     return crypto.subtle.verify('Ed25519', publicKey, signature, data);
   }
+}
+
+/**
+ * True for a plain `{...}` options object (not a CryptoKey, TypedArray,
+ * ArrayBuffer, etc.).
+ * @param {unknown} v
+ * @returns {boolean}
+ */
+function isPlainObject(v) {
+  if (v === null || typeof v !== 'object') return false;
+  const proto = Object.getPrototypeOf(v);
+  return proto === Object.prototype || proto === null;
 }

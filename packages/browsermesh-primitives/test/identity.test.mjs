@@ -272,4 +272,82 @@ describe('PodIdentity', () => {
       assert.equal(valid, false);
     });
   });
+
+  describe('canonical object form', () => {
+    it('verify({ publicKey, signature, message }) accepts a real signature', async () => {
+      const identity = await PodIdentity.generate();
+      const message = new TextEncoder().encode('object form');
+      const signature = await identity.sign(message);
+
+      assert.equal(
+        await PodIdentity.verify({
+          publicKey: identity.keyPair.publicKey,
+          signature,
+          message,
+        }),
+        true
+      );
+    });
+
+    it('verify object form rejects tampered message and wrong key', async () => {
+      const id1 = await PodIdentity.generate();
+      const id2 = await PodIdentity.generate();
+      const message = new TextEncoder().encode('original');
+      const signature = await id1.sign(message);
+
+      assert.equal(
+        await PodIdentity.verify({
+          publicKey: id1.keyPair.publicKey,
+          signature,
+          message: new TextEncoder().encode('tampered'),
+        }),
+        false
+      );
+      assert.equal(
+        await PodIdentity.verify({ publicKey: id2.keyPair.publicKey, signature, message }),
+        false
+      );
+    });
+
+    it('positional and object forms agree on the same signature', async () => {
+      const identity = await PodIdentity.generate();
+      const other = await PodIdentity.generate();
+      const message = new TextEncoder().encode('cross-check');
+      const signature = await identity.sign(message);
+      const tampered = new TextEncoder().encode('cross-check!');
+
+      const cases = [
+        [identity.keyPair.publicKey, message],
+        [identity.keyPair.publicKey, tampered],
+        [other.keyPair.publicKey, message],
+      ];
+      for (const [publicKey, msg] of cases) {
+        const positional = await PodIdentity.verify(publicKey, msg, signature);
+        const object = await PodIdentity.verify({ publicKey, signature, message: msg });
+        assert.equal(object, positional);
+      }
+    });
+
+    it('verify object form rejects missing fields', async () => {
+      const identity = await PodIdentity.generate();
+      await assert.rejects(
+        PodIdentity.verify({ publicKey: identity.keyPair.publicKey }),
+        TypeError
+      );
+    });
+
+    it('sign({ message }) equals sign(data)', async () => {
+      const identity = await PodIdentity.generate();
+      const message = new TextEncoder().encode('sign object form');
+      const sig = await identity.sign({ message });
+
+      assert.ok(sig instanceof Uint8Array);
+      assert.equal(
+        await PodIdentity.verify(identity.keyPair.publicKey, message, sig),
+        true
+      );
+      // Ed25519 is deterministic: both forms yield identical bytes.
+      assert.deepEqual(sig, await identity.sign(message));
+    });
+  });
 });

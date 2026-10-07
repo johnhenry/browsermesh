@@ -61,7 +61,17 @@ console.log(identity.podId) // base64url-encoded SHA-256 of public key
 // Sign and verify data
 const data = new TextEncoder().encode('hello mesh')
 const sig = await identity.sign(data)
-const ok = await PodIdentity.verify(identity.keyPair.publicKey, data, sig)
+// Canonical object form (preferred): named fields, no argument-order pitfalls
+const ok = await PodIdentity.verify({
+  publicKey: identity.keyPair.publicKey,
+  signature: sig,
+  message: data,
+})
+// Positional form still works, but NOTE its order is (publicKey, data, signature)
+// -- unlike WebCrypto/wsh (key, signature, data) and raijin (message, signature, key).
+// Swapping data/signature returns false instead of throwing.
+const ok2 = await PodIdentity.verify(identity.keyPair.publicKey, data, sig)
+// sign also accepts the object form: identity.sign({ message: data })
 
 // CRDTs -- merge state across peers
 const clockA = new VectorClock()
