@@ -238,8 +238,8 @@ describe('PodIdentity', () => {
 
       const valid = await PodIdentity.verify(
         identity.keyPair.publicKey,
-        data,
-        signature
+        signature,
+        data
       );
       assert.equal(valid, true);
     });
@@ -252,8 +252,8 @@ describe('PodIdentity', () => {
       const tampered = new TextEncoder().encode('tampered');
       const valid = await PodIdentity.verify(
         identity.keyPair.publicKey,
-        tampered,
-        signature
+        signature,
+        tampered
       );
       assert.equal(valid, false);
     });
@@ -266,88 +266,64 @@ describe('PodIdentity', () => {
 
       const valid = await PodIdentity.verify(
         id2.keyPair.publicKey,
-        data,
-        signature
+        signature,
+        data
       );
       assert.equal(valid, false);
     });
   });
 
-  describe('canonical object form', () => {
-    it('verify({ publicKey, signature, message }) accepts a real signature', async () => {
+  describe('argument order (publicKey, signature, data)', () => {
+    it('matches crypto.subtle.verify argument order', async () => {
       const identity = await PodIdentity.generate();
-      const message = new TextEncoder().encode('object form');
-      const signature = await identity.sign(message);
+      const data = new TextEncoder().encode('webcrypto order');
+      const signature = await identity.sign(data);
+      const publicKey = identity.keyPair.publicKey;
 
-      assert.equal(
-        await PodIdentity.verify({
-          publicKey: identity.keyPair.publicKey,
-          signature,
-          message,
-        }),
-        true
-      );
-    });
+      const mine = await PodIdentity.verify(publicKey, signature, data);
+      const native = await crypto.subtle.verify('Ed25519', publicKey, signature, data);
+      assert.equal(mine, true);
+      assert.equal(mine, native);
 
-    it('verify object form rejects tampered message and wrong key', async () => {
-      const id1 = await PodIdentity.generate();
-      const id2 = await PodIdentity.generate();
-      const message = new TextEncoder().encode('original');
-      const signature = await id1.sign(message);
-
-      assert.equal(
-        await PodIdentity.verify({
-          publicKey: id1.keyPair.publicKey,
-          signature,
-          message: new TextEncoder().encode('tampered'),
-        }),
-        false
-      );
-      assert.equal(
-        await PodIdentity.verify({ publicKey: id2.keyPair.publicKey, signature, message }),
-        false
-      );
-    });
-
-    it('positional and object forms agree on the same signature', async () => {
-      const identity = await PodIdentity.generate();
       const other = await PodIdentity.generate();
-      const message = new TextEncoder().encode('cross-check');
-      const signature = await identity.sign(message);
-      const tampered = new TextEncoder().encode('cross-check!');
-
-      const cases = [
-        [identity.keyPair.publicKey, message],
-        [identity.keyPair.publicKey, tampered],
-        [other.keyPair.publicKey, message],
-      ];
-      for (const [publicKey, msg] of cases) {
-        const positional = await PodIdentity.verify(publicKey, msg, signature);
-        const object = await PodIdentity.verify({ publicKey, signature, message: msg });
-        assert.equal(object, positional);
-      }
-    });
-
-    it('verify object form rejects missing fields', async () => {
-      const identity = await PodIdentity.generate();
-      await assert.rejects(
-        PodIdentity.verify({ publicKey: identity.keyPair.publicKey }),
-        TypeError
+      assert.equal(
+        await PodIdentity.verify(other.keyPair.publicKey, signature, data),
+        await crypto.subtle.verify('Ed25519', other.keyPair.publicKey, signature, data)
       );
     });
 
-    it('sign({ message }) equals sign(data)', async () => {
+    it('throws TypeError on the old (publicKey, data, signature) order', async () => {
       const identity = await PodIdentity.generate();
-      const message = new TextEncoder().encode('sign object form');
-      const sig = await identity.sign({ message });
+      const data = new TextEncoder().encode('old order');
+      const signature = await identity.sign(data);
+      assert.equal(signature.byteLength, 64);
 
-      assert.ok(sig instanceof Uint8Array);
+      await assert.rejects(
+        PodIdentity.verify(identity.keyPair.publicKey, data, signature),
+        (err) => err instanceof TypeError && /\(publicKey, signature, data\)/.test(err.message)
+      );
+    });
+
+    it('does not throw for a wrong-length signature when data is not 64 bytes', async () => {
+      const identity = await PodIdentity.generate();
       assert.equal(
-        await PodIdentity.verify(identity.keyPair.publicKey, message, sig),
+        await PodIdentity.verify(
+          identity.keyPair.publicKey,
+          new Uint8Array(10),
+          new Uint8Array(10)
+        ),
+        false
+      );
+    });
+
+    it('verifies a message that is itself 64 bytes in the new order', async () => {
+      const identity = await PodIdentity.generate();
+      const data = new Uint8Array(64).fill(7);
+      const signature = await identity.sign(data);
+      assert.equal(
+        await PodIdentity.verify(identity.keyPair.publicKey, signature, data),
         true
       );
-      // Ed25519 is deterministic: both forms yield identical bytes.
-      assert.deepEqual(sig, await identity.sign(message));
     });
   });
 });

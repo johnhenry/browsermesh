@@ -39,18 +39,18 @@ console.log('podId re-derivation from public key alone: matches ✓')
 const data = new TextEncoder().encode('alice says hello to the mesh')
 const signature = await alice.sign(data)
 
-const genuine = await PodIdentity.verify(alice.keyPair.publicKey, data, signature)
+const genuine = await PodIdentity.verify(alice.keyPair.publicKey, signature, data)
 assert.equal(genuine, true)
 console.log('genuine signature:              verified ✓')
 
 // Tampering 1: altered payload — same signature, fails.
 const tampered = new TextEncoder().encode('alice says HELLO to the mesh')
-const tamperedOk = await PodIdentity.verify(alice.keyPair.publicKey, tampered, signature)
+const tamperedOk = await PodIdentity.verify(alice.keyPair.publicKey, signature, tampered)
 assert.equal(tamperedOk, false)
 console.log('tampered payload, same signature: rejected ✓')
 
 // Tampering 2: genuine payload, wrong signer's key.
-const wrongKeyOk = await PodIdentity.verify(bob.keyPair.publicKey, data, signature)
+const wrongKeyOk = await PodIdentity.verify(bob.keyPair.publicKey, signature, data)
 assert.equal(wrongKeyOk, false)
 console.log('genuine payload, wrong signer:    rejected ✓')
 

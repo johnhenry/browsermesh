@@ -627,7 +627,7 @@ export class MeshIdentityManager {
       false,
       ['verify']
     );
-    return PodIdentity.verify(publicKey, data, signature);
+    return PodIdentity.verify(publicKey, signature, data);
   }
 
   /**

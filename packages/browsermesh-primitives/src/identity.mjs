@@ -147,22 +147,10 @@ export class PodIdentity {
   /**
    * Sign data with this identity's private key.
    *
-   * Two call forms:
-   * - `sign(data)` -- positional (original form).
-   * - `sign({ message })` -- canonical object form shared with the sibling
-   *   libraries.
-   *
-   * @param {BufferSource | { message: BufferSource }} data - Data to sign, or
-   *   an object carrying it as `message`
+   * @param {BufferSource} data - Data to sign
    * @returns {Promise<Uint8Array>} Ed25519 signature
    */
   async sign(data) {
-    if (isPlainObject(data)) {
-      if (data.message === undefined) {
-        throw new TypeError('PodIdentity.sign({ message }) requires `message`');
-      }
-      data = data.message;
-    }
     return new Uint8Array(
       await crypto.subtle.sign('Ed25519', this.keyPair.privateKey, data)
     );
@@ -171,43 +159,40 @@ export class PodIdentity {
   /**
    * Verify a signature against a public key.
    *
-   * Two call forms:
+   * Argument order is `(publicKey, signature, data)`, the same as WebCrypto's
+   * `crypto.subtle.verify('Ed25519', publicKey, signature, data)`.
    *
-   * - **Canonical (preferred):** `verify({ publicKey, signature, message })`.
-   *   Named fields, so argument order cannot be confused.
-   * - **Positional (kept for compatibility):** `verify(publicKey, data, signature)`.
-   *   WARNING: this order is (key, DATA, SIGNATURE), the odd one out. WebCrypto's
-   *   own `crypto.subtle.verify` and wsh use (key, SIGNATURE, DATA); raijin uses
-   *   (message, signature, key). Swapping data and signature here silently
-   *   returns `false` rather than throwing. Prefer the object form.
+   * BREAKING (primitives 0.2.0): releases before this took
+   * `(publicKey, data, signature)`. A guard throws a TypeError when the old
+   * order is detected (Ed25519 signatures are exactly 64 bytes) rather than
+   * silently returning false.
    *
-   * @param {CryptoKey | { publicKey: CryptoKey, signature: BufferSource, message: BufferSource }} publicKey
-   *   Ed25519 public key, or the canonical options object
-   * @param {BufferSource} [data] - Original data (positional form only)
-   * @param {BufferSource} [signature] - Signature to verify (positional form only)
+   * @param {CryptoKey} publicKey - Ed25519 public key
+   * @param {BufferSource} signature - Signature to verify (64 bytes)
+   * @param {BufferSource} data - Original data
    * @returns {Promise<boolean>}
    */
-  static async verify(publicKey, data, signature) {
-    if (isPlainObject(publicKey)) {
-      ({ publicKey, signature, message: data } = publicKey);
-      if (!publicKey || signature === undefined || data === undefined) {
-        throw new TypeError(
-          'PodIdentity.verify({ publicKey, signature, message }) requires all three fields'
-        );
-      }
+  static async verify(publicKey, signature, data) {
+    if (
+      byteLengthOf(signature) !== ED25519_SIGNATURE_BYTES &&
+      byteLengthOf(data) === ED25519_SIGNATURE_BYTES
+    ) {
+      throw new TypeError(
+        'PodIdentity.verify: argument order changed to (publicKey, signature, data) ' +
+        'in this version (previously (publicKey, data, signature)); ' +
+        'the signature argument is not 64 bytes but the data argument is'
+      );
     }
     return crypto.subtle.verify('Ed25519', publicKey, signature, data);
   }
 }
 
+const ED25519_SIGNATURE_BYTES = 64;
+
 /**
- * True for a plain `{...}` options object (not a CryptoKey, TypedArray,
- * ArrayBuffer, etc.).
- * @param {unknown} v
- * @returns {boolean}
+ * @param {BufferSource} v
+ * @returns {number}
  */
-function isPlainObject(v) {
-  if (v === null || typeof v !== 'object') return false;
-  const proto = Object.getPrototypeOf(v);
-  return proto === Object.prototype || proto === null;
+function byteLengthOf(v) {
+  return v && typeof v.byteLength === 'number' ? v.byteLength : -1;
 }
