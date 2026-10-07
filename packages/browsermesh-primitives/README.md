@@ -25,7 +25,7 @@ Every other package in this monorepo depends on `browsermesh-primitives` directl
 
 ## Provenance
 
-Previously maintained as an independent, standalone repository and published to npm, unscoped, as `browsermesh-primitives@0.1.1` (initial release `0.1.0`, 2026-03-15), with its own CI already wired up (tests, CodeQL, dependency review). Imported into the `@johnhenry/browsermesh` monorepo via `git subtree` -- preserving its full commit history -- and rescoped to `@johnhenry/browsermesh-primitives`; the version restarts at `0.0.0` per family convention.
+Previously maintained as an independent, standalone repository and published to npm, unscoped, as `browsermesh-primitives@0.1.1` (initial release `0.2.0`, 2026-03-15), with its own CI already wired up (tests, CodeQL, dependency review). Imported into the `@johnhenry/browsermesh` monorepo via `git subtree` -- preserving its full commit history -- and rescoped to `@johnhenry/browsermesh-primitives`; the version restarts at `0.0.0` per family convention.
 
 ## Install
 
@@ -61,17 +61,10 @@ console.log(identity.podId) // base64url-encoded SHA-256 of public key
 // Sign and verify data
 const data = new TextEncoder().encode('hello mesh')
 const sig = await identity.sign(data)
-// Canonical object form (preferred): named fields, no argument-order pitfalls
-const ok = await PodIdentity.verify({
-  publicKey: identity.keyPair.publicKey,
-  signature: sig,
-  message: data,
-})
-// Positional form still works, but NOTE its order is (publicKey, data, signature)
-// -- unlike WebCrypto/wsh (key, signature, data) and raijin (message, signature, key).
-// Swapping data/signature returns false instead of throwing.
-const ok2 = await PodIdentity.verify(identity.keyPair.publicKey, data, sig)
-// sign also accepts the object form: identity.sign({ message: data })
+// Argument order is (publicKey, signature, data) -- same as crypto.subtle.verify.
+// BREAKING in 0.2.0: earlier versions took (publicKey, data, signature); the old
+// order now throws a TypeError instead of silently returning false.
+const ok = await PodIdentity.verify(identity.keyPair.publicKey, sig, data)
 
 // CRDTs -- merge state across peers
 const clockA = new VectorClock()

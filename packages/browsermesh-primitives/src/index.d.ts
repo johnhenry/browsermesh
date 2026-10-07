@@ -43,13 +43,12 @@ export declare class PodIdentity {
   constructor(opts: { keyPair: CryptoKeyPair; podId: string });
   static generate(): Promise<PodIdentity>;
   sign(data: BufferSource): Promise<Uint8Array>;
-  sign(opts: { message: BufferSource }): Promise<Uint8Array>;
-  /** Canonical form (preferred): named fields, no argument-order pitfalls. */
-  static verify(opts: {
-    publicKey: CryptoKey;
-    signature: BufferSource;
-    message: BufferSource;
-  }): Promise<boolean>;
+  /**
+   * Argument order is (publicKey, signature, data), matching WebCrypto.
+   * BREAKING in 0.2.0: previously (publicKey, data, signature). Throws a
+   * TypeError if the old order is detected (64-byte data, non-64-byte signature).
+   */
+  static verify(publicKey: CryptoKey, signature: BufferSource, data: BufferSource): Promise<boolean>;
   /**
    * Positional form, kept for compatibility. WARNING: order is
    * (publicKey, DATA, SIGNATURE) -- unlike WebCrypto/wsh (key, signature, data)
