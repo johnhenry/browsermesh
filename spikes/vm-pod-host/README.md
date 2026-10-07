@@ -15,8 +15,11 @@ has zero runtime dependencies (pure Node: `node:http`, `node:net`,
 
 ## What was actually run, honestly
 
-**Built and tested on macOS against a fake API; not yet executed on a
-real KVM host.**
+**Built and tested on macOS against a fake API. Since the rebase onto
+`main`, the Firecracker API client has also been run against a real
+Firecracker v1.16.1 on a KVM host (see "Measurements"); the full `VmPod`
+lifecycle, the jailer path and the guest image have still not run for
+real.**
 
 This spike was written on macOS, which has neither `/dev/kvm` nor a
 `firecracker`/`jailer` binary. Concretely, here is exactly what ran and
@@ -162,17 +165,44 @@ intended path to turn "planned calls" into real ones.
    #  because this spike never validated that path)
    ```
 
-## Measurements to capture (not yet measured)
+## Measurements
 
-These are the three numbers issue #185 §9 asks WP3 to produce, once run
-on a real Linux + KVM host. Empty until someone runs it there:
+Issue #185 §9 asks WP3 for three numbers. The full guest (Alpine + Node +
+`ServerPod`) has still not been built or booted, so **no number below is a
+"boot → `registered`" figure**. What has run is one real Firecracker v1.16.1
+(`nix shell nixpkgs#firecracker`) on an x86_64 NixOS box with `/dev/kvm`,
+unprivileged and without the jailer, driven by this spike's own
+`FirecrackerClient` (`putMachineConfig` with `track_dirty_pages`,
+`putBootSource` with an `initrd_path`, `putVsock`, `start`, `pause`,
+`createSnapshot`, then a second Firecracker process and `loadSnapshot`),
+with Firecracker CI's `vmlinux-6.1.188` and a ~800 KB busybox initramfs
+whose `/init` prints a tick every second. 128 MiB, 1 vCPU, no network.
 
-| Measurement | Target (issue §9) | Measured |
+| Measurement | Target (issue §9) | Measured (kernel + busybox initramfs, not the real guest) |
 | --- | --- | --- |
-| Boot → `registered` (cold) | < 1 s | |
-| Boot → `registered` (restore from snapshot) | < 300 ms | |
-| Memory per idle VM | < 40 MB | |
-| Snapshot restore time | (see above — same measurement) | |
+| `start()` → guest `/init` printed | < 1 s (to `registered`) | ~585 ms wall (guest reports 0.35 s uptime) |
+| `pause()` | | 3 ms |
+| `createSnapshot` (Full, 128 MiB) | | ~460 ms |
+| `loadSnapshot` + resume (API call) | < 300 ms | 8 ms; the guest was ticking again on its next tick |
+| Firecracker RSS after restore (idle, file-backed memory) | < 40 MB | ~19 MB |
+
+The real-guest boot-to-`registered` figure (Node start, `ServerPod`
+registering over the signaling server) is still open, as is everything that
+needs root: jailer, TAP/nft setup, and `build-rootfs.sh`.
+
+Two things this run exposed that the fake-API tests could not:
+
+1. **The vsock UDS survives a killed VMM, and Firecracker refuses to bind
+   over it.** `loadSnapshot` on a second process failed with
+   `VsockUnixBackend: Error binding to the host-side Unix socket: Address
+   already in use` until the old `uds_path` was unlinked. `VmPod.restore()`
+   does not remove it yet.
+2. **`VmPod.restore()` does not start a VMM process.** Its doc comment says it
+   spawns a fresh pre-boot Firecracker, but `snapshot()` kills the VMM and
+   `restore()` goes straight to `loadSnapshot` on the same client, so against
+   a real host there is nothing listening on the API socket. The spawn
+   (jailer or plain `firecracker --api-sock`) belongs in `restore()` before
+   `loadSnapshot`. Tracked as a wave 3 item.
 
 ## Design notes / deviations from the issue text
 
