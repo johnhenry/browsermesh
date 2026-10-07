@@ -33,7 +33,7 @@ Not a workspace member; plain ESM; zero new runtime deps.
 ## Run (the testable part)
 
 ```
-npm test   # == node --test test/
+npm test   # == node --test test/*.test.mjs
 ```
 
 17 tests, all against the fake `chrome` — `driver.mjs`'s actual logic, not

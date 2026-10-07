@@ -90,6 +90,7 @@ import {
   validateVerbRequest,
 } from '@johnhenry/browsermesh-pod'
 import { PLACEMENT_AUDIT } from './orchestrator.mjs'
+import { decodeWireData } from './internal/wire-envelope.mjs'
 
 /** Envelope type of a host-metadata request. Not one of the eight verbs -- see the module doc comment. */
 export const POD_HOST_DESCRIBE = 'pod-host:describe'
@@ -599,7 +600,11 @@ export function createPodHostClient({ peerNode, ctx, timeoutMs = DEFAULT_POD_HOS
   const eventListeners = new Set()
   let closed = false
 
-  const unsubscribe = node.onIncomingData((pubKey, data) => {
+  const unsubscribe = node.onIncomingData((pubKey, rawData) => {
+    // A real transport hands over the JSON text the host's ctx.sendTo() put
+    // on the wire (browsermesh#208); `ctx.onIncomingData()` decodes that for
+    // services, but this is a raw PeerNode subscriber, so it must too.
+    const data = decodeWireData(rawData)
     if (!data || typeof data !== 'object') return
 
     if (data.type === POD_HOST_EVENT) {

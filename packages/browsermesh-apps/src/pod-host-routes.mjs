@@ -50,17 +50,14 @@
  * ACCESS CONTROL -- NO BYPASS. `mesh-rpc.mjs` itself checks nothing (see its
  * own "AUTHORIZATION IS EXPLICITLY OUT OF SCOPE" doc comment); authorization
  * is this router's job, same as `pod-host-service.mjs`'s `handleRequest()`.
- * `createPodHostService()`'s `attach()` returns an `api` object
- * (`{resource, lane, verbs, driver, describe, runtimePeer}`) that does NOT
- * expose a gated dispatch method -- `api.driver` is the raw, UNGATED driver.
- * Routing HTTP requests straight through `api.driver` would silently bypass
- * `checkAccess()`. So this router does what `pod-host-service.mjs` itself
- * does: calls `registry.checkAccess(pubKey, resource, verb)` directly, using
- * an explicitly-supplied `registry` (`peerNode.registry` -- see
- * `mesh-service.mjs`'s `ctx.registry: peerNode.registry`). When `api` is
- * supplied it is used for its `driver`/`resource`/`describe()` (so a caller
- * who already attached `createPodHostService()` doesn't have to repeat
- * those), never for bypassing the gate.
+ * `createPodHostService()`'s `attach()` returns an `api` whose `dispatch(
+ * pubKey, verb, payload)` is the ONE gated path (gate + validate + lane check
+ * + audit + events); when `api` is supplied this router calls it and nothing
+ * else. `api.driver` stays the raw, UNGATED driver and is never used to
+ * answer a request. Only a router built from a bare `driver` (no `api`) falls
+ * back to a standalone copy of the same steps, calling
+ * `registry.checkAccess(pubKey, resource, verb)` on the explicitly-supplied
+ * `registry` (`peerNode.registry` -- see `mesh-service.mjs`'s `ctx.registry`).
  *
  * The requester's pubKey travels from `createPodHostMeshRpcHandler()`'s
  * `fromPubKey` into the synthetic `Request` as the `MESH_FROM_HEADER`

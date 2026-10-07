@@ -60,5 +60,5 @@ driving it from entirely outside the mesh), and
 `15-agent-spawns-hosted-pod.mjs` (item 4: the same control surface projected
 as `meshctl_*` LLM tools, driven by a real `createAgentRuntime()` loop). The
 real lanes live in `spikes/isolate-pod-host` and `spikes/vm-pod-host`, which
-are not part of `npm run examples` because one needs `wrangler`/`workerd` and
+are not part of `npm run examples` because one needs `cf`/`workerd` and
 the other needs Linux + `/dev/kvm`.

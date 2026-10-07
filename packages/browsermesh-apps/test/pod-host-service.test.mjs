@@ -774,3 +774,57 @@ describe('lane driver adapters serve the pod host service', () => {
     await handle.teardown()
   })
 })
+
+describe('createPodHostClient: real-wire (JSON text) responses (#208)', () => {
+  // A real transport can hand a raw PeerNode subscriber the JSON text the
+  // host put on the wire, not an object. The client must parse it.
+  function wireNode() {
+    let cb = null
+    const sent = []
+    return {
+      sent,
+      node: {
+        onIncomingData(fn) { cb = fn; return () => { cb = null } },
+        sendTo(pubKey, envelope) { sent.push({ pubKey, envelope }); return Promise.resolve() },
+      },
+      deliver(pubKey, value) { cb(pubKey, typeof value === 'string' ? value : JSON.stringify(value)) },
+    }
+  }
+
+  it('resolves a call from a JSON-text response', async () => {
+    const w = wireNode()
+    const client = createPodHostClient({ peerNode: w.node, timeoutMs: 1000 })
+    const pending = client.list('host-1')
+    const { envelope } = w.sent[0]
+    w.deliver('host-1', { type: 'pod-host:response', requestId: envelope.requestId, ok: true, result: [{ name: 'a' }] })
+    assert.deepEqual(await pending, [{ name: 'a' }])
+    client.close()
+  })
+
+  it('rejects with the remote error code from a JSON-text failure', async () => {
+    const w = wireNode()
+    const client = createPodHostClient({ peerNode: w.node, timeoutMs: 1000 })
+    const pending = client.list('host-1')
+    const { envelope } = w.sent[0]
+    w.deliver('host-1', { type: 'pod-host:response', requestId: envelope.requestId, ok: false, error: { code: 'EACCES', message: 'no' } })
+    await assert.rejects(pending, (err) => err.code === POD_HOST_ERROR.EACCES)
+    client.close()
+  })
+
+  it('delivers a JSON-text lifecycle event to onEvent subscribers', async () => {
+    const w = wireNode()
+    const client = createPodHostClient({ peerNode: w.node, timeoutMs: 1000 })
+    const seen = []
+    client.onEvent((host, event) => seen.push([host, event.kind, event.data.to]))
+    w.deliver('host-1', { type: 'pod-host:event', kind: 'lifecycle', data: { name: 'a', to: 'registered' }, ts: 1 })
+    assert.deepEqual(seen, [['host-1', 'lifecycle', 'registered']])
+    client.close()
+  })
+
+  it('ignores plain-text payloads that merely look like JSON scalars', () => {
+    const w = wireNode()
+    const client = createPodHostClient({ peerNode: w.node, timeoutMs: 1000 })
+    assert.doesNotThrow(() => { w.deliver('host-1', '42'); w.deliver('host-1', 'hello') })
+    client.close()
+  })
+})

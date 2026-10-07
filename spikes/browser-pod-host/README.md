@@ -50,7 +50,7 @@ needs.
 ## Run
 
 ```
-npm test            # == node --test test/
+npm test            # == node --test test/*.test.mjs
 ```
 
 Or individually: `node --test test/cdp.test.mjs`,
