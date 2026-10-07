@@ -198,6 +198,7 @@ export declare class AccessGrant {
     usageCount?: number;
   });
   isExpired(now?: number): boolean;
+  isRevoked(): boolean;
   isWithinTimeWindow(now?: Date): boolean;
   check(resource: string, action: string, now?: number): CheckResult;
   consumeUse(): void;
@@ -254,6 +255,11 @@ export declare class ACLEngine {
 }
 
 export declare function generateGrantId(): string;
+
+export declare function grantFromToken(
+  token: { issuer: string; subject: string; scopes: string[]; expiresAt: number },
+  opts?: { grantor?: string; id?: string; created?: number }
+): AccessGrant;
 
 // CRDTs
 

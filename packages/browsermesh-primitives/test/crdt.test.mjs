@@ -875,3 +875,49 @@ describe('LWWMap', () => {
     assert.ok(restored.has('dead'));
   });
 });
+
+// ── LWWMap canonical order (#201) ───────────────────────────────────────────
+
+describe('LWWMap canonical serialization order', () => {
+  function replicas() {
+    const a = new LWWMap();
+    const b = new LWWMap();
+    a.set('plan', 'wire wsh', 1, 'a');
+    a.set('owner', 'alpha', 1, 'a');
+    b.set('owner', 'beta', 2, 'b');
+    b.set('plan', 'ship 0.2', 2, 'b');
+    b.set('alpha-only-b', 1, 1, 'b');
+    return { a, b };
+  }
+
+  it('value serializes identically on both replicas after merge', () => {
+    const { a, b } = replicas();
+    const ma = a.merge(b);
+    const mb = b.merge(a);
+    assert.equal(JSON.stringify(ma.value), JSON.stringify(mb.value));
+    assert.deepEqual(Object.keys(ma.value), ['alpha-only-b', 'owner', 'plan']);
+  });
+
+  it('toJSON serializes identically on both replicas after merge', () => {
+    const { a, b } = replicas();
+    assert.equal(JSON.stringify(a.merge(b).toJSON()), JSON.stringify(b.merge(a).toJSON()));
+  });
+
+  it('keys/values/entries iterate in sorted key order and skip tombstones', () => {
+    const m = new LWWMap();
+    m.set('z', 1, 1, 'n');
+    m.set('a', 2, 1, 'n');
+    m.set('m', 3, 1, 'n');
+    m.delete('m', 2, 'n');
+    assert.deepEqual([...m.keys()], ['a', 'z']);
+    assert.deepEqual([...m.values()], [2, 1]);
+    assert.deepEqual([...m.entries()], [['a', 2], ['z', 1]]);
+  });
+
+  it('fromJSON round trip preserves the state', () => {
+    const { a, b } = replicas();
+    const merged = a.merge(b);
+    const round = LWWMap.fromJSON(JSON.parse(JSON.stringify(merged.toJSON())));
+    assert.deepEqual(round.value, merged.value);
+  });
+});

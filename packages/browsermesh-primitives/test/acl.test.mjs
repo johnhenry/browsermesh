@@ -6,7 +6,9 @@ import {
   AccessGrant,
   ACLEngine,
   generateGrantId,
+  grantFromToken,
 } from '../src/acl.mjs';
+import { CapabilityToken } from '../src/capability.mjs';
 
 // ─── matchResourcePattern ────────────────────────────────────────────
 
@@ -414,7 +416,7 @@ describe('ACLEngine', () => {
     engine.revokeGrant('g2');
     const result = engine.check('pod_alice', 'tool:fetch', 'execute');
     assert.ok(!result.allowed);
-    assert.equal(result.reason, 'grant_expired');
+    assert.equal(result.reason, 'grant_revoked');
   });
 
   it('revokeGrant returns false for nonexistent ID', () => {
@@ -618,5 +620,86 @@ describe('generateGrantId', () => {
     const parts = id.split('_');
     assert.equal(parts.length, 3); // grant, timestamp, sequence
     assert.equal(parts[0], 'grant');
+  });
+});
+
+// ─── Revocation reasons (#200) ───────────────────────────────────────
+
+describe('revoked vs expired reasons', () => {
+  const perms = [{ resource: 'mesh://memory/notes', actions: ['write'] }];
+
+  it('grant.revoke() -> grant_revoked, not grant_expired', () => {
+    const g = new AccessGrant({ id: 'r1', grantee: 'beta', grantor: 'alpha', permissions: perms });
+    g.revoke();
+    assert.ok(g.isRevoked());
+    assert.deepEqual(g.check('mesh://memory/notes', 'write'), { allowed: false, reason: 'grant_revoked' });
+  });
+
+  it('ACLEngine.revokeAll() -> grant_revoked', () => {
+    const acl = new ACLEngine();
+    acl.addGrant(new AccessGrant({ id: generateGrantId(), grantee: 'beta', grantor: 'alpha', permissions: perms }));
+    acl.revokeAll('beta');
+    assert.deepEqual(acl.check('beta', 'mesh://memory/notes', 'write'), { allowed: false, reason: 'grant_revoked' });
+  });
+
+  it('a revoked grant that is also past expiry reports grant_revoked', () => {
+    const g = new AccessGrant({
+      id: 'r2', grantee: 'beta', grantor: 'alpha', permissions: perms,
+      conditions: { expires: Date.now() - 1000 },
+    });
+    g.revoke();
+    assert.equal(g.check('mesh://memory/notes', 'write').reason, 'grant_revoked');
+  });
+
+  it('grant_expired stays reserved for conditions.expires / maxUses', () => {
+    const past = new AccessGrant({
+      id: 'r3', grantee: 'beta', grantor: 'alpha', permissions: perms,
+      conditions: { expires: Date.now() - 1000 },
+    });
+    assert.ok(!past.isRevoked());
+    assert.equal(past.check('mesh://memory/notes', 'write').reason, 'grant_expired');
+  });
+
+  it('isExpired() still folds in revocation (listGrants/pruneExpired unaffected)', () => {
+    const g = new AccessGrant({ id: 'r4', grantee: 'beta', grantor: 'alpha', permissions: perms });
+    g.revoke();
+    assert.ok(g.isExpired());
+  });
+});
+
+// ─── grantFromToken (#202) ───────────────────────────────────────────
+
+describe('grantFromToken', () => {
+  it('maps token scopes onto an ACL grant the engine can enforce and revoke', () => {
+    const token = new CapabilityToken({
+      issuer: 'alpha',
+      subject: 'beta',
+      scopes: ['memory:notes:write', 'memory:notes:read', 'tool:*:execute'],
+      expiresAt: Math.floor(Date.now() / 1000) + 3600,
+    });
+    const grant = grantFromToken(token);
+    assert.equal(grant.grantee, 'beta');
+    assert.equal(grant.grantor, 'alpha');
+    assert.deepEqual(grant.permissions.map(p => p.toJSON()), [
+      { resource: 'mesh://memory/notes', actions: ['write', 'read'], quotas: null },
+      { resource: 'mesh://tool/*', actions: ['execute'], quotas: null },
+    ]);
+    assert.equal(grant.conditions.expires, token.expiresAt * 1000);
+
+    const acl = new ACLEngine();
+    acl.addGrant(grant);
+    assert.ok(acl.check('beta', 'mesh://memory/notes', 'write').allowed);
+    assert.ok(acl.check('beta', 'mesh://tool/fetch', 'execute').allowed);
+    assert.ok(!acl.check('beta', 'mesh://memory/notes', 'delete').allowed);
+    acl.revokeGrant(grant.id);
+    assert.equal(acl.check('beta', 'mesh://memory/notes', 'write').reason, 'grant_revoked');
+  });
+
+  it('expiresAt 0 (no expiry) yields no expires condition; grantor/id are overridable', () => {
+    const token = new CapabilityToken({ issuer: 'alpha', subject: 'beta', scopes: ['a:b:c'], expiresAt: 0 });
+    const grant = grantFromToken(token, { grantor: 'gamma', id: 'fixed' });
+    assert.equal(grant.id, 'fixed');
+    assert.equal(grant.grantor, 'gamma');
+    assert.deepEqual(grant.conditions, {});
   });
 });

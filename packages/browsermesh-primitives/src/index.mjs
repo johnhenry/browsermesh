@@ -17,7 +17,7 @@ export { parseScope, matchScope, CapabilityToken } from "./capability.mjs";
 export { TRUST_CATEGORIES, createTrustEdge, computeTransitiveTrust } from "./trust.mjs";
 
 // ACL
-export { matchResourcePattern, Permission, AccessGrant, ACLEngine, generateGrantId } from "./acl.mjs";
+export { matchResourcePattern, Permission, AccessGrant, ACLEngine, generateGrantId, grantFromToken } from "./acl.mjs";
 
 // CRDTs
 export { VectorClock, LWWRegister, GCounter, PNCounter, ORSet, RGA, LWWMap } from "./crdt.mjs";

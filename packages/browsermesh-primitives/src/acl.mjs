@@ -7,6 +7,8 @@
  * Pure module — no I/O, no browser APIs, no crypto.
  */
 
+import { parseScope } from './capability.mjs';
+
 // ─── Glob-style resource pattern matching ────────────────────────────
 
 /**
@@ -149,8 +151,9 @@ export class AccessGrant {
   /**
    * Check whether this grant has expired.
    *
-   * A grant is expired if:
-   * - It has been revoked
+   * A grant is treated as expired (not usable) if:
+   * - It has been revoked (use {@link AccessGrant#isRevoked} to tell the
+   *   difference; {@link AccessGrant#check} reports `grant_revoked`)
    * - The `expires` timestamp has passed
    * - The `maxUses` limit has been reached
    *
@@ -162,6 +165,15 @@ export class AccessGrant {
     if (this.conditions.expires && now >= this.conditions.expires) return true;
     if (this.conditions.maxUses && this.usageCount >= this.conditions.maxUses) return true;
     return false;
+  }
+
+  /**
+   * Check whether this grant has been revoked.
+   *
+   * @returns {boolean}
+   */
+  isRevoked() {
+    return Boolean(this.revoked);
   }
 
   /**
@@ -187,9 +199,16 @@ export class AccessGrant {
    * @param {string} resource - Resource identifier
    * @param {string} action - Action being attempted
    * @param {number} [now=Date.now()] - Current time in milliseconds
+   * Denial reasons: `grant_revoked` (revoked via `revoke()`),
+   * `grant_expired` (`conditions.expires` passed or `maxUses` reached),
+   * `outside_time_window`, `no_matching_permission`.
+   *
    * @returns {{ allowed: boolean, grant?: AccessGrant, reason?: string }}
    */
   check(resource, action, now = Date.now()) {
+    if (this.isRevoked()) {
+      return { allowed: false, reason: 'grant_revoked' };
+    }
     if (this.isExpired(now)) {
       return { allowed: false, reason: 'grant_expired' };
     }
@@ -468,4 +487,44 @@ let _grantSeq = 0;
  */
 export function generateGrantId() {
   return `grant_${Date.now().toString(36)}_${(++_grantSeq).toString(36)}`;
+}
+
+/**
+ * Map a {@link CapabilityToken} onto an {@link AccessGrant} so the enforcing
+ * pod can revoke, count and audit it through its {@link ACLEngine}.
+ *
+ * Each scope `namespace:resource:action` becomes a permission on
+ * `mesh://<namespace>/<resource>` with `[action]` (a `*` part stays `*`);
+ * scopes naming the same resource are merged into one permission. The
+ * token's `expiresAt` (seconds) becomes `conditions.expires` (milliseconds).
+ *
+ * This does NOT verify the token. Check the signature, `subject` and
+ * `isExpired()` first, then add the returned grant to your engine. See the
+ * README ("Capability tokens vs ACL grants").
+ *
+ * @param {{ issuer: string, subject: string, scopes: string[], expiresAt: number }} token
+ * @param {object} [opts]
+ * @param {string} [opts.grantor=token.issuer]
+ * @param {string} [opts.id] - Grant ID (default: generated)
+ * @param {number} [opts.created=Date.now()]
+ * @returns {AccessGrant}
+ */
+export function grantFromToken(token, { grantor = token.issuer, id = generateGrantId(), created = Date.now() } = {}) {
+  /** @type {Map<string, string[]>} */
+  const byResource = new Map();
+  for (const scope of token.scopes) {
+    const { namespace, resource, action } = parseScope(scope);
+    const target = `mesh://${namespace}/${resource}`;
+    if (!byResource.has(target)) byResource.set(target, []);
+    const actions = byResource.get(target);
+    if (!actions.includes(action)) actions.push(action);
+  }
+  return new AccessGrant({
+    id,
+    grantee: token.subject,
+    grantor,
+    permissions: [...byResource].map(([resource, actions]) => ({ resource, actions })),
+    conditions: token.expiresAt > 0 ? { expires: token.expiresAt * 1000 } : {},
+    created,
+  });
 }
