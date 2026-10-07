@@ -36,6 +36,12 @@
  * pointed at the same database — exactly the kind of caveat you'd expect
  * from making a synchronous view onto async storage.
  *
+ * Torrent service: this class is a supported `chunkStore` for
+ * `createTorrentService()` / `TorrentManager` in `@johnhenry/browsermesh-apps`
+ * (those await every store call, so the Promise-returning methods are fine).
+ * Pair it with a persistent `manifestStore` so a reloaded seeder keeps serving.
+ * Covered by `mesh-torrent-hooks.test.mjs` in that package.
+ *
  * Usage:
  *   const store = new IndexedDBChunkStore({ dbName: 'my-app-chunks' });
  *   const cid = await IndexedDBChunkStore.computeCid(data);

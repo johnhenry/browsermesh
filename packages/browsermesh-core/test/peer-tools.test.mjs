@@ -297,24 +297,163 @@ describe('TorrentSeedTool — real manager API', () => {
     peerToolsContext.setTorrentManager(null)
   })
 
-  it('TorrentSeedTool passes data first, name inside opts — not swapped', async () => {
+  function recordingManager() {
     const calls = []
-    const fakeMgr = {
+    return {
+      calls,
       async seed(data, opts) {
         calls.push({ data, opts })
-        return { infoHash: 'abc123' }
+        return { infoHash: 'abc123', magnetURI: 'magnet:?xt=urn:btih:abc123', size: data.byteLength }
       },
     }
+  }
+
+  it('TorrentSeedTool passes data first, name inside opts — not swapped', async () => {
+    const fakeMgr = recordingManager()
     peerToolsContext.setTorrentManager(fakeMgr)
 
     const tool = new TorrentSeedTool()
     const result = await tool.execute({ name: 'notes.txt', data: 'hello world' })
 
     assert.equal(result.success, true)
-    assert.equal(calls.length, 1)
+    assert.equal(fakeMgr.calls.length, 1)
     // The real file content must be the `data` positional arg, not the name.
-    assert.equal(calls[0].data, 'hello world')
-    assert.equal(calls[0].opts.name, 'notes.txt')
+    assert.equal(new TextDecoder().decode(fakeMgr.calls[0].data), 'hello world')
+    assert.equal(fakeMgr.calls[0].opts.name, 'notes.txt')
+  })
+
+  it('decodes text to UTF-8 bytes by default, so a string is never seeded as-is (#195)', async () => {
+    const fakeMgr = recordingManager()
+    peerToolsContext.setTorrentManager(fakeMgr)
+
+    const result = await new TorrentSeedTool().execute({ name: 'greeting', data: 'héllo' })
+
+    assert.equal(result.success, true)
+    assert.ok(fakeMgr.calls[0].data instanceof Uint8Array)
+    assert.deepEqual([...fakeMgr.calls[0].data], [...new TextEncoder().encode('héllo')])
+    assert.match(result.output, /magnet:\?xt=urn:btih:abc123/)
+    assert.match(result.output, /6 bytes/)
+  })
+
+  it('decodes base64 when encoding is "base64"', async () => {
+    const fakeMgr = recordingManager()
+    peerToolsContext.setTorrentManager(fakeMgr)
+    const original = Uint8Array.from([0, 1, 2, 250, 251, 252, 253, 254, 255])
+    const b64 = Buffer.from(original).toString('base64')
+
+    const result = await new TorrentSeedTool().execute({ name: 'blob.bin', data: b64, encoding: 'base64' })
+
+    assert.equal(result.success, true)
+    assert.deepEqual([...fakeMgr.calls[0].data], [...original])
+  })
+
+  it('rejects invalid base64 and unknown encodings without seeding anything', async () => {
+    const fakeMgr = recordingManager()
+    peerToolsContext.setTorrentManager(fakeMgr)
+    const tool = new TorrentSeedTool()
+
+    const bad = await tool.execute({ name: 'x', data: 'not base64!!', encoding: 'base64' })
+    assert.equal(bad.success, false)
+    assert.match(bad.error, /base64/)
+
+    const unknown = await tool.execute({ name: 'x', data: 'abc', encoding: 'hex' })
+    assert.equal(unknown.success, false)
+    assert.match(unknown.error, /encoding/)
+
+    assert.equal(fakeMgr.calls.length, 0)
+  })
+
+  it('advertises the encoding parameter in its schema', () => {
+    const props = new TorrentSeedTool().parameters.properties
+    assert.deepEqual(props.encoding.enum, ['text', 'base64'])
+  })
+})
+
+describe('ipfs_store / ipfs_retrieve rendering (#196)', () => {
+  afterEach(() => {
+    peerToolsContext.setIpfsStore(null)
+  })
+
+  /** Minimal stand-in with IPFSStore's real return shapes: add() -> { cid, size }, get() -> Uint8Array|null. */
+  function fakeStore() {
+    const m = new Map()
+    return {
+      async add(data) {
+        const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data
+        const cid = `cid${m.size + 1}`
+        m.set(cid, bytes)
+        return { cid, size: bytes.byteLength }
+      },
+      async get(cid) { return m.get(cid) ?? null },
+    }
+  }
+
+  it('ipfs_store prints the CID and size, not [object Object]', async () => {
+    peerToolsContext.setIpfsStore(fakeStore())
+    const result = await new IpfsStoreTool().execute({ data: 'hi there' })
+    assert.equal(result.success, true)
+    assert.equal(result.output, 'Stored with CID: cid1 (8 bytes)')
+  })
+
+  it('ipfs_store still works against a store whose add() returns a bare cid string', async () => {
+    peerToolsContext.setIpfsStore({ async add() { return 'abc' } })
+    const result = await new IpfsStoreTool().execute({ data: 'hi' })
+    assert.equal(result.output, 'Stored with CID: abc (2 bytes)')
+  })
+
+  it('ipfs_store decodes base64 input before storing', async () => {
+    const added = []
+    peerToolsContext.setIpfsStore({ async add(d) { added.push(d); return { cid: 'c', size: d.byteLength } } })
+    const result = await new IpfsStoreTool().execute({ data: Buffer.from([255, 0, 1]).toString('base64'), encoding: 'base64' })
+    assert.equal(result.success, true)
+    assert.deepEqual([...added[0]], [255, 0, 1])
+  })
+
+  it('ipfs_retrieve returns UTF-8 text, not a byte-index object', async () => {
+    const store = fakeStore()
+    peerToolsContext.setIpfsStore(store)
+    const { cid } = await store.add('hi there')
+    const result = await new IpfsRetrieveTool().execute({ cid })
+    assert.equal(result.success, true)
+    assert.equal(result.output, 'hi there')
+    assert.equal(result.encoding, 'text')
+  })
+
+  it('ipfs_retrieve falls back to base64 (and says so) for non-text bytes', async () => {
+    const store = fakeStore()
+    peerToolsContext.setIpfsStore(store)
+    const raw = Uint8Array.from([0xff, 0xfe, 0x00, 0x80])
+    const { cid } = await store.add(raw)
+    const result = await new IpfsRetrieveTool().execute({ cid })
+    assert.equal(result.success, true)
+    assert.equal(result.encoding, 'base64')
+    assert.ok(result.output.endsWith(Buffer.from(raw).toString('base64')))
+    assert.match(result.output, /Binary content \(4 bytes\)/)
+  })
+
+  it('ipfs_retrieve encoding "base64" returns bare base64 even for text; "text" refuses binary', async () => {
+    const store = fakeStore()
+    peerToolsContext.setIpfsStore(store)
+    const { cid: textCid } = await store.add('hello')
+    const { cid: binCid } = await store.add(Uint8Array.from([0xff, 0xfe]))
+    const tool = new IpfsRetrieveTool()
+
+    const b64 = await tool.execute({ cid: textCid, encoding: 'base64' })
+    assert.equal(b64.output, Buffer.from('hello').toString('base64'))
+
+    const refused = await tool.execute({ cid: binCid, encoding: 'text' })
+    assert.equal(refused.success, false)
+    assert.match(refused.error, /base64/)
+
+    const unknown = await tool.execute({ cid: textCid, encoding: 'hex' })
+    assert.equal(unknown.success, false)
+  })
+
+  it('ipfs_retrieve reports an unknown CID as not found', async () => {
+    peerToolsContext.setIpfsStore(fakeStore())
+    const result = await new IpfsRetrieveTool().execute({ cid: 'nope' })
+    assert.equal(result.success, true)
+    assert.equal(result.output, 'CID nope not found.')
   })
 })
 

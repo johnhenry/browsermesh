@@ -17,6 +17,7 @@ Application layer for BrowserMesh: marketplace, chat, payments, compute orchestr
 - [Sharing a `VirtualNetwork` with specific peers: mesh relay](#sharing-a-virtualnetwork-with-specific-peers-mesh-relay)
 - [CloudStorage bucket authorization and key distribution](#cloudstorage-bucket-authorization-and-key-distribution)
 - [CloudStorage: the ergonomic SDK](#cloudstorage-the-ergonomic-sdk)
+- [Torrent service: durable stores, authorization and serve limits](#torrent-service-durable-stores-authorization-and-serve-limits)
 - [Putting it all together: sync + kernel-gated mesh + relay on one connection](#putting-it-all-together-sync--kernel-gated-mesh--relay-on-one-connection)
 - [`fetch()`/`WebSocket`-shaped mesh access: `browserMeshFetch` and `BrowserMeshWebSocket`](#fetchwebsocket-shaped-mesh-access-browsermeshfetch-and-browsermeshwebsocket)
   - [`browserMeshFetch`](#browsermeshfetch)
@@ -59,7 +60,7 @@ Extracted from the private `clawser` monorepo (previously `packages/browsermesh-
 | peer-escrow | `EscrowContract`, `EscrowManager` |
 | peer-files | `FileHost`, `FileClient` |
 | peer-health | `HealthMonitor`, `AutoMigrator` |
-| peer-ipfs | `IPFSStore` |
+| peer-ipfs | `IPFSStore` (also exported as `MeshLocalCidStore`): a mesh-local content-addressed store. CIDs are SHA-256 hex digests, not IPFS CIDs, and nothing talks to the IPFS network |
 | peer-node | `PeerNode` |
 | peer-payments | `CreditLedger`, `WebLNProvider` |
 | peer-registry | `PeerRegistry` |
@@ -68,6 +69,7 @@ Extracted from the private `clawser` monorepo (previously `packages/browsermesh-
 | peer-terminal | `TerminalHost`, `TerminalClient` |
 | peer-timestamp | `TimestampAuthority`, `TimestampProof` |
 | peer-torrent | `TorrentManager` |
+| mesh-torrent | `createTorrentService` (swarm piece exchange as a `MeshService`; injectable durable stores, `authorize` hook, serve caps) |
 | peer-verification | `VerificationQuorum`, `Attestation` |
 | marketplace-ui | `SkillMarketplace` |
 | mesh-relay-host | `MeshRelayHost` |
@@ -342,6 +344,55 @@ CRDT-manifest-plus-content-addressed-chunk pattern, the signed
 GrantLog pattern, and the key-distribution pattern, each with pointers to
 the real code, written so the *next* mesh-native service doesn't have to
 rediscover these same design questions from scratch.
+
+## Torrent service: durable stores, authorization and serve limits
+
+`createTorrentService()` (`mesh-torrent.mjs`) distributes content in
+SHA-256-addressed pieces: a downloader fetches each piece from whichever peer
+holds it, and a finished downloader becomes a seeder. By default everything is
+in memory and open to any peer that knows the magnet URI. These options change
+that; all are optional.
+
+```js
+import { createTorrentService, attachService } from '@johnhenry/browsermesh-apps'
+import { IndexedDBChunkStore } from '@johnhenry/browsermesh-sync'
+
+const torrent = attachService(peerNode, undefined, createTorrentService({
+  // Durable pieces and manifests: a seeder that reloads keeps serving.
+  chunkStore: new IndexedDBChunkStore({ dbName: 'my-app-pieces' }),
+  manifestStore: myManifestStore,
+  // Who may fetch what. Return true to allow; false, a throw, or anything else denies.
+  authorize: async (fromPubKey, { kind, magnetURI, infoHash, cid, chunkCid }) =>
+    registry.checkAccess(fromPubKey, `share:${cid}`, 'read'),
+  maxConcurrentServes: 16,          // chunk-responses in flight, all peers (0 = unlimited)
+  maxConcurrentServesPerPeer: 4,    // ... per requesting peer
+  maxBytesPerPeerPerSec: 4 * 1024 * 1024, // served-bytes budget per peer (default 0 = unlimited)
+  maxAnnouncesPerPeerPerMinute: 30, // inbound announces accepted per peer
+}))
+
+await torrent.api.ensureLoaded() // after a reload: also restores listTorrents()
+const info = await torrent.api.seed('some text')   // strings are UTF-8 encoded
+```
+
+- **`chunkStore`** is any object with `save(cid, bytes)`, `get(cid)`,
+  `has(cid)` and `remove(cid)`, each sync or returning a Promise. The in-memory
+  `ChunkStore` and the IndexedDB-backed `IndexedDBChunkStore` from
+  `@johnhenry/browsermesh-sync` both fit; the service is tested against both.
+- **`manifestStore`** is `{ get(magnetURI), set(magnetURI, manifest),
+  delete(magnetURI), entries() }` (sync or async). Each manifest is a small
+  JSON-safe record. It is the index of what the node holds, and a node only
+  serves pieces that one of its manifests lists, so persist both stores or
+  neither. `TorrentManager` accepts the same two options (plus `chunkSize`).
+- Stores you pass in belong to you: `destroy()` never clears them.
+- **`authorize`** runs before every manifest and piece is served. A refused
+  request gets exactly the reply an unknown one gets (`manifest: null` /
+  `error: 'not-found'`), so a peer cannot probe what exists. `cid` is the
+  SHA-256 hex CID of the whole content; `chunkCid` is set for `kind: 'chunk'`.
+- Over a serve cap a requester is told `busy` (whatever it asked for) and
+  downloaders back off and retry. Caps and `authorize` never apply to the
+  downloading side.
+- Events: `torrent:chunk-served`, `torrent:chunk-received` (as before), plus
+  `torrent:request-denied` and `torrent:serve-busy`.
 
 ## Putting it all together: sync + kernel-gated mesh + relay on one connection
 

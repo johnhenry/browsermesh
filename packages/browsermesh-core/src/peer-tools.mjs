@@ -727,57 +727,121 @@ export class MeshGatewayStatusTool extends BrowserTool {
   }
 }
 
+// ── Byte/text helpers for the torrent and IPFS tools ──────────────────
+
+const BASE64_RE = /^[A-Za-z0-9+/]*={0,2}$/
+
+/** @param {Uint8Array} bytes @returns {string} */
+function bytesToBase64(bytes) {
+  let bin = ''
+  const STEP = 0x8000
+  for (let i = 0; i < bytes.length; i += STEP) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + STEP))
+  }
+  return btoa(bin)
+}
+
+/**
+ * Strict base64 decode: whitespace is ignored, anything else outside the
+ * alphabet (or a bad length) throws instead of decoding to garbage.
+ * @param {string} str @returns {Uint8Array}
+ */
+function base64ToBytes(str) {
+  const clean = String(str).replace(/\s+/g, '')
+  if (!BASE64_RE.test(clean) || clean.length % 4 === 1) {
+    throw new Error('data is not valid base64 (use encoding "text" for plain text)')
+  }
+  const bin = atob(clean)
+  const bytes = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+  return bytes
+}
+
+/**
+ * The tools' `data` string -> bytes, per its `encoding` ('text' = UTF-8, the
+ * default; 'base64').
+ * @param {string} data @param {string} [encoding]
+ * @returns {Uint8Array}
+ */
+function decodeToolData(data, encoding = 'text') {
+  if (typeof data !== 'string') throw new Error('data must be a string')
+  if (encoding === 'text') return new TextEncoder().encode(data)
+  if (encoding === 'base64') return base64ToBytes(data)
+  throw new Error(`unknown encoding "${encoding}" (use "text" or "base64")`)
+}
+
 // ── Torrent tools ─────────────────────────────────────────────────────
 
 export class TorrentSeedTool extends BrowserTool {
   get name() { return 'torrent_seed' }
-  get description() { return 'Seed a file or data via BitTorrent-style P2P distribution.' }
+  get description() { return 'Seed a file or data via BitTorrent-style P2P distribution. Returns the magnet URI to hand to peers.' }
   get parameters() {
     return {
       type: 'object',
       properties: {
         name: { type: 'string', description: 'Content name/identifier' },
-        data: { type: 'string', description: 'Base64-encoded data or text to seed' },
+        data: { type: 'string', description: 'Content to seed: plain text, or base64 when encoding is "base64"' },
+        encoding: {
+          type: 'string',
+          enum: ['text', 'base64'],
+          description: 'How data is encoded: "text" (UTF-8, default) or "base64" (for binary content)',
+        },
       },
       required: ['name', 'data'],
     }
   }
   get permission() { return 'approve' }
 
-  async execute({ name, data }) {
+  async execute({ name, data, encoding = 'text' }) {
     const tm = peerToolsContext.getTorrentManager()
     if (!tm) return { success: false, output: '', error: 'Torrent manager not initialized.' }
     try {
-      const result = await tm.seed(data, { name })
-      return { success: true, output: `Seeding: ${result?.infoHash || name}` }
+      const bytes = decodeToolData(data, encoding)
+      const result = await tm.seed(bytes, { name })
+      const size = result?.size ?? bytes.byteLength
+      const id = result?.magnetURI || result?.infoHash || name
+      return { success: true, output: `Seeding "${name}" (${size} bytes): ${id}` }
     } catch (err) {
       return { success: false, output: '', error: err.message }
     }
   }
 }
 
-// ── IPFS tools ────────────────────────────────────────────────────────
+// ── Content-addressed store tools ─────────────────────────────────────
+//
+// Despite the `ipfs_` names (kept for compatibility), the store behind these
+// is mesh-local with SHA-256 hex CIDs, not the public IPFS network.
 
 export class IpfsStoreTool extends BrowserTool {
   get name() { return 'ipfs_store' }
-  get description() { return 'Store data in the IPFS-compatible content-addressed store.' }
+  get description() { return 'Store data in the mesh-local content-addressed store; returns its CID (a SHA-256 hex digest, not an IPFS CID). Content is local to this node.' }
   get parameters() {
     return {
       type: 'object',
       properties: {
-        data: { type: 'string', description: 'Data to store' },
+        data: { type: 'string', description: 'Data to store: plain text, or base64 when encoding is "base64"' },
+        encoding: {
+          type: 'string',
+          enum: ['text', 'base64'],
+          description: 'How data is encoded: "text" (UTF-8, default) or "base64" (for binary content)',
+        },
       },
       required: ['data'],
     }
   }
   get permission() { return 'write' }
 
-  async execute({ data }) {
+  async execute({ data, encoding = 'text' }) {
     const store = peerToolsContext.getIpfsStore()
     if (!store) return { success: false, output: '', error: 'IPFS store not initialized.' }
     try {
-      const cid = await store.add(data)
-      return { success: true, output: `Stored with CID: ${cid}` }
+      const bytes = decodeToolData(data, encoding)
+      const added = await store.add(bytes)
+      // IPFSStore.add() resolves { cid, size }; tolerate a store that returns just the cid string.
+      const cid = typeof added === 'string' ? added : added?.cid
+      if (!cid) throw new Error('store did not return a CID')
+      const size = (typeof added === 'object' ? added?.size : undefined) ?? bytes.byteLength
+      return { success: true, output: `Stored with CID: ${cid} (${size} bytes)` }
     } catch (err) {
       return { success: false, output: '', error: err.message }
     }
@@ -786,25 +850,46 @@ export class IpfsStoreTool extends BrowserTool {
 
 export class IpfsRetrieveTool extends BrowserTool {
   get name() { return 'ipfs_retrieve' }
-  get description() { return 'Retrieve data from the IPFS-compatible store by CID.' }
+  get description() { return 'Retrieve data from the mesh-local content-addressed store by CID. Returns UTF-8 text when the content is text, otherwise base64.' }
   get parameters() {
     return {
       type: 'object',
       properties: {
         cid: { type: 'string', description: 'Content identifier (CID)' },
+        encoding: {
+          type: 'string',
+          enum: ['text', 'base64'],
+          description: 'Output encoding. Omit to get text when the content is valid UTF-8 and base64 otherwise; "text" fails on binary content; "base64" always returns base64.',
+        },
       },
       required: ['cid'],
     }
   }
   get permission() { return 'read' }
 
-  async execute({ cid }) {
+  async execute({ cid, encoding }) {
     const store = peerToolsContext.getIpfsStore()
     if (!store) return { success: false, output: '', error: 'IPFS store not initialized.' }
     try {
+      if (encoding !== undefined && encoding !== 'text' && encoding !== 'base64') {
+        throw new Error(`unknown encoding "${encoding}" (use "text" or "base64")`)
+      }
       const data = await store.get(cid)
-      if (!data) return { success: true, output: `CID ${cid} not found.` }
-      return { success: true, output: typeof data === 'string' ? data : JSON.stringify(data) }
+      if (data === null || data === undefined) return { success: true, output: `CID ${cid} not found.` }
+      if (typeof data === 'string') return { success: true, output: data, encoding: 'text' }
+
+      const bytes = data instanceof Uint8Array ? data : new Uint8Array(data)
+      if (encoding === 'base64') return { success: true, output: bytesToBase64(bytes), encoding: 'base64' }
+      try {
+        return { success: true, output: new TextDecoder('utf-8', { fatal: true }).decode(bytes), encoding: 'text' }
+      } catch {
+        if (encoding === 'text') throw new Error('content is not valid UTF-8 text; retry with encoding "base64"')
+        return {
+          success: true,
+          output: `Binary content (${bytes.byteLength} bytes), base64: ${bytesToBase64(bytes)}`,
+          encoding: 'base64',
+        }
+      }
     } catch (err) {
       return { success: false, output: '', error: err.message }
     }

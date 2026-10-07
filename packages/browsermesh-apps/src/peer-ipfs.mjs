@@ -10,44 +10,29 @@
  * the `MeshService` wrapper.
  *
  * ---------------------------------------------------------------------------
- * HONEST STATUS OF "HELIA/IPFS" IN THIS FILE (read before assuming the class
- * name, or the word "IPFS" in this file's own history, implies real public
- * IPFS-network interop):
+ * WHAT THIS CLASS IS (and is not):
  *
- * 1. `helia`/`@helia/*` is NOT a dependency of this package, or of ANY
- *    package in this monorepo (verified by grepping every `package.json` in
- *    the repo for `helia` -- zero hits, as a dependency, peerDependency, or
- *    otherwise). `ensureLoaded()` only ever reaches for Helia via a runtime
- *    `import()` of a jsdelivr CDN URL, and only when `{enabled: true}` --
- *    there is no installed, offline-importable, or CI-exercised Helia
- *    anywhere in this codebase today. `enabled` defaults to `false`, so in
- *    this package's own test suite that CDN path is essentially never
- *    exercised -- see `peer-ipfs.test.mjs`'s own "available is false
- *    without Helia" test, the only Helia-adjacent behavior anyone has
- *    actually verified here.
- * 2. Even setting (1) aside and assuming a real Helia node did load
- *    successfully: `add()`, `get()`, `pin()`, `unpin()`, `remove()`,
- *    `listCids()`, and `getStats()` below NEVER touch `this.#helia`. Read
- *    them -- every one reads/writes `this.#storedCids`, the same in-memory
- *    `Map`, unconditionally. The only place `#helia` is referenced again
- *    after being set is `close()`, which calls `.stop()` on it. So even a
- *    successfully-loaded Helia node is constructed and then never used for
- *    a single actual storage operation -- there is no code path in this
- *    class, today, that stores or retrieves a byte via Helia/IPFS.
- * 3. The "CID" this class produces is a raw SHA-256 hex digest
- *    (`ChunkStore.computeCid()`), NOT a real IPFS CID (a multihash +
- *    multibase-encoded identifier, e.g. a `Qm...`/`bafy...` string) -- it's
- *    exactly the same format `ChunkStore`/`CloudStorage` already use
- *    elsewhere in this repo, not an IPFS-native one.
+ * `IPFSStore` is a MESH-LOCAL CONTENT-ADDRESSED STORE. The "CID" it produces
+ * is a raw SHA-256 hex digest (`ChunkStore.computeCid()`), the same format
+ * `ChunkStore`/`CloudStorage` use elsewhere in this repo. It is NOT an IPFS
+ * CID (no multihash/multibase, no `Qm...`/`bafy...`), and nothing here speaks
+ * to the public IPFS network: there is no Helia, libp2p, or bitswap code in
+ * this package, and `helia`/`@helia/*` is not a dependency of any package in
+ * this monorepo. The `IPFSStore` name and the `ipfs_store`/`ipfs_retrieve`
+ * agent tools predate this clarification and are kept for compatibility;
+ * `MeshLocalCidStore` is exported as an alias that says what the class is.
  *
- * Given all three points, this class is accurately described as: **mesh-local
- * content-addressed storage with a `ChunkStore`-compatible CID format, plus
- * an inert, never-actually-wired hook that would start toward a real Helia
- * backend IF `helia` ever became a real dependency and `add()`/`get()`/
- * `pin()`/`unpin()`/`remove()` were rewritten to call into it -- not real,
- * working IPFS-network interop today.** Do not repeat "real IPFS network
- * interop" as a settled fact about this file elsewhere in the codebase or in
- * a PR description; it is not true of the code as it stands.
+ * Earlier revisions carried a hook in `ensureLoaded()` that tried to
+ * `import()` a Helia bundle from a CDN when `{ enabled: true }`. It could
+ * never activate (the bundle is an IIFE so `globalThis.Helia` was never set,
+ * the namespace exports `createHelia` rather than `create`, and the
+ * `typeof === 'function'` guard failed for a namespace), and even a loaded
+ * node was never used by `add()`/`get()`/`pin()`. It was removed (#197); a
+ * library should not fetch a 900 KB third-party bundle on its host's behalf.
+ * `enabled` is therefore accepted and reported but has no effect, and
+ * `available` is always `false`; both remain so existing callers keep
+ * working. A consumer who wants real IPFS should run their own Helia and
+ * keep it separate from this class.
  *
  * WHAT THIS ACTUALLY OFFERS OVER `CloudStorage` (`cloud-storage.mjs`), given
  * the above: `CloudStorage` is encrypted, `PeerRegistry`-gated, and
@@ -59,11 +44,9 @@
  * `IPFSStore` (there is no wire protocol here at all; each `IPFSStore`
  * instance is a private, local cache, and `createIpfsService()` below does
  * not add one -- see its own "NO WIRE PROTOCOL" note). Its genuinely
- * distinct value today is a lightweight, dependency-light local scratch
- * cache with pin/unpin/storage-cap bookkeeping and an `ensureLoaded()`/
- * `close()` lifecycle -- not an IPFS-network-interop story, which would
- * require someone to actually add `helia` as a dependency and rewire the
- * storage operations to call through to it, neither of which has happened.
+ * distinct value is a lightweight, dependency-light local scratch cache
+ * with pin/unpin/storage-cap bookkeeping and an `ensureLoaded()`/`close()`
+ * lifecycle -- not an IPFS-network-interop story.
  *
  * ---------------------------------------------------------------------------
  * No browser-only imports at module level.
@@ -88,24 +71,14 @@ export const IPFS_DEFAULTS = Object.freeze({
 // ---------------------------------------------------------------------------
 
 /**
- * Content-addressed storage, with an inert `ensureLoaded()` hook toward a
- * Helia/IPFS backend that is not actually wired to any storage operation
- * below -- see the module doc comment's "HONEST STATUS OF HELIA/IPFS"
- * section before reading this class as "real IPFS". In practice, today,
- * `add`/`get`/`pin`/`unpin`/`remove`/`listCids`/`getStats` always read and
- * write the in-memory `#storedCids` map, keyed by SHA-256 CID (same format
- * used by `ChunkStore` in `browsermesh-sync`), regardless of whether
- * `ensureLoaded()` happened to load a Helia instance.
+ * Mesh-local content-addressed store. CIDs are SHA-256 hex digests (the
+ * `ChunkStore` format), not IPFS CIDs, and nothing here talks to the public
+ * IPFS network -- see the module doc comment. Also exported as
+ * `MeshLocalCidStore`.
  */
 export class IPFSStore {
-  /** @type {object|null} Helia node instance (lazy-loaded) */
-  #helia = null
-
   /** @type {boolean} */
   #loaded = false
-
-  /** @type {boolean} */
-  #heliaAvailable = false
 
   /** @type {boolean} */
   #enabled
@@ -124,7 +97,9 @@ export class IPFSStore {
 
   /**
    * @param {object} [opts]
-   * @param {boolean} [opts.enabled=false] - Whether IPFS is enabled
+   * @param {boolean} [opts.enabled=false] - Accepted and reported by
+   *   `enabled`/`toJSON()` for compatibility; it has no effect on behaviour
+   *   (there is no IPFS backend to enable).
    * @param {number} [opts.maxStorageMb=100] - Maximum storage in MB
    * @param {Function} [opts.onLog] - Logging callback
    */
@@ -134,43 +109,14 @@ export class IPFSStore {
     this.#onLog = opts.onLog || (() => {})
   }
 
-  // ── CDN Loading ──────────────────────────────────────────────────────
+  // ── Lifecycle ────────────────────────────────────────────────────────
 
   /**
-   * Lazy-load Helia from CDN.
-   * Only attempts if enabled. Sets #heliaAvailable based on result.
+   * Mark the store as loaded. Kept for lifecycle compatibility; there is
+   * nothing to load (the CDN Helia hook was removed, see the module doc
+   * comment). Idempotent.
    */
   async ensureLoaded() {
-    if (this.#loaded) return
-    if (!this.#enabled) {
-      this.#loaded = true
-      return
-    }
-
-    try {
-      if (typeof globalThis.Helia === 'function') {
-        this.#helia = await globalThis.Helia.create()
-        this.#heliaAvailable = true
-        this.#onLog(2, 'Helia node initialized from globalThis')
-      } else {
-        try {
-          // CDN URL verified current 2026-05-03 against npm registry latest (helia@6.1.4).
-          await import('https://cdn.jsdelivr.net/npm/helia@6.1.4/dist/index.min.js')
-          if (typeof globalThis.Helia === 'function') {
-            this.#helia = await globalThis.Helia.create()
-            this.#heliaAvailable = true
-            this.#onLog(2, 'Helia loaded from CDN')
-          }
-        } catch {
-          this.#heliaAvailable = false
-          this.#onLog(1, 'Helia CDN load failed -- using memory-backed CID store')
-        }
-      }
-    } catch (err) {
-      this.#heliaAvailable = false
-      this.#onLog(1, `Helia initialization failed: ${err.message}`)
-    }
-
     this.#loaded = true
   }
 
@@ -181,12 +127,16 @@ export class IPFSStore {
     return this.#loaded
   }
 
-  /** Whether Helia is usable (true only after successful load). */
+  /**
+   * Always `false`: there is no IPFS/Helia backend. Retained so callers that
+   * checked it keep working.
+   * @deprecated
+   */
   get available() {
-    return this.#heliaAvailable
+    return false
   }
 
-  /** Whether IPFS storage is enabled. */
+  /** The `enabled` option as passed in (informational only; see constructor). */
   get enabled() {
     return this.#enabled
   }
@@ -402,23 +352,12 @@ export class IPFSStore {
   // ── Lifecycle ────────────────────────────────────────────────────────
 
   /**
-   * Close the IPFS store. Clears all stored data and shuts down Helia if present.
+   * Close the store. Clears all stored data and listeners.
    */
   async close() {
     this.#storedCids.clear()
     this.#listeners.clear()
-
-    if (this.#helia) {
-      try {
-        await this.#helia.stop()
-      } catch {
-        // best effort
-      }
-      this.#helia = null
-    }
-
     this.#loaded = false
-    this.#heliaAvailable = false
   }
 
   // ── Serialization ────────────────────────────────────────────────────
@@ -431,13 +370,16 @@ export class IPFSStore {
     return {
       enabled: this.#enabled,
       loaded: this.#loaded,
-      available: this.#heliaAvailable,
+      available: false,
       maxStorageMb: this.#maxStorageMb,
       stats: this.getStats(),
       cids: this.listCids().map(c => ({ cid: c.cid, size: c.size, pinned: c.pinned })),
     }
   }
 }
+
+/** Accurate name for `IPFSStore`: a mesh-local content-addressed store. */
+export { IPFSStore as MeshLocalCidStore }
 
 // ---------------------------------------------------------------------------
 // createIpfsService -- MeshService wiring (Phase 6 consumer, issue #123)
@@ -458,8 +400,7 @@ export class IPFSStore {
  * network in the first place -- every one of its methods
  * (`add`/`get`/`pin`/`unpin`/`remove`/`listCids`/`getStats`) is a purely
  * local operation on its own in-memory `#storedCids` map (see this file's
- * "HONEST STATUS OF HELIA/IPFS" header comment for the full explanation of
- * why that's true even when Helia loads). Attaching this service to two
+ * "WHAT THIS CLASS IS" header comment). Attaching this service to two
  * different `PeerNode`s therefore produces two entirely independent stores:
  * content `add()`ed through peer A's `api.add()` is never visible via peer
  * B's `api.get()`, with no `ctx.sendTo()` call anywhere in this file able to
@@ -489,7 +430,7 @@ export class IPFSStore {
  * listening to.
  *
  * `teardown()` calls `store.close()` -- clearing all locally-stored content
- * and shutting down `#helia` if `ensureLoaded()` ever set one -- since the
+ * -- since the
  * store is entirely owned by this `attach()` call (a fresh `IPFSStore` is
  * constructed every time `createIpfsService()`'s descriptor is attached; see
  * `mesh-service.mjs`'s own "teardown() only reverses what attach() itself
@@ -501,10 +442,8 @@ export class IPFSStore {
 /**
  * @param {object} [opts]
  * @param {boolean} [opts.enabled] - Forwarded to `new IPFSStore()` (default
- *   `false` -- see `IPFS_DEFAULTS`). See module doc comment before setting
- *   this expecting real IPFS-network behavior; it only changes whether
- *   `ensureLoaded()` attempts (and, per the module doc comment, still never
- *   actually uses) a CDN-loaded Helia instance.
+ *   `false` -- see `IPFS_DEFAULTS`). Informational only: it does not enable
+ *   any IPFS behaviour (see the module doc comment).
  * @param {number} [opts.maxStorageMb] - Forwarded to `new IPFSStore()`
  *   (default 100).
  * @param {Function} [opts.onLog] - `(event: string, data: object) => void`,

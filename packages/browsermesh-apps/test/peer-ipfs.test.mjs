@@ -1,7 +1,8 @@
 // Run with: node --import ./test/_setup-globals.mjs --test test/peer-ipfs.test.mjs
 import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { IPFSStore, IPFS_DEFAULTS, createIpfsService } from '../src/peer-ipfs.mjs'
+import { readFileSync } from 'node:fs'
+import { IPFSStore, MeshLocalCidStore, IPFS_DEFAULTS, createIpfsService } from '../src/peer-ipfs.mjs'
 import { attachService } from '../src/mesh-service.mjs'
 import { PeerRegistry } from '../src/peer-registry.mjs'
 import { createMeshNode } from '../src/mesh-bootstrap.mjs'
@@ -86,6 +87,58 @@ describe('IPFSStore ensureLoaded', () => {
     await store.ensureLoaded()
     assert.equal(store.loaded, true)
     assert.equal(store.available, false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #197 -- the class must not pretend to have an IPFS backend
+// ---------------------------------------------------------------------------
+
+describe('IPFSStore is a mesh-local store with no IPFS backend (#197)', () => {
+  it('enabled: true changes nothing: no Helia is loaded, and a Helia global is never consulted', async () => {
+    const hadHelia = 'Helia' in globalThis
+    const previous = globalThis.Helia
+    let created = 0
+    globalThis.Helia = { create: () => { created++; return {} }, createHelia: () => { created++; return {} } }
+    try {
+      const store = new IPFSStore({ enabled: true })
+      await store.ensureLoaded()
+      assert.equal(store.enabled, true) // reported as passed in
+      assert.equal(store.loaded, true)
+      assert.equal(store.available, false)
+      assert.equal(created, 0)
+
+      const { cid } = await store.add('still local')
+      assert.equal(new TextDecoder().decode(await store.get(cid)), 'still local')
+      assert.equal(store.toJSON().available, false)
+    } finally {
+      if (hadHelia) globalThis.Helia = previous
+      else delete globalThis.Helia
+    }
+  })
+
+  it('CIDs are plain SHA-256 hex digests, not IPFS CIDs', async () => {
+    const store = new IPFSStore()
+    const { cid } = await store.add('abc')
+    assert.equal(cid, 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad')
+  })
+
+  it('MeshLocalCidStore is the same class under its accurate name', () => {
+    assert.equal(MeshLocalCidStore, IPFSStore)
+  })
+
+  it('the module no longer loads anything from a CDN', () => {
+    const source = readFileSync(new URL('../src/peer-ipfs.mjs', import.meta.url), 'utf8')
+    assert.ok(!/import\(\s*['"`]https?:/.test(source), 'no dynamic import of a remote URL')
+    assert.ok(!source.includes('cdn.jsdelivr.net'))
+  })
+
+  it('close() still resets the lifecycle and clears content', async () => {
+    const store = new IPFSStore({ enabled: true })
+    const { cid } = await store.add('x')
+    await store.close()
+    assert.equal(store.loaded, false)
+    assert.equal(await store.get(cid), null)
   })
 })
 
