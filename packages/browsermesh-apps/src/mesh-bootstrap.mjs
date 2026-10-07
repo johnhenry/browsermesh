@@ -576,7 +576,9 @@ import { registerOrchestratorTools } from './mesh-orchestrator-tools.mjs'
  *   `node.services.get('torrent')`).
  * @param {object} [options.torrentOptions] - Only used when `enableTorrent`.
  *   Passed straight through to `createTorrentService()`
- *   (`trackerUrl`/`chunkSize`/`envelopeType`/`manifestTimeoutMs`/`chunkTimeoutMs`).
+ *   (`trackerUrl`/`chunkSize`/`envelopeType`/`manifestTimeoutMs`/`chunkTimeoutMs`,
+ *   plus the hooks `chunkStore`/`manifestStore`/`authorize`/`maxConcurrentServes`/
+ *   `maxConcurrentServesPerPeer`/`maxBytesPerPeerPerSec`/`maxAnnouncesPerPeerPerMinute`).
  * @param {boolean} [options.enableEscrow=false] - Attach `peer-escrow.mjs`'s
  *   `createEscrowService()` (issue #117): real escrow-contract create/
  *   release/refund/dispute against `escrowOptions.creditLedger`, with
@@ -1220,6 +1222,13 @@ export async function createMeshNode(options = {}) {
       envelopeType: torrentOptions?.envelopeType,
       manifestTimeoutMs: torrentOptions?.manifestTimeoutMs,
       chunkTimeoutMs: torrentOptions?.chunkTimeoutMs,
+      chunkStore: torrentOptions?.chunkStore,
+      manifestStore: torrentOptions?.manifestStore,
+      authorize: torrentOptions?.authorize,
+      maxConcurrentServes: torrentOptions?.maxConcurrentServes,
+      maxConcurrentServesPerPeer: torrentOptions?.maxConcurrentServesPerPeer,
+      maxBytesPerPeerPerSec: torrentOptions?.maxBytesPerPeerPerSec,
+      maxAnnouncesPerPeerPerMinute: torrentOptions?.maxAnnouncesPerPeerPerMinute,
       onLog,
     })
     const torrentHandle = attachService(node, servicesNetwork, torrentDescriptor)

@@ -5,11 +5,29 @@
  * CDN-loads webtorrent browser bundle for swarm-based file sharing.
  * Falls back to direct chunked transfer when WebTorrent unavailable.
  *
+ * DURABILITY (fallback path only): by default the fallback keeps whole blobs
+ * in a private in-memory map. Pass `chunkStore` and/or `manifestStore`
+ * (the same objects you give `createTorrentService()` in mesh-torrent.mjs)
+ * and the fallback instead stores content as SHA-256-addressed pieces in
+ * `chunkStore` plus one manifest per torrent in `manifestStore`, and
+ * `ensureLoaded()` restores `listTorrents()` from the manifests -- so seeded
+ * content survives a reload when those stores are durable (for example
+ * `IndexedDBChunkStore` from browsermesh-sync). Injected stores belong to the
+ * caller: `destroy()` never clears them. The real-WebTorrent path keeps its
+ * own storage and ignores both.
+ *
  * Run tests:
  *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-peer-torrent.test.mjs
  */
 
 import { ChunkStore } from '@johnhenry/browsermesh-sync'
+import {
+  MemoryManifestStore,
+  toSeedBytes,
+  releaseChunks,
+  splitIntoChunks,
+  saveChunks,
+} from './internal/torrent-store.mjs'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -127,6 +145,18 @@ export class TorrentManager {
   /** @type {FallbackStore} */
   #fallback = new FallbackStore()
 
+  /** Injected (or defaulted, when only one was injected) piece store; null = legacy in-memory blob map. */
+  #chunkStore = null
+
+  /** @type {object|null} manifest store paired with #chunkStore */
+  #manifestStore = null
+
+  /** @type {number} piece size used when writing to #chunkStore */
+  #chunkSize
+
+  /** @type {Set<Promise<void>>} in-flight best-effort store cleanups */
+  #cleanups = new Set()
+
   /** @type {Function} */
   #onLog
 
@@ -143,10 +173,22 @@ export class TorrentManager {
    * @param {object} [opts]
    * @param {string} [opts.trackerUrl] - Custom tracker URL
    * @param {Function} [opts.onLog] - Logging callback
+   * @param {object} [opts.chunkStore] - Piece store with the `ChunkStore`
+   *   contract (`save/get/has/remove`, sync or async), e.g. browsermesh-sync's
+   *   `IndexedDBChunkStore`. Fallback path only; see the module comment.
+   * @param {object} [opts.manifestStore] - `{ get, set, delete, entries }`
+   *   keyed by magnet URI (sync or async). Defaults to in-memory when only
+   *   `chunkStore` is given.
+   * @param {number} [opts.chunkSize=65536] - Piece size when `chunkStore` is used.
    */
   constructor(opts = {}) {
     this.#trackerUrl = opts.trackerUrl ?? TORRENT_DEFAULTS.trackerUrl
     this.#onLog = opts.onLog || (() => {})
+    this.#chunkSize = opts.chunkSize ?? TORRENT_DEFAULTS.chunkSize
+    if (opts.chunkStore || opts.manifestStore) {
+      this.#chunkStore = opts.chunkStore || new ChunkStore()
+      this.#manifestStore = opts.manifestStore || new MemoryManifestStore()
+    }
   }
 
   // ── CDN Loading ──────────────────────────────────────────────────────
@@ -190,6 +232,31 @@ export class TorrentManager {
     }
 
     this.#loaded = true
+
+    if (!this.#wtAvailable && this.#manifestStore) {
+      try {
+        await this.#restoreFromStores()
+      } catch (err) {
+        this.#onLog(1, `Restoring torrents from manifestStore failed: ${err.message}`)
+      }
+    }
+  }
+
+  /** Rebuild #activeTorrents from persisted manifests (fallback path only). */
+  async #restoreFromStores() {
+    for (const [magnetURI, m] of await this.#manifestStore.entries()) {
+      if (!m || this.#activeTorrents.has(magnetURI)) continue
+      this.#activeTorrents.set(magnetURI, {
+        magnetURI,
+        infoHash: m.infoHash,
+        name: m.name,
+        size: m.size,
+        peers: 0,
+        progress: 1,
+        speed: 0,
+        state: 'seeding',
+      })
+    }
   }
 
   /** Whether ensureLoaded() has been called. */
@@ -207,23 +274,23 @@ export class TorrentManager {
   /**
    * Seed a file — make it available for download.
    *
-   * @param {Uint8Array|Blob|ArrayBuffer} data - File content
+   * @param {string|Uint8Array|ArrayBufferView|Blob|ArrayBuffer} data - File
+   *   content. A string is encoded as UTF-8; anything that is not one of the
+   *   listed types throws a `TypeError` (it is never seeded as empty content).
    * @param {object} [opts]
    * @param {string} [opts.name] - File name
    * @param {string[]} [opts.announce] - Tracker URLs
+   * @param {number} [opts.chunkSize] - Piece size for this torrent when
+   *   `chunkStore` is injected (default: the constructor's `chunkSize`).
    * @returns {Promise<TorrentInfo>}
    */
   async seed(data, opts = {}) {
     if (!this.#loaded) await this.ensureLoaded()
 
-    const rawData = data instanceof ArrayBuffer
-      ? new Uint8Array(data)
-      : data instanceof Uint8Array
-        ? data
-        : data
+    const rawData = await toSeedBytes(data)
 
     const name = opts.name || `file_${Date.now()}`
-    const size = rawData.byteLength ?? rawData.length ?? rawData.size ?? 0
+    const size = rawData.byteLength
 
     // Real WebTorrent path
     if (this.#wtAvailable && this.#client) {
@@ -231,7 +298,7 @@ export class TorrentManager {
     }
 
     // Fallback: generate pseudo-torrent info
-    return this.#seedFallback(rawData, name, size)
+    return this.#seedFallback(rawData, name, size, opts)
   }
 
   /**
@@ -276,13 +343,19 @@ export class TorrentManager {
    * Seed via fallback in-memory store.
    * @returns {Promise<TorrentInfo>}
    */
-  async #seedFallback(data, name, size) {
-    const bytes = data instanceof Uint8Array ? data : new Uint8Array(data)
+  async #seedFallback(data, name, size, opts = {}) {
+    const bytes = data
     const cid = await ChunkStore.computeCid(bytes)
     const infoHash = cid.slice(0, 40) // Use first 40 hex chars as pseudo info hash
     const magnetURI = generateMagnetURI(infoHash)
 
-    this.#fallback.set(infoHash, { data: bytes, name, size })
+    if (this.#chunkStore) {
+      const chunkSize = opts.chunkSize ?? this.#chunkSize
+      const chunkCids = await saveChunks(this.#chunkStore, splitIntoChunks(bytes, chunkSize), (p) => ChunkStore.computeCid(p))
+      await this.#manifestStore.set(magnetURI, { infoHash, name, size, chunkSize, chunkCids, cid })
+    } else {
+      this.#fallback.set(infoHash, { data: bytes, name, size })
+    }
 
     const info = {
       magnetURI,
@@ -399,7 +472,9 @@ export class TorrentManager {
 
     this.#emit('download:start', { magnetURI })
 
-    const entry = this.#fallback.get(infoHash)
+    const entry = this.#chunkStore
+      ? await this.#readFromStores(infoHash, magnetURI)
+      : this.#fallback.get(infoHash)
     if (!entry) {
       throw new Error(`Content not found for magnet: ${magnetURI}`)
     }
@@ -422,6 +497,45 @@ export class TorrentManager {
     this.#totalDown += entry.size
     this.#emit('download:complete', info)
     return { data: entry.data, info }
+  }
+
+  /**
+   * The stored manifest for a torrent seeded through the injected stores:
+   * `{ infoHash, name, size, chunkSize, chunkCids, cid }`, or `null` when no
+   * stores were injected, the torrent is unknown, or the real-WebTorrent path
+   * is in use (which keeps its own storage).
+   *
+   * @param {string} magnetURI
+   * @returns {Promise<object|null>}
+   */
+  async getManifest(magnetURI) {
+    if (!this.#manifestStore) return null
+    return (await this.#manifestStore.get(magnetURI)) ?? null
+  }
+
+  /**
+   * Reassemble a torrent's bytes from the injected stores.
+   * @returns {Promise<{ data: Uint8Array, name: string, size: number }|null>} null when no manifest is held
+   */
+  async #readFromStores(infoHash, magnetURI) {
+    const manifest = await this.#manifestStore.get(generateMagnetURI(infoHash))
+      ?? await this.#manifestStore.get(magnetURI)
+    if (!manifest) return null
+    const data = new Uint8Array(manifest.size)
+    let offset = 0
+    for (const cid of manifest.chunkCids) {
+      const piece = await this.#chunkStore.get(cid)
+      if (!piece) throw new Error(`Content incomplete for magnet ${magnetURI}: piece ${cid} is missing from the chunk store`)
+      if (!(await ChunkStore.computeCid(piece) === cid)) {
+        throw new Error(`Content corrupt for magnet ${magnetURI}: piece ${cid} failed integrity verification`)
+      }
+      data.set(piece, offset)
+      offset += piece.length
+    }
+    if (offset !== manifest.size) {
+      throw new Error(`Content incomplete for magnet ${magnetURI}: ${offset} of ${manifest.size} bytes present`)
+    }
+    return { data, name: manifest.name, size: manifest.size }
   }
 
   // ── Mesh sharing ─────────────────────────────────────────────────────
@@ -502,6 +616,19 @@ export class TorrentManager {
       this.#fallback.delete(infoHash)
     }
 
+    // Injected stores: drop the manifest, then any pieces no other torrent
+    // still lists. Best-effort and asynchronous (the return value stays sync).
+    if (this.#chunkStore) {
+      const cleanup = (async () => {
+        const manifest = await this.#manifestStore.get(magnetURI)
+        if (!manifest) return
+        await this.#manifestStore.delete(magnetURI)
+        await releaseChunks(this.#chunkStore, this.#manifestStore, manifest, magnetURI)
+      })().catch((err) => this.#onLog(1, `Store cleanup failed for ${magnetURI}: ${err.message}`))
+        .finally(() => this.#cleanups.delete(cleanup))
+      this.#cleanups.add(cleanup)
+    }
+
     this.#activeTorrents.delete(magnetURI)
     return true
   }
@@ -578,9 +705,14 @@ export class TorrentManager {
   // ── Lifecycle ────────────────────────────────────────────────────────
 
   /**
-   * Destroy the manager: remove all torrents, close the client.
+   * Destroy the manager: forget all torrents in memory, close the client.
+   * Content in injected `chunkStore`/`manifestStore` is left intact.
    */
   async destroy() {
+    // Let any in-flight removeTorrent() store cleanup finish first. Injected
+    // stores themselves are never cleared: they belong to the caller.
+    await Promise.all([...this.#cleanups])
+
     // Clear active torrents
     this.#activeTorrents.clear()
     this.#fallback.clear()
