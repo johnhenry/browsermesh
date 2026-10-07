@@ -104,6 +104,48 @@ export function mergeIceServers(userServers, defaults = DEFAULT_ICE_SERVERS) {
 }
 
 /**
+ * True when `iceServers` contains at least one `turn:` / `turns:` URL.
+ *
+ * @param {RTCIceServer[]} [iceServers]
+ * @returns {boolean}
+ */
+export function hasTurnServer(iceServers) {
+  return (Array.isArray(iceServers) ? iceServers : []).some((server) => {
+    const urls = server && server.urls
+    const list = Array.isArray(urls) ? urls : [urls]
+    return list.some((u) => typeof u === 'string' && /^turns?:/i.test(u))
+  })
+}
+
+/**
+ * Validate an `iceTransportPolicy` against the ICE servers it will run with.
+ *
+ * `'relay'` makes the browser gather only relayed (TURN) candidates, so the
+ * pod's host and server-reflexive addresses are never disclosed to peers or
+ * to the STUN host. With no TURN server it would silently gather zero
+ * candidates and never connect, so that combination is rejected up front.
+ *
+ * @param {'all'|'relay'|undefined|null} policy
+ * @param {RTCIceServer[]} iceServers
+ * @returns {'all'|'relay'|undefined} The policy to forward, or undefined to leave the browser default
+ * @throws {TypeError} For a value other than 'all' or 'relay'
+ * @throws {Error} For 'relay' with no `turn:`/`turns:` server
+ */
+export function resolveIceTransportPolicy(policy, iceServers) {
+  if (policy === undefined || policy === null) return undefined
+  if (policy !== 'all' && policy !== 'relay') {
+    throw new TypeError(`iceTransportPolicy must be 'all' or 'relay', got ${JSON.stringify(policy)}`)
+  }
+  if (policy === 'relay' && !hasTurnServer(iceServers)) {
+    throw new Error(
+      "iceTransportPolicy 'relay' requires at least one turn:/turns: entry in iceServers " +
+      '(relay-only gathering with no TURN server yields no candidates)'
+    )
+  }
+  return policy
+}
+
+/**
  * How many remote ICE candidates to hold while waiting for the remote
  * description. A handful of interfaces gather a handful of candidates each;
  * generous for that, and still bounded against a peer that floods candidates
@@ -181,6 +223,7 @@ export class WebRTCPeerConnection {
    */
   #bulkChannel = null
   #iceServers
+  #iceTransportPolicy
   #onLog
   #state = 'new'   // new | connecting | connected | failed | closed
 
@@ -205,18 +248,24 @@ export class WebRTCPeerConnection {
    * @param {string} opts.localPodId  - This pod's identifier
    * @param {string} opts.remotePodId - Target pod's identifier
    * @param {RTCIceServer[]} [opts.iceServers]
+   * @param {'all'|'relay'} [opts.iceTransportPolicy] - Forwarded verbatim to
+   *   `RTCPeerConnection`. `'relay'` gathers TURN candidates only, so host and
+   *   server-reflexive addresses are never disclosed; it requires a
+   *   `turn:`/`turns:` entry in `iceServers` and throws otherwise. Omitted by
+   *   default (browser default, `'all'`).
    * @param {Function} [opts.onLog]   - Optional logging callback
    * @param {number} [opts.disconnectedGraceMs=5000] - How long a peer connection
    *   may sit in the transient `disconnected` state before it is reported
    *   through `onError()`. `failed` is reported immediately and is not
    *   subject to this delay.
    */
-  constructor({ localPodId, remotePodId, iceServers, onLog, disconnectedGraceMs = 5000 } = {}) {
+  constructor({ localPodId, remotePodId, iceServers, iceTransportPolicy, onLog, disconnectedGraceMs = 5000 } = {}) {
     if (!localPodId) throw new Error('localPodId is required')
     if (!remotePodId) throw new Error('remotePodId is required')
     this.#localPodId = localPodId
     this.#remotePodId = remotePodId
     this.#iceServers = iceServers || [...DEFAULT_ICE_SERVERS]
+    this.#iceTransportPolicy = resolveIceTransportPolicy(iceTransportPolicy, this.#iceServers)
     this.#onLog = onLog || null
     this.#disconnectedGraceMs = disconnectedGraceMs
   }
@@ -251,6 +300,13 @@ export class WebRTCPeerConnection {
     return this.#bulkChannel?.readyState === 'open'
   }
 
+  /** The RTCConfiguration handed to every RTCPeerConnection this class creates. */
+  #rtcConfig() {
+    const config = { iceServers: this.#iceServers }
+    if (this.#iceTransportPolicy) config.iceTransportPolicy = this.#iceTransportPolicy
+    return config
+  }
+
   // -- Offer / Answer -------------------------------------------------------
 
   /**
@@ -262,7 +318,7 @@ export class WebRTCPeerConnection {
    */
   async createOffer() {
     this.#ensureNotClosed()
-    this.#pc = new RTCPeerConnection({ iceServers: this.#iceServers })
+    this.#pc = new RTCPeerConnection(this.#rtcConfig())
     this.#setupIceHandling()
     this.#setupConnectionStateHandling()
 
@@ -348,7 +404,7 @@ export class WebRTCPeerConnection {
     // unreachable and, with a native stack, keeps threads and sockets alive.
     this.#releasePeerConnection()
 
-    this.#pc = new RTCPeerConnection({ iceServers: this.#iceServers })
+    this.#pc = new RTCPeerConnection(this.#rtcConfig())
     this.#setupIceHandling()
     this.#setupConnectionStateHandling()
 
@@ -1050,6 +1106,7 @@ export const DEFAULT_CONNECTION_ID = 'default'
 export class WebRTCMeshManager {
   #localPodId
   #iceServers
+  #iceTransportPolicy
   #connections = new Map()   // remotePodId -> Map<connectionId, WebRTCPeerConnection>
   #onLog
   #messageCbs = []
@@ -1065,6 +1122,9 @@ export class WebRTCMeshManager {
    * @param {object} opts
    * @param {string} opts.localPodId
    * @param {RTCIceServer[]} [opts.iceServers]
+   * @param {'all'|'relay'} [opts.iceTransportPolicy] - Passed to every connection.
+   *   `'relay'` (TURN-only) never gathers host/srflx candidates; it requires a
+   *   `turn:`/`turns:` entry in `iceServers` and throws here otherwise.
    * @param {Function} [opts.onLog]
    * @param {number} [opts.maxReconnectAttempts=5] - Give up auto-reconnecting after this many failures
    * @param {number} [opts.reconnectBaseDelayMs=1000] - Backoff base; doubles each attempt
@@ -1073,12 +1133,13 @@ export class WebRTCMeshManager {
    *   before it counts as an error worth reconnecting over.
    */
   constructor({
-    localPodId, iceServers, onLog,
+    localPodId, iceServers, iceTransportPolicy, onLog,
     maxReconnectAttempts = 5, reconnectBaseDelayMs = 1000, disconnectedGraceMs = 5000,
   } = {}) {
     if (!localPodId) throw new Error('localPodId is required')
     this.#localPodId = localPodId
     this.#iceServers = iceServers || [...DEFAULT_ICE_SERVERS]
+    this.#iceTransportPolicy = resolveIceTransportPolicy(iceTransportPolicy, this.#iceServers)
     this.#onLog = onLog || null
     this.#maxReconnectAttempts = maxReconnectAttempts
     this.#reconnectBaseDelayMs = reconnectBaseDelayMs
@@ -1147,6 +1208,7 @@ export class WebRTCMeshManager {
       localPodId: this.#localPodId,
       remotePodId,
       iceServers: this.#iceServers,
+      iceTransportPolicy: this.#iceTransportPolicy,
       onLog: this.#onLog,
       disconnectedGraceMs: this.#disconnectedGraceMs,
     })

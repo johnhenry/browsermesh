@@ -373,3 +373,11 @@ export declare class LWWMap<T = unknown> {
     }>;
   }): LWWMap<T>;
 }
+
+// Size-bucket padding
+
+export declare const DEFAULT_PAD_BUCKETS: readonly number[];
+export declare const PAD_TRAILER_BYTES: 4;
+export declare function paddedLength(length: number, opts?: { buckets?: number[] }): number;
+export declare function padTo(bytes: Uint8Array, opts?: { buckets?: number[] }): Uint8Array;
+export declare function unpad(padded: Uint8Array): Uint8Array;

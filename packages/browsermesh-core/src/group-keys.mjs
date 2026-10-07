@@ -13,6 +13,18 @@
  *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-mesh-group-keys.test.mjs
  */
 
+// Namespace import, not `import { padTo, unpad }`: padding needs primitives >= 0.3.0,
+// but this package's peer range still admits 0.2.x, and a missing named export
+// would fail to link (breaking all of core) instead of only breaking `padding`.
+import * as primitives from '@johnhenry/browsermesh-primitives'
+
+function paddingFns() {
+  if (typeof primitives.padTo !== 'function' || typeof primitives.unpad !== 'function') {
+    throw new Error('padding requires @johnhenry/browsermesh-primitives >= 0.3.0')
+  }
+  return primitives
+}
+
 // ---------------------------------------------------------------------------
 // Wire constants
 // ---------------------------------------------------------------------------
@@ -228,6 +240,17 @@ export class GroupState {
 // ---------------------------------------------------------------------------
 
 /**
+ * @param {boolean|{ buckets?: number[] }|null|undefined} padding
+ * @returns {false|{ buckets?: number[] }}
+ */
+function normalizePadding(padding) {
+  if (!padding) return false
+  if (padding === true) return {}
+  if (typeof padding === 'object') return { buckets: padding.buckets }
+  throw new TypeError('padding must be a boolean or { buckets }')
+}
+
+/**
  * Manages symmetric group keys with epoch-based rotation.
  * Each epoch has a unique AES-GCM-256 key shared by all group members.
  * On member removal, a new epoch is created for forward secrecy.
@@ -263,20 +286,26 @@ export class GroupKeyManager {
   /** @type {function|null} */
   #onLog
 
+  /** @type {false|{ buckets?: number[] }} Default padding for encrypt()/decrypt() */
+  #padding
+
   /**
    * @param {object} opts
    * @param {string} opts.localPodId
    * @param {string} opts.groupId
    * @param {number} [opts.maxEpochHistory=10]
    * @param {function} [opts.onLog]
+   * @param {boolean|{ buckets?: number[] }} [opts.padding=false] - Default for
+   *   the `padding` option of `encrypt()`/`decrypt()`. Off unless set.
    */
-  constructor({ localPodId, groupId, maxEpochHistory = 10, onLog } = {}) {
+  constructor({ localPodId, groupId, maxEpochHistory = 10, onLog, padding = false } = {}) {
     if (!localPodId) throw new Error('localPodId is required')
     if (!groupId) throw new Error('groupId is required')
     this.#localPodId = localPodId
     this.#groupId = groupId
     this.#maxEpochHistory = maxEpochHistory
     this.#onLog = onLog || null
+    this.#padding = normalizePadding(padding)
   }
 
   get localPodId() { return this.#localPodId }
@@ -498,19 +527,32 @@ export class GroupKeyManager {
   /**
    * Encrypt data with the current epoch key.
    *
+   * With `padding` on, the plaintext is rounded up to a size bucket (see
+   * `padTo()` in `@johnhenry/browsermesh-primitives`) BEFORE sealing, so a
+   * relay that only sees ciphertext learns the bucket, not the exact length:
+   * the ciphertext is always `bucket + 16` bytes (the AES-GCM tag). Every
+   * receiver must decrypt with the same `padding` setting. Off by default.
+   *
    * @param {Uint8Array} plaintext
+   * @param {object} [opts]
+   * @param {boolean|{ buckets?: number[] }} [opts.padding] - Overrides the
+   *   constructor default; `true` uses the default buckets
+   *   (256/1024/4096/16384), `{ buckets }` custom ones.
    * @returns {Promise<{ ciphertext: Uint8Array, iv: Uint8Array, epoch: number }>}
    */
-  async encrypt(plaintext) {
+  async encrypt(plaintext, { padding } = {}) {
     const state = this.getCurrentState()
     if (!state || !state.key) throw new Error('No active group key')
+
+    const pad = padding === undefined ? this.#padding : normalizePadding(padding)
+    const sealed = pad ? paddingFns().padTo(plaintext, pad) : plaintext
 
     const iv = crypto.getRandomValues(new Uint8Array(12))
     const ciphertext = new Uint8Array(
       await crypto.subtle.encrypt(
         { name: 'AES-GCM', iv },
         state.key,
-        plaintext,
+        sealed,
       ),
     )
 
@@ -523,9 +565,13 @@ export class GroupKeyManager {
    * @param {Uint8Array} ciphertext
    * @param {Uint8Array} iv
    * @param {number} epoch
+   * @param {object} [opts]
+   * @param {boolean|{ buckets?: number[] }} [opts.padding] - Must match the
+   *   sender's `encrypt()` setting: when on, the padding is stripped after
+   *   decryption. Overrides the constructor default.
    * @returns {Promise<Uint8Array>}
    */
-  async decrypt(ciphertext, iv, epoch) {
+  async decrypt(ciphertext, iv, epoch, { padding } = {}) {
     const state = this.#epochs.get(epoch)
     if (!state || !state.key) throw new Error(`No key for epoch ${epoch}`)
 
@@ -537,7 +583,8 @@ export class GroupKeyManager {
       ),
     )
 
-    return plaintext
+    const pad = padding === undefined ? this.#padding : normalizePadding(padding)
+    return pad ? paddingFns().unpad(plaintext) : plaintext
   }
 
   /**

@@ -1,5 +1,10 @@
 import { silentCatch } from './silent-catch.mjs'
 import { encodeWireData } from './wire-data.mjs'
+import { resolveIceTransportPolicy } from './webrtc.mjs'
+// Namespace import, not `import { padTo, unpad }`: padding needs primitives >= 0.3.0,
+// but this package's peer range still admits 0.2.x, and a missing named export
+// would fail to link (breaking the whole transport package) instead of only `padding`.
+import * as primitives from '@johnhenry/browsermesh-primitives'
 /**
 // STATUS: INTEGRATED — wired into ClawserPod lifecycle, proven via E2E testing
  * clawser-mesh-websocket.js -- WebSocket, WebRTC & WebTransport Adapters.
@@ -42,6 +47,67 @@ function byteLength(data) {
   if (ArrayBuffer.isView(data)) return data.byteLength;
   if (typeof data === 'object') return JSON.stringify(data).length;
   return 0;
+}
+
+/** The padding functions, or a clear error when primitives predates 0.3.0. */
+function paddingFns() {
+  if (typeof primitives.padTo !== 'function' || typeof primitives.unpad !== 'function') {
+    throw new Error('padding requires @johnhenry/browsermesh-primitives >= 0.3.0');
+  }
+  return primitives;
+}
+
+/** First byte of a padded frame: the payload is raw bytes. */
+const PAD_FRAME_BINARY = 0;
+/** First byte of a padded frame: the payload is UTF-8 text. */
+const PAD_FRAME_TEXT = 1;
+
+/**
+ * Wrap an outgoing wire value in a size-bucketed frame:
+ * `[kind byte][payload]`, padded with `padTo()`. Always binary on the wire.
+ * @param {string|ArrayBuffer|ArrayBufferView} wire - Output of encodeWireData()
+ * @param {{ buckets?: number[] }} padding
+ * @returns {Uint8Array}
+ */
+function padFrame(wire, padding) {
+  let kind;
+  let payload;
+  if (typeof wire === 'string') {
+    kind = PAD_FRAME_TEXT;
+    payload = new TextEncoder().encode(wire);
+  } else if (wire instanceof ArrayBuffer) {
+    kind = PAD_FRAME_BINARY;
+    payload = new Uint8Array(wire);
+  } else if (ArrayBuffer.isView(wire)) {
+    kind = PAD_FRAME_BINARY;
+    payload = new Uint8Array(wire.buffer, wire.byteOffset, wire.byteLength);
+  } else {
+    throw new TypeError('padding cannot be applied to a Blob; send a string, ArrayBuffer or typed array');
+  }
+  const framed = new Uint8Array(payload.length + 1);
+  framed[0] = kind;
+  framed.set(payload, 1);
+  return paddingFns().padTo(framed, padding);
+}
+
+/**
+ * Inverse of {@link padFrame}. Returns a string for text frames and a
+ * `Uint8Array` for binary ones.
+ * @param {*} data - A received ArrayBuffer / typed array
+ * @returns {string|Uint8Array}
+ * @throws {Error} When `data` is not a padded frame
+ */
+function unpadFrame(data) {
+  let bytes;
+  if (data instanceof ArrayBuffer) bytes = new Uint8Array(data);
+  else if (ArrayBuffer.isView(data)) bytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+  else throw new Error('padding is enabled but a non-binary frame arrived (is the peer padding too?)');
+  const framed = paddingFns().unpad(bytes);
+  if (framed.length < 1) throw new Error('padded frame is empty');
+  const body = framed.subarray(1);
+  if (framed[0] === PAD_FRAME_TEXT) return new TextDecoder().decode(body);
+  if (framed[0] === PAD_FRAME_BINARY) return body.slice();
+  throw new Error(`unknown padded frame kind ${framed[0]}`);
 }
 
 /** Valid event names for WebSocketTransport */
@@ -101,6 +167,18 @@ export class WebSocketTransport {
   /** @type {number|null} */
   #heartbeatTimer = null;
 
+  /** @type {false|{ buckets?: number[] }} Size-bucket padding for outgoing/incoming frames */
+  #padding;
+
+  /** @type {number} Max random delay (ms) added before each send; 0 = off */
+  #jitterMs;
+
+  /** @type {Set<*>} Outstanding jitter timers, cleared on close */
+  #jitterTimers = new Set();
+
+  /** @type {number} Earliest time the next jittered send may fire (keeps order) */
+  #nextSendAt = 0;
+
   /** @type {{ open: Function[], message: Function[], close: Function[], error: Function[], reconnect: Function[] }} */
   #callbacks = { open: [], message: [], close: [], error: [], reconnect: [] };
 
@@ -115,10 +193,28 @@ export class WebSocketTransport {
    * @param {number} [opts.maxReconnectAttempts=5] - Max reconnection attempts
    * @param {number} [opts.reconnectDelayMs=1000] - Base delay between reconnects
    * @param {number} [opts.heartbeatIntervalMs=30000] - Heartbeat interval
+   * @param {boolean|{ buckets?: number[] }} [opts.padding=false] - Opt in to
+   *   size-bucket padding: every frame goes out as a binary frame padded to a
+   *   bucket size (`true` = 256/1024/4096/16384), and incoming frames are
+   *   unpadded. BOTH ends must enable it. It hides message sizes from network
+   *   observers; it does not hide them from a relay that reads the frame,
+   *   so for relay-blind payloads pad inside the end-to-end seal instead
+   *   (e.g. `GroupKeyManager.encrypt(data, { padding: true })`).
+   * @param {number} [opts.jitterMs=0] - Delay each send by a random 0..jitterMs
+   *   milliseconds (order preserved) for coarse timing decorrelation.
    * @param {Function} [opts._WebSocket] - Injectable WebSocket constructor
    */
   constructor(opts = {}) {
     if (!opts.url) throw new Error('url is required');
+    if (opts.jitterMs !== undefined && !(Number.isFinite(opts.jitterMs) && opts.jitterMs >= 0)) {
+      throw new TypeError('jitterMs must be a non-negative number');
+    }
+    if (opts.padding && opts.padding !== true && typeof opts.padding !== 'object') {
+      throw new TypeError('padding must be a boolean or { buckets }');
+    }
+    this.#padding = opts.padding ? (opts.padding === true ? {} : { buckets: opts.padding.buckets }) : false;
+    if (this.#padding) paddingFns();
+    this.#jitterMs = opts.jitterMs ?? 0;
     this.#url = opts.url;
     this.#protocols = opts.protocols || [];
     this.#reconnect = opts.reconnect !== undefined ? opts.reconnect : true;
@@ -167,6 +263,8 @@ export class WebSocketTransport {
     return new Promise((resolve, reject) => {
       try {
         this.#ws = new this.#WebSocketCtor(this.#url, this.#protocols.length ? this.#protocols : undefined);
+        // Padded frames are binary; ask for ArrayBuffer so they arrive synchronously (not as Blobs).
+        if (this.#padding) this.#ws.binaryType = 'arraybuffer';
       } catch (err) {
         this.#state = 'disconnected';
         return reject(err);
@@ -210,10 +308,43 @@ export class WebSocketTransport {
    */
   send(data) {
     if (!this.connected) throw new Error('Not connected');
-    const wire = encodeWireData(data);
-    this.#ws.send(wire);
+    const wire = this.#frameOut(encodeWireData(data));
+    this.#dispatch(wire);
     this.#stats.messagesSent++;
     this.#stats.bytesOut += byteLength(wire);
+  }
+
+  /** Apply size-bucket padding when enabled. */
+  #frameOut(wire) {
+    return this.#padding ? padFrame(wire, this.#padding) : wire;
+  }
+
+  /**
+   * Hand a frame to the socket, after a random delay when `jitterMs` is set.
+   * Delayed sends keep their order: a send never fires before an earlier one.
+   */
+  #dispatch(wire) {
+    const ws = this.#ws;
+    if (!(this.#jitterMs > 0)) {
+      ws.send(wire);
+      return;
+    }
+    const now = Date.now();
+    const at = Math.max(now + Math.random() * this.#jitterMs, this.#nextSendAt);
+    this.#nextSendAt = at;
+    const timer = setTimeout(() => {
+      this.#jitterTimers.delete(timer);
+      if (this.#ws !== ws || !this.connected) return;
+      try { ws.send(wire); } catch (e) { this._fireEvent('error', e); }
+    }, Math.max(0, at - now));
+    this.#jitterTimers.add(timer);
+  }
+
+  /** Cancel sends still waiting out their jitter delay. */
+  #clearJitter() {
+    for (const t of this.#jitterTimers) clearTimeout(t);
+    this.#jitterTimers.clear();
+    this.#nextSendAt = 0;
   }
 
   /**
@@ -227,6 +358,7 @@ export class WebSocketTransport {
     this.#userClosed = true;
     this.#state = 'closing';
     this._stopHeartbeat();
+    this.#clearJitter();
 
     if (this.#ws) {
       return new Promise((resolve) => {
@@ -282,15 +414,24 @@ export class WebSocketTransport {
 
   /** @type {(ev: { data: * }) => void} */
   #onMessage = (ev) => {
-    const data = ev.data;
+    let data = ev.data;
     this.#stats.messagesReceived++;
     this.#stats.bytesIn += byteLength(data);
+    if (this.#padding) {
+      try {
+        data = unpadFrame(data);
+      } catch (err) {
+        this._fireEvent('error', err);
+        return;
+      }
+    }
     this._fireEvent('message', data);
   };
 
   /** @type {(ev: { code: number, reason: string }) => void} */
   #onClose = (ev) => {
     this._stopHeartbeat();
+    this.#clearJitter();
     if (this.#userClosed) {
       this.#state = 'closed';
       this._fireEvent('close', ev);
@@ -365,9 +506,9 @@ export class WebSocketTransport {
     this._stopHeartbeat();
     this.#heartbeatTimer = setInterval(() => {
       if (!this.connected || !this.#ws) return;
-      const ping = JSON.stringify({ type: 'ping', ts: Date.now() });
+      const ping = this.#frameOut(JSON.stringify({ type: 'ping', ts: Date.now() }));
       try {
-        this.#ws.send(ping);
+        this.#dispatch(ping);
         this.#stats.lastPingMs = Date.now();
       } catch (e) { silentCatch('clawser-mesh-websocket', 'ignore-send-errors-during-heartbeat', e) }
     }, this.#heartbeatIntervalMs);
@@ -471,6 +612,11 @@ export class WebRTCTransport {
    * @param {string} opts.remotePodId - Remote pod identifier
    * @param {object} opts.signaler - Signaling channel
    * @param {object} [opts.config] - RTCConfiguration
+   * @param {'all'|'relay'} [opts.iceTransportPolicy] - Shorthand for
+   *   `config.iceTransportPolicy` (this option wins if both are given).
+   *   `'relay'` gathers TURN candidates only, so host and server-reflexive
+   *   addresses are never disclosed; it requires a `turn:`/`turns:` entry in
+   *   `config.iceServers` and throws otherwise.
    * @param {Function} [opts._RTCPeerConnection] - Injectable constructor
    */
   constructor(opts = {}) {
@@ -480,7 +626,12 @@ export class WebRTCTransport {
     this.#localPodId = opts.localPodId;
     this.#remotePodId = opts.remotePodId;
     this.#signaler = opts.signaler;
-    this.#config = opts.config || {};
+    this.#config = { ...(opts.config || {}) };
+    const policy = resolveIceTransportPolicy(
+      opts.iceTransportPolicy ?? this.#config.iceTransportPolicy,
+      this.#config.iceServers,
+    );
+    if (policy) this.#config.iceTransportPolicy = policy;
     this.#RTCPeerConnectionCtor = opts._RTCPeerConnection || globalThis.RTCPeerConnection;
   }
 
@@ -1150,6 +1301,9 @@ export class TransportFactory {
   /** @type {NATTraversal|null} */
   #natTraversal;
 
+  /** @type {'all'|'relay'|undefined} */
+  #iceTransportPolicy;
+
   /** @type {Function|null} */
   #WebSocketCtor;
 
@@ -1163,6 +1317,10 @@ export class TransportFactory {
    * @param {object} [opts]
    * @param {string[]} [opts.preferredOrder] - Transport preference order
    * @param {NATTraversal} [opts.natTraversal] - NAT traversal helper
+   * @param {'all'|'relay'} [opts.iceTransportPolicy] - Default `iceTransportPolicy`
+   *   for every `'webrtc'` transport this factory creates (a per-call
+   *   `opts.iceTransportPolicy` overrides it). `'relay'` = TURN-only, see
+   *   {@link WebRTCTransport}.
    * @param {Function} [opts._WebSocket] - Injectable WebSocket constructor
    * @param {Function} [opts._RTCPeerConnection] - Injectable RTCPeerConnection constructor
    * @param {Function} [opts._WebTransport] - Injectable WebTransport constructor
@@ -1170,6 +1328,7 @@ export class TransportFactory {
   constructor(opts = {}) {
     this.#preferredOrder = opts.preferredOrder || ['webrtc', 'wsh-wt', 'wsh-ws'];
     this.#natTraversal = opts.natTraversal || null;
+    this.#iceTransportPolicy = opts.iceTransportPolicy;
     this.#WebSocketCtor = opts._WebSocket !== undefined ? opts._WebSocket : (globalThis.WebSocket || null);
     this.#RTCPeerConnectionCtor = opts._RTCPeerConnection !== undefined ? opts._RTCPeerConnection : (globalThis.RTCPeerConnection || null);
     this.#WebTransportCtor = opts._WebTransport !== undefined ? opts._WebTransport : (globalThis.WebTransport || null);
@@ -1197,6 +1356,7 @@ export class TransportFactory {
       case 'webrtc':
         return new WebRTCTransport({
           ...opts,
+          iceTransportPolicy: opts?.iceTransportPolicy ?? this.#iceTransportPolicy,
           _RTCPeerConnection: this.#RTCPeerConnectionCtor,
         });
       case 'wsh-wt':

@@ -843,4 +843,32 @@ describe('StealthAgent', () => {
     assert.ok(manifest)
     assert.equal(manifest.agentId, 'agent-007')
   })
+
+  // #189: the shards are plaintext slices + XOR parity. These pin that down so
+  // nobody re-adds "encrypted" wording without adding encryption.
+  it('shards are NOT encrypted: data shards contain the state verbatim', () => {
+    const state = 'plaintext-state-0123456789-abcdefghijklmnop'
+    stealth.hide(state)
+    const joined = [0, 1, 2].map(i => dhtNode.get(`stealth:agent-007:shard:${i}`).data).join('')
+    assert.ok(joined.startsWith(state))
+  })
+
+  it('reconstitute recovers from the loss of ONE data shard using parity', () => {
+    const state = 'recover me even if one data shard is gone from the DHT'
+    stealth.hide(state)
+    for (const lost of [0, 1, 2]) {
+      const node = new DhtNode({ localId: `n${lost}`, sendFn: () => {} })
+      const agent = new StealthAgent({ agentId: 'agent-007', dhtNode: node, threshold: 3, totalShards: 5 })
+      agent.hide(state)
+      node.store(`stealth:agent-007:shard:${lost}`, null)
+      assert.equal(agent.reconstitute(), state, `lost data shard ${lost}`)
+    }
+  })
+
+  it('reconstitute throws when two data shards are lost (parity cannot cover that)', () => {
+    stealth.hide('two data shards lost is too many for single-parity')
+    dhtNode.store('stealth:agent-007:shard:0', null)
+    dhtNode.store('stealth:agent-007:shard:2', null)
+    assert.throws(() => stealth.reconstitute(), /Not enough data shards|Need at least/)
+  })
 })
