@@ -609,9 +609,9 @@ export function createTorrentService({
           await bucket.take(bytes.length)
 
           let sent = true
-          // Piece data should ride the bulk lane so it cannot starve control traffic.
-          // #198 lands the `{ channel: 'bulk' }` option on ctx.sendTo; until then the
-          // extra argument is ignored and everything uses the default lane.
+          // Piece data rides the bulk lane so it cannot starve control traffic
+          // (`ctx.sendTo(..., { channel: 'bulk' })`, #198). A transport with no bulk
+          // lane ignores the option.
           await respond({ data: toBase64(bytes) }, { channel: 'bulk' }).catch((err) => {
             sent = false
             log('mesh-torrent:chunk-response-send-failed', { to: fromPubKey, cid: msg.cid, error: err?.message || String(err) })
