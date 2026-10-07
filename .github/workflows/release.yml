@@ -1,46 +1,35 @@
 name: Release
 
+# Publish model: main is the release branch. See johnhenry/workflows' README.
+# On every push to main, changesets/action either opens/updates the
+# "Version Packages" PR (when changesets are pending) or, when that PR has just
+# been merged, runs scripts/staggered-publish.sh. Versions already on the
+# registry are skipped, so re-runs are safe. The action creates a git tag and a
+# GitHub Release per published package; nobody creates those by hand.
 on:
-  release:
-    types: [published]
-  workflow_dispatch:
+  push:
+    branches: [main]
+  # Re-run from the Actions tab: publishes whatever versions are missing.
+  workflow_dispatch: {}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 permissions:
-  contents: read
+  contents: write # version-bump commit, tags, GitHub Releases
+  pull-requests: write # the "Version Packages" PR
+  id-token: write # npm trusted publishing + provenance
 
 jobs:
-  validate:
-    name: Validate Release
+  release:
+    name: Version PR or Publish
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v7
         with:
-          node-version: '26'
-          cache: 'npm'
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Run tests
-        run: npm test
-
-  publish-npm:
-    name: Publish to NPM
-    runs-on: ubuntu-latest
-    # id-token: write lets npm publish through trusted publishing (each
-    # package trusts this repo's release.yml) and sign provenance.
-    # NPM_TOKEN below is only a fallback until it's removed.
-    permissions:
-      contents: read
-      id-token: write
-    needs: validate
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
+          fetch-depth: 0 # changesets diffs against the base branch
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
@@ -52,9 +41,20 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Publish to NPM (workspaces, dependency order)
-        run: ./scripts/staggered-publish.sh
+      - name: Run tests
+        run: npm test
+
+      - name: Version PR or publish
+        uses: changesets/action@v1
+        with:
+          version: npm run version-packages
+          # No build step: every package ships plain ESM source.
+          publish: ./scripts/staggered-publish.sh
+          title: 'chore: version packages'
+          commit: 'chore: version packages'
+          createGithubReleases: true
         env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           DELAY_BETWEEN_PACKAGES: '2'
           DELAY_BETWEEN_BATCHES: '5'

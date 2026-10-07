@@ -68,3 +68,7 @@ jobs:
       # crash like this, so `npm run test:real-gpu` stays a local/manual-
       # only tier (see packages/browsermesh-apps/README.md) rather than a
       # CI step that would fail unpredictably on every run.
+
+  workflow-lint:
+    name: Workflow Lint
+    uses: johnhenry/workflows/.github/workflows/workflow-lint.yml@v1

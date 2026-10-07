@@ -39,6 +39,18 @@ npm test          # turbo run test across all packages
 npm run examples  # run the runnable examples/ (see examples/README.md)
 ```
 
+## Releasing
+
+Main is the release branch. Add a changeset with each change that should ship
+(`npx changeset`). On every push to `main`, `changesets/action` opens or updates
+a `chore: version packages` PR; merging it runs `scripts/staggered-publish.sh`,
+which publishes each workspace in dependency order (versions already on npm are
+skipped), and the action then pushes a tag and creates a GitHub Release per
+published package. Pushes with no pending changesets publish nothing. Do not
+create tags or GitHub Releases by hand: no workflow listens for them. To re-run
+a partial publish, use "Run workflow" on `release.yml` (Actions tab) against
+`main`. `ci.yml`'s `workflow-lint` job keeps the publish workflow on this model.
+
 ## Examples
 
 [`examples/`](examples/) has 5 self-contained, runnable demonstrations
