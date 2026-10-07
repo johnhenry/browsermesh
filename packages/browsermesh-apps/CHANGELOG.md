@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.11.0
+
+### Minor Changes
+
+- 14485f6: Fixes browsermesh#208, browsermesh#198 and browsermesh#193.
+
+  - **Inbound envelopes over a real wire (#208).** A real transport can only carry text and binary, so a `MeshService` envelope reaches `PeerNode` as a JSON string. `ctx.onIncomingData()` now parses a JSON object/array string before matching `type`, so every service (compute, verification, torrent, chunk replication, ...) receives the parsed envelope. `MeshSyncBinding`, `MeshRelayHost`, `MeshRelayBackend` and `BrowserMeshWebSocket` accept the same. A string that is not a JSON object/array, or is corrupt, is ignored rather than thrown on. `PeerNode.onIncomingData()` itself still hands subscribers exactly what the transport delivered. Use it with a `@johnhenry/browsermesh-transport` release that encodes objects in `send()` (the patch released alongside this one).
+  - **Bulk lane (#198).** `PeerNode.sendTo(pubKey, data, { connectionId, channel })` and `ctx.sendTo(pubKey, type, payload, { channel })` take `channel: 'control' | 'bulk'`. It is passed to the transport as `send(data, { channel })` only when given, so the default is unchanged; a transport with no bulk lane ignores it, and any other value throws a `TypeError`. Chunk replication (`chunk-push`, `chunk-fetch-response`) and the torrent service's `chunk-response` now use the bulk lane; requests and acknowledgements stay on the control lane.
+  - **`PeerNode.broadcast()` (#193).** `broadcast(data, { channel, exclude, concurrency })` sends to every connected peer (one send per peer, bounded parallelism, default 8), collects per-peer errors instead of throwing, resolves to `{ sent, failed }` and emits a `'broadcast'` event. New `createPeerNodeTransport(peerNode)` returns the `{ broadcastFn, subscribeFn }` pair that `PaymentRouter`, `ConsensusManager`, `MigrationEngine` and `GroupKeyManager` take in `wireTransport()`; the sender passed to handlers is the peer the session belongs to, never the envelope's own `from` field.
+
 ## 0.10.0
 
 ### Minor Changes
