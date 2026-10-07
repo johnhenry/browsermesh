@@ -24,6 +24,7 @@ Application layer for BrowserMesh: marketplace, chat, payments, compute orchestr
   - [`browserMeshFetch`](#browsermeshfetch)
   - [`BrowserMeshWebSocket`](#browsermeshwebsocket)
 - [LLM tool-calling: `BrowserToolRegistry` and `createAgentRuntime`](#llm-tool-calling-browsertoolregistry-and-createagentruntime)
+- [Runtime classes and placement lanes](#runtime-classes-and-placement-lanes)
 - [License](#license)
 
 ## Provenance
@@ -679,6 +680,99 @@ is fed to your callback once, spies on `verifyFn` see one extra call with
 
 The `peer-timestamp` paths also throw a `TypeError` if the first argument is a
 64-byte signature.
+
+## Runtime classes and placement lanes
+
+[Issue #185](https://github.com/johnhenry/browsermesh/issues/185) ("Hosted
+pods") proposes running `Pod` outside the browser, on a host someone else
+operates, in one of two isolation lanes that the orchestrator places work
+across. This package's WP4 slice wires the *vocabulary* and the
+`ResourceScorer`/`execOnPod()` placement logic those lanes need; it does
+**not** implement the placement RPC itself (spawning or restoring a hosted
+pod) -- that is issue #185's WP2 (isolate pod host) and WP3 (microVM pod
+host), separate deliverables.
+
+`resources.mjs` exports two frozen constants naming the lanes:
+
+| `RUNTIME_CLASS` | Meaning | Boundary | Good for |
+| --- | --- | --- | --- |
+| `'browser'` | A tab/iframe/worker pod the user owns | n/a (same trust domain) | everything today's mesh already does |
+| `'node'` | A `ServerPod`-style Node process | OS process | shell, filesystem, native modules |
+| `'isolate'` | A V8 isolate (workerd / Durable Object) | Language-level (V8) | JS/Wasm skills, agents, CRDT replicas |
+| `'microvm'` | A Firecracker microVM running `ServerPod` | Hardware (KVM) | `execOnPod` shell commands, native binaries |
+
+`ISOLATION` names the lane a `ComputeRequest` can require:
+`'any'` (default), `'isolate'`, or `'microvm'`.
+
+A `ResourceDescriptor` advertises which lanes it supports as
+`runtime:<class>` capability strings (e.g. `'runtime:isolate'`), the same
+convention `preferRuntimeClass` already used for
+`runtime:<preferRuntimeClass>`. `runtimePeerToComputeDescriptor()` in
+`orchestrator.mjs` derives these from a runtime-registry peer's
+`metadata.runtimeClasses`, and also copies `metadata.hostedBy` onto the
+descriptor's own `hostedBy` field -- the podId of the lane host a hosted
+pod is a `child` of (issue #185 §7: "hosted pods are child-role pods of the
+host pod").
+
+### `ComputeRequest` placement fields
+
+- `moduleType` now also accepts `'shell'` (alongside the existing `'wasm'`
+  and `'js'`), for jobs that are a shell command rather than a
+  wasm/js module.
+- `constraints.isolation` (default `'any'`) is the request's lane
+  requirement: `'any'` lets the scorer prefer a lane without requiring it;
+  `'isolate'`/`'microvm'` hard-require that lane.
+- Both are validated at construction time and round-trip through
+  `toJSON()`/`fromJSON()`.
+
+### `ResourceScorer` rules
+
+`ResourceScorer.score()` applies the isolation lane **before** any of the
+existing scoring (`preferRuntimeClass`, memory headroom, CPU, bandwidth --
+all unchanged):
+
+1. **Hard zero for `moduleType: 'shell'`** unless the descriptor advertises
+   `runtime:microvm` -- a shell command can only ever run in a microVM pod,
+   regardless of `constraints.isolation`.
+2. **Hard zero when `constraints.isolation` is `'isolate'` or `'microvm'`**
+   unless the descriptor advertises the matching `runtime:<isolation>`
+   capability.
+3. **`+25` lane preference when `constraints.isolation` is `'any'`**:
+   `js`/`wasm` jobs get `+25` for `runtime:isolate`; `shell` jobs get `+25`
+   for `runtime:microvm` (this is the same condition as rule 1's gate, so a
+   shell job that clears the hard gate always gets the bonus too).
+
+`ResourceScorer.lane(request)` is a static helper that reports the
+*effective* lane for a request without consulting any descriptor --
+`{ required, preferred }`, where `required` is set for a hard requirement
+(explicit `isolation` or `moduleType: 'shell'`) and `preferred` is set when
+`isolation` is `'any'` and the module type implies a lane. Useful for
+logging/audit without re-deriving the scorer's own branching.
+
+### `execOnPod()` isolate guard
+
+Dispatching `execOnPod()` against a pod whose only advertised runtime class
+is `'isolate'` (no `'microvm'`/`'node'`/`'browser'` class and no
+`shellBackend`) is rejected before any remote dispatch: it records a
+`remote_exec_denied` audit entry (`reason: 'isolate runtime cannot execute
+shell commands'`, `layer: 'runtime'`, mirroring the existing
+`remote_deploy_denied` record shape) and returns
+`{ exitCode: 126, output: 'pod runtime "isolate" cannot execute shell
+commands; use deploySkill or a microvm pod' }` instead of silently
+dispatching a command the pod has no way to run. Use `deploySkill()`
+(isolate pods can receive deployed skill code) or target a `'microvm'` pod
+for shell execution.
+
+### Placement audit vocabulary
+
+`orchestrator.mjs` exports `PLACEMENT_AUDIT`, naming the placement
+lifecycle this and future work packages write to the audit chain:
+`placement_requested`, `placement_denied`, `placement_started`,
+`placement_ready`, `placement_evicted` -- mirroring the existing
+`remote_deploy_*`/`remote_exec_*`/`remote_compute_*` record families.
+`MeshOrchestrator#recordPlacement(kind, details)` writes one through the
+same `#recordAudit` path those use. No placement RPC is implemented yet;
+this is the audit vocabulary WP2/WP3 will write through once they land.
 
 ## License
 

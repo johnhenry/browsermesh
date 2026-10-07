@@ -21,16 +21,32 @@ Run one with `npm run example:01` (etc.), or all of them with `npm run examples`
 | [`09-cloud-storage.mjs`](./09-cloud-storage.mjs) | `CloudStorage`, an S3-like object store with no server anywhere: encrypted-at-rest content (AES-256-GCM), a signed replicated ACL (`GrantLog`), bucket-key distribution, and CRDT manifest sync + chunk replication, all behind `put`/`get`/`delete`/`list`/`grant`/`revoke`/`designateReplica` — an unauthorized peer denied cleanly, and a revoked peer's next read denied too (with the permanent "already-delivered content stays readable" limitation shown, not hidden). See `packages/browsermesh-apps/test/real-peer/cloud-storage.test.mjs` for the identical composition proved over a real WebRTC connection, and `packages/browsermesh-apps/docs/building-mesh-services.md` for the reusable design pattern this example is the worked example of. |
 | [`10-mesh-kv-and-observability.mjs`](./10-mesh-kv-and-observability.mjs) | `MeshKv`, a small mesh-native key-value store (`get`/`set`/`delete`/`keys`, no chunking, no encryption-at-rest), doing real ACL-gated multi-peer work — an admin grant, an authorized peer writing back, an unauthorized peer's write refused — while a live `ctx.emit()` event stream feeds an `observability-bridge` instance in real time. Ends by printing the bridge's `VisualizationExporter` topology and trust-heatmap JSON, built entirely from real emitted events, not mock data. See `packages/browsermesh-apps/docs/building-mesh-services.md` (§7-8) for the `ctx.emit()` convention and this service's own retrospective against `09-cloud-storage.mjs`. |
 | [`11-agent-tool-calling.mjs`](./11-agent-tool-calling.mjs) | The issues #90/#92 capstone: two real `createMeshNode()` peers (`enableOrchestrator` + `enableAgentRuntime` on one of them), a deterministic test `llmFn` (no real LLM API call — browsermesh's "bring your own LLM callback" design), and a real `createAgentRuntime()` dispatch loop — the LLM requests `meshctl_pods` then the genuinely risky, `checkAccess()`-gated `meshctl_exec`, both really dispatched through a real `BrowserToolRegistry` to a real `MeshOrchestrator` over a real two-peer mesh, with the results flowing back into the conversation for the final answer. See `packages/browsermesh-apps/docs/building-mesh-services.md`'s "`BrowserTool`/`BrowserToolRegistry`/agent runtime" section for the reusable pattern this example demonstrates, distinct from the `MeshService` pattern the rest of this guide covers. |
+| [`12-hosted-pod-over-websocket.mjs`](./12-hosted-pod-over-websocket.mjs) | Issue #185 ("Hosted pods") work package 1: two `Pod` instances discover each other and exchange a message over `WebSocketTransport` — the adapter that speaks the real `browsermesh-servers` relay/signaling wire protocol (`register`/`registered`, `relay`/`relayed`, `peers`/`peer-joined`/`peer-left`), simulated in-process here, so a `Pod` can run outside a browser tab (a V8 isolate, a microVM, a plain Node process) and still join the mesh. Demonstrates the point-to-point fan-out workaround for the relay's lack of a broadcast primitive, seeded via `peersFromSignaling`. |
 
 These cover the five foundational packages (`browsermesh-primitives`,
 `-pod`, `-netway`, `-kernel`, `-sync`) plus `browsermesh-apps`'s mesh-relay
 composition (`06`), its full discovery+sync+kernel+relay composition (`07`),
 its `fetch()`/`WebSocket`-shaped mesh wrappers (`08`), its mesh-native
 CloudStorage service (`09`), its mesh-native KV store plus observability
-bridge (`10`), and its LLM-tool-calling agent runtime over a real
-`MeshOrchestrator` (`11`). The higher-level packages built on top of them
+bridge (`10`), its LLM-tool-calling agent runtime over a real
+`MeshOrchestrator` (`11`), and `browsermesh-pod`'s relay-backed
+`WebSocketTransport` for pods hosted outside the browser (`12`). The
+higher-level packages built on top of them
 — `browsermesh-core`,
 `-transport`, `-discovery`, most of `-apps`, `browsermesh-embed` — are
 exercised end-to-end in a real browser by
 [clawser](https://github.com/erisera-code/clawser)'s Mesh and Peers panels;
 see their own package READMEs for API-level usage.
+
+## Hosted pods
+
+Every example above runs a `Pod` the way the browser (or a single Node
+process) already supports: same-origin tabs, workers, or an in-process
+`EventEmitterTransport` bus. [`docs/hosted-pods.md`](../docs/hosted-pods.md)
+at the monorepo root designs the next step — running a `Pod` on a machine
+someone else operates, in a V8 isolate or a Firecracker microVM, with the
+orchestrator choosing the lane per job. A runnable
+`12-hosted-pod-over-websocket.mjs` example (two Node pods discovering each
+other through an in-process fake relay) is part of that design's work
+packages and not yet added here — see the design doc's work-package table
+for status.

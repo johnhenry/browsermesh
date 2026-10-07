@@ -1,0 +1,22 @@
+{
+  "name": "isolate-pod-host-spike",
+  "private": true,
+  "version": "0.0.0",
+  "description": "WP2 spike (issue #185): run a @johnhenry/browsermesh-pod Pod inside a Cloudflare Durable Object / workerd V8 isolate. Not a published package, not part of the npm workspaces.",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "dry-run": "wrangler deploy --dry-run --outdir dist",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@johnhenry/browsermesh-pod": "file:../../packages/browsermesh-pod",
+    "@johnhenry/browsermesh-primitives": "file:../../packages/browsermesh-primitives"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  },
+  "engines": {
+    "node": ">=26.0.0"
+  }
+}

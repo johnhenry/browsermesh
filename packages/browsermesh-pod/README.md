@@ -27,6 +27,8 @@ Pods automatically generate an Ed25519 cryptographic identity, detect their exec
 - [Pod Kinds](#pod-kinds)
 - [Capabilities](#capabilities)
 - [Wire Protocol](#wire-protocol)
+- [WebSocketTransport (relay-backed)](#websockettransport-relay-backed)
+- [Running a Pod outside the browser](#running-a-pod-outside-the-browser)
 - [InjectedPod](#injectedpod)
 - [Peer Dependency](#peer-dependency)
 - [License](#license)
@@ -175,7 +177,7 @@ const server = await createServer({ discoveryTimeout: 5000 })
 | `shared-worker` | `instanceof SharedWorkerGlobalScope` |
 | `worker` | `instanceof WorkerGlobalScope` |
 | `worklet` | `instanceof AudioWorkletGlobalScope` |
-| `server` | No `window` or `document` |
+| `server` | No `window`, `document`, or worker global scope — plain Node.js, including a Firecracker microVM guest. Note: inside workerd/Cloudflare Workers the global is an instance of `ServiceWorkerGlobalScope`, so an isolate-hosted pod reports `service-worker`, not `server`. See [Running a Pod outside the browser](#running-a-pod-outside-the-browser). |
 | `iframe` | `window !== window.parent` |
 | `spawned` | `window.opener` is set |
 | `window` | Default (top-level window) |
@@ -205,6 +207,176 @@ const server = await createServer({ discoveryTimeout: 5000 })
 | `POD_RPC_RESPONSE` | `'pod:rpc-response'` | RPC result |
 
 Message factories: `createHello()`, `createHelloAck()`, `createGoodbye()`, `createMessage()`, `createRpcRequest()`, `createRpcResponse()`.
+
+## WebSocketTransport (relay-backed)
+
+`BroadcastChannelTransport` only reaches same-origin tabs. `WebSocketTransport` is the adapter that lets a `Pod` run anywhere a WebSocket client exists — a Node process, a browser, or a V8 isolate (workerd / Cloudflare Workers) — and still join the mesh, by speaking the `browsermesh-servers` relay/signaling wire protocol (`register`/`registered`, `relay`/`relayed`, `peers`/`peer-joined`/`peer-left`, `ping`/`pong`, `error`). This is what unlocks "hosted pods" (see [issue #185](https://github.com/johnhenry/browsermesh/issues/185)): a pod running on a machine someone else operates, reachable over the same relay a browser tab would use.
+
+```js
+import { Pod, WebSocketTransport } from '@johnhenry/browsermesh-pod'
+import { PodIdentity } from '@johnhenry/browsermesh-primitives'
+
+// Pod generates its own identity during boot() unless one is supplied; the
+// transport needs the same podId up front to register with the relay, so
+// generate (or load) the identity first.
+const identity = await PodIdentity.generate()
+
+const transport = new WebSocketTransport({
+  url: 'wss://relay.example.com',
+  podId: identity.podId,
+  // WebSocket: globalThis.WebSocket is used by default; inject your own
+  // (e.g. the `ws` package, or a fake) for testing or non-browser runtimes
+  // that don't expose a global WebSocket.
+  peersFromSignaling: true,
+  signalingUrl: 'wss://signaling.example.com',
+})
+
+const pod = new Pod()
+await pod.boot({ identity, transport })
+```
+
+Key properties, driven directly by the relay server's shape:
+
+- **Point-to-point only.** The relay server forwards `{type:'relay', target, envelope}` to exactly one registered peer — it has no broadcast primitive. `send(msg)` relays point-to-point when `msg.to` names a specific peer, and fans a `to`-less (or `to: '*'`) message like discovery's `hello`/`goodbye` out point-to-point to every peer id the transport currently knows about (`get knownPeers`).
+- **`knownPeers` has two sources**: every podId seen as the sender of a `relayed` envelope, and — when `peersFromSignaling: true` and `signalingUrl` is set — a second WebSocket connection to the signaling server that consumes its `peers` snapshot plus `peer-joined`/`peer-left` events. Seeding from signaling matters for discovery specifically: without it, two freshly-registered pods' first `hello` broadcasts have nobody to fan out to.
+- **Reconnects with exponential backoff** (`reconnect: { baseMs: 250, maxMs: 10000, maxAttempts: Infinity }` by default) and re-registers on reconnect; `ready` is `false` while disconnected, and `close()` clears all pending timers.
+- **Wire encoding** follows the same rule as `@johnhenry/browsermesh-transport`'s `encodeWireData()`: each relay/signaling frame is sent as exactly one JSON text, with the pod message nested inside as an object (never as a pre-encoded string, so nothing is double-encoded). Inbound frames may be text or binary (`ArrayBuffer`/typed array, read as UTF-8); a `Blob` frame cannot be read synchronously and is ignored.
+- **Protocol note**: the relay/signaling servers' wire protocol uses `target`/`source` field names for forwarding, not `to`/`from` — `WebSocketTransport` speaks the servers' real field names and only remaps to `from` on the Pod message shape when delivering to `onMessage()`.
+
+See `examples/12-hosted-pod-over-websocket.mjs` in the monorepo root for a full runnable example (two pods discovering each other and exchanging a message over a simulated relay, no network required).
+
+## Running a Pod outside the browser
+
+`Pod` (`src/pod.mjs`) is runtime-agnostic: it imports only `PodIdentity` from
+`@johnhenry/browsermesh-primitives` plus its own sibling modules. Everything
+browser-specific lives in the pluggable `transport`/`discovery` adapters and
+in feature-detected capability flags, not in the core class. This section
+spells out exactly what a non-browser host needs to provide, verified
+against this package's source (see
+[`docs/hosted-pods.md`](../../docs/hosted-pods.md) at the monorepo root for
+the full design and how this fits into hosted-pod lanes).
+
+### Exact runtime requirements
+
+A default `pod.boot()` call (no `window`/`document` present, so
+`detectPodKind()` returns `'server'`) needs:
+
+| Requirement | Why | Always runs, or conditional? |
+| --- | --- | --- |
+| `crypto.subtle` — Ed25519 `generateKey` | `PodIdentity.generate()` | Always, unless `opts.identity` is passed in |
+| `crypto.subtle` — `exportKey('raw')` + SHA-256 `digest` | `derivePodId()` | Always, as part of `PodIdentity.generate()` |
+| `btoa` / `atob` | `encodeBase64url()`/`decodeBase64url()` | Always — every `podId` derivation calls these |
+| `setTimeout` | `TransportDiscovery.start()`'s discovery-timeout wait | Whenever a real (non-`Null`) transport/discovery pair is used |
+| `TextEncoder`/`TextDecoder`, `structuredClone` | *(not actually used by this package)* | N/A — see note below |
+
+`crypto.subtle.sign`/`verify` are also available on `PodIdentity` but are
+**not** called during `boot()` itself — only when application code
+explicitly signs or verifies data.
+
+**Note on `TextEncoder`/`TextDecoder` and `structuredClone`:** despite
+sometimes being cited as `Pod` runtime requirements, neither is used
+anywhere in this package's source. `TextEncoder`/`TextDecoder` appear only
+in `browsermesh-primitives`' wire-format module, which `Pod` does not
+import; `structuredClone` appears only in a primitives test helper. If your
+host environment is missing them, `Pod` itself still works — you'd only hit
+a problem if you separately use the primitives wire format or that test
+helper. All three (plus `btoa`/`atob`) are present in Node ≥18, browsers,
+and `workerd`, so this is unlikely to matter in practice — it's called out
+here so the requirement list stays exactly as narrow as the code.
+
+None of this requires `window`, `document`, `navigator`, `indexedDB`,
+`fetch`, `WebAssembly`, `RTCPeerConnection`, or `SharedArrayBuffer` — those
+are only probed, never required, by `detectCapabilities()`.
+
+### The `TransportAdapter` and `DiscoveryAdapter` contracts
+
+Pass `opts.transport` and `opts.discovery` to `boot()` to run `Pod` anywhere
+these two interfaces can be implemented:
+
+```ts
+interface TransportAdapter {
+  readonly ready: boolean
+  open(): Promise<void>
+  close(): Promise<void>
+  send(msg: object): void                       // no-op before open(), never throws
+  onMessage(handler: (msg: object) => void): void
+}
+
+interface DiscoveryAdapter {
+  start(): Promise<void>
+  stop(opts?: { silent?: boolean }): Promise<void>
+  onPeerDiscovered(handler: (peer: { podId: string, kind?: string }) => void): void
+  onPeerLost(handler: (peer: { podId: string }) => void): void
+  onMessage(handler: (msg: object) => void): void   // non-discovery messages pass through
+}
+```
+
+Every `TransportAdapter` implementation in this package (and any you write)
+is expected to satisfy the shared conformance suite in
+`test/helpers/transport-conformance.mjs` — see
+`test/transport-conformance.test.mjs` for how the three built-in adapters
+are wired into it.
+
+### Worked example: `EventEmitterTransport` + `NullDiscovery` in Node
+
+This mirrors the composition a server-side `Pod` subclass would use to run
+a pod in plain Node with no browser APIs at all — an in-process
+`EventEmitterTransport` shared bus stands in for a real network transport,
+and `NullDiscovery` skips the hello/ack handshake since there's nothing to
+discover on a bus you fully control yourself:
+
+```js
+import { Pod } from '@johnhenry/browsermesh-pod'
+import { EventEmitterTransport, NullTransport } from '@johnhenry/browsermesh-pod'
+import { NullDiscovery } from '@johnhenry/browsermesh-pod'
+
+// A shared in-process bus standing in for a real network (relay, WebSocket, …)
+const bus = EventEmitterTransport.createBus()
+
+class NodePod extends Pod {
+  _onMessage(msg) {
+    console.log(`[${this.podId}] received`, msg.payload)
+  }
+}
+
+const alpha = new NodePod()
+const beta = new NodePod()
+
+await alpha.boot({
+  transport: new EventEmitterTransport(bus),
+  discovery: new NullDiscovery(),
+})
+await beta.boot({
+  transport: new EventEmitterTransport(bus),
+  discovery: new NullDiscovery(),
+})
+
+// NullDiscovery doesn't run the hello/ack protocol, so peers aren't
+// auto-discovered — address pods directly once you know their podId:
+alpha.send(beta.podId, { text: 'hello from alpha' })
+```
+
+Swap `NullDiscovery` for a `TransportDiscovery` wired to the same
+`EventEmitterTransport` if you want real hello/ack peer discovery over the
+bus instead of addressing pods by a `podId` you already have out of band.
+To actually leave the process — reaching a pod hosted in a separate Node
+process, a V8 isolate, or a Firecracker microVM guest — swap the transport
+for one that crosses a real network boundary (a `WebSocketTransport`
+speaking to a relay/signaling server; see `docs/hosted-pods.md` at the
+monorepo root for that design). Until such a transport lands, `Pod` running
+server-side is confined to one process, same as `EventEmitterTransport`
+always has been.
+
+> [!WARNING]
+> **`node:vm` and `worker_threads` are NOT security boundaries.** Node's own
+> `node:vm` docs say so explicitly, and `worker_threads` share the host
+> process's memory space and OS permissions. Use them to pack multiple
+> *trusted* pods into one process to save memory — never to run a
+> stranger's code. If you need to run code from an untrusted party, that
+> belongs in a real isolation boundary: a V8 isolate (`workerd`/Cloudflare
+> Workers + Durable Objects) or a Firecracker microVM. See
+> `docs/hosted-pods.md`'s "isolate pod" and "microVM pod" lanes for the two
+> supported designs.
 
 ## InjectedPod
 

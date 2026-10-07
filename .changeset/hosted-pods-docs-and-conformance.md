@@ -1,0 +1,5 @@
+---
+"@johnhenry/browsermesh-pod": patch
+---
+
+Documented how to run `Pod` outside the browser (exact runtime requirements, the `TransportAdapter`/`DiscoveryAdapter` contracts, a worked `EventEmitterTransport` + `NullDiscovery` Node example, and an explicit `node:vm`/`worker_threads`-are-not-a-security-boundary warning) in a new README section, and added a shared TransportAdapter conformance suite (`test/helpers/transport-conformance.mjs`) wired up for `BroadcastChannelTransport`, `EventEmitterTransport`, and `NullTransport`. Writing the suite surfaced one real bug it was built to catch: `BroadcastChannelTransport`'s `onmessage` callback did not guard against handler exceptions the way `EventEmitterTransport`'s dispatch loop and `Pod`'s own event emitter already do ("listener errors don't crash the pod") — a throwing handler would propagate as an uncaught exception instead of being isolated. Fixed with the same try/catch pattern already used elsewhere in this package. See `docs/hosted-pods.md` at the monorepo root (new) for the full hosted-pods design this work package is part of, tracking issue #185.
