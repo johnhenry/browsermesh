@@ -41,7 +41,21 @@ npm install @johnhenry/browsermesh-discovery @johnhenry/browsermesh-primitives
 import { DhtNode, DiscoveryManager, SwarmCoordinator } from '@johnhenry/browsermesh-discovery';
 ```
 
-## `StealthAgent` is sharding, not encryption
+## `StealthAgent` is sharding; encryption is opt-in
+
+For secrecy, derive a per-group key and use the async encrypted path:
+
+```js
+const key = await deriveStealthKey(groupSecret, 'my-group'); // HKDF-SHA-256 -> AES-256-GCM
+const agent = new StealthAgent({ agentId, dhtNode, key });
+await agent.hideEncrypted(state);          // shard holders see only ciphertext
+const state = await agent.reconstituteEncrypted();
+```
+
+The payload is bound to the agent id and a wrong key or any tampering rejects.
+Not done yet (tracked in #230): threshold sharing of the key, signed shards,
+agent-anonymous DHT keys, a real checksum and multi-loss parity. The plain
+`hide()` / `reconstitute()` below are unchanged and plaintext:
 
 `StealthAgent.hide(stateString)` / `reconstitute()` split a state string into
 `threshold` plaintext data shards plus XOR parity shards and store them in the
