@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.1
+
+### Patch Changes
+
+- 38a87ce: Raise the `@johnhenry/browsermesh-primitives` peer range to `>=0.3.0 <1.0.0` and import `padTo` / `unpad` by name. Padding (primitives 0.3.0) no longer needs a runtime "primitives too old" check; an older primitives is now rejected by the peer range instead (#231). Also makes the `TransportHealthCheck` and `startAutoSync` tests deterministic with mock timers (#232).
+- 03989a4: Fix three-pod meshes where one link came up one-way and a pod ended with no sessions (#224). `WebRTCTransport` now acts only on answers and ICE candidates from its own remote peer, applies an answer once, and unsubscribes from the shared signaler when it closes; before, every in-flight negotiation on a pod applied every peer's answer to its own `RTCPeerConnection`. `SignalingClient#on`, `onOffer`, `onAnswer` and `onIceCandidate` now return an unsubscribe function (they returned `undefined`). A signaler that does not report who a message is from keeps working unchanged.
+
 ## 0.4.0
 
 ### Minor Changes
