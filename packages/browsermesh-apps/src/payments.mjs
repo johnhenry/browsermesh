@@ -987,6 +987,18 @@ export class PaymentChannel {
  * @property {number|null} resolvedAt
  */
 
+/** A conditional-manager contract as the flat record `listEscrows()` returns. */
+function normalizeManagerContract(c) {
+  return {
+    escrowId: c.id,
+    payerPodId: c.payer,
+    payeePodId: c.payee,
+    amount: c.amount,
+    status: c.status,
+    source: 'manager',
+  };
+}
+
 // ---------------------------------------------------------------------------
 // SimpleEscrowBook
 // ---------------------------------------------------------------------------
@@ -1099,6 +1111,11 @@ export class SimpleEscrowBook {
     return true;
   }
 
+  /** Copies of every escrow in the book. */
+  listAll() {
+    return [...this.#escrows.values()].map((e) => ({ ...e }));
+  }
+
   /**
    * List all escrows involving a pod (as payer or payee).
    *
@@ -1168,6 +1185,9 @@ export class PaymentRouter {
 
   /** @type {SimpleEscrowBook} */
   #escrow;
+
+  /** @type {object|null} Optional conditional EscrowManager (peer-escrow.mjs), see attachEscrowManager(). */
+  #escrowManager = null;
 
   /** @type {function|null} */
   #broadcastFn = null;
@@ -1315,6 +1335,62 @@ export class PaymentRouter {
   }
 
   /**
+   * Make a conditional `EscrowManager` (peer-escrow.mjs) visible to this
+   * router. The router's own `SimpleEscrowBook` stays what it was: a
+   * wire-level mirror of the `ESCROW_CREATE` messages other pods send, which
+   * moves no balance. The manager is the escrow that debits and credits a
+   * ledger. After attaching, `listEscrows()` / `getEscrowById()` show both, and
+   * the escrow sweeper also expires (and refunds) the manager's due contracts.
+   *
+   * @param {object} manager - An `EscrowManager`
+   * @returns {this}
+   */
+  attachEscrowManager(manager) {
+    if (!manager || typeof manager.create !== 'function' || typeof manager.listContracts !== 'function'
+        || typeof manager.checkExpired !== 'function' || typeof manager.getContract !== 'function') {
+      throw new TypeError('attachEscrowManager requires an EscrowManager');
+    }
+    this.#escrowManager = manager;
+    return this;
+  }
+
+  /** The attached conditional EscrowManager, or null. */
+  getEscrowManager() {
+    return this.#escrowManager;
+  }
+
+  /**
+   * One view over every escrow this router knows about: the wire mirror
+   * (`source: 'wire'`) and, if attached, the manager's contracts
+   * (`source: 'manager'`). Records are normalized copies with
+   * `escrowId`, `payerPodId`, `payeePodId`, `amount`, `status`, `source`.
+   * Statuses are each model's own (`held`/`released`/... vs `funded`/...).
+   *
+   * @param {string} [podId] - Only escrows where this pod is payer or payee
+   * @returns {object[]}
+   */
+  listEscrows(podId) {
+    const out = [];
+    for (const e of this.#escrow.listAll()) out.push({ ...e, source: 'wire' });
+    if (this.#escrowManager) {
+      for (const c of this.#escrowManager.listContracts()) out.push(normalizeManagerContract(c));
+    }
+    return podId ? out.filter((e) => e.payerPodId === podId || e.payeePodId === podId) : out;
+  }
+
+  /**
+   * Look up an escrow by id in either book.
+   * @param {string} escrowId
+   * @returns {object|null}
+   */
+  getEscrowById(escrowId) {
+    const wire = this.#escrow.get(escrowId);
+    if (wire) return { ...wire, source: 'wire' };
+    const c = this.#escrowManager?.getContract(escrowId);
+    return c ? normalizeManagerContract(c) : null;
+  }
+
+  /**
    * Start periodic escrow-timeout enforcement. Without this,
    * `SimpleEscrowBook.pruneExpired()` exists but nothing ever calls it, so
    * timed-out escrows sit in `held` status forever.
@@ -1331,10 +1407,25 @@ export class PaymentRouter {
    */
   startEscrowSweeper(intervalMs = 30000, onExpired = null) {
     this.stopEscrowSweeper();
-    this.#escrowSweeperTimer = setInterval(() => {
-      const expired = this.#escrow.pruneExpiredDetailed();
+    const report = (expired) => {
       if (expired.length > 0 && onExpired) {
         try { onExpired(expired); } catch (e) { silentCatch('clawser-mesh-payments', 'onExpired', e) }
+      }
+    };
+    this.#escrowSweeperTimer = setInterval(() => {
+      const expired = this.#escrow.pruneExpiredDetailed().map((e) => ({ ...e, source: 'wire' }));
+      report(expired);
+      const mgr = this.#escrowManager;
+      if (mgr) {
+        // Manager contracts expire by refunding the payer through its ledger,
+        // which is async; report the ones that were due once that settles.
+        const now = Date.now();
+        const due = mgr.listContracts({ status: 'funded' }).filter((c) => c.isExpired(now)).map((c) => c.id);
+        if (due.length > 0) {
+          mgr.checkExpired(now)
+            .then(() => report(due.map((id) => mgr.getContract(id)).filter((c) => c && c.status === 'expired').map(normalizeManagerContract)))
+            .catch((e) => silentCatch('clawser-mesh-payments', 'manager-checkExpired', e));
+        }
       }
     }, intervalMs);
   }

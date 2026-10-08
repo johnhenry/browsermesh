@@ -469,8 +469,13 @@ Four classes cover two ideas, and each public name belongs to exactly one:
 `debit()`/`credit()` (that ledger has one balance, so use it when the local pod
 is the payer, or pass `mutateLedger` to account for a counterparty); with a
 `MultiPartyCreditLedger` it calls `charge()`/`credit()` so payer and payee each
-move their own balance. `PaymentRouter`'s `SimpleEscrowBook` and an
-`EscrowManager` you create are separate books and do not see each other.
+move their own balance. `PaymentRouter`'s `SimpleEscrowBook` stays a wire
+mirror and is a separate book from an `EscrowManager` you create, but the router
+can see both: `router.attachEscrowManager(manager)` makes `router.listEscrows(podId?)`
+and `router.getEscrowById(id)` return one normalized view (`source: 'wire'` or
+`'manager'`), and the escrow sweeper also expires the manager's due contracts.
+An inbound `ESCROW_CREATE` is still only recorded in the book; it does not debit
+anything (the payer is a remote pod).
 
 ## Putting it all together: sync + kernel-gated mesh + relay on one connection
 
