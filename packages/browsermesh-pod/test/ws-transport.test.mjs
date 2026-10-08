@@ -107,7 +107,7 @@ describe('WebSocketTransport — wire encoding', () => {
     assert.deepEqual(frame.envelope, msg)
   })
 
-  it('reads a binary (ArrayBuffer / typed array) frame as UTF-8 JSON', async () => {
+  it('reads binary (ArrayBuffer / typed array / Blob) frames as UTF-8 JSON, in order', async () => {
     const { sockets, SpyWebSocket } = spyNetwork()
     const bob = track(new WebSocketTransport({ url: 'ws://relay.test', podId: 'bob', WebSocket: SpyWebSocket }))
     await bob.open()
@@ -118,11 +118,14 @@ describe('WebSocketTransport — wire encoding', () => {
     const ws = sockets[0]
     ws._dispatch('message', { data: enc({ type: 'relayed', source: 'alice', envelope: { type: 'pod:message', payload: 1 } }).buffer })
     ws._dispatch('message', { data: enc({ type: 'relayed', source: 'alice', envelope: { type: 'pod:message', payload: 2 } }) })
-    // a Blob cannot be read synchronously and is ignored rather than turned into "[object Blob]"
+    // #221: a Blob is read asynchronously, and frames behind it keep their order
     ws._dispatch('message', { data: new Blob(['{"type":"relayed","source":"alice","envelope":{"payload":3}}']) })
-    await wait(5)
+    ws._dispatch('message', { data: JSON.stringify({ type: 'relayed', source: 'alice', envelope: { type: 'pod:message', payload: 4 } }) })
+    ws._dispatch('message', { data: new Blob(['not json']) })
+    ws._dispatch('message', { data: JSON.stringify({ type: 'relayed', source: 'alice', envelope: { type: 'pod:message', payload: 5 } }) })
+    await wait(30)
 
-    assert.deepEqual(received.map((m) => m.payload), [1, 2])
+    assert.deepEqual(received.map((m) => m.payload), [1, 2, 3, 4, 5])
   })
 })
 
