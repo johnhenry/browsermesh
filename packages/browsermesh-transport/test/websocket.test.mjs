@@ -1547,7 +1547,7 @@ describe('iceTransportPolicy on WebRTCTransport / TransportFactory (#190)', () =
   async function connectOfferer(t, signaler, pcs) {
     const p = t.connect();
     setTimeout(() => {
-      signaler._receiveAnswer({ type: 'answer', sdp: 'mock-answer-sdp' });
+      signaler._receiveAnswer({ type: 'answer', sdp: 'mock-answer-sdp' }, 'b');
       if (pcs[0]._dataChannels[0]) pcs[0]._dataChannels[0]._open();
     }, 10);
     await p;
