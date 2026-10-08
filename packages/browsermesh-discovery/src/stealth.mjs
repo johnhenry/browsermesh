@@ -16,8 +16,13 @@
  *     tampering;
  *   - keys name the agent they belong to.
  *
- * If the state must be secret, encrypt it yourself before calling `hide()`
- * (and decrypt after `reconstitute()`); this module does not manage keys.
+ * For secrecy use the opt-in encrypted path: derive a per-group AES-256-GCM key
+ * with `deriveStealthKey(groupSecret, groupId)` and call
+ * `StealthAgent#hideEncrypted()` / `#reconstituteEncrypted()` (async). The
+ * state is sealed before sharding, bound to the agent id, so shard holders see
+ * only ciphertext. That is the first half of #230; threshold sharing of the
+ * key, signed shards and agent-anonymous DHT keys are NOT done (see the issue).
+ * The plain synchronous `hide()` / `reconstitute()` are unchanged and plaintext.
  *
  * StateShard represents one fragment.
  * ShardDistributor scatters shards across DHT nodes.
@@ -34,6 +39,93 @@
  * Run tests:
  *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-mesh-dht.test.mjs
  */
+
+// ---------------------------------------------------------------------------
+// Payload encryption (AES-256-GCM)
+// ---------------------------------------------------------------------------
+
+const ENC_PREFIX = 'v1.'
+const IV_BYTES = 12
+
+function toBase64Url(bytes) {
+  let bin = ''
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i])
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
+function fromBase64Url(str) {
+  const b64 = str.replace(/-/g, '+').replace(/_/g, '/')
+  const bin = atob(b64 + '='.repeat((4 - (b64.length % 4)) % 4))
+  const out = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i)
+  return out
+}
+
+/**
+ * Derive the AES-256-GCM key for one discovery group from a secret every group
+ * member holds (HKDF-SHA-256, `groupId` as salt). Members of the same group
+ * derive the same key; another group, or a different secret, cannot.
+ *
+ * @param {Uint8Array|string} groupSecret - At least 16 bytes of shared secret
+ * @param {string} groupId
+ * @returns {Promise<CryptoKey>}
+ */
+export async function deriveStealthKey(groupSecret, groupId) {
+  if (!groupId || typeof groupId !== 'string') throw new Error('groupId is required and must be a non-empty string')
+  const raw = typeof groupSecret === 'string' ? new TextEncoder().encode(groupSecret) : groupSecret
+  if (!(raw instanceof Uint8Array) || raw.length < 16) throw new Error('groupSecret must be at least 16 bytes')
+  const base = await crypto.subtle.importKey('raw', raw, 'HKDF', false, ['deriveKey'])
+  return crypto.subtle.deriveKey(
+    { name: 'HKDF', hash: 'SHA-256', salt: new TextEncoder().encode(`browsermesh-stealth:${groupId}`), info: new TextEncoder().encode('aes-256-gcm') },
+    base,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt'],
+  )
+}
+
+/**
+ * Seal a state string: `v1.` + base64url(iv || ciphertext+tag), a fresh random
+ * IV per call, `agentId` as additional authenticated data.
+ *
+ * @param {string} state
+ * @param {CryptoKey} key
+ * @param {string} agentId
+ * @returns {Promise<string>}
+ */
+export async function encryptStealthState(state, key, agentId) {
+  const iv = crypto.getRandomValues(new Uint8Array(IV_BYTES))
+  const ct = new Uint8Array(await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv, additionalData: new TextEncoder().encode(agentId) },
+    key,
+    new TextEncoder().encode(state),
+  ))
+  const out = new Uint8Array(IV_BYTES + ct.length)
+  out.set(iv, 0)
+  out.set(ct, IV_BYTES)
+  return ENC_PREFIX + toBase64Url(out)
+}
+
+/**
+ * Open a payload produced by `encryptStealthState`. Rejects on a wrong key,
+ * wrong agent id, or any modification.
+ *
+ * @param {string} payload
+ * @param {CryptoKey} key
+ * @param {string} agentId
+ * @returns {Promise<string>}
+ */
+export async function decryptStealthState(payload, key, agentId) {
+  if (typeof payload !== 'string' || !payload.startsWith(ENC_PREFIX)) throw new Error('not an encrypted stealth payload')
+  const bytes = fromBase64Url(payload.slice(ENC_PREFIX.length))
+  if (bytes.length <= IV_BYTES) throw new Error('encrypted stealth payload is truncated')
+  const pt = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: bytes.slice(0, IV_BYTES), additionalData: new TextEncoder().encode(agentId) },
+    key,
+    bytes.slice(IV_BYTES),
+  )
+  return new TextDecoder().decode(pt)
+}
 
 // ---------------------------------------------------------------------------
 // Checksum Helper
@@ -435,17 +527,22 @@ export class StealthAgent {
   /** @type {object|null} */
   #manifest = null
 
+  /** @type {CryptoKey|null} */
+  #key = null
+
   /**
    * @param {object} opts
    * @param {string} opts.agentId - Agent identifier
    * @param {import('./clawser-mesh-dht.js').DhtNode} opts.dhtNode - DHT node
    * @param {number} [opts.threshold=3] - Minimum shards for recovery
    * @param {number} [opts.totalShards=5] - Total shards to create
+   * @param {CryptoKey} [opts.key] - AES-GCM key (see `deriveStealthKey`); enables `hideEncrypted()` / `reconstituteEncrypted()`
    */
-  constructor({ agentId, dhtNode, threshold = 3, totalShards = 5 }) {
+  constructor({ agentId, dhtNode, threshold = 3, totalShards = 5, key = null }) {
     if (!agentId || typeof agentId !== 'string') {
       throw new Error('agentId is required and must be a non-empty string')
     }
+    this.#key = key
     this.#agentId = agentId
     this.#dhtNode = dhtNode
     this.#threshold = threshold
@@ -472,6 +569,30 @@ export class StealthAgent {
     }
 
     return this.#manifest
+  }
+
+  /**
+   * Like `hide()`, but seals the state with AES-GCM first, so the DHT holds
+   * only ciphertext. Requires the `key` option.
+   * @param {string} stateBlob
+   * @returns {Promise<object>} Manifest (`encrypted: true`)
+   */
+  async hideEncrypted(stateBlob) {
+    if (!this.#key) throw new Error('hideEncrypted requires a key (see deriveStealthKey)')
+    const sealed = await encryptStealthState(stateBlob, this.#key, this.#agentId)
+    this.hide(sealed)
+    this.#manifest = { ...this.#manifest, encrypted: true }
+    return this.#manifest
+  }
+
+  /**
+   * Reconstitute and decrypt state stored by `hideEncrypted()`. Rejects when
+   * the key is wrong or the shards were altered. Requires the `key` option.
+   * @returns {Promise<string>}
+   */
+  async reconstituteEncrypted() {
+    if (!this.#key) throw new Error('reconstituteEncrypted requires a key (see deriveStealthKey)')
+    return decryptStealthState(this.reconstitute(), this.#key, this.#agentId)
   }
 
   /**
