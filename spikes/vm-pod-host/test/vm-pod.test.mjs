@@ -134,6 +134,9 @@ describe('VmPod state machine', () => {
       ['ip', 'tuntap', 'add', 'tap-demo', 'mode', 'tap'],
       ['ip', 'link', 'set', 'tap-demo', 'up'],
       ['nft', 'add', 'rule', 'firecracker', 'filter', 'iifname', 'tap-demo', 'oifname', 'eth0', 'accept'],
+      // #221: the killed VMM leaves its vsock socket behind; loadSnapshot fails
+      // with "Address already in use" unless it is unlinked first.
+      ['rm', '-f', '/vm/demo/v.sock'],
     ])
     assert.deepEqual(pod.plannedApiCalls.map((c) => c.api), ['loadSnapshot', 'resume'])
     assert.deepEqual(pod.plannedApiCalls[0].args, {
@@ -144,6 +147,34 @@ describe('VmPod state machine', () => {
 
     pod.markRegistered('guest-1')
     assert.equal(pod.state, 'registered')
+  })
+
+  it('restore starts a fresh VMM (vmmArgv) after unlinking the stale vsock socket and before loadSnapshot (#221)', async () => {
+    const vmmArgv = ['jailer', '--id', 'demo', '--daemonize']
+    const pod = makePod({ vmmArgv })
+    await pod.boot()
+    pod.markRegistered('guest-1')
+    await pod.pause()
+    await pod.snapshot()
+    pod.plannedApiCalls.length = 0
+    pod.plannedCommands.length = 0
+
+    await pod.restore()
+    const argvs = pod.plannedCommands.map((c) => c.argv)
+    const rmAt = argvs.findIndex((a) => a[0] === 'rm')
+    const vmmAt = argvs.findIndex((a) => a[0] === 'jailer')
+    assert.ok(rmAt >= 0 && vmmAt > rmAt, 'rm of the stale socket precedes VMM start')
+    assert.deepEqual(argvs[vmmAt], vmmArgv)
+    assert.equal(vmmAt, argvs.length - 1, 'VMM start is the last host command before the API calls')
+  })
+
+  it('boot also starts the VMM first when vmmArgv is given; without it boot is unchanged', async () => {
+    const withVmm = makePod({ vmmArgv: ['jailer', '--id', 'demo'] })
+    await withVmm.boot()
+    assert.deepEqual(withVmm.plannedCommands[0].argv, ['jailer', '--id', 'demo'])
+    const without = makePod()
+    await without.boot()
+    assert.equal(without.plannedCommands.some((c) => c.argv[0] === 'jailer'), false)
   })
 
   it('drain: registered -> draining -> cold, notifies peers then kills VMM then tears down TAP', async () => {

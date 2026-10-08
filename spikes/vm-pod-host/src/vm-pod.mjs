@@ -85,6 +85,7 @@ export class VmPod extends EventEmitter {
   #idleTimeoutMs
   #snapshotDir
   #dryRun
+  #vmmArgv
   #state = 'cold'
   #idleTimer = null
   #podId = null
@@ -109,10 +110,15 @@ export class VmPod extends EventEmitter {
    * @param {string} opts.snapshotDir - directory to write
    *   `<id>.vmstate` / `<id>.mem` snapshot files into
    * @param {boolean} [opts.dryRun=false]
+   * @param {string[]} [opts.vmmArgv] - argv (e.g. from `buildJailerArgv()`,
+   *   daemonized) that starts a fresh Firecracker process whose API socket
+   *   `client` talks to. Run at the start of `boot()` and in `restore()`
+   *   (`snapshot()` kills the VMM, so a restore needs a new one). Omit when
+   *   the host starts the VMM itself, as before.
    */
   constructor({
     client, exec, id, kernelImage, rootfs, tap, vsock, limits,
-    idleTimeoutMs = 30_000, snapshotDir, dryRun = false,
+    idleTimeoutMs = 30_000, snapshotDir, dryRun = false, vmmArgv,
   }) {
     super()
     if (!id) throw new Error('VmPod: id is required')
@@ -127,6 +133,7 @@ export class VmPod extends EventEmitter {
     this.#idleTimeoutMs = idleTimeoutMs
     this.#snapshotDir = snapshotDir
     this.#dryRun = dryRun
+    this.#vmmArgv = vmmArgv
   }
 
   /** @returns {string} */
@@ -194,6 +201,12 @@ export class VmPod extends EventEmitter {
     return this.#exec(argv)
   }
 
+  /** Start a fresh Firecracker process, when the host asked this pod to own that. */
+  async #startVmm() {
+    if (!this.#vmmArgv) return
+    await this.#runExec(this.#vmmArgv, 'start a fresh jailed firecracker process')
+  }
+
   // ── Host-side network setup ──────────────────────────────────
 
   async #setUpTap() {
@@ -225,6 +238,7 @@ export class VmPod extends EventEmitter {
   async boot() {
     this.#transition('booting', 'boot() called')
 
+    await this.#startVmm()
     await this.#setUpTap()
 
     await this.#callApi('putMachineConfig', {
@@ -346,6 +360,12 @@ export class VmPod extends EventEmitter {
   async restore() {
     this.#transition('restoring', 'restore() called')
     await this.#setUpTap()
+    // snapshot() killed the VMM, which left its vsock UDS behind; loadSnapshot
+    // fails with "Address already in use" if it is still there.
+    if (this.#vsock?.udsPath) {
+      await this.#runExec(['rm', '-f', this.#vsock.udsPath], 'unlink the stale vsock socket left by the killed VMM')
+    }
+    await this.#startVmm()
     await this.#callApi('loadSnapshot', {
       snapshot_path: this.snapshotVmStatePath,
       mem_backend: { backend_type: 'File', backend_path: this.snapshotMemPath },

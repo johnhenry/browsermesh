@@ -229,8 +229,7 @@ export class WebSocketTransport {
       const onOpen = () => {
         this.#send(ws, { type: 'register', podId: this.#podId })
       }
-      const onMessage = (event) => {
-        const data = this.#parse(event)
+      const handle = (data) => {
         if (!data) return
         if (isPrimary) this.#handlePrimaryMessage(data)
         else this.#handleSignalingMessage(data)
@@ -240,6 +239,29 @@ export class WebSocketTransport {
         } else if (data.type === 'error') {
           finishReject(new Error(data.message || `WebSocketTransport: ${kind} registration error`))
         }
+      }
+      // A Blob frame can only be read asynchronously. Once one is in flight,
+      // every later frame on this socket queues behind it so frames are still
+      // handled in arrival order; with no Blob in flight nothing changes and
+      // frames are handled synchronously.
+      let blobQueue = null
+      const onMessage = (event) => {
+        if (typeof Blob !== 'undefined' && event.data instanceof Blob) {
+          const prior = blobQueue ?? Promise.resolve()
+          const mine = prior
+            .then(() => event.data.arrayBuffer())
+            .then((buf) => handle(this.#parse({ data: buf })), () => {})
+          blobQueue = mine
+          mine.then(() => { if (blobQueue === mine) blobQueue = null })
+          return
+        }
+        if (blobQueue) {
+          const mine = blobQueue.then(() => handle(this.#parse(event)))
+          blobQueue = mine
+          mine.then(() => { if (blobQueue === mine) blobQueue = null })
+          return
+        }
+        handle(this.#parse(event))
       }
       const onClose = () => {
         if (isPrimary) { this.#ready = false; this.#ws = null }
@@ -271,7 +293,7 @@ export class WebSocketTransport {
       if (typeof d === 'string') raw = d
       else if (d instanceof ArrayBuffer) raw = new TextDecoder().decode(d)
       else if (ArrayBuffer.isView(d)) raw = new TextDecoder().decode(d)
-      else return null // Blob (async read) or anything else: not a frame we can read
+      else return null // anything else (Blobs are read by the caller first): not a frame we can read
       return JSON.parse(raw)
     } catch {
       return null
