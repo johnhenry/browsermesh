@@ -236,6 +236,17 @@ describe("#198: sendTo(..., { channel }) reaches the transport", () => {
     assert.equal(wire.sentByA.length, 0)
   })
 
+  it('#115: a named channel the transport has opened is passed through; one it has not is a TypeError', async () => {
+    const solo = await makeNode('solo')
+    const sent = []
+    await solo.adoptIncomingSession('far', { send(data, opts) { sent.push(opts) }, channels: ['control', 'bulk', 'telemetry'] }, 'plain')
+    await solo.sendTo('far', { type: 'x' }, { channel: 'telemetry' })
+    assert.deepEqual(sent, [{ channel: 'telemetry' }])
+    await assert.rejects(() => solo.sendTo('far', { type: 'x' }, { channel: 'other' }), TypeError)
+    await assert.rejects(() => solo.sendTo('far', { type: 'x' }, { channel: 'bad name!' }), TypeError)
+    assert.equal(sent.length, 1)
+  })
+
   it('a transport with no bulk lane (one-argument send) simply ignores the option', async () => {
     const solo = await makeNode('solo')
     const got = []
@@ -337,7 +348,7 @@ describe('#193: PeerNode.broadcast()', () => {
     await node.broadcast({ type: 'chunk' }, { channel: 'bulk' })
     assert.deepEqual(sent.a[0].opts, { channel: 'bulk' })
     assert.deepEqual(sent.b[0].opts, { channel: 'bulk' })
-    await assert.rejects(() => node.broadcast({}, { channel: 'nope' }), TypeError)
+    await assert.rejects(() => node.broadcast({}, { channel: 'not a name!' }), TypeError)
   })
 
   it('sends once per peer even when a peer has several sessions', async () => {
