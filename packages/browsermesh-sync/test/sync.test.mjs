@@ -1,5 +1,5 @@
 // Run with: node --import ./test/_setup-globals.mjs --test test/sync.test.mjs
-import { describe, it, beforeEach } from 'node:test';
+import { describe, it, beforeEach, afterEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { SyncDocument, MeshSyncEngine, InMemorySyncStorage, CRDT_TYPES } from '../src/sync.mjs';
 
@@ -433,24 +433,29 @@ describe('MeshSyncEngine', () => {
   // ── 14. startAutoSync / stopAutoSync / stopAllAutoSync ───────────────────
 
   describe('autoSync', () => {
-    it('startAutoSync calls syncFn periodically', async () => {
+    // Mock timers, not wall-clock sleeps: a real 250 ms sleep under heavy
+    // machine load can fire before the 50 ms interval has run twice (#232).
+    beforeEach(() => { mock.timers.enable({ apis: ['setInterval', 'setTimeout'] }); });
+    afterEach(() => { mock.timers.reset(); });
+
+    it('startAutoSync calls syncFn periodically', () => {
       engine.create('gc', 'g-counter');
       engine.update('gc', (c) => c.increment('test_node', 1));
       const payloads = [];
       engine.startAutoSync('gc', (p) => payloads.push(p), 50);
-      await new Promise(r => setTimeout(r, 250));
+      mock.timers.tick(250);
       engine.stopAutoSync('gc');
       assert.ok(payloads.length >= 2, `expected >=2, got ${payloads.length}`);
       assert.equal(payloads[0].id, 'gc');
     });
 
-    it('startAutoSync returns a stopper function', async () => {
+    it('startAutoSync returns a stopper function', () => {
       engine.create('gc', 'g-counter');
       const payloads = [];
       const stop = engine.startAutoSync('gc', (p) => payloads.push(p), 30);
       assert.equal(typeof stop, 'function');
       stop();
-      await new Promise(r => setTimeout(r, 80));
+      mock.timers.tick(80);
       assert.equal(payloads.length, 0);
     });
 
@@ -458,14 +463,14 @@ describe('MeshSyncEngine', () => {
       assert.doesNotThrow(() => engine.stopAutoSync('nonexistent'));
     });
 
-    it('stopAllAutoSync stops all intervals', async () => {
+    it('stopAllAutoSync stops all intervals', () => {
       engine.create('a', 'g-counter');
       engine.create('b', 'g-counter');
       const pA = [], pB = [];
       engine.startAutoSync('a', (p) => pA.push(p), 30);
       engine.startAutoSync('b', (p) => pB.push(p), 30);
       engine.stopAllAutoSync();
-      await new Promise(r => setTimeout(r, 80));
+      mock.timers.tick(80);
       assert.equal(pA.length, 0);
       assert.equal(pB.length, 0);
     });
@@ -474,12 +479,14 @@ describe('MeshSyncEngine', () => {
   // ── 15. destroy() ────────────────────────────────────────────────────────
 
   describe('destroy()', () => {
-    it('stops auto-sync intervals and clears subscriptions', async () => {
+    it('stops auto-sync intervals and clears subscriptions', () => {
+      mock.timers.enable({ apis: ['setInterval', 'setTimeout'] });
       engine.create('gc', 'g-counter');
       const payloads = [];
       engine.startAutoSync('gc', (p) => payloads.push(p), 30);
       engine.destroy();
-      await new Promise(r => setTimeout(r, 80));
+      mock.timers.tick(80);
+      mock.timers.reset();
       assert.equal(payloads.length, 0);
     });
   });
