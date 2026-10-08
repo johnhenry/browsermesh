@@ -195,6 +195,17 @@ const BULK_CHANNEL_LABEL = 'mesh-bulk'
  */
 const BULK_CHANNEL_OPTIONS = Object.freeze({ ordered: false })
 
+/**
+ * Wire-label prefix of caller-named extra channels (#115). `openChannel('x')`
+ * creates a channel labelled `mesh-x:x`. The prefix is what lets a receiver
+ * tell an extra channel from the control channel: a label it does not
+ * recognise is otherwise adopted AS the control channel (see handleOffer()).
+ * Builds that predate this feature do exactly that, so only open named
+ * channels to peers known to run a build that has `openChannel()`.
+ */
+const EXTRA_CHANNEL_PREFIX = 'mesh-x:'
+const EXTRA_CHANNEL_NAME = /^[A-Za-z0-9._-]{1,64}$/
+
 // ---------------------------------------------------------------------------
 // WebRTCPeerConnection
 // ---------------------------------------------------------------------------
@@ -222,6 +233,12 @@ export class WebRTCPeerConnection {
    * falls back to `#dataChannel` while it is null. See `send()`.
    */
   #bulkChannel = null
+
+  /**
+   * Caller-named extra channels, name -> RTCDataChannel (see openChannel()).
+   * @type {Map<string, RTCDataChannel>}
+   */
+  #extraChannels = new Map()
   #iceServers
   #iceTransportPolicy
   #onLog
@@ -422,6 +439,10 @@ export class WebRTCPeerConnection {
       if (chan.label === BULK_CHANNEL_LABEL) {
         this.#bulkChannel = chan
         this.#setupDataChannel(chan, 'bulk')
+      } else if (typeof chan.label === 'string' && chan.label.startsWith(EXTRA_CHANNEL_PREFIX)) {
+        const name = chan.label.slice(EXTRA_CHANNEL_PREFIX.length)
+        this.#extraChannels.set(name, chan)
+        this.#setupDataChannel(chan, 'extra', name)
       } else {
         this.#dataChannel = chan
         this.#setupDataChannel(chan, 'control')
@@ -587,16 +608,21 @@ export class WebRTCPeerConnection {
    *   `handleOffer()`) -- there is no other way for it to be missing on a
    *   peer that itself created both -- so the traffic still gets there, just
    *   without its own lane, exactly as it did before this channel existed.
-   * @throws {Error} If there is no data channel at all, or the channel that
-   *   was actually selected (after fallback) is not open.
+   *   Any other string selects a channel added with `openChannel(name)` (or
+   *   opened by the remote). Unlike `'bulk'` there is NO fallback: an unknown
+   *   or closed name throws, because the caller asked for a lane with its own
+   *   semantics (ordering, retransmits) that the control channel can't honour.
+   * @throws {Error} If there is no data channel at all, the channel name is
+   *   unknown, or the channel that was actually selected is not open.
    */
   send(data, { channel = 'control' } = {}) {
-    if (channel !== 'control' && channel !== 'bulk') {
+    const extra = (channel !== 'control' && channel !== 'bulk') ? this.#extraChannels.get(channel) : undefined
+    if (channel !== 'control' && channel !== 'bulk' && !extra) {
       throw new Error(`Unknown channel: ${channel}`)
     }
-    const dc = (channel === 'bulk' && this.#bulkChannel?.readyState === 'open')
+    const dc = extra ?? ((channel === 'bulk' && this.#bulkChannel?.readyState === 'open')
       ? this.#bulkChannel
-      : this.#dataChannel
+      : this.#dataChannel)
     if (!dc) throw new Error('No data channel')
     if (dc.readyState !== 'open') {
       throw new Error('Data channel not open')
@@ -605,6 +631,64 @@ export class WebRTCPeerConnection {
     dc.send(str)
     this.#stats.bytesSent += str.length ?? str.byteLength ?? str.size ?? 0
     this.#stats.messagesOut += 1
+  }
+
+  /**
+   * Open an additional named data channel on the ALREADY-NEGOTIATED
+   * RTCPeerConnection (#115): another SCTP stream, no new ICE/DTLS handshake,
+   * with its own `ordered` / `maxRetransmits` / `maxPacketLifeTime`. Use it to
+   * keep, say, latency-sensitive telemetry off the same stream as bulk
+   * transfers. Address it with `send(data, { channel: name })`; the remote end
+   * adopts it automatically (listed in `channels`, delivered to `onMessage`
+   * callbacks as their second argument).
+   *
+   * Only open named channels to a peer running a build that has this method;
+   * older builds adopt an unrecognised label as their control channel.
+   *
+   * @param {string} name - 1-64 chars of `A-Za-z0-9._-`; not 'control' or 'bulk'
+   * @param {{ ordered?: boolean, maxRetransmits?: number, maxPacketLifeTime?: number }} [opts]
+   * @returns {RTCDataChannel}
+   */
+  openChannel(name, opts = {}) {
+    if (typeof name !== 'string' || !EXTRA_CHANNEL_NAME.test(name) || name === 'control' || name === 'bulk') {
+      throw new Error(`Invalid channel name: ${JSON.stringify(name)} (1-64 of A-Za-z0-9._-, not 'control' or 'bulk')`)
+    }
+    if (!this.#pc) throw new Error('No peer connection — call createOffer() or handleOffer() first')
+    if (this.#extraChannels.has(name)) throw new Error(`Channel ${name} is already open`)
+    const init = {}
+    for (const k of ['ordered', 'maxRetransmits', 'maxPacketLifeTime']) {
+      if (opts[k] !== undefined) init[k] = opts[k]
+    }
+    const dc = this.#pc.createDataChannel(EXTRA_CHANNEL_PREFIX + name, init)
+    this.#extraChannels.set(name, dc)
+    this.#setupDataChannel(dc, 'extra', name)
+    return dc
+  }
+
+  /**
+   * Close one named channel opened with `openChannel()` (or by the remote).
+   * @param {string} name
+   * @returns {boolean} true if a channel was closed
+   */
+  closeChannel(name) {
+    const dc = this.#extraChannels.get(name)
+    if (!dc) return false
+    this.#extraChannels.delete(name)
+    try { dc.close() } catch (e) { silentCatch('clawser-mesh-webrtc', 'close-extra', e) }
+    return true
+  }
+
+  /**
+   * Names of the channels currently usable with `send({ channel })`:
+   * 'control', 'bulk' (when open) and every named channel.
+   * @returns {string[]}
+   */
+  get channels() {
+    const out = []
+    if (this.#dataChannel) out.push('control')
+    if (this.#bulkChannel) out.push('bulk')
+    for (const name of this.#extraChannels.keys()) out.push(name)
+    return out
   }
 
   /**
@@ -756,6 +840,10 @@ export class WebRTCPeerConnection {
         try { this.#bulkChannel.close() } catch (e) { silentCatch('clawser-mesh-webrtc', 'this', e) }
         this.#bulkChannel = null
       }
+      for (const [name, dc] of [...this.#extraChannels]) {
+        this.#extraChannels.delete(name)
+        try { dc.close() } catch (e) { silentCatch('clawser-mesh-webrtc', 'close-extra', e) }
+      }
       if (this.#pc) {
         try { this.#pc.close() } catch (e) { silentCatch('clawser-mesh-webrtc', 'this', e) }
         this.#pc = null
@@ -825,6 +913,12 @@ export class WebRTCPeerConnection {
     const dc = this.#dataChannel
     const bulkDc = this.#bulkChannel
     const pc = this.#pc
+    const extras = [...this.#extraChannels.values()]
+    this.#extraChannels.clear()
+    for (const x of extras) {
+      x.onopen = null; x.onmessage = null; x.onclose = null; x.onerror = null
+      try { x.close() } catch (e) { silentCatch('clawser-mesh-webrtc', 'release-extra', e) }
+    }
     this.#dataChannel = null
     this.#bulkChannel = null
     this.#pc = null
@@ -1020,7 +1114,7 @@ export class WebRTCPeerConnection {
    * method does, and only ever overwrites which channel it treats as "the"
    * one to *send* on -- so it still receives from both.
    */
-  #setupDataChannel(dc, kind) {
+  #setupDataChannel(dc, kind, name = kind) {
     dc.onopen = () => {
       if (kind === 'control') this.#setState('connected')
       this.#log(`DataChannel (${kind}) open with ${this.#remotePodId}`)
@@ -1032,10 +1126,15 @@ export class WebRTCPeerConnection {
       let parsed = event.data
       try { parsed = JSON.parse(event.data) } catch { /* keep as string */ }
       for (const cb of this.#messageCbs) {
-        try { cb(parsed) } catch (e) { silentCatch('clawser-mesh-webrtc', 'swallow', e) }
+        try { cb(parsed, name) } catch (e) { silentCatch('clawser-mesh-webrtc', 'swallow', e) }
       }
     }
     dc.onclose = () => {
+      if (kind === 'extra') {
+        if (this.#extraChannels.get(name) === dc) this.#extraChannels.delete(name)
+        this.#log(`Channel ${name} closed with ${this.#remotePodId}`)
+        return
+      }
       if (kind === 'bulk') {
         // Auxiliary: drop the reference so send({channel:'bulk'}) falls back
         // to control, but don't tear down a connection that may otherwise be
@@ -1051,6 +1150,10 @@ export class WebRTCPeerConnection {
     }
     dc.onerror = (event) => {
       this.#fireError(event?.error || new Error(`DataChannel (${kind}) error`))
+      if (kind === 'extra') {
+        if (this.#extraChannels.get(name) === dc) this.#extraChannels.delete(name)
+        return
+      }
       if (kind === 'bulk') {
         // Same reasoning as onclose above: an error on the auxiliary channel
         // alone should not take down a working control channel.
@@ -1517,6 +1620,21 @@ export class WebRTCTransportAdapter extends MeshTransport {
     this.#connection.close()
     super.close()
   }
+
+  /**
+   * Open an additional named data channel on the same negotiated connection
+   * (#115). See `WebRTCPeerConnection#openChannel()`. Send on it with
+   * `send(data, { channel: name })`.
+   * @param {string} name
+   * @param {object} [opts]
+   */
+  openChannel(name, opts) { return this.#connection.openChannel(name, opts) }
+
+  /** Close a named channel. @param {string} name @returns {boolean} */
+  closeChannel(name) { return this.#connection.closeChannel(name) }
+
+  /** Names usable as `send(data, { channel })`: 'control', 'bulk' and named channels. */
+  get channels() { return this.#connection.channels }
 
   /** The underlying WebRTCPeerConnection. */
   get peerConnection() { return this.#connection }

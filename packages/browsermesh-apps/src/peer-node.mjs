@@ -39,6 +39,11 @@ const DEFAULT_CONNECTION_ID = 'default'
 // PeerNode
 // ---------------------------------------------------------------------------
 
+/** A syntactically valid named-channel name (see WebRTCPeerConnection#openChannel). */
+function isChannelName(v) {
+  return typeof v === 'string' && /^[A-Za-z0-9._-]{1,64}$/.test(v);
+}
+
 /**
  * Top-level orchestrator for a mesh peer. Manages the full lifecycle
  * from identity bootstrap through discovery, connection, and shutdown.
@@ -553,8 +558,10 @@ export class PeerNode {
    * @param {object} [opts]
    * @param {string} [opts.connectionId] - Target this specific connection's
    *   session (issue #116) rather than "most recently created".
-   * @param {'control'|'bulk'} [opts.channel] - Which of the transport's data
-   *   channels to send on. Omit (or pass `'control'`) for the ordered control
+   * @param {string} [opts.channel] - Which of the transport's data
+   *   channels to send on. Besides 'control' and 'bulk' this may be the name of
+   *   a channel opened with `transport.openChannel(name)` (#115); a name the
+   *   session's transport has not opened throws a `TypeError`. Omit (or pass `'control'`) for the ordered control
    *   lane; `'bulk'` selects the second, unordered `mesh-bulk` channel, so
    *   large payloads (file/torrent chunks) cannot queue in front of control
    *   traffic. Passed through as `transport.send(data, { channel })` only
@@ -570,8 +577,8 @@ export class PeerNode {
    */
   async sendTo(pubKey, data, { connectionId, channel } = {}) {
     this.#ensureRunning('sendTo');
-    if (channel !== undefined && channel !== 'control' && channel !== 'bulk') {
-      throw new TypeError(`PeerNode.sendTo: unknown channel ${JSON.stringify(channel)} (expected 'control' or 'bulk')`);
+    if (channel !== undefined && channel !== 'control' && channel !== 'bulk' && !isChannelName(channel)) {
+      throw new TypeError(`PeerNode.sendTo: unknown channel ${JSON.stringify(channel)} (expected 'control', 'bulk' or a named channel)`);
     }
     let session = null;
     for (const [, s] of this.#sessions) {
@@ -585,6 +592,13 @@ export class PeerNode {
     }
     if (!session.transportInstance || typeof session.transportInstance.send !== 'function') {
       throw new Error(`PeerNode.sendTo: session for ${pubKey} has no transport.send`);
+    }
+    if (channel !== undefined && channel !== 'control' && channel !== 'bulk') {
+      // A named channel (#115) must have been opened on this session's transport.
+      const open = session.transportInstance.channels;
+      if (!Array.isArray(open) || !open.includes(channel)) {
+        throw new TypeError(`PeerNode.sendTo: unknown channel ${JSON.stringify(channel)} for ${pubKey} (open it with transport.openChannel())`);
+      }
     }
     return channel === undefined
       ? session.transportInstance.send(data)
@@ -624,8 +638,8 @@ export class PeerNode {
    */
   async broadcast(data, { channel, exclude, concurrency = 8 } = {}) {
     this.#ensureRunning('broadcast');
-    if (channel !== undefined && channel !== 'control' && channel !== 'bulk') {
-      throw new TypeError(`PeerNode.broadcast: unknown channel ${JSON.stringify(channel)} (expected 'control' or 'bulk')`);
+    if (channel !== undefined && channel !== 'control' && channel !== 'bulk' && !isChannelName(channel)) {
+      throw new TypeError(`PeerNode.broadcast: unknown channel ${JSON.stringify(channel)} (expected 'control', 'bulk' or a named channel)`);
     }
     const skip = typeof exclude === 'function'
       ? exclude
