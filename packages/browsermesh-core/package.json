@@ -20,7 +20,7 @@
     "directory": "packages/browsermesh-core"
   },
   "peerDependencies": {
-    "@johnhenry/browsermesh-primitives": ">=0.2.0 <1.0.0",
+    "@johnhenry/browsermesh-primitives": ">=0.3.0 <1.0.0",
     "@johnhenry/browsermesh-apps": ">=0.4.0 <1.0.0"
   },
   "peerDependenciesMeta": {

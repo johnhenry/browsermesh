@@ -1,5 +1,5 @@
 // Run with: node --import ./test/_setup-globals.mjs --test test/hardening.test.mjs
-import { describe, it, beforeEach } from 'node:test';
+import { describe, it, beforeEach, afterEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
@@ -231,63 +231,54 @@ describe('TransportHealthCheck', () => {
     assert.equal(check.totalPongs, 1);
   });
 
-  it('becomes degraded after 1 missed pong', () => {
-    const events = [];
-    check.on('degraded', () => events.push('degraded'));
-    check.on('pong-timeout', () => events.push('timeout'));
+  // Timing is driven by node:test mock timers, not wall-clock sleeps: under
+  // heavy machine load a real 250 ms sleep can fire before (or long after) the
+  // 100 ms interval / 50 ms timeout it is meant to observe (#232).
+  describe('with mocked timers', () => {
+    beforeEach(() => { mock.timers.enable({ apis: ['setInterval', 'setTimeout'] }); });
+    afterEach(() => { check.stop(); mock.timers.reset(); });
+    // Advance in small steps so timers scheduled by earlier ticks (the pong
+    // timeout is created inside the interval callback) are also fired.
+    const advance = (ms) => { for (let t = 0; t < ms; t += 10) mock.timers.tick(10); };
 
-    // Simulate: sendPing is called internally, but we manually trigger timeout
-    // We use the internal mechanism by starting and letting timeouts fire
+    it('becomes degraded after 1 missed pong', () => {
+      const events = [];
+      check.on('degraded', () => events.push('degraded'));
+      check.on('pong-timeout', () => events.push('timeout'));
 
-    // Instead, manually test the pong-timeout path:
-    // Start the check, let it send a ping, wait for timeout
-    check.start();
-
-    return new Promise((resolve) => {
-      setTimeout(() => {
-        // After interval + timeout, should have sent a ping and timed out
-        assert.ok(pings.length >= 1, 'should have sent at least one ping');
-        assert.ok(check.missedCount >= 1, 'should have at least 1 missed');
-        assert.ok(['degraded', 'unhealthy'].includes(check.status));
-        check.stop();
-        resolve();
-      }, 250);
+      check.start();
+      advance(100);                   // interval fires: ping sent
+      assert.equal(pings.length, 1, 'should have sent one ping');
+      assert.equal(check.missedCount, 0);
+      advance(50);                    // pong timeout fires
+      assert.equal(check.missedCount, 1);
+      assert.equal(check.status, 'degraded');
+      assert.deepEqual(events, ['timeout', 'degraded']);
     });
-  });
 
-  it('becomes unhealthy after maxMissed consecutive timeouts', () => {
-    const events = [];
-    check.on('unhealthy', () => events.push('unhealthy'));
+    it('becomes unhealthy after maxMissed consecutive timeouts', () => {
+      const events = [];
+      check.on('unhealthy', () => events.push('unhealthy'));
 
-    check.start();
-
-    return new Promise((resolve) => {
-      setTimeout(() => {
-        assert.equal(check.status, 'unhealthy');
-        assert.ok(check.missedCount >= 3);
-        assert.ok(events.includes('unhealthy'));
-        check.stop();
-        resolve();
-      }, 600);
+      check.start();
+      advance(100 * 3 + 50);    // three pings, each timing out
+      assert.equal(check.status, 'unhealthy');
+      assert.equal(check.missedCount, 3);
+      assert.deepEqual(events, ['unhealthy']);
     });
-  });
 
-  it('recovers to healthy after recordPong', () => {
-    const events = [];
-    check.on('healthy', (d) => events.push(d));
+    it('recovers to healthy after recordPong', () => {
+      const events = [];
+      check.on('healthy', (d) => events.push(d));
 
-    check.start();
-
-    return new Promise((resolve) => {
-      // Let it degrade first
-      setTimeout(() => {
-        assert.ok(check.missedCount >= 1);
-        check.recordPong();
-        assert.equal(check.status, 'healthy');
-        assert.equal(check.missedCount, 0);
-        check.stop();
-        resolve();
-      }, 250);
+      check.start();
+      advance(150);                   // ping + timeout: degraded
+      assert.equal(check.missedCount, 1);
+      assert.equal(check.status, 'degraded');
+      check.recordPong();
+      assert.equal(check.status, 'healthy');
+      assert.equal(check.missedCount, 0);
+      assert.equal(events.length, 1);
     });
   });
 

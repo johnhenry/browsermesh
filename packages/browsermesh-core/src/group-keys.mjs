@@ -13,17 +13,7 @@
  *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-mesh-group-keys.test.mjs
  */
 
-// Namespace import, not `import { padTo, unpad }`: padding needs primitives >= 0.3.0,
-// but this package's peer range still admits 0.2.x, and a missing named export
-// would fail to link (breaking all of core) instead of only breaking `padding`.
-import * as primitives from '@johnhenry/browsermesh-primitives'
-
-function paddingFns() {
-  if (typeof primitives.padTo !== 'function' || typeof primitives.unpad !== 'function') {
-    throw new Error('padding requires @johnhenry/browsermesh-primitives >= 0.3.0')
-  }
-  return primitives
-}
+import { padTo, unpad } from '@johnhenry/browsermesh-primitives'
 
 // ---------------------------------------------------------------------------
 // Wire constants
@@ -545,7 +535,7 @@ export class GroupKeyManager {
     if (!state || !state.key) throw new Error('No active group key')
 
     const pad = padding === undefined ? this.#padding : normalizePadding(padding)
-    const sealed = pad ? paddingFns().padTo(plaintext, pad) : plaintext
+    const sealed = pad ? padTo(plaintext, pad) : plaintext
 
     const iv = crypto.getRandomValues(new Uint8Array(12))
     const ciphertext = new Uint8Array(
@@ -584,7 +574,7 @@ export class GroupKeyManager {
     )
 
     const pad = padding === undefined ? this.#padding : normalizePadding(padding)
-    return pad ? paddingFns().unpad(plaintext) : plaintext
+    return pad ? unpad(plaintext) : plaintext
   }
 
   /**
