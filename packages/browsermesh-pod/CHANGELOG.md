@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.1
+
+### Patch Changes
+
+- 4fb4230: `WebSocketTransport` now reads `Blob` frames (asynchronously, queued so frames keep their arrival order) instead of dropping them (#221).
+
 ## 0.1.0
 
 ### Minor Changes
