@@ -1,10 +1,7 @@
 import { silentCatch } from './silent-catch.mjs'
 import { encodeWireData } from './wire-data.mjs'
 import { resolveIceTransportPolicy } from './webrtc.mjs'
-// Namespace import, not `import { padTo, unpad }`: padding needs primitives >= 0.3.0,
-// but this package's peer range still admits 0.2.x, and a missing named export
-// would fail to link (breaking the whole transport package) instead of only `padding`.
-import * as primitives from '@johnhenry/browsermesh-primitives'
+import { padTo, unpad } from '@johnhenry/browsermesh-primitives'
 /**
 // STATUS: INTEGRATED — wired into ClawserPod lifecycle, proven via E2E testing
  * clawser-mesh-websocket.js -- WebSocket, WebRTC & WebTransport Adapters.
@@ -49,14 +46,6 @@ function byteLength(data) {
   return 0;
 }
 
-/** The padding functions, or a clear error when primitives predates 0.3.0. */
-function paddingFns() {
-  if (typeof primitives.padTo !== 'function' || typeof primitives.unpad !== 'function') {
-    throw new Error('padding requires @johnhenry/browsermesh-primitives >= 0.3.0');
-  }
-  return primitives;
-}
-
 /** First byte of a padded frame: the payload is raw bytes. */
 const PAD_FRAME_BINARY = 0;
 /** First byte of a padded frame: the payload is UTF-8 text. */
@@ -87,7 +76,7 @@ function padFrame(wire, padding) {
   const framed = new Uint8Array(payload.length + 1);
   framed[0] = kind;
   framed.set(payload, 1);
-  return paddingFns().padTo(framed, padding);
+  return padTo(framed, padding);
 }
 
 /**
@@ -102,7 +91,7 @@ function unpadFrame(data) {
   if (data instanceof ArrayBuffer) bytes = new Uint8Array(data);
   else if (ArrayBuffer.isView(data)) bytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
   else throw new Error('padding is enabled but a non-binary frame arrived (is the peer padding too?)');
-  const framed = paddingFns().unpad(bytes);
+  const framed = unpad(bytes);
   if (framed.length < 1) throw new Error('padded frame is empty');
   const body = framed.subarray(1);
   if (framed[0] === PAD_FRAME_TEXT) return new TextDecoder().decode(body);
@@ -213,7 +202,6 @@ export class WebSocketTransport {
       throw new TypeError('padding must be a boolean or { buckets }');
     }
     this.#padding = opts.padding ? (opts.padding === true ? {} : { buckets: opts.padding.buckets }) : false;
-    if (this.#padding) paddingFns();
     this.#jitterMs = opts.jitterMs ?? 0;
     this.#url = opts.url;
     this.#protocols = opts.protocols || [];
