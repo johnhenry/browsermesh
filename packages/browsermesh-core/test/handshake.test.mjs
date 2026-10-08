@@ -291,6 +291,29 @@ describe('SignalingClient', () => {
     assert.equal(calls.length, 1) // no new call
   })
 
+  it('on / onOffer / onAnswer / onIceCandidate return an unsubscribe function', async () => {
+    await client.connect()
+    const seen = []
+    const offs = [
+      client.on('custom', () => seen.push('custom')),
+      client.onOffer(() => seen.push('offer')),
+      client.onAnswer(() => seen.push('answer')),
+      client.onIceCandidate(() => seen.push('ice')),
+    ]
+    for (const off of offs) assert.equal(typeof off, 'function')
+    const fire = () => {
+      lastWs._receive({ type: 'custom', from: 'pod-X' })
+      lastWs._receive({ type: 'offer', source: 'pod-X', offer: {} })
+      lastWs._receive({ type: 'answer', source: 'pod-X', answer: {} })
+      lastWs._receive({ type: 'ice-candidate', source: 'pod-X', candidate: {} })
+    }
+    fire()
+    assert.deepEqual(seen, ['custom', 'offer', 'answer', 'ice'])
+    for (const off of offs) off()
+    fire()
+    assert.equal(seen.length, 4, 'nothing delivered after unsubscribing')
+  })
+
   it('connect throws when no URL configured', async () => {
     const noUrl = new SignalingClient({
       localPodId: 'pod-local',
