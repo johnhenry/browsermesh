@@ -65,7 +65,7 @@ publish_package() {
       git tag "$pkg@$version" 2>/dev/null || true
       echo "New tag:  $pkg@$version"
       SUCCESS=$((SUCCESS + 1))
-    elif echo "$output" | grep -qE "EPUBLISHCONFLICT|cannot publish over (the )?previously published"; then
+    elif echo "$output" | grep -qE "EPUBLISHCONFLICT|E409|previously staged version|cannot publish over (the )?previously published"; then
       echo -e "  ${YELLOW}Skipped (version already published)${NC}"
       SKIPPED=$((SKIPPED + 1))
     else
