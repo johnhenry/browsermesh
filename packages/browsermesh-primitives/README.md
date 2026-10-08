@@ -100,7 +100,7 @@ console.log(set.has('item')) // true
 
 ### Capabilities
 
-- `CapabilityToken` -- scoped capability with expiry
+- `CapabilityToken` -- signed-by-issuer capability with scopes and expiry (see [Capability tokens vs ACL grants](#capability-tokens-vs-acl-grants))
 - `parseScope(str)` / `matchScope(pattern, target)` -- scope parsing and matching
 
 ### Trust
@@ -116,6 +116,26 @@ console.log(set.has('item')) // true
 - `AccessGrant` -- grant struct with resource pattern, permission, and principal
 - `matchResourcePattern(pattern, resource)` -- glob-style resource matching
 - `generateGrantId()` -- unique grant ID generator
+- `grantFromToken(token, { grantor?, id? })` -- map a `CapabilityToken` onto an `AccessGrant` (does not verify the token)
+
+`AccessGrant.check()` / `ACLEngine.check()` report a denial as one of:
+
+| `reason` | Meaning |
+| --- | --- |
+| `grant_revoked` | The grant was revoked (`grant.revoke()`, `ACLEngine.revokeGrant()`, `revokeAll()`) |
+| `grant_expired` | `conditions.expires` has passed or `conditions.maxUses` is exhausted |
+| `outside_time_window` | None of `conditions.timeWindows` covers the current time |
+| `no_matching_permission` | The grant is live but no permission covers the resource + action |
+| `no_grants` | (`ACLEngine` only) the grantee has no grants at all |
+
+With several grants for one grantee, the engine returns the reason from the last grant it examined.
+
+### Padding
+
+- `padTo(bytes, { buckets? })` / `unpad(padded)` -- round a payload up to a size bucket (default 256 / 1024 / 4096 / 16384; larger payloads round up to a multiple of the largest) with a length trailer, and strip it again
+- `paddedLength(length, { buckets? })`, `DEFAULT_PAD_BUCKETS`, `PAD_TRAILER_BYTES`
+
+Apply `padTo()` before sealing (encrypting) a message, so a relay that only sees ciphertext learns the bucket rather than the exact length; the trailer is plaintext, so padding already-encrypted bytes hides nothing. Size only, no timing or cover traffic.
 
 ### CRDTs
 
@@ -128,6 +148,47 @@ console.log(set.has('item')) // true
 - `LWWMap` -- last-writer-wins map with tombstones
 
 All CRDTs support `merge()`, `toJSON()`, and `fromJSON()` for serialization.
+
+`LWWMap`'s `value`, `toJSON()`, `keys()`, `values()` and `entries()` yield keys in sorted order (UTF-16 code unit order), not insertion order. Replicas that have converged therefore serialize identically, so hashing or signing `JSON.stringify(map.value)` agrees across peers.
+
+### Capability tokens vs ACL grants
+
+The package ships two authorization models. They are not interchangeable and nothing converts between them implicitly.
+
+| | `CapabilityToken` | `AccessGrant` / `ACLEngine` |
+| --- | --- | --- |
+| Shape | `scopes: ['namespace:resource:action']`, `issuer`, `subject`, `expiresAt` (seconds) | `permissions: [{ resource: 'mesh://ns/resource', actions }]`, `grantee`, `grantor`, `conditions` |
+| Matching | `covers()` / `matchScope()`, `*` per part | glob patterns (`*`, `**`, `?`), `*`/`admin` actions |
+| Signed | Yes, the issuer signs it | No, it is local state |
+| Revocable | No (only expires) | Yes, plus `maxUses`, time windows, usage counting |
+| Lives | travels with the holder, handed to a peer | in the enforcing pod, never leaves it |
+
+Use a token as the portable, verifiable thing you hand to another pod ("the issuer says you may do X"). Use grants as the local, revocable policy a pod keeps about who may touch what. To enforce a received token while keeping revocation, verify it, then convert it to a grant in your engine:
+
+```js
+import { ACLEngine, grantFromToken } from '@johnhenry/browsermesh-primitives';
+
+const acl = new ACLEngine();
+
+// `token` is a CapabilityToken a peer presented; `sender` is the pod ID the
+// transport authenticated for that peer.
+function accept(token, sender) {
+  // 1. Verify the issuer's signature over token.toJSON() yourself
+  //    (PodIdentity), then check it is addressed to the sender and live.
+  if (token.subject !== sender || token.isExpired()) throw new Error('rejected');
+  // 2. Mirror it into the ACL. Scope 'memory:notes:write' becomes
+  //    resource 'mesh://memory/notes', actions ['write'].
+  const grant = grantFromToken(token);
+  acl.addGrant(grant);
+  return grant.id; // keep it to revoke later
+}
+
+accept(token, sender);
+acl.check(sender, 'mesh://memory/notes', 'write'); // { allowed: true, grant }
+acl.revokeAll(sender);
+acl.check(sender, 'mesh://memory/notes', 'write'); // { allowed: false, reason: 'grant_revoked' }
+```
+
 
 ### Test Utilities
 

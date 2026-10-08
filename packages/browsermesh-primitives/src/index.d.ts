@@ -198,6 +198,7 @@ export declare class AccessGrant {
     usageCount?: number;
   });
   isExpired(now?: number): boolean;
+  isRevoked(): boolean;
   isWithinTimeWindow(now?: Date): boolean;
   check(resource: string, action: string, now?: number): CheckResult;
   consumeUse(): void;
@@ -254,6 +255,11 @@ export declare class ACLEngine {
 }
 
 export declare function generateGrantId(): string;
+
+export declare function grantFromToken(
+  token: { issuer: string; subject: string; scopes: string[]; expiresAt: number },
+  opts?: { grantor?: string; id?: string; created?: number }
+): AccessGrant;
 
 // CRDTs
 
@@ -367,3 +373,11 @@ export declare class LWWMap<T = unknown> {
     }>;
   }): LWWMap<T>;
 }
+
+// Size-bucket padding
+
+export declare const DEFAULT_PAD_BUCKETS: readonly number[];
+export declare const PAD_TRAILER_BYTES: 4;
+export declare function paddedLength(length: number, opts?: { buckets?: number[] }): number;
+export declare function padTo(bytes: Uint8Array, opts?: { buckets?: number[] }): Uint8Array;
+export declare function unpad(padded: Uint8Array): Uint8Array;

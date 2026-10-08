@@ -1409,6 +1409,208 @@ describe('NATTraversal', () => {
   });
 });
 
+// ── WebSocketTransport size-bucket padding + jitter (#191) ───────────
+
+describe('WebSocketTransport padding and jitter (#191)', () => {
+  let sockets;
+
+  function make(overrides = {}) {
+    sockets = [];
+    return new WebSocketTransport({
+      url: 'wss://relay.example.com',
+      reconnect: false,
+      heartbeatIntervalMs: 3600000,
+      _WebSocket: class extends MockWebSocket {
+        constructor(url, protocols) {
+          super(url, protocols);
+          sockets.push(this);
+        }
+      },
+      ...overrides,
+    });
+  }
+
+  async function open(t) {
+    const p = t.connect();
+    sockets[sockets.length - 1]._open();
+    await p;
+    return sockets[sockets.length - 1];
+  }
+
+  const frameLen = (f) => (f instanceof Uint8Array ? f.length : f.byteLength);
+
+  it('negative control: without padding, frame sizes track message sizes', async () => {
+    const t = make();
+    const sock = await open(t);
+    for (const n of [3, 40, 90, 200]) t.send('x'.repeat(n));
+    assert.deepEqual(sock._sent.map((f) => f.length), [3, 40, 90, 200]);
+    await t.close();
+  });
+
+  it('with padding, every frame is bucket-sized binary and the peer recovers the message', async () => {
+    const a = make({ padding: true });
+    const sockA = await open(a);
+    const b = make({ padding: true });
+    const sockB = await open(b);
+    const got = [];
+    b.on('message', (m) => got.push(m));
+
+    const messages = ['hi', 'x'.repeat(100), 'y'.repeat(240), JSON.stringify({ type: 'tool_call', n: 1 }), 'é'.repeat(300)];
+    for (const m of messages) a.send(m);
+    a.send({ type: 'envelope', body: 'obj' });
+    a.send(new Uint8Array([1, 2, 3]));
+
+    const sizes = sockA._sent.map(frameLen);
+    for (const f of sockA._sent) assert.ok(f instanceof Uint8Array, 'frames go out as binary');
+    assert.deepEqual([...new Set(sizes)].sort((x, y) => x - y), [256, 1024]);
+
+    for (const f of sockA._sent) sockB._message(f.buffer.slice(f.byteOffset, f.byteOffset + f.byteLength));
+    assert.deepEqual(got.slice(0, messages.length), messages);
+    assert.equal(got[messages.length], JSON.stringify({ type: 'envelope', body: 'obj' }));
+    assert.ok(got[messages.length + 1] instanceof Uint8Array);
+    assert.deepEqual([...got[messages.length + 1]], [1, 2, 3]);
+    await a.close();
+    await b.close();
+  });
+
+  it('requests arraybuffer frames from the socket when padding', async () => {
+    const t = make({ padding: true });
+    const sock = await open(t);
+    assert.equal(sock.binaryType, 'arraybuffer');
+    await t.close();
+  });
+
+  it('custom buckets apply', async () => {
+    const t = make({ padding: { buckets: [64, 128] } });
+    const sock = await open(t);
+    t.send('a');
+    t.send('b'.repeat(100));
+    assert.deepEqual(sock._sent.map(frameLen), [64, 128]);
+    await t.close();
+  });
+
+  it('a non-padded (text) frame arriving on a padding transport is reported, not delivered', async () => {
+    const t = make({ padding: true });
+    const sock = await open(t);
+    const errors = [];
+    const got = [];
+    t.on('error', (e) => errors.push(e));
+    t.on('message', (m) => got.push(m));
+    sock._message('plain text from a peer that is not padding');
+    assert.equal(got.length, 0);
+    assert.equal(errors.length, 1);
+    assert.match(errors[0].message, /padding is enabled/);
+    await t.close();
+  });
+
+  it('jitterMs delays sends but keeps their order', async () => {
+    const t = make({ jitterMs: 30 });
+    const sock = await open(t);
+    for (let i = 0; i < 8; i++) t.send(`m${i}`);
+    assert.equal(sock._sent.length < 8, true, 'sends are deferred');
+    await waitFor(() => sock._sent.length === 8, { timeout: 2000 });
+    assert.deepEqual(sock._sent, Array.from({ length: 8 }, (_, i) => `m${i}`));
+    await t.close();
+  });
+
+  it('close() cancels sends still waiting out their jitter delay', async () => {
+    const t = make({ jitterMs: 50 });
+    const sock = await open(t);
+    t.send('late');
+    await t.close();
+    await new Promise((r) => setTimeout(r, 120));
+    assert.deepEqual(sock._sent, []);
+  });
+
+  it('validates padding and jitterMs options', () => {
+    assert.throws(() => make({ jitterMs: -1 }), TypeError);
+    assert.throws(() => make({ padding: 'yes' }), TypeError);
+  });
+});
+
+// ── iceTransportPolicy (#190) ─────────────────────────────────────
+
+describe('iceTransportPolicy on WebRTCTransport / TransportFactory (#190)', () => {
+  const TURN = [{ urls: 'turn:relay.example.com:3478', username: 'u', credential: 'c' }];
+
+  function spyCtor(configs, pcs = []) {
+    return class extends MockRTCPeerConnection {
+      constructor(config) {
+        super(config);
+        configs.push(config);
+        pcs.push(this);
+      }
+    };
+  }
+
+  /** Drive an offerer-side connect() to completion so the PC gets built. */
+  async function connectOfferer(t, signaler, pcs) {
+    const p = t.connect();
+    setTimeout(() => {
+      signaler._receiveAnswer({ type: 'answer', sdp: 'mock-answer-sdp' });
+      if (pcs[0]._dataChannels[0]) pcs[0]._dataChannels[0]._open();
+    }, 10);
+    await p;
+  }
+
+  it('WebRTCTransport forwards iceTransportPolicy into the RTCConfiguration', async () => {
+    const configs = [];
+    const pcs = [];
+    const signaler = new MockSignaler();
+    const t = new WebRTCTransport({
+      localPodId: 'a', remotePodId: 'b', signaler,
+      config: { iceServers: TURN }, iceTransportPolicy: 'relay',
+      _RTCPeerConnection: spyCtor(configs, pcs),
+    });
+    await connectOfferer(t, signaler, pcs);
+    assert.equal(configs[0].iceTransportPolicy, 'relay');
+    assert.deepEqual(configs[0].iceServers, TURN);
+    await t.close();
+  });
+
+  it('WebRTCTransport accepts the policy inside config too, and rejects relay without TURN', () => {
+    assert.throws(
+      () => new WebRTCTransport({
+        localPodId: 'a', remotePodId: 'b', signaler: new MockSignaler(),
+        config: { iceTransportPolicy: 'relay' }, _RTCPeerConnection: MockRTCPeerConnection,
+      }),
+      /requires at least one turn/,
+    );
+    assert.doesNotThrow(() => new WebRTCTransport({
+      localPodId: 'a', remotePodId: 'b', signaler: new MockSignaler(),
+      config: { iceServers: TURN, iceTransportPolicy: 'relay' }, _RTCPeerConnection: MockRTCPeerConnection,
+    }));
+  });
+
+  it('TransportFactory applies its iceTransportPolicy to created webrtc transports', async () => {
+    const configs = [];
+    const pcs = [];
+    const signaler = new MockSignaler();
+    const factory = new TransportFactory({
+      iceTransportPolicy: 'relay', _RTCPeerConnection: spyCtor(configs, pcs),
+    });
+    const t = await factory.create('webrtc', {
+      localPodId: 'a', remotePodId: 'b', signaler, config: { iceServers: TURN },
+    });
+    await connectOfferer(t, signaler, pcs);
+    assert.equal(configs[0].iceTransportPolicy, 'relay');
+    await t.close();
+  });
+
+  it('negative control: no policy leaves the RTCConfiguration without the key', async () => {
+    const configs = [];
+    const pcs = [];
+    const signaler = new MockSignaler();
+    const factory = new TransportFactory({ _RTCPeerConnection: spyCtor(configs, pcs) });
+    const t = await factory.create('webrtc', {
+      localPodId: 'a', remotePodId: 'b', signaler, config: { iceServers: TURN },
+    });
+    await connectOfferer(t, signaler, pcs);
+    assert.equal('iceTransportPolicy' in configs[0], false);
+    await t.close();
+  });
+});
+
 // ── TransportFactory ──────────────────────────────────────────────
 
 describe('TransportFactory', () => {

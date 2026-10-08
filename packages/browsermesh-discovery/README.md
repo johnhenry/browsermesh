@@ -41,6 +41,22 @@ npm install @johnhenry/browsermesh-discovery @johnhenry/browsermesh-primitives
 import { DhtNode, DiscoveryManager, SwarmCoordinator } from '@johnhenry/browsermesh-discovery';
 ```
 
+## `StealthAgent` is sharding, not encryption
+
+`StealthAgent.hide(stateString)` / `reconstitute()` split a state string into
+`threshold` plaintext data shards plus XOR parity shards and store them in the
+DHT under `stealth:<agentId>:shard:<i>`. It improves availability, not secrecy:
+
+- the shards contain the state verbatim (data shards) or its XOR (parity);
+  anyone who can read the DHT entries can read the state;
+- every parity shard is the same XOR of all data chunks, so the state survives
+  the loss of **one** data shard, not `total - threshold` of them;
+- the checksum detects accidental corruption only, not tampering;
+- the keys name the agent they hold state for.
+
+If the state is sensitive, encrypt it before `hide()` and decrypt after
+`reconstitute()`; this package does not manage keys.
+
 ## License
 
 MIT

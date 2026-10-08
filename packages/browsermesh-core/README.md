@@ -50,6 +50,24 @@ npm install @johnhenry/browsermesh-core @johnhenry/browsermesh-primitives
 import { MeshIdentityManager, MeshKeyring, TrustGraph } from '@johnhenry/browsermesh-core';
 ```
 
+## Padding group-key envelopes
+
+`GroupKeyManager.encrypt()` leaks the exact plaintext length to anything that
+sees the ciphertext (a relay, for instance). Pass `padding` to round the
+plaintext up to a size bucket before sealing it:
+
+```js
+const { ciphertext, iv, epoch } = await keys.encrypt(bytes, { padding: true });
+const back = await keys.decrypt(ciphertext, iv, epoch, { padding: true });
+```
+
+`padding: true` uses buckets of 256 / 1024 / 4096 / 16384 bytes (larger
+payloads round up to a multiple of 16384); `{ buckets: [...] }` picks your own;
+`new GroupKeyManager({ ..., padding })` sets the default. Ciphertexts are then
+`bucket + 16` bytes. Sender and receiver must agree on the setting (the padded
+plaintext is not self-describing). Off by default; no cover traffic or timing
+protection is provided.
+
 ## License
 
 MIT

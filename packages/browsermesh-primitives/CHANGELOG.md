@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.0
+
+### Minor Changes
+
+- e4e6899: ACL and CRDT fixes, plus capability/ACL guidance.
+
+  - `ACLEngine.check()` / `AccessGrant.check()` now report `grant_revoked` for a revoked grant instead of `grant_expired`. `grant_expired` is reserved for `conditions.expires` and exhausted `maxUses`. New `AccessGrant#isRevoked()`; `isExpired()` is unchanged. Callers that matched on `reason === 'grant_expired'` to detect revocation must also handle `grant_revoked`.
+  - `LWWMap` `value`, `toJSON()`, `keys()`, `values()` and `entries()` now yield keys in sorted order, so converged replicas serialize identically.
+  - New `grantFromToken(token)` maps a `CapabilityToken` onto an `AccessGrant`, and the README explains when to use tokens versus grants and lists the ACL reason strings.
+
+- 774e86e: Add `padTo()`, `unpad()`, `paddedLength()`, `DEFAULT_PAD_BUCKETS` and `PAD_TRAILER_BYTES`: opt-in size-bucket padding (default buckets 256/1024/4096/16384; oversize payloads round up to a multiple of the largest) so a relay that only sees ciphertext learns the bucket, not the exact payload length. Pad before sealing.
+
 ## 0.2.0
 
 ### Minor Changes

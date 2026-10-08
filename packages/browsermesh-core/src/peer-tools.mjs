@@ -560,9 +560,14 @@ export class TimestampProofTool extends BrowserTool {
 
 // ── Stealth tools ─────────────────────────────────────────────────────
 
+// The agent is a `StealthAgent` from @johnhenry/browsermesh-discovery:
+// `hide(stateString)` / `reconstitute()`. It shards the state across the DHT
+// as plaintext slices plus XOR parity. There is NO encryption, so these tools
+// say so; encrypt the state first if it is sensitive.
+
 export class StealthSaveTool extends BrowserTool {
   get name() { return 'stealth_save' }
-  get description() { return 'Save agent state as threshold-encrypted shards distributed across the DHT.' }
+  get description() { return 'Save agent state as XOR-parity shards distributed across the DHT. The shards are NOT encrypted: anyone who can read the DHT entries can read the state.' }
   get parameters() {
     return {
       type: 'object',
@@ -578,8 +583,11 @@ export class StealthSaveTool extends BrowserTool {
     const agent = peerToolsContext.getStealthAgent()
     if (!agent) return { success: false, output: '', error: 'Stealth agent not initialized.' }
     try {
-      await agent.saveState(state)
-      return { success: true, output: 'State saved as distributed shards.' }
+      const manifest = typeof agent.hide === 'function'
+        ? await agent.hide(JSON.stringify(state))
+        : await agent.saveState(state) // duck-typed agent from before the tool matched StealthAgent
+      const shards = manifest?.shardIds?.length
+      return { success: true, output: `State saved as ${shards ?? ''}${shards ? ' ' : ''}unencrypted distributed shards.` }
     } catch (err) {
       return { success: false, output: '', error: err.message }
     }
@@ -588,7 +596,7 @@ export class StealthSaveTool extends BrowserTool {
 
 export class StealthRestoreTool extends BrowserTool {
   get name() { return 'stealth_restore' }
-  get description() { return 'Restore agent state from threshold-encrypted DHT shards.' }
+  get description() { return 'Restore agent state from XOR-parity shards in the DHT (shards are not encrypted).' }
   get parameters() { return { type: 'object', properties: {} } }
   get permission() { return 'approve' }
 
@@ -596,7 +604,14 @@ export class StealthRestoreTool extends BrowserTool {
     const agent = peerToolsContext.getStealthAgent()
     if (!agent) return { success: false, output: '', error: 'Stealth agent not initialized.' }
     try {
-      const state = await agent.restoreState()
+      if (typeof agent.reconstitute === 'function') {
+        if (typeof agent.isViable === 'function' && !agent.isViable()) {
+          return { success: true, output: 'No state found.' }
+        }
+        const blob = await agent.reconstitute()
+        return { success: true, output: blob ? blob : 'No state found.' }
+      }
+      const state = await agent.restoreState() // duck-typed agent from before the tool matched StealthAgent
       return { success: true, output: state ? JSON.stringify(state) : 'No state found.' }
     } catch (err) {
       return { success: false, output: '', error: err.message }

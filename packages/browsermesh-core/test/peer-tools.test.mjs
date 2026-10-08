@@ -39,6 +39,9 @@ import {
   registerMeshPeerTools,
 } from '../src/peer-tools.mjs'
 import { BrowserToolRegistry } from '../src/compat.mjs'
+// Real StealthAgent + DhtNode (cross-package relative import, like hardening.test.mjs)
+import { StealthAgent } from '../../browsermesh-discovery/src/stealth.mjs'
+import { DhtNode } from '../../browsermesh-discovery/src/dht.mjs'
 
 describe('MeshPeerToolsContext', () => {
   it('is exported as a singleton', () => {
@@ -505,5 +508,68 @@ describe('registerMeshPeerTools', () => {
     assert.ok(registry.get('mesh_chat_create_room') instanceof MeshChatCreateRoomTool)
     const specs = registry.listSpecs()
     assert.ok(specs.some((s) => s.name === 'federated_compute_submit'))
+  })
+})
+
+// #189: the tools used to call agent.saveState/restoreState, which StealthAgent
+// does not have, so every call failed. These drive them against a real agent.
+describe('stealth tools against a real StealthAgent (#189)', () => {
+  let dhtNode
+  let agent
+
+  beforeEach(() => {
+    dhtNode = new DhtNode({ localId: 'stealth-node', sendFn: () => {} })
+    agent = new StealthAgent({ agentId: 'agent-007', dhtNode, threshold: 3, totalShards: 5 })
+    peerToolsContext.setStealthAgent(agent)
+  })
+  afterEach(() => peerToolsContext.setStealthAgent(null))
+
+  const state = { goal: 'find the needle', step: 4, notes: ['alpha', 'beta'] }
+
+  it('stealth_save then stealth_restore round-trips the state', async () => {
+    const saved = await new StealthSaveTool().execute({ state })
+    assert.equal(saved.success, true, saved.error)
+    assert.equal(agent.isViable(), true)
+    assert.equal(agent.getManifest().shardIds.length, 5)
+
+    const restored = await new StealthRestoreTool().execute({})
+    assert.equal(restored.success, true, restored.error)
+    assert.deepEqual(JSON.parse(restored.output), state)
+  })
+
+  it('stealth_restore reports No state found when nothing was saved', async () => {
+    const restored = await new StealthRestoreTool().execute({})
+    assert.equal(restored.success, true)
+    assert.equal(restored.output, 'No state found.')
+  })
+
+  it('stealth_restore survives the loss of one data shard (XOR parity)', async () => {
+    await new StealthSaveTool().execute({ state })
+    dhtNode.store('stealth:agent-007:shard:1', null)
+    const restored = await new StealthRestoreTool().execute({})
+    assert.equal(restored.success, true, restored.error)
+    assert.deepEqual(JSON.parse(restored.output), state)
+  })
+
+  it('does not claim encryption, and the stored shards are plaintext (honesty check)', async () => {
+    assert.doesNotMatch(new StealthSaveTool().description, /threshold-encrypted|encrypted shards/i)
+    assert.match(new StealthSaveTool().description, /NOT encrypted/)
+    assert.match(new StealthRestoreTool().description, /not encrypted/)
+    await new StealthSaveTool().execute({ state: { secret: 'hunter2-hunter2-hunter2' } })
+    const stored = [0, 1, 2]
+      .map((i) => dhtNode.get(`stealth:agent-007:shard:${i}`).data)
+      .join('')
+    assert.ok(stored.includes('hunter2-hunter2-hunter2'), 'data shards hold the state verbatim')
+  })
+
+  it('a duck-typed agent exposing saveState/restoreState still works', async () => {
+    let held = null
+    peerToolsContext.setStealthAgent({
+      async saveState(s) { held = s },
+      async restoreState() { return held },
+    })
+    assert.equal((await new StealthSaveTool().execute({ state })).success, true)
+    const restored = await new StealthRestoreTool().execute({})
+    assert.deepEqual(JSON.parse(restored.output), state)
   })
 })

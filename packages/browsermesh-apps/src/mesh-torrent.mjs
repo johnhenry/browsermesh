@@ -212,6 +212,21 @@ const DEFAULT_BUSY_RETRIES = 3
 /** Backoff before the first `busy` retry; grows linearly per attempt. */
 const DEFAULT_BUSY_BACKOFF_MS = 250
 
+/** Pieces `download()` keeps in flight at once unless told otherwise. */
+const DEFAULT_DOWNLOAD_CONCURRENCY = 4
+
+/** Hard ceiling on piece concurrency, whatever a caller asks for. */
+const MAX_DOWNLOAD_CONCURRENCY = 32
+
+/** Longest `chunkCids` list accepted in a manifest a remote peer sends (`maxManifestChunks`); 16384 x 64KB = 1GiB. */
+const DEFAULT_MAX_MANIFEST_CHUNKS = 16384
+
+/** Remembered remote manifests, least recently used evicted first (`maxRemoteManifests`). */
+const DEFAULT_MAX_REMOTE_MANIFESTS = 64
+
+/** A piece CID: the lowercase hex SHA-256 of the piece. */
+const CID_RE = /^[0-9a-f]{64}$/
+
 // ---------------------------------------------------------------------------
 // Base64 helpers -- deliberately duplicated rather than shared, matching
 // this family's established convention (see chunk-replication.mjs's /
@@ -258,9 +273,46 @@ function isUsableManifest(m) {
     && Number.isSafeInteger(m.size) && m.size >= 0
 }
 
+/**
+ * A manifest a REMOTE peer sent us, held to the bounds the receiver chose:
+ * the basic shape of `isUsableManifest`, plus at most `maxChunks` pieces (and
+ * `maxSize` bytes), every piece CID a 64-hex SHA-256, and a piece count that
+ * matches the declared size (`ceil(size / chunkSize)` when the manifest says
+ * its `chunkSize`). Returns the reason it was refused, or `null` when fine.
+ *
+ * @param {*} m
+ * @param {{ maxChunks: number, maxSize: number }} bounds - `Infinity` = unbounded
+ * @returns {string|null}
+ */
+function remoteManifestProblem(m, { maxChunks, maxSize }) {
+  if (!isUsableManifest(m)) return 'malformed'
+  if (m.chunkCids.length > maxChunks) return 'too-many-chunks'
+  if (m.size > maxSize) return 'too-large'
+  for (const cid of m.chunkCids) {
+    if (!CID_RE.test(cid)) return 'bad-chunk-cid'
+  }
+  if (m.cid !== undefined && !(typeof m.cid === 'string' && CID_RE.test(m.cid))) return 'bad-cid'
+  if (m.name !== undefined && (typeof m.name !== 'string' || m.name.length > 1024)) return 'bad-name'
+  if (m.chunkSize !== undefined && !(Number.isSafeInteger(m.chunkSize) && m.chunkSize > 0)) return 'bad-chunk-size'
+  const expected = m.size === 0 ? 0 : (m.chunkSize !== undefined ? Math.ceil(m.size / m.chunkSize) : null)
+  if (expected !== null) {
+    if (m.chunkCids.length !== expected) return 'size-mismatch'
+  } else if (m.chunkCids.length < 1 || m.chunkCids.length > m.size) {
+    return 'size-mismatch'
+  }
+  return null
+}
+
 function checkLimit(name, value) {
   if (typeof value !== 'number' || Number.isNaN(value) || value < 0) {
     throw new TypeError(`createTorrentService: ${name} must be a non-negative number (0 or Infinity = unlimited), got ${String(value)}`)
+  }
+}
+
+/** A piece concurrency: a whole number from 1 to MAX_DOWNLOAD_CONCURRENCY. */
+function checkConcurrency(name, value) {
+  if (!Number.isInteger(value) || value < 1 || value > MAX_DOWNLOAD_CONCURRENCY) {
+    throw new TypeError(`createTorrentService: ${name} must be a whole number from 1 to ${MAX_DOWNLOAD_CONCURRENCY}, got ${String(value)}`)
   }
 }
 
@@ -310,6 +362,22 @@ const orUnlimited = (n) => (n === 0 ? Infinity : n)
  *   `announce`s accepted per peer per rolling minute; extras are dropped. `0` = unlimited.
  * @param {number} [opts.busyRetries=3] - Downloader: retries on one provider after `busy`.
  * @param {number} [opts.busyBackoffMs=250] - Downloader: first backoff after `busy` (grows linearly).
+ * @param {number} [opts.downloadConcurrency=4] - Default number of pieces
+ *   `api.download()` fetches in parallel (a per-call `concurrency` overrides it).
+ *   Whole numbers 1-32; `1` fetches strictly one piece at a time.
+ * @param {number} [opts.maxManifestChunks=16384] - Longest `chunkCids` list
+ *   accepted in a manifest sent by another peer. Longer ones are ignored, as
+ *   are manifests whose piece CIDs are not 64-hex SHA-256 digests or whose piece
+ *   count does not match their declared size. `0` or `Infinity` = unlimited.
+ * @param {number} [opts.maxManifestSize=0] - Largest `size` (bytes) accepted in
+ *   a manifest sent by another peer. `0` = unlimited.
+ * @param {number} [opts.maxRemoteManifests=64] - Manifests learned from other
+ *   peers (via `announce` or a manifest request) that are remembered at once;
+ *   the least recently used is forgotten, along with the providers recorded only
+ *   for its pieces. `0` = unlimited.
+ * @param {Function|object} [opts.webtorrent] - Forwarded to `new TorrentManager()`:
+ *   the WebTorrent constructor or client to use for real BitTorrent swarming.
+ *   Nothing is ever loaded from a CDN. See `TorrentManager`.
  * @param {() => number} [opts.now] - Clock for rate limits (tests).
  * @param {(ms: number) => Promise<void>} [opts.sleep] - Sleep for rate limits/backoff (tests).
  * @returns {import('./mesh-service.mjs').MeshService}
@@ -330,6 +398,11 @@ export function createTorrentService({
   maxAnnouncesPerPeerPerMinute = DEFAULT_MAX_ANNOUNCES_PER_PEER_PER_MINUTE,
   busyRetries = DEFAULT_BUSY_RETRIES,
   busyBackoffMs = DEFAULT_BUSY_BACKOFF_MS,
+  downloadConcurrency = DEFAULT_DOWNLOAD_CONCURRENCY,
+  maxManifestChunks = DEFAULT_MAX_MANIFEST_CHUNKS,
+  maxManifestSize = 0,
+  maxRemoteManifests = DEFAULT_MAX_REMOTE_MANIFESTS,
+  webtorrent,
   now = Date.now,
   sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
 } = {}) {
@@ -338,9 +411,13 @@ export function createTorrentService({
   if (authorize !== undefined && typeof authorize !== 'function') {
     throw new TypeError('createTorrentService: authorize must be a function (fromPubKey, request) => boolean|Promise<boolean>')
   }
-  for (const [n, v] of Object.entries({ maxConcurrentServes, maxConcurrentServesPerPeer, maxBytesPerPeerPerSec, maxAnnouncesPerPeerPerMinute })) {
+  for (const [n, v] of Object.entries({
+    maxConcurrentServes, maxConcurrentServesPerPeer, maxBytesPerPeerPerSec, maxAnnouncesPerPeerPerMinute,
+    maxManifestChunks, maxManifestSize, maxRemoteManifests,
+  })) {
     checkLimit(n, v)
   }
+  checkConcurrency('downloadConcurrency', downloadConcurrency)
   for (const [n, o] of [['chunkStore', injectedChunkStore], ['manifestStore', injectedManifestStore]]) {
     if (o !== undefined && (o === null || typeof o !== 'object')) {
       throw new TypeError(`createTorrentService: ${n} must be an object`)
@@ -359,6 +436,8 @@ export function createTorrentService({
   const globalServeCap = orUnlimited(maxConcurrentServes)
   const perPeerServeCap = orUnlimited(maxConcurrentServesPerPeer)
   const announceCap = orUnlimited(maxAnnouncesPerPeerPerMinute)
+  const manifestBounds = { maxChunks: orUnlimited(maxManifestChunks), maxSize: orUnlimited(maxManifestSize) }
+  const remoteCap = orUnlimited(maxRemoteManifests)
 
   return {
     name: 'torrent',
@@ -373,6 +452,7 @@ export function createTorrentService({
         chunkSize,
         chunkStore,
         manifestStore,
+        webtorrent,
         onLog: (level, msg) => log('mesh-torrent:internal', { level, msg }),
       })
 
@@ -383,8 +463,17 @@ export function createTorrentService({
        */
       const held = new Map()
 
-      /** magnetURI -> manifest a peer announced or answered with, for content we do NOT hold. Memory only. */
+      /**
+       * magnetURI -> manifest a peer announced or answered with, for content we do NOT hold. Memory only.
+       * Bounded (`maxRemoteManifests`): Map insertion order is recency order, oldest first.
+       */
       const remoteManifests = new Map()
+
+      /** piece cid -> number of `remoteManifests` listing it, so providers recorded only for forgotten manifests can be dropped. */
+      const remoteCidRefs = new Map()
+
+      /** magnetURI -> number of in-flight downloads using that remote manifest; those are never evicted. */
+      const pinnedRemote = new Map()
 
       /** piece cid -> magnetURIs (in `held`) that list it: what a chunk-request may be served from. */
       const chunkIndex = new Map()
@@ -392,7 +481,55 @@ export function createTorrentService({
       /** @type {Map<string, Set<string>>} cid -> pubKeys known to currently hold that piece */
       const chunkOwners = new Map()
 
-      const manifestFor = (magnetURI) => held.get(magnetURI) ?? remoteManifests.get(magnetURI)
+      function manifestFor(magnetURI) {
+        const mine = held.get(magnetURI)
+        if (mine) return mine
+        const remote = remoteManifests.get(magnetURI)
+        if (remote) {
+          // Use counts as recency: move it to the young end.
+          remoteManifests.delete(magnetURI)
+          remoteManifests.set(magnetURI, remote)
+        }
+        return remote
+      }
+
+      /** Forget a remote manifest, and the providers known only because of it. */
+      function dropRemote(magnetURI) {
+        const manifest = remoteManifests.get(magnetURI)
+        if (!manifest) return false
+        remoteManifests.delete(magnetURI)
+        for (const cid of new Set(manifest.chunkCids)) {
+          const left = (remoteCidRefs.get(cid) ?? 1) - 1
+          if (left > 0) {
+            remoteCidRefs.set(cid, left)
+            continue
+          }
+          remoteCidRefs.delete(cid)
+          if (!chunkIndex.has(cid)) chunkOwners.delete(cid)
+        }
+        return true
+      }
+
+      /** Remember a remote manifest, evicting the least recently used ones past `maxRemoteManifests`. */
+      function rememberRemote(magnetURI, manifest) {
+        dropRemote(magnetURI)
+        remoteManifests.set(magnetURI, manifest)
+        for (const cid of new Set(manifest.chunkCids)) remoteCidRefs.set(cid, (remoteCidRefs.get(cid) ?? 0) + 1)
+        if (remoteCap === Infinity) return
+        for (const key of [...remoteManifests.keys()]) {
+          if (remoteManifests.size <= remoteCap) break
+          if (key === magnetURI || pinnedRemote.has(key)) continue
+          dropRemote(key)
+        }
+      }
+
+      /** Vet a manifest another peer sent; log and return false when it is outside the configured bounds. */
+      function acceptableRemote(manifest, from, magnetURI) {
+        const problem = remoteManifestProblem(manifest, manifestBounds)
+        if (!problem) return true
+        log('mesh-torrent:remote-manifest-rejected', { from, magnetURI, reason: problem })
+        return false
+      }
 
       function indexHeld(magnetURI, manifest) {
         for (const cid of manifest.chunkCids) {
@@ -515,8 +652,8 @@ export function createTorrentService({
           log('mesh-torrent:announce-rate-limited', { from: fromPubKey })
           return
         }
-        if (isUsableManifest(msg.manifest)) {
-          if (!held.has(msg.magnetURI)) remoteManifests.set(msg.magnetURI, msg.manifest)
+        if (acceptableRemote(msg.manifest, fromPubKey, msg.magnetURI)) {
+          if (!held.has(msg.magnetURI)) rememberRemote(msg.magnetURI, msg.manifest)
           recordOwner(fromPubKey, msg.manifest.chunkCids)
         }
         ctx.emit('torrent:announce-received', {
@@ -546,10 +683,10 @@ export function createTorrentService({
         const pending = pendingManifestRequests.get(msg.requestId)
         if (!pending || !pending.targets.has(fromPubKey)) return
         pending.targets.delete(fromPubKey)
-        if (isUsableManifest(msg.manifest)) {
+        if (acceptableRemote(msg.manifest, fromPubKey, pending.magnetURI)) {
           clearTimeout(pending.timer)
           pendingManifestRequests.delete(msg.requestId)
-          if (!held.has(pending.magnetURI)) remoteManifests.set(pending.magnetURI, msg.manifest)
+          if (!held.has(pending.magnetURI)) rememberRemote(pending.magnetURI, msg.manifest)
           recordOwner(fromPubKey, msg.manifest.chunkCids)
           pending.resolve(msg.manifest)
           return
@@ -734,11 +871,12 @@ export function createTorrentService({
        * whichever known/candidate provider actually delivers it.
        * @param {string} cid
        * @param {string[]} [candidatePeers]
-       * @returns {Promise<Uint8Array>}
+       * @returns {Promise<{ bytes: Uint8Array, from: string|null, written: boolean }>} `from` is
+       *   null and `written` false when the piece was already in the local store.
        */
       async function fetchChunk(cid, candidatePeers) {
         const already = await chunkStore.get(cid)
-        if (already) return already
+        if (already) return { bytes: already, from: null, written: false }
 
         const owners = new Set([...(chunkOwners.get(cid) || []), ...(candidatePeers || [])])
         owners.delete(peerNode.podId)
@@ -759,7 +897,7 @@ export function createTorrentService({
               await chunkStore.save(cid, bytes)
               recordOwner(pubKey, [cid])
               ctx.emit('torrent:chunk-received', { from: pubKey, cid, size: bytes.length })
-              return bytes
+              return { bytes, from: pubKey, written: true }
             } catch (err) {
               lastErr = err
               if (err?.code === 'busy' && attempt < busyRetries) {
@@ -786,8 +924,8 @@ export function createTorrentService({
         const prior = held.get(magnetURI)
         if (prior) unindexHeld(magnetURI, prior)
         held.set(magnetURI, manifest)
-        remoteManifests.delete(magnetURI)
         indexHeld(magnetURI, manifest)
+        dropRemote(magnetURI) // after indexHeld, so providers of pieces we now hold are kept
         await manifestStore.set(magnetURI, manifest)
       }
 
@@ -840,75 +978,188 @@ export function createTorrentService({
         })
       }
 
+      /** piece cid -> number of in-flight downloads that newly wrote it (cleanup must not delete a piece another download is still using) */
+      const inflightWrites = new Map()
+
       /**
        * Download content from the swarm: piece-by-piece, from whichever
        * peer(s) are known (via a prior `announce`, or `opts.peers`) to hold
        * each piece -- not necessarily the original seeder. See module doc
        * comment's "WHAT MAKES THIS A REAL SWARM" section.
+       *
+       * Between learning the manifest and requesting the first piece,
+       * `opts.onManifest` can veto the download (a storage-quota gate). Pieces
+       * are fetched `opts.concurrency` at a time (default `downloadConcurrency`,
+       * 4); `1` is strictly sequential. If the download fails after some pieces
+       * were stored, the ones this call wrote itself (and no held torrent lists)
+       * are removed again, so a quota-accounting host stays consistent.
+       *
        * @param {string} magnetURI
        * @param {object} [opts]
        * @param {string[]} [opts.peers] - Candidate peers to ask for the
        *   manifest (if not already known) and/or any piece with no other
        *   known provider.
+       * @param {(manifest: { magnetURI: string, infoHash: string, name: string,
+       *   size: number, chunkSize?: number, chunkCids: string[], cid?: string }) => boolean|void|Promise<boolean|void>} [opts.onManifest]
+       *   Awaited once the manifest is known and before any piece is requested
+       *   or written. Return `false` (or throw/reject) to abort: the download
+       *   rejects, nothing is fetched. A `false` rejects with `code:
+       *   'manifest-rejected'`; a throw propagates unchanged. Any other return
+       *   value lets the download proceed. The manifest is a copy; mutating it
+       *   changes nothing.
+       * @param {(p: { received: number, total: number, bytes: number, size: number,
+       *   cid: string, from: string|null }) => void} [opts.onProgress] - Called
+       *   after each piece is in hand: `received` of `total` pieces, `bytes`
+       *   received so far of `size`; `from` is the provider's pubKey, or `null`
+       *   for a piece already in the local store. A throw here is logged, not fatal.
+       * @param {number} [opts.concurrency] - Pieces fetched in parallel, a whole
+       *   number from 1 to 32. Defaults to the service's `downloadConcurrency`.
+       *   Each provider is still held to its own `busy` limits (see `busyRetries`).
        * @returns {Promise<{data: Uint8Array, info: import('./peer-torrent.mjs').TorrentInfo}>}
        */
       async function download(magnetURI, opts = {}) {
+        const { onManifest, onProgress, peers } = opts
+        if (onManifest !== undefined && typeof onManifest !== 'function') {
+          throw new TypeError('download: onManifest must be a function')
+        }
+        if (onProgress !== undefined && typeof onProgress !== 'function') {
+          throw new TypeError('download: onProgress must be a function')
+        }
+        const concurrency = opts.concurrency ?? downloadConcurrency
+        checkConcurrency('concurrency', concurrency)
+
         await ready
         ctx.emit('torrent:download-start', { magnetURI })
 
-        const manifest = manifestFor(magnetURI) || await requestManifest(magnetURI, opts.peers)
+        const manifest = manifestFor(magnetURI) || await requestManifest(magnetURI, peers)
         if (!manifest) {
           throw new Error(
             `mesh-torrent: no manifest known for ${magnetURI} (no prior announce, and no peer responded -- supply opts.peers)`,
           )
         }
 
-        const pieces = []
-        for (const cid of manifest.chunkCids) {
-          pieces.push(await fetchChunk(cid, opts.peers))
-        }
-        const data = concatChunks(pieces)
-        if (data.length !== manifest.size) {
-          throw new Error(
-            `mesh-torrent: reassembled ${data.length} bytes but manifest for ${magnetURI} declares size ${manifest.size}`,
-          )
-        }
-        const contentCid = await ChunkStore.computeCid(data)
-        if (typeof manifest.cid === 'string' && manifest.cid !== contentCid) {
-          throw new Error(`mesh-torrent: reassembled content for ${magnetURI} does not match the manifest's cid`)
+        // While this download runs its remote manifest must not be evicted by other announces.
+        const pinned = remoteManifests.has(magnetURI)
+        if (pinned) pinnedRemote.set(magnetURI, (pinnedRemote.get(magnetURI) ?? 0) + 1)
+        /** pieces this call newly wrote */
+        const written = new Set()
+        let finished = false
+        const settleWrites = async (keep) => {
+          if (finished) return
+          finished = true
+          const removable = []
+          for (const cid of written) {
+            const left = (inflightWrites.get(cid) ?? 1) - 1
+            if (left > 0) inflightWrites.set(cid, left)
+            else {
+              inflightWrites.delete(cid)
+              if (!keep && !chunkIndex.has(cid)) removable.push(cid)
+            }
+          }
+          if (pinned) {
+            const n = (pinnedRemote.get(magnetURI) ?? 1) - 1
+            if (n > 0) pinnedRemote.set(magnetURI, n)
+            else pinnedRemote.delete(magnetURI)
+          }
+          await Promise.all(removable.map((cid) => Promise.resolve(chunkStore.remove(cid)).catch((err) => {
+            log('mesh-torrent:cleanup-failed', { cid, error: err?.message || String(err) })
+          })))
         }
 
-        // Register this peer as a full holder via TorrentManager's own
-        // seed() -- genuinely correct, not a hack: a peer with every piece
-        // of a torrent IS, in real BitTorrent terms, now a seed for it, and
-        // content-addressing makes this self-consistent -- tm.seed() on
-        // these identical bytes deterministically reproduces the SAME
-        // magnetURI/infoHash (same hash, same truncation), so this doesn't
-        // create a second, different torrent identity for the same content.
-        // The pieces are re-cut at the size the manifest used (inferred from
-        // its first piece when the announcing peer did not say), so they are
-        // the ones already in the store and nothing is stored twice.
-        const pieceSize = manifest.chunkSize
-          ?? (pieces.length > 1 ? pieces[0].length : Math.max(data.length, 1))
-        const info = await tm.seed(data, { name: manifest.name, chunkSize: pieceSize })
-        if (info.magnetURI !== magnetURI) {
-          log('mesh-torrent:magnet-mismatch-after-reassembly', { expected: magnetURI, got: info.magnetURI })
-        }
-        const stored = await tm.getManifest(info.magnetURI)
-        await holdManifest(info.magnetURI, stored ?? {
-          infoHash: info.infoHash, name: manifest.name, size: data.length, chunkSize: pieceSize,
-          chunkCids: manifest.chunkCids, cid: contentCid,
-        })
-        if (info.magnetURI !== magnetURI) remoteManifests.delete(magnetURI)
+        try {
+          if (onManifest) {
+            const verdict = await onManifest({ ...manifest, magnetURI, chunkCids: [...manifest.chunkCids] })
+            if (verdict === false) {
+              const err = new Error(`mesh-torrent: download of ${magnetURI} refused by onManifest`)
+              err.code = 'manifest-rejected'
+              throw err
+            }
+          }
 
-        ctx.emit('torrent:download-complete', { magnetURI, name: manifest.name, size: data.length })
-        return { data, info }
+          const cids = manifest.chunkCids
+          const total = cids.length
+          const pieces = new Array(total)
+          let next = 0
+          let received = 0
+          let bytes = 0
+          let failure = null
+          const worker = async () => {
+            while (failure === null) {
+              const index = next++
+              if (index >= total) return
+              try {
+                const got = await fetchChunk(cids[index], peers)
+                if (got.written && !written.has(cids[index])) {
+                  written.add(cids[index])
+                  inflightWrites.set(cids[index], (inflightWrites.get(cids[index]) ?? 0) + 1)
+                }
+                pieces[index] = got.bytes
+                received++
+                bytes += got.bytes.length
+                if (onProgress) {
+                  try {
+                    onProgress({ received, total, bytes, size: manifest.size, cid: cids[index], from: got.from })
+                  } catch (err) {
+                    log('mesh-torrent:progress-callback-error', { magnetURI, error: err?.message || String(err) })
+                  }
+                }
+              } catch (err) {
+                failure ??= err
+                return
+              }
+            }
+          }
+          await Promise.all(Array.from({ length: Math.min(concurrency, total) }, worker))
+          if (failure) throw failure
+
+          const data = concatChunks(pieces)
+          if (data.length !== manifest.size) {
+            throw new Error(
+              `mesh-torrent: reassembled ${data.length} bytes but manifest for ${magnetURI} declares size ${manifest.size}`,
+            )
+          }
+          const contentCid = await ChunkStore.computeCid(data)
+          if (typeof manifest.cid === 'string' && manifest.cid !== contentCid) {
+            throw new Error(`mesh-torrent: reassembled content for ${magnetURI} does not match the manifest's cid`)
+          }
+
+          // Register this peer as a full holder via TorrentManager's own
+          // seed() -- genuinely correct, not a hack: a peer with every piece
+          // of a torrent IS, in real BitTorrent terms, now a seed for it, and
+          // content-addressing makes this self-consistent -- tm.seed() on
+          // these identical bytes deterministically reproduces the SAME
+          // magnetURI/infoHash (same hash, same truncation), so this doesn't
+          // create a second, different torrent identity for the same content.
+          // The pieces are re-cut at the size the manifest used (inferred from
+          // its first piece when the announcing peer did not say), so they are
+          // the ones already in the store and nothing is stored twice.
+          const pieceSize = manifest.chunkSize
+            ?? (pieces.length > 1 ? pieces[0].length : Math.max(data.length, 1))
+          const info = await tm.seed(data, { name: manifest.name, chunkSize: pieceSize })
+          if (info.magnetURI !== magnetURI) {
+            log('mesh-torrent:magnet-mismatch-after-reassembly', { expected: magnetURI, got: info.magnetURI })
+          }
+          const stored = await tm.getManifest(info.magnetURI)
+          await holdManifest(info.magnetURI, stored ?? {
+            infoHash: info.infoHash, name: manifest.name, size: data.length, chunkSize: pieceSize,
+            chunkCids: manifest.chunkCids, cid: contentCid,
+          })
+          if (info.magnetURI !== magnetURI) dropRemote(magnetURI)
+
+          ctx.emit('torrent:download-complete', { magnetURI, name: manifest.name, size: data.length })
+          await settleWrites(true)
+          return { data, info }
+        } catch (err) {
+          await settleWrites(false)
+          ctx.emit('torrent:download-failed', { magnetURI, error: err?.message || String(err) })
+          throw err
+        }
       }
 
       /** Stop serving a torrent now; its stored manifest and unshared pieces are released in the background (`flush()` waits for that). */
       function removeTorrent(magnetURI) {
         const removedByTm = tm.removeTorrent(magnetURI)
-        remoteManifests.delete(magnetURI)
+        dropRemote(magnetURI)
         const manifest = held.get(magnetURI)
         if (!manifest) return removedByTm
         held.delete(magnetURI)
@@ -928,6 +1179,8 @@ export function createTorrentService({
         if (!injectedManifestStore && typeof manifestStore.clear === 'function') await manifestStore.clear()
         held.clear()
         remoteManifests.clear()
+        remoteCidRefs.clear()
+        pinnedRemote.clear()
         chunkIndex.clear()
         chunkOwners.clear()
       }

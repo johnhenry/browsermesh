@@ -578,7 +578,8 @@ import { registerOrchestratorTools } from './mesh-orchestrator-tools.mjs'
  *   Passed straight through to `createTorrentService()`
  *   (`trackerUrl`/`chunkSize`/`envelopeType`/`manifestTimeoutMs`/`chunkTimeoutMs`,
  *   plus the hooks `chunkStore`/`manifestStore`/`authorize`/`maxConcurrentServes`/
- *   `maxConcurrentServesPerPeer`/`maxBytesPerPeerPerSec`/`maxAnnouncesPerPeerPerMinute`).
+ *   `maxConcurrentServesPerPeer`/`maxBytesPerPeerPerSec`/`maxAnnouncesPerPeerPerMinute`,
+ *   and `downloadConcurrency`/`maxManifestChunks`/`maxManifestSize`/`maxRemoteManifests`/`webtorrent`).
  * @param {boolean} [options.enableEscrow=false] - Attach `peer-escrow.mjs`'s
  *   `createEscrowService()` (issue #117): real escrow-contract create/
  *   release/refund/dispute against `escrowOptions.creditLedger`, with
@@ -590,9 +591,9 @@ import { registerOrchestratorTools } from './mesh-orchestrator-tools.mjs'
  * @param {object} [options.escrowOptions] - Required when `enableEscrow`.
  *   Passed straight through to `createEscrowService()`
  *   (`creditLedger`/`onLog`/`envelopeType`/`requestTimeoutMs`) -- see that
- *   function's own doc comment. `escrowOptions.creditLedger` (must have
- *   `charge()`/`credit()`/`getBalance()`) is required; this function throws
- *   if it's missing.
+ *   function's own doc comment. `escrowOptions.creditLedger` (a `CreditLedger`
+ *   or `MultiPartyCreditLedger`, or anything `EscrowManager` accepts) is
+ *   required; this function throws if it's missing.
  * @param {boolean} [options.enableChat=false] - Attach `peer-chat.mjs`'s
  *   `createChatService()` (issue #84, Phase 9): P2P chat with optional
  *   message signing/verification, history, typing indicators, and an
@@ -1229,6 +1230,11 @@ export async function createMeshNode(options = {}) {
       maxConcurrentServesPerPeer: torrentOptions?.maxConcurrentServesPerPeer,
       maxBytesPerPeerPerSec: torrentOptions?.maxBytesPerPeerPerSec,
       maxAnnouncesPerPeerPerMinute: torrentOptions?.maxAnnouncesPerPeerPerMinute,
+      downloadConcurrency: torrentOptions?.downloadConcurrency,
+      maxManifestChunks: torrentOptions?.maxManifestChunks,
+      maxManifestSize: torrentOptions?.maxManifestSize,
+      maxRemoteManifests: torrentOptions?.maxRemoteManifests,
+      webtorrent: torrentOptions?.webtorrent,
       onLog,
     })
     const torrentHandle = attachService(node, servicesNetwork, torrentDescriptor)
@@ -1272,7 +1278,7 @@ export async function createMeshNode(options = {}) {
     if (!escrowOptions?.creditLedger) {
       throw new Error(
         'createMeshNode: options.escrowOptions.creditLedger is required when enableEscrow is true ' +
-        '(must implement charge()/credit()/getBalance() -- see peer-escrow.mjs\'s EscrowManager).',
+        '(a CreditLedger, a MultiPartyCreditLedger, or anything with debit()/credit() or charge()/credit() -- see peer-escrow.mjs\'s EscrowManager).',
       )
     }
     const escrowDescriptor = createEscrowService({

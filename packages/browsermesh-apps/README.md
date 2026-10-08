@@ -18,12 +18,16 @@ Application layer for BrowserMesh: marketplace, chat, payments, compute orchestr
 - [CloudStorage bucket authorization and key distribution](#cloudstorage-bucket-authorization-and-key-distribution)
 - [CloudStorage: the ergonomic SDK](#cloudstorage-the-ergonomic-sdk)
 - [Torrent service: durable stores, authorization and serve limits](#torrent-service-durable-stores-authorization-and-serve-limits)
+  - [Downloading: `onManifest`, `onProgress`, concurrency, bounds](#downloading-onmanifest-onprogress-concurrency-bounds)
+  - [Using real WebTorrent](#using-real-webtorrent)
+- [Ledgers and escrow: which class is which](#ledgers-and-escrow-which-class-is-which)
 - [Putting it all together: sync + kernel-gated mesh + relay on one connection](#putting-it-all-together-sync--kernel-gated-mesh--relay-on-one-connection)
 - [Sending to peers: wire format, the bulk lane and `broadcast()`](#sending-to-peers-wire-format-the-bulk-lane-and-broadcast)
 - [`fetch()`/`WebSocket`-shaped mesh access: `browserMeshFetch` and `BrowserMeshWebSocket`](#fetchwebsocket-shaped-mesh-access-browsermeshfetch-and-browsermeshwebsocket)
   - [`browserMeshFetch`](#browsermeshfetch)
   - [`BrowserMeshWebSocket`](#browsermeshwebsocket)
 - [LLM tool-calling: `BrowserToolRegistry` and `createAgentRuntime`](#llm-tool-calling-browsertoolregistry-and-createagentruntime)
+  - [IoT tools (opt-in)](#iot-tools-opt-in)
 - [Runtime classes and placement lanes](#runtime-classes-and-placement-lanes)
 - [Pod host service: spawning and controlling hosted pods](#pod-host-service-spawning-and-controlling-hosted-pods)
 - [License](#license)
@@ -40,7 +44,7 @@ Extracted from the private `clawser` monorepo (previously `packages/browsermesh-
 | apps | `AppRegistry`, `AppStore`, `AppRPC`, `AppEventBus` |
 | marketplace | `Marketplace`, `MarketplaceIndex`, `ServiceListing` |
 | chat | `MeshChat`, `ChatRoom`, `ChatMessage` |
-| payments | `PaymentChannel`, `EscrowManager`, `CreditLedger`, `PaymentRouter` |
+| payments | `PaymentChannel`, `CreditLedger` (single-owner), `SimpleEscrowBook`, `PaymentRouter` (see [Ledgers and escrow](#ledgers-and-escrow-which-class-is-which)) |
 | quotas | `QuotaManager`, `QuotaEnforcer` |
 | resources | `ResourceRegistry`, `ComputeRequest`, `ResourceScorer`, `JobQueue` |
 | gpu | `TrainingOrchestrator`, `GpuProbe`, `GradientAggregator` |
@@ -54,7 +58,7 @@ Extracted from the private `clawser` monorepo (previously `packages/browsermesh-
 | audit | `AuditChain`, `AuditStore`, `detectFork`, `buildMerkleRoot` |
 | visualizations | `TopologyLayout`, `TrustGraphLayout`, `TrustHeatmap` |
 | devtools | `MeshInspector`, `MeshInspectTool` |
-| tools | `registerMeshTools` + stream/file/DHT/GPU/IoT BrowserTool subclasses |
+| tools | `registerMeshTools` + stream/file/DHT/GPU BrowserTool subclasses; the IoT tools register only when you pass an IoT bridge (see [IoT tools](#iot-tools-opt-in)) |
 | peer-agent | `AgentHost`, `AgentClient`, `bridgePeerAgent` |
 | peer-agent-swarm | `AgentSwarmCoordinator` |
 | peer-chat | `PeerChat` |
@@ -66,7 +70,7 @@ Extracted from the private `clawser` monorepo (previously `packages/browsermesh-
 | peer-ipfs | `IPFSStore` (also exported as `MeshLocalCidStore`): a mesh-local content-addressed store. CIDs are SHA-256 hex digests, not IPFS CIDs, and nothing talks to the IPFS network |
 | peer-node | `PeerNode` |
 | peer-node-transport | `createPeerNodeTransport` |
-| peer-payments | `CreditLedger`, `WebLNProvider` |
+| peer-payments | `MultiPartyCreditLedger`, `WebLNProvider` |
 | peer-registry | `PeerRegistry` |
 | peer-routing | `MeshRouter`, `ServerSharing` |
 | peer-services | `ServiceAdvertiser`, `ServiceBrowser` |
@@ -396,7 +400,77 @@ const info = await torrent.api.seed('some text')   // strings are UTF-8 encoded
   downloaders back off and retry. Caps and `authorize` never apply to the
   downloading side.
 - Events: `torrent:chunk-served`, `torrent:chunk-received` (as before), plus
-  `torrent:request-denied` and `torrent:serve-busy`.
+  `torrent:request-denied`, `torrent:serve-busy` and `torrent:download-failed`.
+
+### Downloading: `onManifest`, `onProgress`, concurrency, bounds
+
+```js
+const { data, info } = await torrent.api.download(magnetURI, {
+  peers: [seederPubKey],
+  // Awaited once the manifest is known and BEFORE any piece is requested or
+  // stored: a quota gate. Return false (or throw) to abort; nothing is fetched.
+  onManifest: async (manifest) => manifest.size <= await myQuota.remaining(),
+  // Once per piece: { received, total, bytes, size, cid, from } (from is null
+  // for a piece already in the local store). A throw in here is logged only.
+  onProgress: ({ received, total, bytes, size }) => bar.set(bytes / size),
+  concurrency: 4, // pieces in flight, 1-32; 1 is strictly sequential
+})
+```
+
+- **`onManifest(manifest)`** gets a copy with `magnetURI`, `infoHash`, `name`,
+  `size`, `chunkSize`, `chunkCids`, `cid`. Returning `false` rejects the download
+  with `err.code === 'manifest-rejected'`; a throw or rejection propagates as
+  is; any other return value lets it proceed.
+- **`concurrency`** defaults to the service's `downloadConcurrency` (4). Each
+  provider is still held to its own serve caps: a `busy` answer is retried with
+  backoff (`busyRetries`, `busyBackoffMs`) rather than failing the download.
+- **Cleanup.** If a download fails after storing some pieces, the pieces that
+  call wrote itself, and that no held torrent lists, are removed again, so a host
+  that accounts for storage stays consistent. Pieces already in the store before
+  the download are never touched.
+- **Remote manifests are bounded.** A manifest another peer announces or sends
+  is ignored (and its sender recorded as nobody's provider) unless it lists at
+  most `maxManifestChunks` pieces (default 16384), declares at most
+  `maxManifestSize` bytes (default unlimited), has only 64-hex SHA-256 piece
+  CIDs, and has a piece count that matches its size (`ceil(size / chunkSize)`).
+  At most `maxRemoteManifests` (default 64) are remembered: the least recently
+  used is forgotten together with the providers recorded only for its pieces. A
+  manifest an in-flight download is using is never evicted.
+
+### Using real WebTorrent
+
+`TorrentManager` and `createTorrentService()` never load anything from the
+network. For real BitTorrent swarming give them the library:
+
+```js
+import WebTorrent from 'webtorrent'
+createTorrentService({ webtorrent: WebTorrent })       // the class: built and destroyed for you
+createTorrentService({ webtorrent: new WebTorrent() }) // or a client of your own, left running on destroy()
+```
+
+`window.WebTorrent` / `globalThis.WebTorrent` is still picked up when present.
+With neither, `available` is `false` and the in-memory mesh-native path is used
+(the one `createTorrentService()` serves from anyway). Earlier releases
+imported `webtorrent` from `esm.sh` on first use, which hangs offline and fails
+under a strict CSP; that import is gone.
+
+## Ledgers and escrow: which class is which
+
+Four classes cover two ideas, and each public name belongs to exactly one:
+
+| Name | Module | Model | Use it for |
+| --- | --- | --- | --- |
+| `CreditLedger` | `payments.mjs` | **Canonical ledger.** One pod, one balance: `credit(amount, from)`, `debit(amount, to)`, `transfer(peerLedger, amount)`, every change an immutable entry. | A pod's own balance; what `PaymentRouter.getLedger()` returns; what the replicated/consensus path assumes. |
+| `MultiPartyCreditLedger` | `peer-payments.mjs` | One book, a balance per pod: `charge(podId, amount)`, `credit(podId, amount)`, `transfer(from, to, amount)`, `calculateCost()`, events. | A hub that keeps everyone's credits (a compute marketplace). Formerly also called `CreditLedger`. |
+| `EscrowManager` | `peer-escrow.mjs` | **Canonical escrow.** Contracts with conditions (`result_hash_match`, `attestation_quorum`, `manual_approval`, timeouts), `dispute()`, a `mutateLedger` hook, `createEscrowService()` for the wire. It moves funds through a ledger. | Anything that actually holds credits. `createMeshNode({ enableEscrow })` uses it. |
+| `SimpleEscrowBook` | `payments.mjs` | A flat record: `held` then `released`/`refunded`/`expired`. No conditions, no disputes, and it moves **no** balance. | What `PaymentRouter.getEscrow()` keeps to track `ESCROW_CREATE` wire messages. Formerly also called `EscrowManager`. |
+
+`EscrowManager` accepts either ledger: with a `CreditLedger` it calls
+`debit()`/`credit()` (that ledger has one balance, so use it when the local pod
+is the payer, or pass `mutateLedger` to account for a counterparty); with a
+`MultiPartyCreditLedger` it calls `charge()`/`credit()` so payer and payee each
+move their own balance. `PaymentRouter`'s `SimpleEscrowBook` and an
+`EscrowManager` you create are separate books and do not see each other.
 
 ## Putting it all together: sync + kernel-gated mesh + relay on one connection
 
@@ -435,7 +509,10 @@ back as the parsed object through `ctx.onIncomingData()`. That parse accepts
 either form, so it works for transports that deliver text and for in-process
 nodes that pass objects. `PeerNode.onIncomingData()` is the raw bus: it hands
 subscribers exactly what the transport delivered, so a direct subscriber that
-wants objects should parse JSON-object text itself. If you write your own
+wants objects should parse JSON-object text itself (every raw subscriber in this
+package -- mesh-sync, the relay host and backend, the pod-host service,
+`BrowserMeshWebSocket`, `createPeerNodeTransport` -- does, through one shared
+`decodeWireData`; a test fails if a new one does not). If you write your own
 transport, make `send()` follow the same rule -- forwarding an object to
 `RTCDataChannel.send()` turns it into the text `"[object Object]"` with no
 error.
@@ -718,6 +795,37 @@ tool count to 15. `meshctl_supervise` accepts the same args as
 `meshctl_spawn` plus `restart`/`links`, and calls
 `orchestrator.getSupervisor()` then that supervisor's own `supervise()` —
 see "Pod supervisor" above.
+
+### IoT tools (opt-in)
+
+`registerMeshTools()` registers the stream, file, DHT and GPU tools (12). The
+three IoT tools need an implementation this package does not ship, so they are
+registered only when you pass one, and the agent never sees tools that could
+only fail:
+
+```js
+registerMeshTools(registry, multiplexer, fileTransfer, {
+  iotBridge,      // enables iot_list and iot_send
+  iotTelemetry,   // enables iot_telemetry
+})
+```
+
+The duck types (also `IoTBridgeLike` / `IoTTelemetryLike` typedefs in `tools.mjs`):
+
+```js
+iotBridge = {
+  // filter is undefined, or { protocol?, capability? }
+  listDevices(filter) { return [{ deviceId, name, protocol, capabilities: ['read', 'write'] }] },
+  async send(deviceId, payload) { /* deliver; throw or reject on failure */ },
+}
+iotTelemetry = {
+  query(deviceId, since, until) { return [{ ts: 1700000000000, value: 21.5 }] }, // oldest first
+  getStats(deviceId) { return { min, max, avg, count, last } /* or null when no samples */ },
+}
+```
+
+A bridge or telemetry object missing one of those methods makes
+`registerMeshTools()` throw a `TypeError` instead of failing later inside a tool.
 
 ## Verify argument order (caller-supplied callbacks)
 

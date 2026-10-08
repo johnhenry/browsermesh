@@ -17,7 +17,7 @@ export { parseScope, matchScope, CapabilityToken } from "./capability.mjs";
 export { TRUST_CATEGORIES, createTrustEdge, computeTransitiveTrust } from "./trust.mjs";
 
 // ACL
-export { matchResourcePattern, Permission, AccessGrant, ACLEngine, generateGrantId } from "./acl.mjs";
+export { matchResourcePattern, Permission, AccessGrant, ACLEngine, generateGrantId, grantFromToken } from "./acl.mjs";
 
 // CRDTs
 export { VectorClock, LWWRegister, GCounter, PNCounter, ORSet, RGA, LWWMap } from "./crdt.mjs";
@@ -30,3 +30,6 @@ export {
   TestMesh,
   TESTMESH_LIMITS,
 } from "./test-transport.mjs";
+
+// Size-bucket padding (relay-blind envelopes)
+export { DEFAULT_PAD_BUCKETS, PAD_TRAILER_BYTES, paddedLength, padTo, unpad } from "./padding.mjs";

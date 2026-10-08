@@ -1,10 +1,28 @@
 /**
 // STATUS: INTEGRATED — wired into ClawserPod lifecycle, proven via E2E testing
- * clawser-mesh-stealth.js -- Stealth agent with erasure-coded state sharding.
+ * clawser-mesh-stealth.js -- Agent state sharding across the DHT.
  *
- * Provides state sharding across the DHT for agent stealth operations.
- * State is split into shards using XOR-based erasure coding, distributed
- * across the DHT, and can be reconstituted from a threshold number of shards.
+ * NOT ENCRYPTED, NOT ANONYMOUS. This module splits a state string into
+ * `threshold` plaintext data shards plus `total - threshold` XOR parity shards
+ * and stores them in the DHT under keys derived from the agent id
+ * (`stealth:<agentId>:shard:<i>`). It gives availability, not secrecy:
+ *
+ *   - shard data is the state itself (data shards) or the XOR of it (parity);
+ *     anyone who can read the DHT entries can read the state;
+ *   - the parity shards are all identical (the XOR of every data chunk), so
+ *     the scheme survives the loss of exactly ONE data shard, not `total -
+ *     threshold`;
+ *   - the shard checksum is a sum of char codes: it catches corruption, not
+ *     tampering;
+ *   - keys name the agent they belong to.
+ *
+ * If the state must be secret, encrypt it yourself before calling `hide()`
+ * (and decrypt after `reconstitute()`); this module does not manage keys.
+ *
+ * StateShard represents one fragment.
+ * ShardDistributor scatters shards across DHT nodes.
+ * ShardCollector retrieves and reconstructs state from DHT.
+ * StealthAgent orchestrates the hide/reconstitute lifecycle.
  *
  * StateShard represents an erasure-coded fragment.
  * ShardDistributor scatters shards across DHT nodes.
@@ -16,8 +34,6 @@
  * Run tests:
  *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-mesh-dht.test.mjs
  */
-
-import { STEALTH_SHARD } from './dht.mjs'
 
 // ---------------------------------------------------------------------------
 // Checksum Helper
@@ -41,7 +57,8 @@ function simpleChecksum(data) {
 // ---------------------------------------------------------------------------
 
 /**
- * Erasure-coded fragment of agent state.
+ * One fragment of sharded agent state: a plaintext slice of the state (data
+ * shard) or the XOR of all slices (parity shard). Not encrypted.
  */
 export class StateShard {
   /** @type {string} */
@@ -305,7 +322,13 @@ export class ShardCollector {
   }
 
   /**
-   * Reconstruct original state from data shards (first `threshold` shards).
+   * Reconstruct the original state from at least `threshold` valid shards.
+   *
+   * All `threshold` data shards are used when present. If exactly one data
+   * shard is missing and a parity shard is available, the missing chunk is
+   * recovered as parity XOR the other chunks. Two or more missing data
+   * shards cannot be recovered (every parity shard carries the same XOR).
+   *
    * @param {StateShard[]} shards - At least `threshold` valid shards
    * @returns {string} Reconstructed state blob
    */
@@ -321,20 +344,42 @@ export class ShardCollector {
       return idxA - idxB
     })
 
-    // Use only the data shards (first threshold shards by index)
-    const dataShards = sorted.filter(s => {
+    // Data shards by index; parity shards (index >= threshold) separately
+    const byIndex = new Map()
+    let parity = null
+    for (const s of sorted) {
       const idx = parseInt(s.shardId.split(':').pop(), 10)
-      return idx < this.#threshold
-    })
-
-    if (dataShards.length < this.#threshold) {
-      throw new Error(`Not enough data shards for reconstruction: need ${this.#threshold}, got ${dataShards.length}`)
+      if (idx < this.#threshold) byIndex.set(idx, s.data)
+      else if (!parity) parity = s.data
     }
 
-    // Concatenate data chunks and trim null padding
+    const missing = []
+    for (let i = 0; i < this.#threshold; i++) {
+      if (!byIndex.has(i)) missing.push(i)
+    }
+
+    if (missing.length > 1 || (missing.length === 1 && parity === null)) {
+      throw new Error(
+        `Not enough data shards for reconstruction: need ${this.#threshold}, got ${this.#threshold - missing.length}` +
+        ' (parity can recover at most one missing data shard)',
+      )
+    }
+
+    if (missing.length === 1) {
+      // parity = XOR of every data chunk, so the missing chunk is parity XOR the rest
+      let recovered = ''
+      for (let c = 0; c < parity.length; c++) {
+        let xorVal = parity.charCodeAt(c)
+        for (const data of byIndex.values()) xorVal ^= data.charCodeAt(c)
+        recovered += String.fromCharCode(xorVal)
+      }
+      byIndex.set(missing[0], recovered)
+    }
+
+    // Concatenate data chunks in order
     let result = ''
-    for (const shard of dataShards) {
-      result += shard.data
+    for (let i = 0; i < this.#threshold; i++) {
+      result += byIndex.get(i)
     }
 
     // Remove null padding
@@ -358,9 +403,15 @@ export class ShardCollector {
 // ---------------------------------------------------------------------------
 
 /**
- * Orchestrates the hide/reconstitute lifecycle for a stealth agent.
- * State is sharded across the DHT and can be reconstructed from
- * a threshold number of shards.
+ * Orchestrates the hide/reconstitute lifecycle for an agent's state.
+ *
+ * State is sharded across the DHT as plaintext data shards plus XOR parity
+ * (see the module header): it can be reconstructed from `threshold` shards
+ * (so one lost data shard is tolerated) but it is NOT encrypted and the shard
+ * keys name the agent. Encrypt the state before `hide()` if it is sensitive.
+ *
+ * Methods are `hide(stateBlob)`, `reconstitute()`, `isViable()` and
+ * `getManifest()`; they are synchronous.
  */
 export class StealthAgent {
   /** @type {string} */
@@ -404,7 +455,8 @@ export class StealthAgent {
   }
 
   /**
-   * Hide the agent's state by distributing it as shards across the DHT.
+   * Distribute the agent's state as shards across the DHT. This is sharding,
+   * not concealment: the shards are plaintext slices of `stateBlob`.
    * @param {string} stateBlob - State data to hide
    * @returns {object} Manifest with shard keys and metadata
    */

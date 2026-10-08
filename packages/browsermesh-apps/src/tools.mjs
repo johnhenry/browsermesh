@@ -9,6 +9,38 @@
 
 import { BrowserTool } from './compat.mjs';
 
+// ── IoT duck types ───────────────────────────────────────────────────
+//
+// This package ships no IoT implementation. The three iot_* tools call into a
+// bridge and a telemetry store that the host application supplies, and are only
+// registered (see `registerMeshTools()`) when one is passed in.
+
+/**
+ * What `iot_list` and `iot_send` call. Supply an object with these methods as
+ * `registerMeshTools(registry, mux, ft, { iotBridge })`.
+ *
+ * @typedef {object} IoTBridgeLike
+ * @property {(filter?: { protocol?: string, capability?: string }) =>
+ *   Array<{ deviceId: string, name?: string, protocol: string, capabilities: string[] }>} listDevices
+ *   Registered devices, optionally filtered by `protocol` and/or `capability`
+ *   (called with `undefined` when neither is given).
+ * @property {(deviceId: string, payload: object) => Promise<void>|void} send
+ *   Deliver `payload` to the device; throw or reject on failure.
+ */
+
+/**
+ * What `iot_telemetry` calls. Supply as
+ * `registerMeshTools(registry, mux, ft, { iotTelemetry })`.
+ *
+ * @typedef {object} IoTTelemetryLike
+ * @property {(deviceId: string, since?: number, until?: number) =>
+ *   Array<{ ts: number, value: * }>} query
+ *   Samples for a device, oldest first; `ts` is epoch milliseconds.
+ * @property {(deviceId: string) =>
+ *   { min: number, max: number, avg: number, count: number, last: * }|null} getStats
+ *   Summary statistics, or `null` when the device has no samples.
+ */
+
 // ── Shared state ─────────────────────────────────────────────────────
 
 /**
@@ -35,10 +67,14 @@ export class MeshToolsContext {
   setTrainingOrchestrator(orch) { this.#trainingOrchestrator = orch; }
   getTrainingOrchestrator() { return this.#trainingOrchestrator; }
 
+  /** @param {IoTBridgeLike|null} bridge */
   setIoTBridge(bridge) { this.#iotBridge = bridge; }
+  /** @returns {IoTBridgeLike|null} */
   getIoTBridge() { return this.#iotBridge; }
 
+  /** @param {IoTTelemetryLike|null} telemetry */
   setIoTTelemetry(telemetry) { this.#iotTelemetry = telemetry; }
+  /** @returns {IoTTelemetryLike|null} */
   getIoTTelemetry() { return this.#iotTelemetry; }
 }
 
@@ -641,14 +677,32 @@ export class IoTTelemetryTool extends BrowserTool {
 // ── Registry helper ──────────────────────────────────────────────────
 
 /**
- * Register all mesh stream/file tools with a BrowserToolRegistry.
+ * Register the mesh stream/file/DHT/GPU tools with a BrowserToolRegistry (12
+ * tools), plus the IoT tools the caller opts into.
+ *
+ * The IoT tools need an implementation this package does not ship, so they are
+ * registered only when you supply one: `iot_list` and `iot_send` when
+ * `options.iotBridge` is given, `iot_telemetry` when `options.iotTelemetry` is.
+ * Without them the agent never sees tools that could only fail. See
+ * {@link IoTBridgeLike} and {@link IoTTelemetryLike} for the duck types.
+ *
  * @param {import('./compat.mjs').BrowserToolRegistry} registry
  * @param {import('@johnhenry/browsermesh-transport').StreamMultiplexer} [multiplexer]
  * @param {import('@johnhenry/browsermesh-sync').MeshFileTransfer} [fileTransfer]
+ * @param {object} [options]
+ * @param {IoTBridgeLike} [options.iotBridge] - Enables `iot_list` and `iot_send`.
+ * @param {IoTTelemetryLike} [options.iotTelemetry] - Enables `iot_telemetry`.
+ * @throws {TypeError} If a supplied bridge/telemetry lacks a required method.
  */
-export function registerMeshTools(registry, multiplexer, fileTransfer) {
+export function registerMeshTools(registry, multiplexer, fileTransfer, options = {}) {
+  const { iotBridge, iotTelemetry } = options || {};
+  assertHasMethods('iotBridge', iotBridge, ['listDevices', 'send']);
+  assertHasMethods('iotTelemetry', iotTelemetry, ['query', 'getStats']);
+
   if (multiplexer) meshToolsContext.setMultiplexer(multiplexer);
   if (fileTransfer) meshToolsContext.setFileTransfer(fileTransfer);
+  if (iotBridge) meshToolsContext.setIoTBridge(iotBridge);
+  if (iotTelemetry) meshToolsContext.setIoTTelemetry(iotTelemetry);
 
   registry.register(new MeshStreamOpenTool());
   registry.register(new MeshStreamCloseTool());
@@ -662,7 +716,21 @@ export function registerMeshTools(registry, multiplexer, fileTransfer) {
   registry.register(new DhtPeersTool());
   registry.register(new GpuTrainStartTool());
   registry.register(new GpuTrainStatusTool());
-  registry.register(new IoTListTool());
-  registry.register(new IoTSendTool());
-  registry.register(new IoTTelemetryTool());
+  if (iotBridge) {
+    registry.register(new IoTListTool());
+    registry.register(new IoTSendTool());
+  }
+  if (iotTelemetry) {
+    registry.register(new IoTTelemetryTool());
+  }
+}
+
+/** @param {string} name @param {*} value @param {string[]} methods */
+function assertHasMethods(name, value, methods) {
+  if (value === undefined || value === null) return;
+  for (const m of methods) {
+    if (typeof value[m] !== 'function') {
+      throw new TypeError(`registerMeshTools: options.${name} must implement ${m}()`);
+    }
+  }
 }

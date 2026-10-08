@@ -79,10 +79,16 @@ export { BrowserTool, BrowserToolRegistry } from './compat.mjs';
 export * from './agent-runtime.mjs';
 export * from './mesh-orchestrator-tools.mjs';
 
-// `CreditLedger` is defined in both payments.mjs and peer-payments.mjs;
-// `EscrowManager` is defined in both payments.mjs and peer-escrow.mjs.
-// Ambiguous `export *` bindings are silently dropped, so disambiguate
-// explicitly in favor of the pair actually used together (mesh-level
-// payments.mjs's CreditLedger + peer-escrow.mjs's opts-based EscrowManager).
+// One implementation per public name:
+//
+//   CreditLedger        payments.mjs       single owner: one pod, one balance
+//   EscrowManager       peer-escrow.mjs    conditional escrow that moves funds
+//
+// The other two models keep their own, unambiguous names (also exported through
+// the `export *` lines above): `MultiPartyCreditLedger` (peer-payments.mjs, a
+// book of every peer's balance) and `SimpleEscrowBook` (payments.mjs, the flat
+// record `PaymentRouter` keeps). Neither module defines a `CreditLedger` or
+// `EscrowManager` any more, so no `export *` here is ambiguous; the explicit
+// lines below just say which file each canonical name comes from.
 export { CreditLedger } from './payments.mjs';
 export { EscrowManager } from './peer-escrow.mjs';
