@@ -778,14 +778,27 @@ export class HandshakeCoordinator {
    */
   #glareWaiters = new Map()
 
+  /** @type {object[]|null} Default ICE servers for every WebRTC transport */
+  #iceServers
+
+  /** @type {'all'|'relay'|undefined} Default iceTransportPolicy */
+  #iceTransportPolicy
+
   /**
    * @param {object} opts
    * @param {string} opts.localPodId - Local pod identifier
    * @param {SignalingClient} [opts.signalingClient] - Signaling client instance
    * @param {object} [opts.transportFactory] - TransportFactory instance
    * @param {Function} [opts.onLog] - Logging callback (level, msg)
+   * @param {object[]} [opts.iceServers] - Default STUN/TURN servers for every
+   *   WebRTC transport this coordinator creates (offer side, answer side and
+   *   connectViaToken). A per-call `iceServers` overrides it.
+   * @param {'all'|'relay'} [opts.iceTransportPolicy] - Default
+   *   `iceTransportPolicy` for those transports ('relay' = TURN-only, which
+   *   needs a `turn:`/`turns:` entry in `iceServers`). A per-call value
+   *   overrides it.
    */
-  constructor({ localPodId, signalingClient, transportFactory, onLog } = {}) {
+  constructor({ localPodId, signalingClient, transportFactory, onLog, iceServers, iceTransportPolicy } = {}) {
     if (!localPodId || typeof localPodId !== 'string') {
       throw new Error('localPodId is required and must be a non-empty string')
     }
@@ -793,6 +806,8 @@ export class HandshakeCoordinator {
     this.#signalingClient = signalingClient || null
     this.#transportFactory = transportFactory || null
     this.#onLog = onLog || (() => {})
+    this.#iceServers = iceServers || null
+    this.#iceTransportPolicy = iceTransportPolicy
 
     // Wire incoming offer events from signaling client
     if (this.#signalingClient) {
@@ -800,6 +815,27 @@ export class HandshakeCoordinator {
         this.#fire('incoming', { remotePodId: fromPodId, offer: data.offer })
       })
     }
+  }
+
+  /**
+   * Resolve the WebRTC transport options carrying ICE configuration.
+   * Precedence: per-call value > `fallbackIceServers` (e.g. a token's) >
+   * coordinator default. Keys are only present when a value exists, so a
+   * coordinator with no ICE config leaves the transport's own defaults
+   * (STUN list, 'all' policy) untouched. `config.iceServers` is kept for
+   * factories/proxies that read the legacy shape.
+   *
+   * @param {{ iceServers?: object[], iceTransportPolicy?: string }} [perCall]
+   * @param {object[]} [fallbackIceServers]
+   * @returns {object}
+   */
+  #iceOpts(perCall = {}, fallbackIceServers) {
+    const iceServers = perCall.iceServers ?? fallbackIceServers ?? this.#iceServers
+    const iceTransportPolicy = perCall.iceTransportPolicy ?? this.#iceTransportPolicy
+    const out = { config: { iceServers: iceServers || [] } }
+    if (iceServers) out.iceServers = iceServers
+    if (iceTransportPolicy) out.iceTransportPolicy = iceTransportPolicy
+    return out
   }
 
   /**
@@ -811,7 +847,8 @@ export class HandshakeCoordinator {
    * @param {string} remotePodId - Target peer identifier
    * @param {object} [opts]
    * @param {object} [opts.endpoints] - Map of transport type -> constructor opts
-   * @param {object[]} [opts.iceServers] - ICE server configs
+   * @param {object[]} [opts.iceServers] - ICE server configs (overrides the constructor default)
+   * @param {'all'|'relay'} [opts.iceTransportPolicy] - Overrides the constructor default
    * @param {number} [opts.timeout] - Connection timeout in ms
    * @returns {Promise<{ transport: object, sessionInfo: object }>}
    */
@@ -849,9 +886,7 @@ export class HandshakeCoordinator {
 
     this.#onLog(2, `Initiating connection to ${remotePodId}`)
 
-    const endpointOpts = opts.endpoints || {
-      webrtc: { config: { iceServers: opts.iceServers || [] } },
-    }
+    const endpointOpts = opts.endpoints || { webrtc: this.#iceOpts(opts) }
 
     const promise = (async () => {
       let timeoutHandle
@@ -904,9 +939,12 @@ export class HandshakeCoordinator {
    *
    * @param {string} remotePodId - Initiating peer identifier
    * @param {object} offer - SDP offer
+   * @param {object} [opts]
+   * @param {object[]} [opts.iceServers] - Overrides the constructor default
+   * @param {'all'|'relay'} [opts.iceTransportPolicy] - Overrides the constructor default
    * @returns {Promise<{ transport: object, sessionInfo: object }>}
    */
-  async acceptConnection(remotePodId, offer) {
+  async acceptConnection(remotePodId, offer, opts = {}) {
     if (!this.#transportFactory) {
       throw new Error('TransportFactory is required for acceptConnection')
     }
@@ -940,6 +978,7 @@ export class HandshakeCoordinator {
         localPodId: this.#localPodId,
         remotePodId,
         signaler: this.#signalingClient,
+        ...this.#iceOpts(opts),
       })
 
       if (typeof transport.handleOffer === 'function') {
@@ -979,11 +1018,14 @@ export class HandshakeCoordinator {
    *
    * @param {ConnectionToken} token - Decoded connection token
    * @param {object} [transportFactory] - Override transport factory
+   * @param {object} [opts]
+   * @param {object[]} [opts.iceServers] - Overrides token.iceServers and the constructor default
+   * @param {'all'|'relay'} [opts.iceTransportPolicy] - Overrides the constructor default
    * @returns {Promise<{ transport: object, sessionInfo: object, signaler: SignalingClient|null }>}
    *   `signaler` is the client this call created and still owns, or null when
    *   the coordinator's own signaling client was used.
    */
-  async connectViaToken(token, transportFactory) {
+  async connectViaToken(token, transportFactory, opts = {}) {
     const factory = transportFactory || this.#transportFactory
     if (!factory) {
       throw new Error('TransportFactory is required for connectViaToken')
@@ -1010,9 +1052,8 @@ export class HandshakeCoordinator {
       throw new Error('No signaling channel available (provide signalingClient or token.signalingUrl)')
     }
 
-    const iceServers = token.iceServers || []
     const endpointOpts = {
-      webrtc: { config: { iceServers } },
+      webrtc: this.#iceOpts(opts, token.iceServers),
     }
 
     try {
