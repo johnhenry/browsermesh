@@ -1,0 +1,34 @@
+{
+  "empty-file": {
+    "root": "bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku",
+    "blocks": 1
+  },
+  "small-file": {
+    "root": "bafkreifjjcie6lypi6ny7amxnfftagclbuxndqonfipmb64f2km2devei4",
+    "blocks": 1
+  },
+  "large-file-2-chunks": {
+    "root": "bafybeic4pfx4nkg7pkb5xnbmeovufi5tdvknt7i3toylujpyrx3zomyxhe",
+    "blocks": 3
+  },
+  "large-file-exact-chunk": {
+    "root": "bafkreigoa6rzfhhsgqmqxxrfebzj3qo64mxxjj3xglwxu2r5vl2saw2ghq",
+    "blocks": 1
+  },
+  "huge-file-175-chunks": {
+    "root": "bafybeihknp4ijqjv663eapy6duxqny6wdk6h5iojjnjechxb7dvgnhibie",
+    "blocks": 179
+  },
+  "small-dir": {
+    "root": "bafybeifrzj23tmoeeee2a3kqjfbwgkahp72y3jro25ikr67y2mlligaoxu",
+    "blocks": 3
+  },
+  "nested-dirs": {
+    "root": "bafybeihnkkq4zf55zvnfmve2xvlzhi3d2d6zmaytvbnhytnv4ufep3rjli",
+    "blocks": 11
+  },
+  "dir-with-large-file": {
+    "root": "bafybeiaoi5zidgim5zfrj22ayl7467ldkjr6qjlwdfmjns4xr3v3faenvy",
+    "blocks": 6
+  }
+}

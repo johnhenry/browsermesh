@@ -96,8 +96,8 @@ export class IndexedDBChunkStore {
    * @param {Uint8Array} data
    * @returns {Promise<string>}
    */
-  static computeCid(data) {
-    return ChunkStore.computeCid(data);
+  static computeCid(data, opts) {
+    return ChunkStore.computeCid(data, opts);
   }
 
   /**
