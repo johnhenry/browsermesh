@@ -26,9 +26,25 @@ Extracted from the private `clawser` monorepo (previously `packages/browsermesh-
 | delta-sync | `SyncCoordinator`, `DeltaLog`, `DeltaEncoder`, `DeltaDecoder`, `DeltaBranch` |
 | migration | `MigrationEngine`, `MigrationPlan`, `DualActiveWindow` |
 | files | `MeshFileTransfer`, `ChunkStore`, `FileDescriptor`, `TransferOffer` |
+| cidv1 | `computeCidV1`, `buildUnixfsFile`, `buildUnixfsDirectory`, `verifyBlock`, `parseCid`, `cidV1FromSha256Hex`, `sha256HexFromCid` |
 | collab | `CollabSession`, `YjsAdapter`, `AwarenessState` |
 | collab-bridge | `CollabBridge`, `CollabManager` |
 | memory-sync | `AgentMemorySync`, `MemoryEntry`, `ConflictEntry` |
+
+## IPFS CIDv1 / UnixFS addressing (opt-in)
+
+`ChunkStore.computeCid(data)` still returns a SHA-256 hex digest by default.
+For real IPFS addresses (CIDv1, sha2-256, base32, raw leaves, dag-pb/UnixFS):
+
+```js
+await ChunkStore.computeCid(bytes, { format: 'cidv1' }); // raw-leaf CIDv1
+const { cid, blocks, files } = await buildUnixfsDirectory({ 'index.html': bytes });
+await verifyBlock(someCid, blockBytes); // accepts SHA-256 hex or CIDv1
+```
+
+Output matches `ipfs add -r --cid-version=1 --raw-leaves` (256 KiB fixed
+chunks, balanced layout, 174 links max). Directories needing HAMT sharding
+(serialized node over 256 KiB) are rejected.
 
 ## Install
 

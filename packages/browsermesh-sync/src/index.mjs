@@ -8,3 +8,4 @@ export * from './files.mjs';
 export * from './collab.mjs';
 export * from './collab-bridge.mjs';
 export * from './memory-sync.mjs';
+export * from './cidv1.mjs';

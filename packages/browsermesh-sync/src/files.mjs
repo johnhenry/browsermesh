@@ -9,6 +9,7 @@
  */
 
 import { MESH_TYPE, MESH_ERROR } from '@johnhenry/browsermesh-primitives';
+import { computeCidV1 } from './cidv1.mjs';
 
 // ── Constants ────────────────────────────────────────────────────────
 
@@ -103,11 +104,17 @@ export class ChunkStore {
   #chunks = new Map();
 
   /**
-   * Compute a content ID (SHA-256 hex) for data.
+   * Compute a content ID for data. Default: SHA-256 hex. Pass
+   * `{ format: 'cidv1' }` for a real IPFS raw-leaf CIDv1 (base32); see
+   * `cidv1.mjs` for directory / multi-chunk UnixFS DAGs.
    * @param {Uint8Array} data
+   * @param {{format?: 'sha256-hex'|'cidv1'}} [opts]
    * @returns {Promise<string>}
    */
-  static async computeCid(data) {
+  static async computeCid(data, opts = {}) {
+    const format = opts?.format ?? 'sha256-hex';
+    if (format === 'cidv1') return computeCidV1(data);
+    if (format !== 'sha256-hex') throw new Error(`unknown CID format: ${format}`);
     let hash;
     if (typeof crypto !== 'undefined' && crypto.subtle) {
       hash = await crypto.subtle.digest('SHA-256', data);
