@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.16.0
+
+### Minor Changes
+
+- 7d06d5f: Add per-request AbortSignal and timeout support, caller-bound cancellation, handler deadlines, concurrency limits and bounded binary body encoding that survives JSON transports. Resource authorization remains the service handler's responsibility; cancellation does not roll back side effects.
+- e2b4758: Share browser-safe mesh address parsing through primitives and discovery, retaining case-sensitive IDs and query strings. Remove the Node-only mesh-fetch factory path. Add explicit HTTP body mode and Request input with bounded byte-preserving uploads, native multipart headers, cancellation and correct HEAD/bodyless responses, while retaining the default structured JSON-body convention. HTTP bodies are buffered, not streamed.
+
+### Patch Changes
+
+- 7d06d5f: Bind pending mesh RPC responses to the intended transport peer. A matching request ID from another peer can no longer complete the call. Reject calls after teardown and settle failed sends without leaving an unobserved pending promise.
+
 ## 0.15.0
 
 ### Minor Changes

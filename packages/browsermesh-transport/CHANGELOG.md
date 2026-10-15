@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.1
+
+### Patch Changes
+
+- f7837d6: Preserve FIFO delivery when jitter timer callbacks fire out of order under load. Readiness now drains a send queue rather than allowing each timer to send independently; closing clears the queue and all timers.
+
 ## 0.5.0
 
 ### Minor Changes
