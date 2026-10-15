@@ -165,6 +165,9 @@ export class WebSocketTransport {
   /** @type {Set<*>} Outstanding jitter timers, cleared on close */
   #jitterTimers = new Set();
 
+  /** FIFO delivery is independent of timer scheduling and clock rounding. */
+  #jitterQueue = [];
+
   /** @type {number} Earliest time the next jittered send may fire (keeps order) */
   #nextSendAt = 0;
 
@@ -320,10 +323,16 @@ export class WebSocketTransport {
     const now = Date.now();
     const at = Math.max(now + Math.random() * this.#jitterMs, this.#nextSendAt);
     this.#nextSendAt = at;
+    const entry = { wire, ws, ready: false };
+    this.#jitterQueue.push(entry);
     const timer = setTimeout(() => {
       this.#jitterTimers.delete(timer);
-      if (this.#ws !== ws || !this.connected) return;
-      try { ws.send(wire); } catch (e) { this._fireEvent('error', e); }
+      entry.ready = true;
+      while (this.#jitterQueue[0]?.ready) {
+        const next = this.#jitterQueue.shift();
+        if (this.#ws !== next.ws || !this.connected) continue;
+        try { next.ws.send(next.wire); } catch (e) { this._fireEvent('error', e); }
+      }
     }, Math.max(0, at - now));
     this.#jitterTimers.add(timer);
   }
@@ -332,6 +341,7 @@ export class WebSocketTransport {
   #clearJitter() {
     for (const t of this.#jitterTimers) clearTimeout(t);
     this.#jitterTimers.clear();
+    this.#jitterQueue.length = 0;
     this.#nextSendAt = 0;
   }
 
