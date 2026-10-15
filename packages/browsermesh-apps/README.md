@@ -600,6 +600,36 @@ layer.
 
 ### `browserMeshFetch`
 
+`createBrowserMeshFetch(api, { bodyMode: 'http' })` accepts standard HTTP body
+types and sends their exact bytes, including native multipart form headers.
+Passing a `Request` also selects that behavior. The default `bodyMode:
+'structured'` retains the original JSON-oriented convention: JSON-looking
+string inputs are parsed before the handler receives them. Both modes preserve
+binary responses and return null bodies for HEAD and status 204, 205 or 304.
+The factory runs in browsers without Node globals. Mesh IDs remain case
+sensitive; prefer `mesh://` addresses when representing cryptographic IDs,
+since ordinary HTTP URL hostname handling can lowercase them.
+
+This is bounded, buffered RPC rather than a streaming HTTP tunnel. The default
+body cap is 1 MiB; `maxBodyBytes` can narrow the fetch adapter's upload cap and
+the RPC service's request/response cap. Transport message-size limits still
+apply. Large file transfer needs chunking or a streaming transport.
+
+`createMeshRpcService()` accepts `maxInflight` (64), `maxIncoming` (64),
+`maxIncomingPerPeer` (8), `maxBodyBytes` (1 MiB), and `requestTimeoutMs`
+(10 seconds). Call `api.request(peer, request, { signal, timeoutMs })` to cancel
+or bound an individual call. Handlers receive `signal`; only the original
+caller may cancel their work. A matching response ID from another peer is
+ignored. Cancel and timeout end local waiting and request remote cancellation;
+they do not undo side effects or force a handler that ignores its signal to
+stop. An unfinished handler continues to count against receiver admission.
+
+Top-level `Uint8Array`, other array-buffer views and `ArrayBuffer` bodies use
+the additive wire field `bodyEncoding: 'base64'`; plain JSON bodies keep their
+previous wire shape. Binary calls and remote cancellation require updated
+responders; older responders still support existing structured calls. This
+transport supplies no resource grants: handlers must authorize the caller.
+
 `createBrowserMeshFetch(meshRpcApi) -> (url, init) => Promise<Response>` binds
 once to a live `mesh-rpc` service's `api` (the `{ request }` object
 `attachService()` returns as `.api`) and hands back a plain function whose

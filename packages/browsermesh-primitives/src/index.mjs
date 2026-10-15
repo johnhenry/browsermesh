@@ -33,3 +33,6 @@ export {
 
 // Size-bucket padding (relay-blind envelopes)
 export { DEFAULT_PAD_BUCKETS, PAD_TRAILER_BYTES, paddedLength, padTo, unpad } from "./padding.mjs";
+
+// Mesh addressing
+export { parseMeshRequest } from './mesh-address.mjs';
