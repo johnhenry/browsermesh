@@ -381,3 +381,6 @@ export declare const PAD_TRAILER_BYTES: 4;
 export declare function paddedLength(length: number, opts?: { buckets?: number[] }): number;
 export declare function padTo(bytes: Uint8Array, opts?: { buckets?: number[] }): Uint8Array;
 export declare function unpad(padded: Uint8Array): Uint8Array;
+
+/** Parse a case-sensitive mesh:// or *.mesh.local address. */
+export declare function parseMeshRequest(url: string): { podId: string; path: string } | null;

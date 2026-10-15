@@ -167,8 +167,10 @@ describe('browser-safe package root (issue #183)', () => {
     }
   })
 
-  it('each previously-affected file uses the lazy, browser-safe require helper instead', () => {
-    for (const name of PREVIOUSLY_AFFECTED_FILES) {
+  it('remaining optional-peer paths use the lazy require helper', () => {
+    // mesh-fetch now uses the shared primitives parser directly. Its factory
+    // is exercised without process in mesh-fetch-http.test.mjs.
+    for (const name of PREVIOUSLY_AFFECTED_FILES.filter(name => name !== 'mesh-fetch.mjs')) {
       const source = readFileSync(path.join(SRC_DIR, name), 'utf8')
       assert.match(
         source,

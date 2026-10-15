@@ -95,6 +95,10 @@ console.log(set.has('item')) // true
 
 ### Wire Format
 
+- `parseMeshRequest(url)` — shared browser-safe parsing of `mesh://` and
+  `*.mesh.local` addresses into `{ podId, path }`, preserving ID case and
+  query strings and excluding fragments. Discovery re-exports the same helper.
+
 - `messageTypeRegistry` -- extensible registry of message types
 - `encodeMeshMessage(msg)` / `decodeMeshMessage(bytes)` -- binary serialization
 

@@ -1522,6 +1522,22 @@ describe('WebSocketTransport padding and jitter (#191)', () => {
     assert.deepEqual(sock._sent, []);
   });
 
+  it('keeps send order even when jitter timer callbacks run in reverse order', async () => {
+    const t = make({ jitterMs: 30 });
+    const sock = await open(t);
+    const realTimeout = globalThis.setTimeout;
+    const callbacks = [];
+    try {
+      globalThis.setTimeout = (callback) => { callbacks.push(callback); return callbacks.length; };
+      for (let i = 0; i < 8; i++) t.send(`m${i}`);
+      for (const callback of callbacks.reverse()) callback();
+      assert.deepEqual(sock._sent, Array.from({ length: 8 }, (_, i) => `m${i}`));
+    } finally {
+      globalThis.setTimeout = realTimeout;
+      await t.close();
+    }
+  });
+
   it('validates padding and jitterMs options', () => {
     assert.throws(() => make({ jitterMs: -1 }), TypeError);
     assert.throws(() => make({ padding: 'yes' }), TypeError);
