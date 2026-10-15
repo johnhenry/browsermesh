@@ -19,7 +19,7 @@
     "directory": "packages/browsermesh-discovery"
   },
   "peerDependencies": {
-    "@johnhenry/browsermesh-primitives": ">=0.2.0 <1.0.0"
+    "@johnhenry/browsermesh-primitives": ">=0.3.1 <1.0.0"
   },
   "scripts": {
     "test": "node --import ./test/_setup-globals.mjs --test test/*.test.mjs"
