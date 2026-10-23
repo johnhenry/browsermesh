@@ -523,9 +523,9 @@ describe('VaultIdentityStorage', () => {
     const rawInner = await inner.load(summary.podId);
     assert.equal(rawInner.privateKeyJwk, null);
     assert.ok(rawInner.encryptedPrivateKey);
-    assert.ok(rawInner.encryptedPrivateKey.salt);
+    assert.ok(rawInner.encryptedPrivateKey.kdf.salt);
     assert.ok(rawInner.encryptedPrivateKey.iv);
-    assert.ok(rawInner.encryptedPrivateKey.ciphertext);
+    assert.ok(rawInner.encryptedPrivateKey.ct);
 
     // Verify vault decrypts correctly
     const loaded = await vault.load(summary.podId);
@@ -919,16 +919,16 @@ describe('IdentitySelector', () => {
 // ---------------------------------------------------------------------------
 
 describe('encrypted export never degrades to plaintext', () => {
-  /** Run `fn` with crypto.subtle.deriveKey broken, then restore it. */
+  /** Run `fn` with crypto.subtle.deriveBits (keyvault's KDF call) broken, then restore it. */
   const withBrokenDeriveKey = async (fn) => {
-    const real = crypto.subtle.deriveKey;
-    crypto.subtle.deriveKey = async () => {
+    const real = crypto.subtle.deriveBits;
+    crypto.subtle.deriveBits = async () => {
       throw new DOMException('PBKDF2 unavailable', 'NotSupportedError');
     };
     try {
       return await fn();
     } finally {
-      crypto.subtle.deriveKey = real;
+      crypto.subtle.deriveBits = real;
     }
   };
 
@@ -938,9 +938,9 @@ describe('encrypted export never degrades to plaintext', () => {
     const out = await mgr.export(s.podId, 'correct horse battery staple');
 
     assert.equal(out.encrypted, true);
-    assert.equal(out.kdf, 'PBKDF2-SHA256');
-    assert.equal(out.iterations, 310_000);
-    assert.ok(out.salt && out.iv && out.ciphertext);
+    assert.equal(out.kdf.name, 'PBKDF2-SHA256');
+    assert.ok(out.kdf.iterations >= 600_000, 'keyvault default, not the old 310k');
+    assert.ok(out.kdf.salt && out.iv && out.ct);
     assert.equal(out.d, undefined, 'no private scalar in the envelope');
     assert.equal(
       JSON.stringify(out).includes('"d"'),
@@ -1055,25 +1055,12 @@ describe('encrypted export never degrades to plaintext', () => {
       await vault.save('pod1', { privateKeyJwk: jwk });
 
       const { encryptedPrivateKey } = await inner.load('pod1');
-      assert.equal(encryptedPrivateKey.kdf, 'PBKDF2-SHA256');
-      assert.equal(encryptedPrivateKey.iterations, 310_000);
+      assert.equal(encryptedPrivateKey.kdf.name, 'PBKDF2-SHA256');
+      assert.ok(encryptedPrivateKey.kdf.iterations >= 600_000);
     });
 
-    it('opens a record written before the iteration count was recorded', async () => {
-      // Envelopes stored by the previous implementation carry no kdf and no
-      // iterations; they must still decrypt at the documented 310k default.
-      const inner = new InMemoryIdentityStorage();
-      const vault = new VaultIdentityStorage(inner, { getPassphrase: async () => 'realpw' });
-      await vault.save('pod1', { privateKeyJwk: jwk });
-
-      const record = await inner.load('pod1');
-      delete record.encryptedPrivateKey.kdf;
-      delete record.encryptedPrivateKey.iterations;
-      await inner.save('pod1', record);
-
-      const loaded = await vault.load('pod1');
-      assert.deepEqual(loaded.privateKeyJwk, jwk);
-    });
+    // Opening records written before the iteration count was recorded is
+    // covered against a real 0.8.0 fixture in vault-keyvault.test.mjs.
 
     it('rejects an envelope claiming an unknown KDF', async () => {
       const inner = new InMemoryIdentityStorage();
@@ -1173,7 +1160,7 @@ describe('encrypted export round-trips through import', () => {
     // passphrase, must be indistinguishable from the wrong-passphrase case.
     // Any difference tells someone guessing that they had just found the
     // passphrase.
-    const damaged = { ...envelope, ciphertext: envelope.ciphertext.slice(0, -4) + 'AAAA' };
+    const damaged = { ...envelope, ct: envelope.ct.slice(0, -4) + 'AAAA' };
     await assert.rejects(
       () => target.import(damaged, 'restored', { passphrase: PW }),
       (err) => {
@@ -1197,18 +1184,5 @@ describe('encrypted export round-trips through import', () => {
       () => target.import(jwk, 'restored', { passphrase: PW }),
       /not encrypted/
     );
-  });
-
-  it('opens an envelope written before `iterations` was recorded', async () => {
-    // decryptWithPassphrase() defaults the count, so older backups still open.
-    const source = new MeshIdentityManager();
-    const created = await source.create('alice');
-    const envelope = await source.export(created.podId, PW);
-    const { iterations, ...legacy } = envelope;
-    assert.equal(iterations, 310_000, 'precondition: the field is normally present');
-
-    const target = new MeshIdentityManager();
-    const restored = await target.import(legacy, 'restored', { passphrase: PW });
-    assert.equal(restored.podId, created.podId);
   });
 });

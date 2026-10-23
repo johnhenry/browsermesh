@@ -1,0 +1,79 @@
+{
+  "generatedBy": "browsermesh-core 0.8.0 (pre-keyvault VaultIdentityStorage / MeshIdentityManager.export)",
+  "jwk": {
+    "kty": "OKP",
+    "crv": "Ed25519",
+    "d": "FIXTURE-PRIVATE-SCALAR",
+    "x": "FIXTURE-PUBLIC",
+    "key_ops": [
+      "sign"
+    ]
+  },
+  "cases": {
+    "ascii-310k": {
+      "passphrase": "correct horse battery staple",
+      "record": {
+        "podId": "pod-1",
+        "label": "ascii-310k",
+        "privateKeyJwk": null,
+        "encryptedPrivateKey": {
+          "kdf": "PBKDF2-SHA256",
+          "iterations": 310000,
+          "salt": "_qBylFaYG2qQ-2tr2FMMZw",
+          "iv": "w6rRmozwXoZf0V8h",
+          "ciphertext": "_RW7LyPkSAhYLI9lqghuo_4GQt_tWKbnkSOfybaclRk3yD1h-SmwJo9JP6Czh4fnvoZ-D9omCUQu2AIHKaaBu4YcvtiJzM-rgMid_7Z2dfKbRKdOuN76ffLrPlCr28mYkmZfNMCTu9FvZssc1uperH3l"
+        }
+      }
+    },
+    "unicode-nfd-310k": {
+      "passphrase": "café ✓ ｐａｓｓ",
+      "record": {
+        "podId": "pod-1",
+        "label": "unicode-nfd-310k",
+        "privateKeyJwk": null,
+        "encryptedPrivateKey": {
+          "kdf": "PBKDF2-SHA256",
+          "iterations": 310000,
+          "salt": "NZ683ZVpr9YU9KFwXjQ5jg",
+          "iv": "tVW8vdUGMi3qdVJt",
+          "ciphertext": "BzXJ_QQixoG9tbhKKQyLkUQzVsSTsEKfAhXL2AITwGIKp6fGKCrTfgdltX-iQFd0MHl5hBRnaR2622zZcVh2lT3dwEv5qOyk9CSGjVJTUZPW3R4kEgHKUuYiCv1I2qxBuGl41ytw6H55he_h2-pYRTVf"
+        }
+      }
+    },
+    "legacy-no-kdf": {
+      "passphrase": "old pass",
+      "record": {
+        "podId": "pod-1",
+        "label": "legacy-no-kdf",
+        "privateKeyJwk": null,
+        "encryptedPrivateKey": {
+          "salt": "9UjM45t5XkfLu5bYLG6nRQ",
+          "iv": "jnFYl6jquteL-2tD",
+          "ciphertext": "F0GaDVxUJdxMR88k5yM7gcc0nt5RE-NCQabtprsQGD4Dw2RI0aaevpg2VsyolcMRWg6qDGt33kMfWhJ8cmVwoTr1qGeaCZHOvrjJXkQRyWKxyhYBuq6MZFHBQxZcYkSMvQDMBdDQlL-cydDdyRyh6wCX"
+        }
+      }
+    }
+  },
+  "export": {
+    "passphrase": "export pass",
+    "envelope": {
+      "encrypted": true,
+      "kdf": "PBKDF2-SHA256",
+      "iterations": 310000,
+      "salt": "0O0pk5LvWnvkHCaum0DFlQ",
+      "iv": "5zJWh-3CORoSlLkS",
+      "ciphertext": "OGJ_nXak5hDrb7l39Dv0TpVsHSvIxyn4RCTjzKYz6vR6jgDZfO-RtpavFyIpo0yifVVlDr9si2cxQcwyPk-PONiGa2J0AuX_8DcU6IB_uEwscgoLMccPdSj6jJZ4FJPoYcz4aVZvPo0zOgZEhW0yuje-grgwa6zMGrVg2KKl3mpOMmXGMFDKkV3xmNfQlZJQOyMdaLb_kZi0Q2EaM-IBMIQHWw8xz8_5FdYTfs1T38VvR30Is4m1Mje1Br0J9Ew"
+    },
+    "jwk": {
+      "key_ops": [
+        "sign"
+      ],
+      "ext": true,
+      "alg": "Ed25519",
+      "crv": "Ed25519",
+      "d": "0-mUFrcKNoz0MZoYmLK9mTdxHujVG_kteSv8L79Gepo",
+      "x": "97yCJ0762k_8cd6DMWPtkx6t23SNKfX83p7bHiPTSBM",
+      "kty": "OKP"
+    }
+  }
+}

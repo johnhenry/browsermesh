@@ -13,6 +13,7 @@
  */
 
 import { silentCatch } from './silent-catch.mjs'
+import { seal, open as openRecord, needsUpgrade, VaultError } from '@johnhenry/keyvault';
 import {
   PodIdentity,
   derivePodId,
@@ -24,13 +25,18 @@ import {
 export { PodIdentity, derivePodId, encodeBase64url, decodeBase64url };
 
 // ---------------------------------------------------------------------------
-// PBKDF2 / AES-GCM constants (shared with VaultIdentityStorage)
+// Passphrase encryption (via @johnhenry/keyvault)
 // ---------------------------------------------------------------------------
 
-const VAULT_PBKDF2_ITERATIONS = 310_000;
-const VAULT_SALT_BYTES = 16;
-const VAULT_IV_BYTES = 12;
-const VAULT_KDF = 'PBKDF2-SHA256';
+/** Record type of an encrypted private key stored by VaultIdentityStorage. */
+const VAULT_TYPE = 'browsermesh-vault';
+/** Record type of an encrypted identity export (`export(podId, passphrase)`). */
+const EXPORT_TYPE = 'browsermesh-identity-export';
+/**
+ * The only KDF name the pre-keyvault envelope (`kdf` was a string) could carry.
+ * Kept to refuse any other string with the message callers have always seen.
+ */
+const LEGACY_VAULT_KDF = 'PBKDF2-SHA256';
 
 /**
  * Reject a passphrase that would not actually protect anything.
@@ -57,94 +63,56 @@ function requirePassphrase(passphrase, source) {
 }
 
 /**
- * PBKDF2(SHA-256) → AES-256-GCM over a UTF-8 string.
- *
- * The KDF name and iteration count travel with the ciphertext so a future
- * change of parameters does not orphan envelopes written under the old ones.
+ * Encrypt a UTF-8 string under a passphrase with keyvault (PBKDF2-SHA256 at
+ * keyvault's current default, AES-256-GCM, KDF parameters and `header`
+ * authenticated and stored in the record).
  *
  * @param {string} plaintext
  * @param {string} passphrase
- * @returns {Promise<{ kdf: string, iterations: number, salt: string, iv: string, ciphertext: string }>}
+ * @param {string} type - Record type
+ * @param {object} [header] - Extra readable, authenticated fields
+ * @returns {Promise<object>} A keyvault record (plain JSON object)
  */
-async function encryptWithPassphrase(plaintext, passphrase) {
-  const enc = new TextEncoder();
-  const salt = crypto.getRandomValues(new Uint8Array(VAULT_SALT_BYTES));
-  const iv = crypto.getRandomValues(new Uint8Array(VAULT_IV_BYTES));
-
-  const baseKey = await crypto.subtle.importKey(
-    'raw',
-    enc.encode(passphrase),
-    'PBKDF2',
-    false,
-    ['deriveKey']
-  );
-
-  const aesKey = await crypto.subtle.deriveKey(
-    { name: 'PBKDF2', salt, iterations: VAULT_PBKDF2_ITERATIONS, hash: 'SHA-256' },
-    baseKey,
-    { name: 'AES-GCM', length: 256 },
-    false,
-    ['encrypt']
-  );
-
-  const ciphertext = new Uint8Array(
-    await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, aesKey, enc.encode(plaintext))
-  );
-
-  return {
-    kdf: VAULT_KDF,
-    iterations: VAULT_PBKDF2_ITERATIONS,
-    salt: encodeBase64url(salt),
-    iv: encodeBase64url(iv),
-    ciphertext: encodeBase64url(ciphertext),
-  };
+async function encryptWithPassphrase(plaintext, passphrase, type, header) {
+  return JSON.parse(await seal(plaintext, passphrase, { type, header }));
 }
 
 /**
- * Inverse of {@link encryptWithPassphrase}.
+ * Inverse of {@link encryptWithPassphrase}. Also opens envelopes written by
+ * browsermesh-core <= 0.8.0 (`{ kdf?, iterations?, salt, iv, ciphertext }`,
+ * 310k iterations when `iterations` is absent, passphrase used as typed).
  *
- * `iterations` is read from the envelope so blobs written before the count
- * was recorded (and before it was raised to match the documented 310k) still
- * open.
+ * Errors keep the shapes this API has always had: a wrong passphrase (or a
+ * modified record) rejects with a DOMException named `OperationError`, an
+ * unknown string `kdf` with `Unsupported key derivation function: <kdf>`.
+ * Anything else keyvault reports is rethrown as its `VaultError`.
  *
- * @param {{ kdf?: string, iterations?: number, salt: string, iv: string, ciphertext: string }} envelope
+ * @param {object} envelope
  * @param {string} passphrase
- * @returns {Promise<string>}
+ * @param {string[]} types - Accepted record types
+ * @returns {Promise<{ plaintext: string, upgrade: boolean }>}
  */
-async function decryptWithPassphrase(envelope, passphrase) {
-  const { kdf, iterations, salt, iv, ciphertext } = envelope;
-  if (kdf !== undefined && kdf !== VAULT_KDF) {
-    throw new Error(`Unsupported key derivation function: ${kdf}`);
+async function decryptWithPassphrase(envelope, passphrase, types) {
+  if (typeof envelope?.kdf === 'string' && envelope.kdf !== LEGACY_VAULT_KDF) {
+    throw new Error(`Unsupported key derivation function: ${envelope.kdf}`);
   }
-
-  const baseKey = await crypto.subtle.importKey(
-    'raw',
-    new TextEncoder().encode(passphrase),
-    'PBKDF2',
-    false,
-    ['deriveKey']
-  );
-
-  const aesKey = await crypto.subtle.deriveKey(
-    {
-      name: 'PBKDF2',
-      salt: decodeBase64url(salt),
-      iterations: iterations ?? VAULT_PBKDF2_ITERATIONS,
-      hash: 'SHA-256',
-    },
-    baseKey,
-    { name: 'AES-GCM', length: 256 },
-    false,
-    ['decrypt']
-  );
-
-  const plaintext = await crypto.subtle.decrypt(
-    { name: 'AES-GCM', iv: decodeBase64url(iv) },
-    aesKey,
-    decodeBase64url(ciphertext)
-  );
-
-  return new TextDecoder().decode(plaintext);
+  try {
+    const r = await openRecord(envelope, passphrase);
+    if (!types.includes(r.type)) {
+      throw new VaultError('wrong_type', `unexpected record type ${JSON.stringify(String(r.type).slice(0, 60))}`);
+    }
+    return {
+      plaintext: new TextDecoder().decode(r.payload),
+      upgrade: needsUpgrade(envelope),
+    };
+  } catch (err) {
+    if (err instanceof VaultError && err.code === 'bad_passphrase') {
+      const e = new DOMException('The operation failed for an operation-specific reason', 'OperationError');
+      e.cause = err;
+      throw e;
+    }
+    throw err;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -375,7 +343,7 @@ export class MeshIdentityManager {
       );
       let plaintext;
       try {
-        plaintext = await decryptWithPassphrase(keyData, passphrase);
+        ({ plaintext } = await decryptWithPassphrase(keyData, passphrase, [VAULT_TYPE, EXPORT_TYPE]));
       } catch (err) {
         throw unreadable(err);
       }
@@ -456,8 +424,11 @@ export class MeshIdentityManager {
    * is the documented plaintext-export path, and the caller is responsible
    * for what happens to it next.
    *
-   * Called with a passphrase, it returns an encrypted envelope
-   * (`{ encrypted: true, kdf, iterations, salt, iv, ciphertext }`) or it
+   * Called with a passphrase, it returns an encrypted envelope, a
+   * `@johnhenry/keyvault` record
+   * (`{ v, t, encrypted: true, kdf: { name, iterations, salt }, iv, ct }`;
+   * browsermesh-core <= 0.8.0 wrote `{ encrypted: true, kdf, iterations,
+   * salt, iv, ciphertext }`, which `import()` still reads) or it
    * throws. It never quietly hands back the plaintext key instead: a caller
    * who asked for encryption and got an unlabelled JWK would have no way to
    * tell, and would go on to write, paste or QR-encode a private key it
@@ -488,7 +459,7 @@ export class MeshIdentityManager {
 
     let envelope;
     try {
-      envelope = await encryptWithPassphrase(JSON.stringify(jwk), passphrase);
+      envelope = await encryptWithPassphrase(JSON.stringify(jwk), passphrase, EXPORT_TYPE, { encrypted: true });
     } catch (err) {
       // Deliberately not falling back to the plaintext JWK. Encryption was
       // asked for; if it cannot be done, the caller has to know.
@@ -499,7 +470,7 @@ export class MeshIdentityManager {
       );
     }
 
-    return { encrypted: true, ...envelope };
+    return envelope;
   }
 
   // -- Lookup & Enumeration -----------------------------------------------
@@ -943,7 +914,9 @@ export class IndexedDBIdentityStorage {
 /**
  * Wraps another identity storage with passphrase-based encryption.
  * Only the privateKey field is encrypted; publicKey + metadata stored cleartext.
- * Uses PBKDF2(310k, SHA-256) → AES-256-GCM.
+ * Uses @johnhenry/keyvault (PBKDF2-SHA256 → AES-256-GCM). Records written by
+ * browsermesh-core <= 0.8.0 (310k iterations) still open and are re-encrypted
+ * with keyvault's current defaults on the first successful load.
  *
  * `getPassphrase` must resolve to a non-empty string. An empty string or a
  * missing value is refused rather than used: PBKDF2 accepts an empty key and
@@ -987,7 +960,8 @@ export class VaultIdentityStorage {
       const passphrase = requirePassphrase(await this.#getPassphrase(), 'getPassphrase');
       record.encryptedPrivateKey = await encryptWithPassphrase(
         JSON.stringify(record.privateKeyJwk),
-        passphrase
+        passphrase,
+        VAULT_TYPE
       );
       record.privateKeyJwk = null;
     }
@@ -1009,10 +983,26 @@ export class VaultIdentityStorage {
 
     if (record.encryptedPrivateKey) {
       const passphrase = requirePassphrase(await this.#getPassphrase(), 'getPassphrase');
-      record.privateKeyJwk = JSON.parse(
-        await decryptWithPassphrase(record.encryptedPrivateKey, passphrase)
-      );
+      const stored = record.encryptedPrivateKey;
+      const { plaintext, upgrade } = await decryptWithPassphrase(stored, passphrase, [VAULT_TYPE]);
+      record.privateKeyJwk = JSON.parse(plaintext);
       delete record.encryptedPrivateKey;
+
+      // Re-encrypt records written under older parameters (310k iterations,
+      // no kdf recorded, the pre-keyvault envelope) with the current defaults.
+      // Best effort: the unlock has succeeded either way, and the old record
+      // stays valid if the write-back fails.
+      if (upgrade) {
+        try {
+          await this.#inner.save(podId, {
+            ...record,
+            privateKeyJwk: null,
+            encryptedPrivateKey: await encryptWithPassphrase(plaintext, passphrase, VAULT_TYPE),
+          });
+        } catch (err) {
+          silentCatch('clawser-mesh-identity', 'vault-upgrade', err);
+        }
+      }
     }
 
     return record;

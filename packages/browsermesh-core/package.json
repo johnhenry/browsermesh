@@ -19,6 +19,9 @@
     "url": "https://github.com/johnhenry/browsermesh",
     "directory": "packages/browsermesh-core"
   },
+  "dependencies": {
+    "@johnhenry/keyvault": "^0.1.0"
+  },
   "peerDependencies": {
     "@johnhenry/browsermesh-primitives": ">=0.3.0 <1.0.0",
     "@johnhenry/browsermesh-apps": ">=0.4.0 <1.0.0"
