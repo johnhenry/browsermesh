@@ -308,6 +308,12 @@ export class MeshFileTransfer {
   // Callbacks
   #onOffer = null;
   #onProgress = null;
+
+  /** @type {Set<Function>} multi-listener progress subscribers */
+  #progressListeners = new Set();
+
+  /** @type {Map<string, 'send'|'receive'>} transferId → local role */
+  #directions = new Map();
   #onComplete = null;
   #onSend = null;
 
@@ -322,6 +328,28 @@ export class MeshFileTransfer {
   onProgress(cb) { this.#onProgress = cb; return this; }
   onComplete(cb) { this.#onComplete = cb; return this; }
   onSend(cb) { this.#onSend = cb; return this; }
+
+  /**
+   * Subscribe to transfer progress. Unlike the single-slot `onProgress`, any
+   * number of listeners may subscribe and none displaces another.
+   *
+   * Listeners receive `{ transferId, direction, bytesDone, bytesTotal,
+   * percentComplete, transferRate, state }` where `direction` is `'send'`
+   * (this instance created the offer) or `'receive'` (it accepted one) and
+   * `state` is the transfer status. An event fires after every chunk
+   * (`'transferring'`) and once more on reaching `'completed'` or
+   * `'cancelled'`. Events are NOT throttled; throttle in the consumer.
+   * A throwing listener is isolated and does not affect other listeners or
+   * the transfer.
+   *
+   * @param {(event: object) => void} fn
+   * @returns {() => void} unsubscribe
+   */
+  subscribeProgress(fn) {
+    if (typeof fn !== 'function') throw new TypeError('subscribeProgress requires a function');
+    this.#progressListeners.add(fn);
+    return () => { this.#progressListeners.delete(fn); };
+  }
 
   /** Access the chunk store. */
   get store() { return this.#store; }
@@ -343,6 +371,7 @@ export class MeshFileTransfer {
       expires: opts.expires,
     });
     this.#offers.set(offer.transferId, offer);
+    this.#directions.set(offer.transferId, 'send');
     const fileSizes = offer.files.map(f => f.size);
     const state = new TransferState({
       transferId: offer.transferId,
@@ -373,6 +402,7 @@ export class MeshFileTransfer {
       throw new Error('Transfer offer has expired');
     }
     this.#offers.set(offer.transferId, offer);
+    this.#directions.set(offer.transferId, 'receive');
     const fileSizes = offer.files.map(f => f.size);
     const state = new TransferState({
       transferId: offer.transferId,
@@ -403,6 +433,7 @@ export class MeshFileTransfer {
     const state = this.#states.get(transferId);
     if (state) {
       state.status = 'cancelled';
+      this._notifyProgress(transferId, state);
     }
 
     this._emit({
@@ -442,7 +473,9 @@ export class MeshFileTransfer {
     }
 
     if (state.isComplete()) {
+      const wasDone = state.status === 'completed';
       state.status = 'completed';
+      if (!wasDone) this._notifyProgress(transferId, state);
       this._emit({
         t: MESH_TYPE.FILE_COMPLETE,
         p: { transferId },
@@ -477,7 +510,9 @@ export class MeshFileTransfer {
     this._emitProgress(transferId, state);
 
     if (state.isComplete()) {
+      const wasDone = state.status === 'completed';
       state.status = 'completed';
+      if (!wasDone) this._notifyProgress(transferId, state);
       this._emit({
         t: MESH_TYPE.FILE_COMPLETE,
         p: { transferId },
@@ -540,6 +575,7 @@ export class MeshFileTransfer {
     const state = this.#states.get(transferId);
     if (state && state.status !== 'completed' && state.status !== 'failed' && state.status !== 'cancelled') {
       state.status = 'cancelled';
+      this._notifyProgress(transferId, state);
     }
 
     this._emit({
@@ -578,19 +614,27 @@ export class MeshFileTransfer {
       }
       case MESH_TYPE.FILE_REJECT: {
         const state = this.#states.get(msg.p.transferId);
-        if (state) state.status = 'cancelled';
+        if (state && state.status !== 'cancelled') {
+          state.status = 'cancelled';
+          this._notifyProgress(msg.p.transferId, state);
+        }
         this.#offers.delete(msg.p.transferId);
         break;
       }
       case MESH_TYPE.FILE_COMPLETE: {
         const state = this.#states.get(msg.p.transferId);
+        const wasDone = state?.status === 'completed';
         if (state) state.status = 'completed';
+        if (state && !wasDone) this._notifyProgress(msg.p.transferId, state);
         if (this.#onComplete) this.#onComplete(msg.p.transferId, state);
         break;
       }
       case MESH_TYPE.FILE_CANCEL: {
         const state = this.#states.get(msg.p.transferId);
-        if (state && state.status !== 'completed') state.status = 'cancelled';
+        if (state && state.status !== 'completed' && state.status !== 'cancelled') {
+          state.status = 'cancelled';
+          this._notifyProgress(msg.p.transferId, state);
+        }
         break;
       }
     }
@@ -602,7 +646,24 @@ export class MeshFileTransfer {
     if (this.#onSend) this.#onSend(msg);
   }
 
+  _notifyProgress(transferId, state) {
+    if (this.#progressListeners.size === 0) return;
+    const event = {
+      transferId,
+      direction: this.#directions.get(transferId) ?? 'receive',
+      bytesDone: state.bytesTransferred,
+      bytesTotal: state.totalSize,
+      percentComplete: state.percentComplete,
+      transferRate: state.transferRate,
+      state: state.status,
+    };
+    for (const fn of [...this.#progressListeners]) {
+      try { fn({ ...event }); } catch { /* listener errors never affect the transfer */ }
+    }
+  }
+
   _emitProgress(transferId, state) {
+    this._notifyProgress(transferId, state);
     if (this.#onProgress) {
       this.#onProgress(transferId, {
         bytesTransferred: state.bytesTransferred,
