@@ -865,3 +865,108 @@ describe('CapabilityChain.verify resource and expiry narrowing', () => {
     assert.deepEqual(new CapabilityChain([link({ expiresAt: 1_000 })]).verify(false), { valid: true });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Signed capability tokens (p2pws#302 item 5)
+// ---------------------------------------------------------------------------
+
+describe('Signed CapabilityTokens', async () => {
+  const { PodIdentity } = await import('../src/identity.mjs');
+  const { CapabilityToken, CapabilityChain, CAPABILITY_DOMAIN } = await import('../src/capabilities.mjs');
+
+  async function setup() {
+    const alice = await PodIdentity.generate();
+    const bob = await PodIdentity.generate();
+    const carol = await PodIdentity.generate();
+    const mallory = await PodIdentity.generate();
+    const keys = new Map([alice, bob, carol, mallory].map((i) => [i.podId, i.keyPair.publicKey]));
+    const getPublicKey = (id) => keys.get(id);
+    const root = await CapabilityToken.issue(alice, {
+      holder: bob.podId, resource: 'fs:/data', permissions: ['read', 'write'],
+    });
+    const child = await root.attenuateSigned(bob, {
+      holder: carol.podId, permissions: ['read'], resource: 'fs:/data/reports',
+    });
+    return { alice, bob, carol, mallory, getPublicKey, root, child };
+  }
+
+  /** Simulate sending a chain over the wire. */
+  const overTheWire = (chain) => CapabilityChain.fromJSON(JSON.parse(JSON.stringify(chain)));
+
+  it('signs a domain-separated canonical payload that binds parentId', async () => {
+    const { root, child } = await setup();
+    const text = new TextDecoder().decode(child.signedPayload);
+    assert.ok(text.startsWith(CAPABILITY_DOMAIN));
+    assert.equal(JSON.parse(text.slice(CAPABILITY_DOMAIN.length)).parentId, root.id);
+    assert.equal(child.isSigned, true);
+  });
+
+  it('a signed chain verifies after crossing the wire', async () => {
+    const { alice, getPublicKey, root, child } = await setup();
+    const chain = overTheWire(new CapabilityChain([root, child]));
+    assert.equal(chain.at(1).isSigned, true);
+    assert.deepEqual(await chain.verifySignatures(getPublicKey, { rootIssuer: alice.podId }), { valid: true });
+  });
+
+  it('refuses an unsigned chain that is structurally fine', async () => {
+    const { bob, carol, getPublicKey } = await setup();
+    const root = new CapabilityToken({ issuer: bob.podId, holder: carol.podId, resource: '*', permissions: ['read'] });
+    const chain = new CapabilityChain([root]);
+    assert.equal(chain.verify().valid, true);
+    const res = await chain.verifySignatures(getPublicKey);
+    assert.equal(res.valid, false);
+    assert.match(res.error, /unsigned/);
+  });
+
+  it('refuses a token whose fields were widened after signing', async () => {
+    const { getPublicKey, root, child } = await setup();
+    const json = new CapabilityChain([root, child]).toJSON();
+    json[0].permissions = ['read', 'write', 'admin'];
+    json[1].permissions = ['read', 'admin'];
+    const res = await CapabilityChain.fromJSON(json).verifySignatures(getPublicKey);
+    assert.equal(res.valid, false);
+    assert.match(res.error, /Bad signature at index 0/);
+  });
+
+  it('refuses re-parenting a signed child onto another token (parentId bound)', async () => {
+    const { alice, bob, getPublicKey, child } = await setup();
+    const otherRoot = await CapabilityToken.issue(alice, {
+      holder: bob.podId, resource: 'fs:/data', permissions: ['read', 'write'],
+    });
+    const json = child.toJSON();
+    json.parentId = otherRoot.id;
+    const chain = new CapabilityChain([otherRoot, CapabilityToken.fromJSON(json)]);
+    assert.equal(chain.verify().valid, true, 'structure alone is fooled');
+    const res = await chain.verifySignatures(getPublicKey);
+    assert.equal(res.valid, false);
+    assert.match(res.error, /Bad signature at index 1/);
+  });
+
+  it('refuses a delegation not issued by the parent\'s holder', async () => {
+    const { mallory, carol, getPublicKey, root } = await setup();
+    // Mallory signs a child of a token she does not hold.
+    const forged = new CapabilityToken({
+      issuer: mallory.podId, holder: carol.podId, resource: 'fs:/data', permissions: ['read'],
+      parentId: root.id, depth: 1,
+    });
+    await forged.sign(mallory);
+    const res = await new CapabilityChain([root, forged]).verifySignatures(getPublicKey);
+    assert.equal(res.valid, false);
+    assert.match(res.error, /not by its parent's holder/);
+    await assert.rejects(() => root.attenuateSigned(mallory, { holder: carol.podId }), /Only the holder/);
+  });
+
+  it('refuses an untrusted root issuer and a wrong signer', async () => {
+    const { alice, mallory, bob, getPublicKey, root } = await setup();
+    const res = await new CapabilityChain([root]).verifySignatures(getPublicKey, { rootIssuer: mallory.podId });
+    assert.equal(res.valid, false);
+    assert.match(res.error, /not trusted/);
+    const t = new CapabilityToken({ issuer: alice.podId, holder: bob.podId, resource: '*', permissions: ['read'] });
+    await assert.rejects(() => t.sign(mallory), /Only the issuer/);
+  });
+
+  it('unsigned tokens keep their existing JSON shape', () => {
+    const t = new CapabilityToken({ issuer: 'a', holder: 'b', resource: '*', permissions: ['read'] });
+    assert.equal('signature' in t.toJSON(), false);
+  });
+});

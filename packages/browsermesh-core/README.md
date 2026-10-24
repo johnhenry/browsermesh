@@ -26,7 +26,7 @@ Extracted from the private `clawser` monorepo (previously `packages/browsermesh-
 |--------|-------------|
 | identity | `MeshIdentityManager`, `AutoIdentityManager`, `IdentitySelector`, `PodIdentity`, `derivePodId` |
 | identity-tools | `IdentityCreateTool`, `IdentityListTool`, `IdentitySwitchTool`, `registerIdentityTools` |
-| keyring | `MeshKeyring`, `KeyLink`, `SignedKeyLink`, `SuccessionPolicy` |
+| keyring | `MeshKeyring`, `KeyLink`, `SignedKeyLink`, `SignedKeyUnlink`, `SuccessionPolicy` |
 | group-keys | `GroupKeyManager`, `GroupState` |
 | peer | `PeerState`, `MeshPeerManager` |
 | peer-tools | `MeshPeerToolsContext`, `registerMeshPeerTools` + 30 BrowserTool subclasses |
@@ -49,6 +49,34 @@ npm install @johnhenry/browsermesh-core @johnhenry/browsermesh-primitives
 ```js
 import { MeshIdentityManager, MeshKeyring, TrustGraph } from '@johnhenry/browsermesh-core';
 ```
+
+## Verifying key links and capabilities from peers
+
+- `MeshKeyring#verifyCryptoChain(from, to, getPublicKey)` requires every link
+  on the path to be a `SignedKeyLink` signed by both ends, unexpired, in the
+  keyring's `namespace` and not revoked. Unsigned `KeyLink`s (from `link()`)
+  are refused unless you pass `{ requireSigned: false }`.
+- `SignedKeyLink`s sign `"browsermesh/keylink/v3\n"` + sorted-key canonical
+  JSON, including an optional `namespace`. Give the keyring and its links the
+  same namespace (`new MeshKeyring({ namespace })`,
+  `SignedKeyLink.create(p, c, rel, { namespace })`) so a link issued for one
+  keyring is refused by another.
+- Revoke an edge with `SignedKeyUnlink.create(parentIdentity, childId)` and
+  `keyring.applyUnlink(unlink, parentPub)`. Unlinks serialise, can be relayed
+  to peers, and cut off every descendant of the child. `unlink()` is local only.
+- `executeSuccession(primary, { links, getPublicKey })` with a `transfer`
+  policy needs successor-signed replacement links (`{ localOnly: true }` keeps
+  the old unsigned behaviour).
+- Before a capability chain crosses peers, sign it (`CapabilityToken.issue`,
+  `token.attenuateSigned`) and check it on arrival with
+  `chain.verifySignatures(getPublicKey, { rootIssuer })`.
+
+**Migrating links signed before 0.10 (v2 payload).** They no longer verify by
+default. To migrate, load them into a keyring with `{ acceptLegacyV2: true }`
+(verification only, never for signing), find them with
+`link.signatureVersion(parentPub, childPub) === 2`, and re-sign each with
+`link.resign(parentIdentity, childIdentity, { namespace })`. v1
+(`a|b|c|d`) signatures are no longer accepted at all; re-create those links.
 
 ## Padding group-key envelopes
 

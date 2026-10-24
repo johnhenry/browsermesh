@@ -5,6 +5,9 @@ import assert from 'node:assert/strict';
 import {
   KeyLink,
   SignedKeyLink,
+  SignedKeyUnlink,
+  KEYLINK_DOMAIN,
+  KEYUNLINK_DOMAIN,
   SuccessionPolicy,
   MeshKeyring,
   VALID_RELATIONS,
@@ -316,7 +319,7 @@ describe('MeshKeyring', () => {
       kr.link('b', 'c', 'device');
       // Manually force a cycle by re-creating with fromJSON
       const data = kr.toJSON();
-      data.push({ parent: 'c', child: 'a', relation: 'alias', scope: null, expires: null, created: Date.now() });
+      data.links.push({ parent: 'c', child: 'a', relation: 'alias', scope: null, expires: null, created: Date.now() });
       const kr2 = MeshKeyring.fromJSON(data);
       const chain = kr2.getChain('a');
       // Should terminate without looping forever
@@ -537,14 +540,25 @@ describe('MeshKeyring', () => {
       assert.equal(kr2.size, 0);
     });
 
-    it('toJSON returns an array of plain objects', () => {
+    it('toJSON returns { v: 3, namespace, links, revocations } of plain objects', () => {
       kr.link('a', 'b', 'device');
       const json = kr.toJSON();
-      assert.ok(Array.isArray(json));
-      assert.equal(json.length, 1);
-      assert.equal(json[0].parent, 'a');
-      assert.equal(json[0].child, 'b');
-      assert.equal(json[0] instanceof KeyLink, false);
+      assert.equal(json.v, 3);
+      assert.equal(json.namespace, null);
+      assert.deepEqual(json.revocations, []);
+      assert.ok(Array.isArray(json.links));
+      assert.equal(json.links.length, 1);
+      assert.equal(json.links[0].parent, 'a');
+      assert.equal(json.links[0].child, 'b');
+      assert.equal(json.links[0] instanceof KeyLink, false);
+    });
+
+    it('fromJSON still reads the pre-0.10 bare array form', () => {
+      const kr2 = MeshKeyring.fromJSON([
+        { parent: 'a', child: 'b', relation: 'device', scope: null, expires: null, created: 1 },
+      ]);
+      assert.equal(kr2.size, 1);
+      assert.equal(kr2.resolveAuthority('b'), 'a');
     });
 
     it('fromJSON preserves functional behavior', () => {
@@ -693,15 +707,17 @@ describe('MeshKeyring', () => {
       assert.equal(result.brokenAt, child.podId);
     });
 
-    it('works with unsigned links in chain', async () => {
-      // Mix signed and unsigned links
+    it('refuses unsigned links in the chain by default', async () => {
       kr.link('root', 'mid', 'org');
-      const mid = await PodIdentity.generate();
-      const leaf = await PodIdentity.generate();
-
-      // Add unsigned link manually (already done above as 'root' -> 'mid')
-      // The verifyCryptoChain skips sig check for unsigned links
       const result = await kr.verifyCryptoChain('mid', 'root', () => null);
+      assert.equal(result.valid, false);
+      assert.equal(result.brokenAt, 'mid');
+      assert.equal(result.reason, 'unsigned');
+    });
+
+    it('skips unsigned links only with requireSigned: false', async () => {
+      kr.link('root', 'mid', 'org');
+      const result = await kr.verifyCryptoChain('mid', 'root', () => null, { requireSigned: false });
       assert.equal(result.valid, true);
       assert.equal(result.chain.length, 1);
     });
@@ -756,7 +772,8 @@ describe('SignedKeyLink', () => {
     const str = new TextDecoder().decode(link.signedPayload);
     assert.equal(
       str,
-      '{"v":2,"parent":"PARENT","child":"CHILD","relation":"device","scope":null,"expires":null,"created":12345}'
+      'browsermesh/keylink/v3\n' +
+        '{"child":"CHILD","created":12345,"expires":null,"namespace":null,"parent":"PARENT","relation":"device","scope":null}'
     );
   });
 
@@ -786,15 +803,26 @@ describe('SignedKeyLink', () => {
     assert.notDeepEqual(joined.signedPayload, split.signedPayload);
   });
 
-  it('legacySignedPayload keeps the v1 form for links signed before v2', () => {
-    const link = new SignedKeyLink({
-      parent: 'PARENT',
-      child: 'CHILD',
-      relation: 'device',
-      created: 12345,
-    });
-    const str = new TextDecoder().decode(link.legacySignedPayload);
-    assert.equal(str, 'PARENT|CHILD|device|12345');
+  it('signedPayload binds the namespace', () => {
+    const base = { parent: 'P', child: 'C', relation: 'device', created: 1 };
+    const a = new SignedKeyLink({ ...base, namespace: 'acct-a' });
+    const b = new SignedKeyLink({ ...base, namespace: 'acct-b' });
+    const none = new SignedKeyLink({ ...base });
+    assert.notDeepEqual(a.signedPayload, b.signedPayload);
+    assert.notDeepEqual(a.signedPayload, none.signedPayload);
+  });
+
+  it('no longer exposes the v1 payload', () => {
+    const link = new SignedKeyLink({ parent: 'P', child: 'C', relation: 'device', created: 1 });
+    assert.equal('legacySignedPayload' in link, false);
+  });
+
+  it('legacyV2SignedPayload keeps the pre-0.10 form (verification only)', () => {
+    const link = new SignedKeyLink({ parent: 'P', child: 'C', relation: 'device', created: 1 });
+    assert.equal(
+      new TextDecoder().decode(link.legacyV2SignedPayload),
+      '{"v":2,"parent":"P","child":"C","relation":"device","scope":null,"expires":null,"created":1}'
+    );
   });
 
   describe('create', () => {
@@ -1081,13 +1109,13 @@ describe('MeshKeyring Succession', () => {
     assert.equal(armed2[0].policy.primaryId, 'podB');
   });
 
-  it('executeSuccession with transfer re-links children', () => {
+  it('executeSuccession with transfer + localOnly re-links children (unsigned)', async () => {
     // Build: primary -> child1, primary -> child2
     kr.link('primary', 'child1', 'device');
     kr.link('primary', 'child2', 'delegate');
     kr.setSuccessor('primary', 'backup', 5000, 'transfer');
 
-    const result = kr.executeSuccession('primary');
+    const result = await kr.executeSuccession('primary', { localOnly: true });
     assert.equal(result.action, 'transfer');
     assert.equal(result.primaryId, 'primary');
     assert.equal(result.successorId, 'backup');
@@ -1106,13 +1134,13 @@ describe('MeshKeyring Succession', () => {
     assert.equal(kr.removeSuccessor('primary'), false);
   });
 
-  it('executeSuccession with revoke removes all children', () => {
+  it('executeSuccession with revoke removes all children', async () => {
     kr.link('primary', 'child1', 'device');
     kr.link('primary', 'child2', 'org');
     kr.link('primary', 'child3', 'alias');
     kr.setSuccessor('primary', 'backup', 5000, 'revoke');
 
-    const result = kr.executeSuccession('primary');
+    const result = await kr.executeSuccession('primary');
     assert.equal(result.action, 'revoke');
     assert.equal(result.affected, 3);
 
@@ -1258,96 +1286,92 @@ describe('SignedKeyLink signature coverage', () => {
     assert.equal(res.brokenAt, child.podId);
   });
 
-  describe('legacy v1 signatures', () => {
-    /** Sign the v1 payload the way pre-v2 code did. */
-    const signLegacy = async (link, parentIdentity, childIdentity) => {
-      const payload = link.legacySignedPayload;
+  describe('legacy signatures', () => {
+    /** Sign arbitrary bytes the way older code did. */
+    const signWith = async (link, payload, parentIdentity, childIdentity) => {
       link.parentSignature = await parentIdentity.sign(payload);
       link.childSignature = await childIdentity.sign(payload);
       return link;
     };
+    const v1Payload = (l) =>
+      new TextEncoder().encode(`${l.parent}|${l.child}|${l.relation}|${l.created}`);
 
-    it('still verifies when the link has no scope and no expiry', async () => {
+    it('refuses a v1 (a|b|c|d) signature, even with acceptLegacyV2', async () => {
       const parent = await PodIdentity.generate();
       const child = await PodIdentity.generate();
-      const link = await signLegacy(
-        new SignedKeyLink({
-          parent: parent.podId,
-          child: child.podId,
-          relation: 'device',
-          created: 1_700_000_000_000,
-        }),
-        parent,
-        child
-      );
+      const link = new SignedKeyLink({
+        parent: parent.podId, child: child.podId, relation: 'device', created: 1_700_000_000_000,
+      });
+      await signWith(link, v1Payload(link), parent, child);
 
+      assert.equal(await link.verifyBoth(parent.keyPair.publicKey, child.keyPair.publicKey), false);
       assert.equal(
-        await link.verifyBoth(parent.keyPair.publicKey, child.keyPair.publicKey),
-        true
+        await link.verifyBoth(parent.keyPair.publicKey, child.keyPair.publicKey, { acceptLegacyV2: true }),
+        false
       );
+      assert.equal(await link.signatureVersion(parent.keyPair.publicKey, child.keyPair.publicKey), null);
     });
 
-    it('does not let the legacy fallback launder a scope onto a v1 link', async () => {
+    it('refuses a v2 signature by default and accepts it only with acceptLegacyV2', async () => {
       const parent = await PodIdentity.generate();
       const child = await PodIdentity.generate();
-      const link = await signLegacy(
-        new SignedKeyLink({
-          parent: parent.podId,
-          child: child.podId,
-          relation: 'delegate',
-          created: 1_700_000_000_000,
-        }),
-        parent,
-        child
-      );
+      const link = new SignedKeyLink({
+        parent: parent.podId, child: child.podId, relation: 'delegate', scope: ['read'], created: 1,
+      });
+      await signWith(link, link.legacyV2SignedPayload, parent, child);
 
-      const forged = tamperOnTheWire(link, { scope: ['admin'] });
+      const pp = parent.keyPair.publicKey;
+      const cp = child.keyPair.publicKey;
+      assert.equal(await link.verifyBoth(pp, cp), false);
+      assert.equal(await link.verifyBoth(pp, cp, { acceptLegacyV2: true }), true);
+      assert.equal(await link.signatureVersion(pp, cp), 2);
+
+      // Keyring default refuses; opted-in keyring accepts.
+      await assert.rejects(() => new MeshKeyring().addVerifiedLink(link, pp, cp), /Signature verification failed/);
+      const migrating = new MeshKeyring({ acceptLegacyV2: true });
+      await migrating.addVerifiedLink(link, pp, cp);
+      const getPublicKey = (id) => (id === parent.podId ? pp : cp);
+      assert.equal((await migrating.verifyCryptoChain(child.podId, parent.podId, getPublicKey)).valid, true);
       assert.equal(
-        await forged.verifyBoth(parent.keyPair.publicKey, child.keyPair.publicKey),
+        (await migrating.verifyCryptoChain(child.podId, parent.podId, getPublicKey, { acceptLegacyV2: false })).valid,
         false
       );
     });
 
-    it('does not let the legacy fallback launder an expiry onto a v1 link', async () => {
+    it('never accepts a v2 signature for a namespaced link', async () => {
       const parent = await PodIdentity.generate();
       const child = await PodIdentity.generate();
-      const link = await signLegacy(
-        new SignedKeyLink({
-          parent: parent.podId,
-          child: child.podId,
-          relation: 'delegate',
-          created: 1_700_000_000_000,
-        }),
-        parent,
-        child
-      );
-
-      const forged = tamperOnTheWire(link, { expires: Date.now() + 86_400_000 });
+      const link = new SignedKeyLink({
+        parent: parent.podId, child: child.podId, relation: 'device', created: 1,
+      });
+      await signWith(link, link.legacyV2SignedPayload, parent, child);
+      // v2 never covered a namespace, so stamping one on must not verify.
+      const forged = SignedKeyLink.fromJSON({ ...link.toJSON(), namespace: 'acct-a' });
       assert.equal(
-        await forged.verifyBoth(parent.keyPair.publicKey, child.keyPair.publicKey),
+        await forged.verifyBoth(parent.keyPair.publicKey, child.keyPair.publicKey, { acceptLegacyV2: true }),
         false
       );
     });
 
-    it('still rejects a v1 link whose relation was swapped', async () => {
+    it('resign() migrates a v2 link to v3, keeping created', async () => {
       const parent = await PodIdentity.generate();
       const child = await PodIdentity.generate();
-      const link = await signLegacy(
-        new SignedKeyLink({
-          parent: parent.podId,
-          child: child.podId,
-          relation: 'alias',
-          created: 1_700_000_000_000,
-        }),
-        parent,
-        child
-      );
+      const link = new SignedKeyLink({
+        parent: parent.podId, child: child.podId, relation: 'delegate',
+        scope: ['read'], expires: 9_999_999_999_999, created: 42,
+      });
+      await signWith(link, link.legacyV2SignedPayload, parent, child);
 
-      const forged = tamperOnTheWire(link, { relation: 'org' });
+      const migrated = await link.resign(parent, child, { namespace: 'acct-a' });
+      assert.equal(migrated.created, 42);
+      assert.deepEqual(migrated.scope, ['read']);
+      assert.equal(migrated.namespace, 'acct-a');
       assert.equal(
-        await forged.verifyBoth(parent.keyPair.publicKey, child.keyPair.publicKey),
-        false
+        await migrated.signatureVersion(parent.keyPair.publicKey, child.keyPair.publicKey),
+        3
       );
+      const other = await PodIdentity.generate();
+      await assert.rejects(() => link.resign(other, child), /identities/);
     });
   });
 });
@@ -1375,8 +1399,9 @@ describe('MeshKeyring.fromJSON preserves signed links', () => {
     });
 
     const revived = MeshKeyring.fromJSON([signed.toJSON()]);
-    const links = revived.toJSON();
+    const links = revived.toJSON().links;
     assert.equal(links.length, 1, 'the link survived the round trip');
+    assert.ok(revived.listLinks()[0] instanceof SignedKeyLink);
     assert.ok(links[0].parentSignature, 'and kept its signatures');
   });
 
@@ -1397,5 +1422,314 @@ describe('MeshKeyring.fromJSON preserves signed links', () => {
     // The measurement that mattered: this was 0, and the verdict was `true`.
     assert.ok(publicKeyLookups > 0, 'a restored chain consults the public keys');
     assert.equal(result.valid, false, 'and refuses signatures that do not verify');
+  });
+});
+
+/* ── p2pws#302: hardening of chain verification, context binding,
+ *    signed revocation and succession ─────────────────────────────────── */
+
+/** A few identities plus a key lookup. */
+async function makeIds(n) {
+  const ids = [];
+  for (let i = 0; i < n; i++) ids.push(await PodIdentity.generate());
+  const keys = new Map(ids.map((id) => [id.podId, id.keyPair.publicKey]));
+  return { ids, getPublicKey: async (podId) => keys.get(podId) };
+}
+
+describe('verifyCryptoChain refuses forged unsigned edges (#302 item 1)', () => {
+  it('a forged unsigned edge spliced into a signed chain does not verify', async () => {
+    const { ids: [root, mid, attacker], getPublicKey } = await makeIds(3);
+    const kr = new MeshKeyring();
+    await kr.addVerifiedLink(await SignedKeyLink.create(root, mid, 'org'),
+      root.keyPair.publicKey, mid.keyPair.publicKey);
+
+    // An attacker hands over a serialised keyring with an extra unsigned
+    // edge claiming mid delegated to them.
+    const data = kr.toJSON();
+    data.links.push({
+      parent: mid.podId, child: attacker.podId, relation: 'delegate',
+      scope: null, expires: null, created: Date.now(), namespace: null,
+    });
+    const tampered = MeshKeyring.fromJSON(data);
+
+    const res = await tampered.verifyCryptoChain(attacker.podId, root.podId, getPublicKey);
+    assert.equal(res.valid, false);
+    assert.equal(res.reason, 'unsigned');
+    assert.equal(res.brokenAt, attacker.podId);
+  });
+
+  it('a SignedKeyLink with its signatures stripped does not verify', async () => {
+    const { ids: [root, child], getPublicKey } = await makeIds(2);
+    const link = await SignedKeyLink.create(root, child, 'device');
+    const stripped = { ...link.toJSON(), parentSignature: null, childSignature: null };
+    const kr = MeshKeyring.fromJSON({ v: 3, namespace: null, links: [stripped], revocations: [] });
+    const res = await kr.verifyCryptoChain(child.podId, root.podId, getPublicKey);
+    assert.equal(res.valid, false);
+    assert.equal(res.reason, 'bad-signature');
+  });
+});
+
+describe('SignedKeyLink domain separation and namespace binding (#302 item 2)', () => {
+  it('signs exactly KEYLINK_DOMAIN + sorted-key canonical JSON', async () => {
+    const { ids: [p, c] } = await makeIds(2);
+    const link = await SignedKeyLink.create(p, c, 'delegate', {
+      scope: ['read'], namespace: 'acct-a', created: 7,
+    });
+    const text = new TextDecoder().decode(link.signedPayload);
+    assert.ok(text.startsWith(KEYLINK_DOMAIN));
+    const body = JSON.parse(text.slice(KEYLINK_DOMAIN.length));
+    assert.deepEqual(Object.keys(body), [...Object.keys(body)].sort());
+    assert.equal(body.namespace, 'acct-a');
+  });
+
+  it('a link signature is not valid as an unlink signature (domain separation)', async () => {
+    const { ids: [p, c] } = await makeIds(2);
+    const link = await SignedKeyLink.create(p, c, 'device');
+    const unlink = new SignedKeyUnlink({
+      parent: p.podId, child: c.podId, created: link.created, signature: link.parentSignature,
+    });
+    assert.equal(await unlink.verify(p.keyPair.publicKey), false);
+  });
+
+  it('a link replayed into a keyring with another namespace is refused', async () => {
+    const { ids: [p, c], getPublicKey } = await makeIds(2);
+    const link = await SignedKeyLink.create(p, c, 'delegate', { namespace: 'acct-a' });
+
+    const krA = new MeshKeyring({ namespace: 'acct-a' });
+    await krA.addVerifiedLink(link, p.keyPair.publicKey, c.keyPair.publicKey);
+    assert.equal((await krA.verifyCryptoChain(c.podId, p.podId, getPublicKey)).valid, true);
+
+    const krB = new MeshKeyring({ namespace: 'acct-b' });
+    await assert.rejects(
+      () => krB.addVerifiedLink(link, p.keyPair.publicKey, c.keyPair.publicKey),
+      /Namespace mismatch/
+    );
+    // Nor is it valid in a keyring with no namespace.
+    await assert.rejects(
+      () => new MeshKeyring().addVerifiedLink(link, p.keyPair.publicKey, c.keyPair.publicKey),
+      /Namespace mismatch/
+    );
+  });
+
+  it('rewriting the namespace field to match the target keyring breaks the signatures', async () => {
+    const { ids: [p, c], getPublicKey } = await makeIds(2);
+    const link = await SignedKeyLink.create(p, c, 'delegate', { namespace: 'acct-a' });
+    const replayed = SignedKeyLink.fromJSON({ ...link.toJSON(), namespace: 'acct-b' });
+
+    const krB = new MeshKeyring({ namespace: 'acct-b' });
+    await assert.rejects(
+      () => krB.addVerifiedLink(replayed, p.keyPair.publicKey, c.keyPair.publicKey),
+      /Signature verification failed/
+    );
+
+    // Smuggled in through a serialised keyring, the chain walker catches it.
+    const smuggled = MeshKeyring.fromJSON({
+      v: 3, namespace: 'acct-b', links: [replayed.toJSON()], revocations: [],
+    });
+    const res = await smuggled.verifyCryptoChain(c.podId, p.podId, getPublicKey);
+    assert.equal(res.valid, false);
+    assert.equal(res.reason, 'bad-signature');
+
+    // Un-rewritten, the link is refused by namespace.
+    const wrongNs = MeshKeyring.fromJSON({
+      v: 3, namespace: 'acct-b', links: [link.toJSON()], revocations: [],
+    });
+    assert.equal((await wrongNs.verifyCryptoChain(c.podId, p.podId, getPublicKey)).reason, 'namespace');
+  });
+
+  it('namespace round-trips through keyring serialisation', async () => {
+    const { ids: [p, c], getPublicKey } = await makeIds(2);
+    const kr = new MeshKeyring({ namespace: 'acct-a' });
+    await kr.addVerifiedLink(
+      await SignedKeyLink.create(p, c, 'device', { namespace: 'acct-a' }),
+      p.keyPair.publicKey, c.keyPair.publicKey
+    );
+    const revived = MeshKeyring.fromJSON(JSON.parse(JSON.stringify(kr)));
+    assert.equal(revived.namespace, 'acct-a');
+    assert.equal((await revived.verifyCryptoChain(c.podId, p.podId, getPublicKey)).valid, true);
+    assert.throws(() => MeshKeyring.fromJSON(kr.toJSON(), { namespace: 'acct-b' }), /Namespace mismatch/);
+  });
+});
+
+describe('SignedKeyUnlink: signed, transferable, cascading revocation (#302 item 3)', () => {
+  /** root -> mid -> leaf, all signed, in namespace `ns`. */
+  async function chain(ns = null) {
+    const { ids: [root, mid, leaf, other], getPublicKey } = await makeIds(4);
+    const kr = new MeshKeyring({ namespace: ns });
+    const l1 = await SignedKeyLink.create(root, mid, 'org', { namespace: ns ?? undefined });
+    const l2 = await SignedKeyLink.create(mid, leaf, 'delegate', { namespace: ns ?? undefined });
+    await kr.addVerifiedLink(l1, root.keyPair.publicKey, mid.keyPair.publicKey);
+    await kr.addVerifiedLink(l2, mid.keyPair.publicKey, leaf.keyPair.publicKey);
+    return { kr, root, mid, leaf, other, l1, l2, getPublicKey };
+  }
+
+  it('signs KEYUNLINK_DOMAIN + canonical body and round-trips', async () => {
+    const { ids: [p, c] } = await makeIds(2);
+    const u = await SignedKeyUnlink.create(p, c.podId, { reason: 'lost device' });
+    assert.ok(new TextDecoder().decode(u.signedPayload).startsWith(KEYUNLINK_DOMAIN));
+    const back = SignedKeyUnlink.fromJSON(JSON.parse(JSON.stringify(u)));
+    assert.equal(await back.verify(p.keyPair.publicKey), true);
+    const tampered = SignedKeyUnlink.fromJSON({ ...u.toJSON(), child: 'someone-else' });
+    assert.equal(await tampered.verify(p.keyPair.publicKey), false);
+  });
+
+  it('cascades: a revoked descendant no longer verifies to the root', async () => {
+    const { kr, root, mid, leaf, getPublicKey } = await chain();
+    assert.equal((await kr.verifyCryptoChain(leaf.podId, root.podId, getPublicKey)).valid, true);
+
+    const unlink = await SignedKeyUnlink.create(root, mid.podId);
+    const { removed, descendants } = await kr.applyUnlink(unlink, root.keyPair.publicKey);
+    assert.equal(removed, true);
+    assert.deepEqual(descendants, [leaf.podId]);
+
+    assert.equal((await kr.verifyCryptoChain(mid.podId, root.podId, getPublicKey)).valid, false);
+    assert.equal((await kr.verifyCryptoChain(leaf.podId, root.podId, getPublicKey)).valid, false);
+    // The mid -> leaf edge itself was not revoked.
+    assert.equal((await kr.verifyCryptoChain(leaf.podId, mid.podId, getPublicKey)).valid, true);
+  });
+
+  it('transfers to a peer: the relayed unlink revokes there too, and the old link cannot be re-added', async () => {
+    const a = await chain('mesh-1');
+    // Peer B holds the same links.
+    const peer = MeshKeyring.fromJSON(JSON.parse(JSON.stringify(a.kr)));
+
+    const unlink = await SignedKeyUnlink.create(a.root, a.mid.podId, { namespace: 'mesh-1' });
+    const wire = JSON.parse(JSON.stringify(unlink));
+    await peer.applyUnlink(SignedKeyUnlink.fromJSON(wire), a.root.keyPair.publicKey);
+
+    const res = await peer.verifyCryptoChain(a.leaf.podId, a.root.podId, a.getPublicKey);
+    assert.equal(res.valid, false);
+
+    // Replaying the original link is refused.
+    await assert.rejects(
+      () => peer.addVerifiedLink(a.l1, a.root.keyPair.publicKey, a.mid.keyPair.publicKey),
+      /revoked/
+    );
+  });
+
+  it('honors a revocation that arrives before the link, and survives serialisation', async () => {
+    const a = await chain();
+    const fresh = new MeshKeyring();
+    await fresh.applyUnlink(await SignedKeyUnlink.create(a.root, a.mid.podId), a.root.keyPair.publicKey);
+    await assert.rejects(
+      () => fresh.addVerifiedLink(a.l1, a.root.keyPair.publicKey, a.mid.keyPair.publicKey),
+      /revoked/
+    );
+
+    // A stale link list restored next to the revocation is caught by the walker.
+    const restored = MeshKeyring.fromJSON({
+      v: 3, namespace: null,
+      links: [a.l1.toJSON(), a.l2.toJSON()],
+      revocations: fresh.toJSON().revocations,
+    });
+    const res = await restored.verifyCryptoChain(a.leaf.podId, a.root.podId, a.getPublicKey);
+    assert.equal(res.valid, false);
+    assert.equal(res.reason, 'revoked');
+    assert.equal(res.brokenAt, a.mid.podId);
+  });
+
+  it('a later re-link signed by both parties is not affected', async () => {
+    const a = await chain();
+    const unlink = await SignedKeyUnlink.create(a.root, a.mid.podId, { created: a.l1.created });
+    await a.kr.applyUnlink(unlink, a.root.keyPair.publicKey);
+    const relink = await SignedKeyLink.create(a.root, a.mid, 'org', { created: a.l1.created + 1 });
+    await a.kr.addVerifiedLink(relink, a.root.keyPair.publicKey, a.mid.keyPair.publicKey);
+    assert.equal((await a.kr.verifyCryptoChain(a.leaf.podId, a.root.podId, a.getPublicKey)).valid, true);
+  });
+
+  it('refuses an unlink not signed by the parent', async () => {
+    const a = await chain();
+    // The leaf (or anyone else) cannot revoke root -> mid.
+    const forged = new SignedKeyUnlink({ parent: a.root.podId, child: a.mid.podId });
+    forged.signature = await a.other.sign(forged.signedPayload);
+    await assert.rejects(() => a.kr.applyUnlink(forged, a.root.keyPair.publicKey), /Signature verification failed/);
+    await assert.rejects(
+      () => a.kr.applyUnlink(new SignedKeyUnlink({ parent: a.root.podId, child: a.mid.podId }), a.root.keyPair.publicKey),
+      /Signature verification failed/
+    );
+    assert.equal(a.kr.listRevocations().length, 0);
+    assert.equal((await a.kr.verifyCryptoChain(a.leaf.podId, a.root.podId, a.getPublicKey)).valid, true);
+  });
+
+  it('refuses an unlink from another namespace', async () => {
+    const a = await chain('mesh-1');
+    const u = await SignedKeyUnlink.create(a.root, a.mid.podId, { namespace: 'mesh-2' });
+    await assert.rejects(() => a.kr.applyUnlink(u, a.root.keyPair.publicKey), /Namespace mismatch/);
+  });
+});
+
+describe('executeSuccession transfer requires successor-signed links (#302 item 4)', () => {
+  async function setup() {
+    const { ids: [primary, successor, c1, c2], getPublicKey } = await makeIds(4);
+    const kr = new MeshKeyring();
+    await kr.addVerifiedLink(
+      await SignedKeyLink.create(primary, c1, 'device'),
+      primary.keyPair.publicKey, c1.keyPair.publicKey
+    );
+    await kr.addVerifiedLink(
+      await SignedKeyLink.create(primary, c2, 'delegate', { scope: ['read', 'write'] }),
+      primary.keyPair.publicKey, c2.keyPair.publicKey
+    );
+    kr.setSuccessor(primary.podId, successor.podId, 1000, 'transfer');
+    return { kr, primary, successor, c1, c2, getPublicKey };
+  }
+
+  it('refuses to transfer without replacement links and leaves the keyring untouched', async () => {
+    const { kr, primary } = await setup();
+    await assert.rejects(() => kr.executeSuccession(primary.podId), /SignedKeyLink/);
+    assert.equal(kr.getChildren(primary.podId).length, 2);
+    // Policy is still there.
+    assert.equal(kr.checkSuccession().length, 1);
+  });
+
+  it('transfers with successor-signed links, which then verify', async () => {
+    const { kr, primary, successor, c1, c2, getPublicKey } = await setup();
+    const links = [
+      await SignedKeyLink.create(successor, c1, 'device'),
+      await SignedKeyLink.create(successor, c2, 'delegate', { scope: ['read'] }),
+    ];
+    const res = await kr.executeSuccession(primary.podId, { links, getPublicKey });
+    assert.equal(res.affected, 2);
+    assert.equal(kr.getChildren(primary.podId).length, 0);
+    for (const l of kr.getChildren(successor.podId)) assert.ok(l instanceof SignedKeyLink);
+    assert.equal((await kr.verifyCryptoChain(c2.podId, successor.podId, getPublicKey)).valid, true);
+  });
+
+  it('refuses a replacement that is forged, widened, or unsigned — atomically', async () => {
+    const { kr, primary, successor, c1, c2, getPublicKey } = await setup();
+    const good = await SignedKeyLink.create(successor, c1, 'device');
+
+    const widened = await SignedKeyLink.create(successor, c2, 'delegate', { scope: ['read', 'admin'] });
+    await assert.rejects(
+      () => kr.executeSuccession(primary.podId, { links: [good, widened], getPublicKey }),
+      /wider/
+    );
+
+    const tampered = SignedKeyLink.fromJSON({
+      ...(await SignedKeyLink.create(successor, c2, 'delegate', { scope: ['read'] })).toJSON(),
+      scope: ['read', 'write'],
+    });
+    await assert.rejects(
+      () => kr.executeSuccession(primary.podId, { links: [good, tampered], getPublicKey }),
+      /signature verification failed/
+    );
+
+    const unsigned = new KeyLink({ parent: successor.podId, child: c2.podId, relation: 'delegate', scope: ['read'] });
+    await assert.rejects(
+      () => kr.executeSuccession(primary.podId, { links: [good, unsigned], getPublicKey }),
+      /SignedKeyLink/
+    );
+
+    // Nothing moved.
+    assert.equal(kr.getChildren(primary.podId).length, 2);
+    assert.equal(kr.getChildren(successor.podId).length, 0);
+  });
+
+  it('localOnly transfer produces unsigned links that verifyCryptoChain refuses', async () => {
+    const { kr, primary, successor, c1, getPublicKey } = await setup();
+    await kr.executeSuccession(primary.podId, { localOnly: true });
+    const res = await kr.verifyCryptoChain(c1.podId, successor.podId, getPublicKey);
+    assert.equal(res.valid, false);
+    assert.equal(res.reason, 'unsigned');
   });
 });
