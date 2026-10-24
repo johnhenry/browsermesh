@@ -15,6 +15,7 @@ import {
   decodeBase64url,
 } from '../src/keyring.mjs';
 import { PodIdentity } from '../src/identity.mjs';
+import { domainPayload } from '../src/canonical.mjs';
 
 // ---------------------------------------------------------------------------
 // KeyLink
@@ -1731,5 +1732,145 @@ describe('executeSuccession transfer requires successor-signed links (#302 item 
     const res = await kr.verifyCryptoChain(c1.podId, successor.podId, getPublicKey);
     assert.equal(res.valid, false);
     assert.equal(res.reason, 'unsigned');
+  });
+});
+
+describe('SignedKeyUnlink optional signed expiry (#262)', () => {
+  const HOUR = 3600_000;
+
+  it('signs and round-trips expires; tampering with it breaks the signature', async () => {
+    const { ids: [p, c] } = await makeIds(2);
+    const exp = Date.now() + HOUR;
+    const u = await SignedKeyUnlink.create(p, c.podId, { expires: exp });
+    assert.equal(u.expires, exp);
+    const back = SignedKeyUnlink.fromJSON(JSON.parse(JSON.stringify(u)));
+    assert.equal(back.expires, exp);
+    assert.equal(await back.verify(p.keyPair.publicKey), true);
+    for (const bad of [exp - 1000, exp + HOUR]) {
+      const t = SignedKeyUnlink.fromJSON({ ...u.toJSON(), expires: bad });
+      assert.equal(await t.verify(p.keyPair.publicKey), false);
+    }
+    // Stripping the expiry (to make a revocation immortal) is refused too.
+    const { expires, ...rest } = u.toJSON();
+    assert.equal(await SignedKeyUnlink.fromJSON(rest).verify(p.keyPair.publicKey), false);
+  });
+
+  it('an unlink without expires signs the exact pre-0.11 bytes and still verifies', async () => {
+    const { ids: [p, c] } = await makeIds(2);
+    const old = new SignedKeyUnlink({ parent: p.podId, child: c.podId, created: 1000, reason: 'r' });
+    const legacyBytes = domainPayload(KEYUNLINK_DOMAIN, {
+      parent: p.podId, child: c.podId, namespace: null, created: 1000, reason: 'r',
+    });
+    assert.deepEqual(old.signedPayload, legacyBytes);
+    old.signature = await p.sign(legacyBytes);
+    const wire = JSON.parse(JSON.stringify(old));
+    assert.equal('expires' in wire, false);
+    const back = SignedKeyUnlink.fromJSON(wire);
+    assert.equal(back.expires, null);
+    assert.equal(await back.verify(p.keyPair.publicKey), true);
+    assert.equal(back.isExpired(Date.now() + 1e12), false);
+  });
+
+  it('forLink copies the link expiry, namespace and child', async () => {
+    const { ids: [p, c] } = await makeIds(2);
+    const exp = Date.now() + HOUR;
+    const link = await SignedKeyLink.create(p, c, 'device', { expires: exp, namespace: 'ns' });
+    const u = await SignedKeyUnlink.forLink(p, link);
+    assert.equal(u.expires, exp);
+    assert.equal(u.namespace, 'ns');
+    assert.equal(u.child, c.podId);
+    assert.equal(u.revokes(link), true);
+    assert.equal(await u.verify(p.keyPair.publicKey), true);
+    const forever = await SignedKeyLink.create(p, c, 'device');
+    assert.equal((await SignedKeyUnlink.forLink(p, forever)).expires, null);
+    await assert.rejects(() => SignedKeyUnlink.forLink(c, link), /not issued/);
+  });
+
+  async function setup(linkExpires, unlinkExpires) {
+    const { ids: [root, mid], getPublicKey } = await makeIds(2);
+    const kr = new MeshKeyring();
+    const link = await SignedKeyLink.create(root, mid, 'device', { expires: linkExpires });
+    await kr.addVerifiedLink(link, root.keyPair.publicKey, mid.keyPair.publicKey);
+    const unlink = await SignedKeyUnlink.create(root, mid.podId, { expires: unlinkExpires });
+    await kr.applyUnlink(unlink, root.keyPair.publicKey);
+    return { kr, root, mid, link, unlink, getPublicKey };
+  }
+
+  it('expired revocations are dropped from listRevocations, toJSON and fromJSON', async () => {
+    const exp = Date.now() + HOUR;
+    const { kr, unlink } = await setup(exp, exp);
+    assert.equal(kr.listRevocations().length, 1);
+    assert.equal(kr.toJSON().revocations.length, 1);
+    const wire = JSON.parse(JSON.stringify(kr));
+    const later = exp + 1;
+    assert.equal(kr.listRevocations({ now: later }).length, 0);
+    assert.equal(kr.toJSON().revocations.length, 0); // pruned for good
+    // fromJSON drops an already-expired revocation (clock moved on).
+    const past = { ...wire, revocations: [{ ...unlink.toJSON() }] };
+    const realNow = Date.now;
+    Date.now = () => later;
+    try {
+      assert.equal(MeshKeyring.fromJSON(past).listRevocations().length, 0);
+    } finally { Date.now = realNow; }
+    assert.equal(MeshKeyring.fromJSON(past).listRevocations().length, 1);
+  });
+
+  it('pruneRevocations returns the number dropped; no-expiry revocations stay', async () => {
+    const exp = Date.now() + HOUR;
+    const a = await setup(exp, exp);
+    assert.equal(a.kr.pruneRevocations(exp - 1), 0);
+    assert.equal(a.kr.pruneRevocations(exp), 1);
+    const b = await setup(undefined, undefined);
+    assert.equal(b.kr.pruneRevocations(Date.now() + 1e12), 0);
+    assert.equal(b.kr.listRevocations().length, 1);
+  });
+
+  it('an already-expired unlink is verified but neither recorded nor relayed', async () => {
+    const { ids: [root, mid] } = await makeIds(2);
+    const kr = new MeshKeyring();
+    const u = await SignedKeyUnlink.create(root, mid.podId, { expires: Date.now() - 1 });
+    const res = await kr.applyUnlink(u, root.keyPair.publicKey);
+    assert.equal(res.removed, false);
+    assert.equal(kr.listRevocations().length, 0);
+    const forged = SignedKeyUnlink.fromJSON({ ...u.toJSON(), expires: Date.now() + HOUR });
+    await assert.rejects(() => kr.applyUnlink(forged, root.keyPair.publicKey), /Signature/);
+  });
+
+  it('stale link after the unlink expired: accepted only while the link itself is unexpired', async () => {
+    // Unlink expiry matches the link (the forLink convention): once it
+    // lapses the link is expired too, so the stale link is dead either way.
+    const exp = Date.now() + HOUR;
+    const a = await setup(exp, exp);
+    const fresh = new MeshKeyring();
+    await fresh.applyUnlink(a.unlink, a.root.keyPair.publicKey);
+    await assert.rejects(
+      () => fresh.addVerifiedLink(a.link, a.root.keyPair.publicKey, a.mid.keyPair.publicKey), /revoked/);
+    const restored = MeshKeyring.fromJSON({
+      v: 3, namespace: null, links: [a.link.toJSON()], revocations: [a.unlink.toJSON()],
+    });
+    const before = await restored.verifyCryptoChain(a.mid.podId, a.root.podId, a.getPublicKey, { now: exp - 1 });
+    assert.equal(before.reason, 'revoked');
+    const lapsed = await restored.verifyCryptoChain(a.mid.podId, a.root.podId, a.getPublicKey, { now: exp + 1 });
+    assert.equal(lapsed.valid, false);
+    assert.equal(lapsed.reason, 'expired');
+
+    // Unlink expiring earlier than the link: the revocation lapses and the
+    // still-unexpired link is live again. Documented; avoid by using forLink.
+    const early = await setup(exp, exp - HOUR / 2);
+    const mid = exp - HOUR / 4;
+    const stale = new MeshKeyring();
+    // Arriving after the unlink expired (but before the link did).
+    const realNow = Date.now;
+    Date.now = () => mid;
+    try {
+      await stale.applyUnlink(early.unlink, early.root.keyPair.publicKey);
+      await stale.addVerifiedLink(early.link, early.root.keyPair.publicKey, early.mid.keyPair.publicKey);
+    } finally { Date.now = realNow; }
+    assert.equal(stale.listRevocations({ now: mid }).length, 0);
+    const live = await stale.verifyCryptoChain(early.mid.podId, early.root.podId, early.getPublicKey, { now: mid });
+    assert.equal(live.valid, true);
+    // ...but once the link itself has expired it is dead regardless.
+    const dead = await stale.verifyCryptoChain(early.mid.podId, early.root.podId, early.getPublicKey, { now: exp });
+    assert.equal(dead.reason, 'expired');
   });
 });

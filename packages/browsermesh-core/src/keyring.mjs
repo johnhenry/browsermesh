@@ -349,7 +349,8 @@ export class SignedKeyLink extends KeyLink {
  * A signed, transferable revocation of the `parent -> child` edge.
  *
  * The parent signs `"browsermesh/keyunlink/v1\n" ‖ canonical(body)` over
- * `parent`, `child`, `namespace`, `created` and `reason`. It revokes every
+ * `parent`, `child`, `namespace`, `created`, `reason` and, only when set,
+ * `expires`. It revokes every
  * link on that edge (in that namespace) created at or before `created`, so
  * a re-link signed later by both parties is not affected, but replaying the
  * old link is. Because authority flows down the chain, every descendant of
@@ -366,10 +367,17 @@ export class SignedKeyUnlink {
    * @param {string|null} [opts.namespace]
    * @param {number} [opts.created]
    * @param {string|null} [opts.reason]
+   * @param {number|null} [opts.expires] - Optional expiry (ms epoch, same
+   *   convention as `KeyLink#expires`), covered by the signature. After it
+   *   the revocation is dropped by the keyring.
    * @param {Uint8Array|null} [opts.signature]
    */
-  constructor({ parent, child, namespace, created, reason, signature }) {
+  constructor({ parent, child, namespace, created, reason, expires, signature }) {
     if (!parent || !child) throw new Error('parent and child are required');
+    if (expires != null && !Number.isFinite(expires)) {
+      throw new TypeError('expires must be a finite number (ms epoch)');
+    }
+    this.expires = expires ?? null;
     this.parent = parent;
     this.child = child;
     this.namespace = namespace ?? null;
@@ -378,7 +386,17 @@ export class SignedKeyUnlink {
     this.signature = signature || null;
   }
 
-  /** @returns {Uint8Array} */
+  /**
+   * Signed bytes. `expires` is part of the canonical body only when set
+   * (canonical JSON omits `undefined`), so an unlink without it signs the
+   * exact bytes it always did. The domain stays `keyunlink/v1`: the body is
+   * self-describing (a present `expires` key changes the bytes, and removing
+   * it from a signed unlink breaks the signature), so a downgrade or
+   * re-interpretation is impossible and a v2 string would only orphan every
+   * existing unlink.
+   *
+   * @returns {Uint8Array}
+   */
   get signedPayload() {
     return domainPayload(KEYUNLINK_DOMAIN, {
       parent: this.parent,
@@ -386,7 +404,17 @@ export class SignedKeyUnlink {
       namespace: this.namespace,
       created: this.created,
       reason: this.reason,
+      expires: this.expires ?? undefined,
     });
+  }
+
+  /**
+   * Whether this unlink's expiry has passed (`now >= expires`, as for links).
+   * @param {number} [now=Date.now()]
+   * @returns {boolean}
+   */
+  isExpired(now = Date.now()) {
+    return this.expires !== null && now >= this.expires;
   }
 
   /**
@@ -394,7 +422,7 @@ export class SignedKeyUnlink {
    *
    * @param {import('./identity.mjs').PodIdentity} parentIdentity
    * @param {string} childId
-   * @param {{ namespace?: string, reason?: string, created?: number }} [opts]
+   * @param {{ namespace?: string, reason?: string, created?: number, expires?: number }} [opts]
    * @returns {Promise<SignedKeyUnlink>}
    */
   static async create(parentIdentity, childId, opts = {}) {
@@ -404,9 +432,33 @@ export class SignedKeyUnlink {
       namespace: opts.namespace,
       created: opts.created ?? Date.now(),
       reason: opts.reason,
+      expires: opts.expires,
     });
     unlink.signature = await parentIdentity.sign(unlink.signedPayload);
     return unlink;
+  }
+
+  /**
+   * Create an unlink for a known link: same child and namespace, and
+   * `expires` set to the link's expiry (none if the link never expires), so
+   * the revocation lives exactly as long as the link it revokes. `opts` may
+   * override `expires`, `reason` and `created`.
+   *
+   * @param {import('./identity.mjs').PodIdentity} parentIdentity
+   * @param {KeyLink} link
+   * @param {{ reason?: string, created?: number, expires?: number|null }} [opts]
+   * @returns {Promise<SignedKeyUnlink>}
+   */
+  static async forLink(parentIdentity, link, opts = {}) {
+    if (link.parent !== parentIdentity.podId) {
+      throw new Error('Link was not issued by this parent');
+    }
+    return SignedKeyUnlink.create(parentIdentity, link.child, {
+      namespace: link.namespace ?? undefined,
+      reason: opts.reason,
+      created: Math.max(opts.created ?? Date.now(), link.created),
+      expires: 'expires' in opts ? (opts.expires ?? undefined) : (link.expires ?? undefined),
+    });
   }
 
   /**
@@ -441,6 +493,7 @@ export class SignedKeyUnlink {
       namespace: this.namespace,
       created: this.created,
       reason: this.reason,
+      ...(this.expires !== null ? { expires: this.expires } : {}),
       signature: this.signature ? encodeBase64url(this.signature) : null,
     };
   }
@@ -679,13 +732,30 @@ export class MeshKeyring {
   // -- Revocation ---------------------------------------------------------
 
   /**
-   * Whether a recorded {@link SignedKeyUnlink} revokes `link`.
+   * Whether a recorded, unexpired {@link SignedKeyUnlink} revokes `link`.
+   * An expired revocation no longer counts. If it expires before the link
+   * does, the link is live again; give the unlink an `expires` at least as
+   * late as the link's ({@link SignedKeyUnlink.forLink}). A link that is
+   * itself expired stays unusable regardless (`verifyCryptoChain` checks it).
    *
    * @param {KeyLink} link
+   * @param {number} [now=Date.now()]
    * @returns {boolean}
    */
-  isRevoked(link) {
-    return this.#revocations.some((r) => r.revokes(link));
+  isRevoked(link, now = Date.now()) {
+    return this.#revocations.some((r) => !r.isExpired(now) && r.revokes(link));
+  }
+
+  /**
+   * Drop recorded revocations that have expired.
+   *
+   * @param {number} [now=Date.now()]
+   * @returns {number} How many were dropped
+   */
+  pruneRevocations(now = Date.now()) {
+    const before = this.#revocations.length;
+    this.#revocations = this.#revocations.filter((r) => !r.isExpired(now));
+    return before - this.#revocations.length;
   }
 
   /**
@@ -719,12 +789,23 @@ export class MeshKeyring {
     }
     if (!ok) throw new Error('Signature verification failed');
 
+    // Already expired: it no longer counts, so record and relay nothing.
+    if (unlink.isExpired()) return { removed: false, descendants: [] };
+
     const descendants = this.#descendantsOf(unlink.child);
 
-    const dup = this.#revocations.some(
-      (r) => r.parent === unlink.parent && r.child === unlink.child && r.created === unlink.created
-    );
-    if (!dup) this.#revocations.push(unlink);
+    const same = (r) =>
+      r.parent === unlink.parent && r.child === unlink.child && r.created === unlink.created;
+    const idx = this.#revocations.findIndex(same);
+    if (idx < 0) {
+      this.#revocations.push(unlink);
+    } else {
+      // Same revocation, possibly with a different expiry: keep the longer-lived.
+      const old = this.#revocations[idx];
+      if (old.expires !== null && (unlink.expires === null || unlink.expires > old.expires)) {
+        this.#revocations[idx] = unlink;
+      }
+    }
 
     const before = this.#links.length;
     this.#links = this.#links.filter((l) => !unlink.revokes(l));
@@ -732,12 +813,15 @@ export class MeshKeyring {
   }
 
   /**
-   * All recorded signed revocations (copies of the list, same objects).
-   * Relay these to peers so they can {@link MeshKeyring#applyUnlink} them.
+   * Recorded signed revocations that have not expired (copies of the list,
+   * same objects); expired ones are dropped from the keyring first. Relay
+   * these to peers so they can {@link MeshKeyring#applyUnlink} them.
    *
+   * @param {{ now?: number }} [opts]
    * @returns {SignedKeyUnlink[]}
    */
-  listRevocations() {
+  listRevocations(opts = {}) {
+    this.pruneRevocations(opts.now ?? Date.now());
     return [...this.#revocations];
   }
 
@@ -940,7 +1024,7 @@ export class MeshKeyring {
 
     for (const link of relevantChain) {
       if (link.isExpired(now)) return fail(link, 'expired');
-      if (this.isRevoked(link)) return fail(link, 'revoked');
+      if (this.isRevoked(link, now)) return fail(link, 'revoked');
       if ((link.namespace ?? null) !== this.#namespace) return fail(link, 'namespace');
 
       if (!(link instanceof SignedKeyLink)) {
@@ -1201,7 +1285,7 @@ export class MeshKeyring {
       v: 3,
       namespace: this.#namespace,
       links: this.#links.map((l) => l.toJSON()),
-      revocations: this.#revocations.map((r) => r.toJSON()),
+      revocations: this.listRevocations().map((r) => r.toJSON()),
     };
   }
 
@@ -1242,7 +1326,8 @@ export class MeshKeyring {
       );
     }
     for (const r of revocations) {
-      kr.#revocations.push(SignedKeyUnlink.fromJSON(r));
+      const u = SignedKeyUnlink.fromJSON(r);
+      if (!u.isExpired()) kr.#revocations.push(u);
     }
     return kr;
   }
