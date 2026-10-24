@@ -17,9 +17,15 @@
  *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-mesh-capabilities.test.mjs
  */
 
+import { encodeBase64url, decodeBase64url } from '@johnhenry/browsermesh-primitives';
+import { domainPayload } from './canonical.mjs';
+
 // ---------------------------------------------------------------------------
 // Wire Constants
 // ---------------------------------------------------------------------------
+
+/** Domain prefix of the bytes a signed {@link CapabilityToken} signs. */
+export const CAPABILITY_DOMAIN = 'browsermesh/capability/v1\n';
 
 /** Wire type for capability grant message. */
 export const CAP_GRANT = 0xDC;
@@ -105,8 +111,17 @@ export function expiryNarrows(parentExpiry, childExpiry) {
 let _tokenSeq = 0;
 
 /**
- * An unforgeable capability token granting specific access rights.
+ * A capability token granting specific access rights.
  * Tokens can be attenuated (narrowed) but never amplified.
+ *
+ * A token built with `new CapabilityToken(...)` is unsigned: fine for a
+ * single process, but not something another peer should trust. Before a
+ * token or chain crosses peers, sign it: {@link CapabilityToken.issue} for a
+ * root, {@link CapabilityToken#attenuateSigned} for a delegation. The issuer
+ * signs `"browsermesh/capability/v1\n" ‖ canonical(body)` over every field
+ * except the local `revoked` flag — including `parentId` and `depth`, so a
+ * signed token is bound to its place in the chain. Verify a chain received
+ * from a peer with {@link CapabilityChain#verifySignatures}.
  */
 export class CapabilityToken {
   /**
@@ -123,6 +138,7 @@ export class CapabilityToken {
    * @param {boolean} [opts.revoked]       Whether token has been revoked
    * @param {number} [opts.depth]          Delegation depth (0 for root)
    * @param {number|null} [opts.maxDepth]  Maximum delegation depth (null = unlimited)
+   * @param {Uint8Array|null} [opts.signature] Issuer's Ed25519 signature over {@link CapabilityToken#signedPayload}
    */
   constructor({
     id,
@@ -137,6 +153,7 @@ export class CapabilityToken {
     revoked = false,
     depth = 0,
     maxDepth = null,
+    signature = null,
   }) {
     if (!issuer || typeof issuer !== 'string') {
       throw new Error('issuer is required and must be a non-empty string');
@@ -163,6 +180,76 @@ export class CapabilityToken {
     this.revoked = revoked;
     this.depth = depth;
     this.maxDepth = maxDepth;
+    /** @type {Uint8Array|null} */
+    this.signature = signature || null;
+  }
+
+  /**
+   * Bytes the issuer signs: domain prefix plus sorted-key canonical JSON of
+   * every field except `revoked` (local state) and `signature`.
+   *
+   * @returns {Uint8Array}
+   */
+  get signedPayload() {
+    return domainPayload(CAPABILITY_DOMAIN, {
+      id: this.id,
+      issuer: this.issuer,
+      holder: this.holder,
+      resource: this.resource,
+      permissions: [...this.permissions],
+      constraints: { ...this.constraints },
+      parentId: this.parentId,
+      createdAt: this.createdAt,
+      expiresAt: this.expiresAt,
+      depth: this.depth,
+      maxDepth: this.maxDepth,
+    });
+  }
+
+  /** Whether the token carries a signature (not whether it verifies). */
+  get isSigned() {
+    return this.signature !== null;
+  }
+
+  /**
+   * Sign this token as its issuer. The identity must be the issuer.
+   *
+   * @param {{ podId: string, sign: (data: Uint8Array) => Promise<Uint8Array> }} issuerIdentity
+   * @returns {Promise<this>}
+   */
+  async sign(issuerIdentity) {
+    if (!issuerIdentity || issuerIdentity.podId !== this.issuer) {
+      throw new Error('Only the issuer can sign a capability token');
+    }
+    this.signature = await issuerIdentity.sign(this.signedPayload);
+    return this;
+  }
+
+  /**
+   * Verify the issuer's signature.
+   *
+   * @param {CryptoKey} issuerPub
+   * @returns {Promise<boolean>}
+   */
+  async verifySignature(issuerPub) {
+    if (!this.signature) return false;
+    try {
+      return await crypto.subtle.verify('Ed25519', issuerPub, this.signature, this.signedPayload);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Issue a signed root token. `issuer` is the identity's pod ID.
+   *
+   * @param {{ podId: string, sign: Function }} issuerIdentity
+   * @param {object} opts - Constructor options other than `issuer`
+   * @returns {Promise<CapabilityToken>}
+   */
+  static async issue(issuerIdentity, opts) {
+    const token = new CapabilityToken({ ...opts, issuer: issuerIdentity.podId, signature: null });
+    return token.sign(issuerIdentity);
   }
 
   /** Check whether this token has expired. */
@@ -261,6 +348,21 @@ export class CapabilityToken {
     });
   }
 
+  /**
+   * {@link CapabilityToken#attenuate}, then sign the child as its issuer
+   * (this token's holder).
+   *
+   * @param {{ podId: string, sign: Function }} holderIdentity - This token's holder
+   * @param {object} opts - As for attenuate()
+   * @returns {Promise<CapabilityToken>}
+   */
+  async attenuateSigned(holderIdentity, opts) {
+    if (!holderIdentity || holderIdentity.podId !== this.holder) {
+      throw new Error('Only the holder can delegate a capability token');
+    }
+    return this.attenuate(opts).sign(holderIdentity);
+  }
+
   /** Revoke this token. */
   revoke() {
     this.revoked = true;
@@ -280,11 +382,15 @@ export class CapabilityToken {
       revoked: this.revoked,
       depth: this.depth,
       maxDepth: this.maxDepth,
+      ...(this.signature ? { signature: encodeBase64url(this.signature) } : {}),
     };
   }
 
   static fromJSON(data) {
-    return new CapabilityToken(data);
+    return new CapabilityToken({
+      ...data,
+      signature: data.signature ? decodeBase64url(data.signature) : null,
+    });
   }
 }
 
@@ -412,6 +518,56 @@ export class CapabilityChain {
       }
     }
 
+    return { valid: true };
+  }
+
+  /**
+   * Structural {@link CapabilityChain#verify} plus signatures — use this for
+   * any chain that came from another peer. Additionally requires:
+   * - every token is signed by its `issuer` (key from `getPublicKey`);
+   * - each delegated token's `issuer` is the `holder` of its parent, so
+   *   only the holder of a capability can delegate it;
+   * - optionally, the root's issuer is `opts.rootIssuer`.
+   *
+   * Because each signature covers `parentId` and `depth`, a signed token
+   * cannot be re-parented into another chain.
+   *
+   * @param {(podId: string) => CryptoKey|Promise<CryptoKey>} getPublicKey
+   * @param {object} [opts]
+   * @param {boolean} [opts.checkValidity=true]
+   * @param {string} [opts.rootIssuer] - Required issuer of the root token
+   * @returns {Promise<{ valid: boolean, error?: string, brokenAt?: number }>}
+   */
+  async verifySignatures(getPublicKey, opts = {}) {
+    const structural = this.verify(opts.checkValidity ?? true);
+    if (!structural.valid) return structural;
+
+    if (opts.rootIssuer !== undefined && this.#tokens[0].issuer !== opts.rootIssuer) {
+      return { valid: false, error: 'Root token issuer is not trusted', brokenAt: 0 };
+    }
+
+    for (let i = 0; i < this.#tokens.length; i++) {
+      const token = this.#tokens[i];
+      if (!token.signature) {
+        return { valid: false, error: `Token at index ${i} is unsigned`, brokenAt: i };
+      }
+      if (i > 0 && token.issuer !== this.#tokens[i - 1].holder) {
+        return {
+          valid: false,
+          error: `Token at index ${i} was issued by "${token.issuer}", not by its parent's holder`,
+          brokenAt: i,
+        };
+      }
+      let pub;
+      try {
+        pub = await getPublicKey(token.issuer);
+      } catch {
+        pub = null;
+      }
+      if (!pub || !(await token.verifySignature(pub))) {
+        return { valid: false, error: `Bad signature at index ${i}`, brokenAt: i };
+      }
+    }
     return { valid: true };
   }
 

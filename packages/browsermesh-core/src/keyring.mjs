@@ -3,15 +3,17 @@
  *
  * Manages parent-child relationships between mesh identities
  * (device, delegate, org, alias, recovery). Provides chain
- * traversal, authority resolution, and expiration pruning.
+ * traversal, authority resolution, signed revocation and expiration
+ * pruning.
  *
  * No browser-only imports at module level.
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-mesh-keyring.test.mjs
+ *   node --import ./test/_setup-globals.mjs --test test/keyring.test.mjs
  */
 
 import { encodeBase64url, decodeBase64url } from '@johnhenry/browsermesh-primitives';
+import { domainPayload } from './canonical.mjs';
 
 // Re-export for consumers
 export { encodeBase64url, decodeBase64url };
@@ -29,12 +31,21 @@ export const VALID_RELATIONS = Object.freeze([
   'recovery',  // Recovery key
 ]);
 
+/** Domain prefix of the bytes a {@link SignedKeyLink} signs (version 3). */
+export const KEYLINK_DOMAIN = 'browsermesh/keylink/v3\n';
+
+/** Domain prefix of the bytes a {@link SignedKeyUnlink} signs. */
+export const KEYUNLINK_DOMAIN = 'browsermesh/keyunlink/v1\n';
+
 // ---------------------------------------------------------------------------
 // KeyLink
 // ---------------------------------------------------------------------------
 
 /**
  * Represents a directed link between two identities.
+ *
+ * A bare `KeyLink` carries no signatures: it is a local assertion only.
+ * {@link MeshKeyring#verifyCryptoChain} refuses it by default.
  *
  * @class
  */
@@ -47,8 +58,9 @@ export class KeyLink {
    * @param {string[]|null} [opts.scope] - Optional scope restrictions
    * @param {number|null} [opts.expires] - Optional expiration timestamp (ms)
    * @param {number} [opts.created] - Creation timestamp (ms)
+   * @param {string|null} [opts.namespace] - Keyring/context the link belongs to
    */
-  constructor({ parent, child, relation, scope, expires, created }) {
+  constructor({ parent, child, relation, scope, expires, created, namespace }) {
     /** @type {string} */
     this.parent = parent;
     /** @type {string} */
@@ -61,6 +73,8 @@ export class KeyLink {
     this.expires = expires ?? null;
     /** @type {number} */
     this.created = created || Date.now();
+    /** @type {string|null} */
+    this.namespace = namespace ?? null;
   }
 
   /**
@@ -86,6 +100,7 @@ export class KeyLink {
       scope: this.scope,
       expires: this.expires,
       created: this.created,
+      namespace: this.namespace,
     };
   }
 
@@ -107,10 +122,17 @@ export class KeyLink {
 /**
  * A KeyLink with cryptographic Ed25519 signatures from both parent and child.
  *
- * The signed payload is canonical JSON over every asserted field —
- * `parent`, `child`, `relation`, `scope`, `expires` and `created` — so a
- * signature that verifies vouches for the delegation's limits, not just for
- * who linked to whom. See {@link SignedKeyLink#signedPayload}.
+ * Both parties sign `"browsermesh/keylink/v3\n" ‖ canonical(body)`, where
+ * `body` holds every asserted field — `parent`, `child`, `relation`,
+ * `scope`, `expires`, `created` and `namespace` — and `canonical` is JSON
+ * with sorted keys. See {@link SignedKeyLink#signedPayload}.
+ *
+ * Earlier payload versions:
+ * - v1 (`parent|child|relation|created`) is no longer accepted at all.
+ * - v2 (literal-order JSON with `v: 2`, no prefix, no namespace) verifies
+ *   only when the caller opts in with `acceptLegacyV2: true`, and only for
+ *   links with no namespace. New links are always signed with v3; re-sign
+ *   old ones with {@link SignedKeyLink#resign}.
  */
 export class SignedKeyLink extends KeyLink {
   /** @type {Uint8Array|null} */
@@ -131,22 +153,35 @@ export class SignedKeyLink extends KeyLink {
   }
 
   /**
-   * Get the canonical signed payload bytes.
+   * The canonical signed payload bytes (version 3).
    *
-   * Version 2. Covers **every** field the link asserts, including `scope`
-   * and `expires`. Version 1 (`parent|child|relation|created`) left those
-   * two out, which meant a holder of a signed link could widen its scope
-   * and push out its expiry without invalidating either signature — see
-   * {@link legacySignedPayload}.
-   *
-   * JSON is used rather than a delimiter-joined string because `scope`
-   * holds caller-supplied strings: `['a|b']` and `['a', 'b']` must not
-   * canonicalise to the same bytes. Key order is fixed by the literal, so
-   * the encoding is deterministic.
+   * `"browsermesh/keylink/v3\n"` followed by sorted-key canonical JSON of
+   * every field the link asserts. The prefix keeps a link signature from
+   * being replayed as any other signed browsermesh message; `namespace`
+   * keeps a link minted for one keyring from being valid in another.
    *
    * @returns {Uint8Array}
    */
   get signedPayload() {
+    return domainPayload(KEYLINK_DOMAIN, {
+      parent: this.parent,
+      child: this.child,
+      relation: this.relation,
+      scope: this.scope,
+      expires: this.expires,
+      created: this.created,
+      namespace: this.namespace,
+    });
+  }
+
+  /**
+   * The version-2 payload bytes (browsermesh-core 0.5–0.9), kept only so
+   * persisted links can be verified during a migration when the caller
+   * explicitly passes `acceptLegacyV2: true`. Never used for signing.
+   *
+   * @returns {Uint8Array}
+   */
+  get legacyV2SignedPayload() {
     return new TextEncoder().encode(JSON.stringify({
       v: 2,
       parent: this.parent,
@@ -159,59 +194,26 @@ export class SignedKeyLink extends KeyLink {
   }
 
   /**
-   * The version-1 payload bytes, kept only so links signed before `scope`
-   * and `expires` were covered still verify.
-   *
-   * A v1 signature is accepted **only** when the link carries no scope and
-   * no expiry — i.e. when there is nothing v1 failed to cover. A link that
-   * has either field must carry a v2 signature over it.
-   *
-   * @returns {Uint8Array}
-   */
-  get legacySignedPayload() {
-    const str = `${this.parent}|${this.child}|${this.relation}|${this.created}`;
-    return new TextEncoder().encode(str);
-  }
-
-  /**
-   * True when a v1 signature may stand in for a v2 one: the link asserts
-   * nothing that the v1 payload left unsigned.
-   *
-   * @returns {boolean}
-   */
-  get #legacyAcceptable() {
-    return this.scope === null && this.expires === null;
-  }
-
-  /**
-   * Verify one signature against the canonical payload, falling back to the
-   * legacy payload only for links with nothing outside its coverage.
+   * Verify one signature against the v3 payload, or — only when opted in
+   * and the link has no namespace (v2 could not bind one) — the v2 payload.
    *
    * @param {CryptoKey} publicKey
    * @param {Uint8Array|null} signature
+   * @param {{ acceptLegacyV2?: boolean }} [opts]
    * @returns {Promise<boolean>}
    */
-  async #verifyOne(publicKey, signature) {
+  async #verifyOne(publicKey, signature, { acceptLegacyV2 = false } = {}) {
     if (!signature) return false;
-    const current = await crypto.subtle.verify(
-      'Ed25519',
-      publicKey,
-      signature,
-      this.signedPayload
-    );
-    if (current) return true;
-    if (!this.#legacyAcceptable) return false;
-    return crypto.subtle.verify(
-      'Ed25519',
-      publicKey,
-      signature,
-      this.legacySignedPayload
-    );
+    if (await crypto.subtle.verify('Ed25519', publicKey, signature, this.signedPayload)) {
+      return true;
+    }
+    if (!acceptLegacyV2 || this.namespace !== null) return false;
+    return crypto.subtle.verify('Ed25519', publicKey, signature, this.legacyV2SignedPayload);
   }
 
   /**
    * Create a signed link between two identities.
-   * Both parent and child sign the canonical payload.
+   * Both parent and child sign the canonical v3 payload.
    *
    * @param {import('./identity.mjs').PodIdentity} parentIdentity
    * @param {import('./identity.mjs').PodIdentity} childIdentity
@@ -219,17 +221,19 @@ export class SignedKeyLink extends KeyLink {
    * @param {object} [opts]
    * @param {string[]} [opts.scope]
    * @param {number} [opts.expires]
+   * @param {string} [opts.namespace] - Keyring/context this link is valid in
+   * @param {number} [opts.created] - Creation timestamp (defaults to now)
    * @returns {Promise<SignedKeyLink>}
    */
   static async create(parentIdentity, childIdentity, relation, opts = {}) {
-    const created = Date.now();
     const link = new SignedKeyLink({
       parent: parentIdentity.podId,
       child: childIdentity.podId,
       relation,
       scope: opts.scope,
       expires: opts.expires,
-      created,
+      namespace: opts.namespace,
+      created: opts.created ?? Date.now(),
     });
 
     const payload = link.signedPayload;
@@ -240,33 +244,72 @@ export class SignedKeyLink extends KeyLink {
   }
 
   /**
+   * Re-sign this link's fields with the current (v3) payload, e.g. to
+   * migrate a persisted v2 link. Needs both private keys. `created` is kept;
+   * `namespace` may be set (a v2 link had none).
+   *
+   * @param {import('./identity.mjs').PodIdentity} parentIdentity
+   * @param {import('./identity.mjs').PodIdentity} childIdentity
+   * @param {{ namespace?: string|null }} [opts]
+   * @returns {Promise<SignedKeyLink>} A new link; this one is unchanged.
+   */
+  async resign(parentIdentity, childIdentity, opts = {}) {
+    if (parentIdentity.podId !== this.parent || childIdentity.podId !== this.child) {
+      throw new Error('resign() needs the identities of this link\'s parent and child');
+    }
+    return SignedKeyLink.create(parentIdentity, childIdentity, this.relation, {
+      scope: this.scope || undefined,
+      expires: this.expires ?? undefined,
+      namespace: 'namespace' in opts ? opts.namespace : this.namespace,
+      created: this.created,
+    });
+  }
+
+  /**
+   * Which payload version both signatures verify under: `3`, `2` (legacy,
+   * needs migration), or `null` (neither). Useful for migration tooling.
+   *
+   * @param {CryptoKey} parentPub
+   * @param {CryptoKey} childPub
+   * @returns {Promise<3|2|null>}
+   */
+  async signatureVersion(parentPub, childPub) {
+    if (await this.verifyBoth(parentPub, childPub)) return 3;
+    if (await this.verifyBoth(parentPub, childPub, { acceptLegacyV2: true })) return 2;
+    return null;
+  }
+
+  /**
    * Verify the parent's signature.
    * @param {CryptoKey} publicKey - Parent's Ed25519 public key
+   * @param {{ acceptLegacyV2?: boolean }} [opts]
    * @returns {Promise<boolean>}
    */
-  async verifyParent(publicKey) {
-    return this.#verifyOne(publicKey, this.parentSignature);
+  async verifyParent(publicKey, opts) {
+    return this.#verifyOne(publicKey, this.parentSignature, opts);
   }
 
   /**
    * Verify the child's signature.
    * @param {CryptoKey} publicKey - Child's Ed25519 public key
+   * @param {{ acceptLegacyV2?: boolean }} [opts]
    * @returns {Promise<boolean>}
    */
-  async verifyChild(publicKey) {
-    return this.#verifyOne(publicKey, this.childSignature);
+  async verifyChild(publicKey, opts) {
+    return this.#verifyOne(publicKey, this.childSignature, opts);
   }
 
   /**
    * Verify both parent and child signatures.
    * @param {CryptoKey} parentPub - Parent's Ed25519 public key
    * @param {CryptoKey} childPub - Child's Ed25519 public key
+   * @param {{ acceptLegacyV2?: boolean }} [opts]
    * @returns {Promise<boolean>}
    */
-  async verifyBoth(parentPub, childPub) {
+  async verifyBoth(parentPub, childPub, opts) {
     const [parentOk, childOk] = await Promise.all([
-      this.verifyParent(parentPub),
-      this.verifyChild(childPub),
+      this.verifyParent(parentPub, opts),
+      this.verifyChild(childPub, opts),
     ]);
     return parentOk && childOk;
   }
@@ -294,6 +337,122 @@ export class SignedKeyLink extends KeyLink {
       ...data,
       parentSignature: data.parentSignature ? decodeBase64url(data.parentSignature) : null,
       childSignature: data.childSignature ? decodeBase64url(data.childSignature) : null,
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// SignedKeyUnlink
+// ---------------------------------------------------------------------------
+
+/**
+ * A signed, transferable revocation of the `parent -> child` edge.
+ *
+ * The parent signs `"browsermesh/keyunlink/v1\n" ‖ canonical(body)` over
+ * `parent`, `child`, `namespace`, `created` and `reason`. It revokes every
+ * link on that edge (in that namespace) created at or before `created`, so
+ * a re-link signed later by both parties is not affected, but replaying the
+ * old link is. Because authority flows down the chain, every descendant of
+ * `child` loses whatever authority it derived through the revoked edge.
+ *
+ * Unlike {@link MeshKeyring#unlink} (local only), an unlink can be relayed
+ * to peers and applied with {@link MeshKeyring#applyUnlink}.
+ */
+export class SignedKeyUnlink {
+  /**
+   * @param {object} opts
+   * @param {string} opts.parent
+   * @param {string} opts.child
+   * @param {string|null} [opts.namespace]
+   * @param {number} [opts.created]
+   * @param {string|null} [opts.reason]
+   * @param {Uint8Array|null} [opts.signature]
+   */
+  constructor({ parent, child, namespace, created, reason, signature }) {
+    if (!parent || !child) throw new Error('parent and child are required');
+    this.parent = parent;
+    this.child = child;
+    this.namespace = namespace ?? null;
+    this.created = created || Date.now();
+    this.reason = reason ?? null;
+    this.signature = signature || null;
+  }
+
+  /** @returns {Uint8Array} */
+  get signedPayload() {
+    return domainPayload(KEYUNLINK_DOMAIN, {
+      parent: this.parent,
+      child: this.child,
+      namespace: this.namespace,
+      created: this.created,
+      reason: this.reason,
+    });
+  }
+
+  /**
+   * Create an unlink signed by the parent.
+   *
+   * @param {import('./identity.mjs').PodIdentity} parentIdentity
+   * @param {string} childId
+   * @param {{ namespace?: string, reason?: string, created?: number }} [opts]
+   * @returns {Promise<SignedKeyUnlink>}
+   */
+  static async create(parentIdentity, childId, opts = {}) {
+    const unlink = new SignedKeyUnlink({
+      parent: parentIdentity.podId,
+      child: childId,
+      namespace: opts.namespace,
+      created: opts.created ?? Date.now(),
+      reason: opts.reason,
+    });
+    unlink.signature = await parentIdentity.sign(unlink.signedPayload);
+    return unlink;
+  }
+
+  /**
+   * Verify the parent's signature.
+   * @param {CryptoKey} parentPub
+   * @returns {Promise<boolean>}
+   */
+  async verify(parentPub) {
+    if (!this.signature) return false;
+    return crypto.subtle.verify('Ed25519', parentPub, this.signature, this.signedPayload);
+  }
+
+  /**
+   * Whether this unlink revokes `link` (same edge and namespace, and the
+   * link was created at or before the unlink).
+   *
+   * @param {KeyLink} link
+   * @returns {boolean}
+   */
+  revokes(link) {
+    return link.parent === this.parent &&
+      link.child === this.child &&
+      (link.namespace ?? null) === this.namespace &&
+      link.created <= this.created;
+  }
+
+  toJSON() {
+    return {
+      type: 'unlink',
+      parent: this.parent,
+      child: this.child,
+      namespace: this.namespace,
+      created: this.created,
+      reason: this.reason,
+      signature: this.signature ? encodeBase64url(this.signature) : null,
+    };
+  }
+
+  /**
+   * @param {object} data
+   * @returns {SignedKeyUnlink}
+   */
+  static fromJSON(data) {
+    return new SignedKeyUnlink({
+      ...data,
+      signature: data.signature ? decodeBase64url(data.signature) : null,
     });
   }
 }
@@ -379,7 +538,35 @@ export class SuccessionPolicy {
 // ---------------------------------------------------------------------------
 
 /**
+ * Whether `child` scope is no wider than `parent` scope (null = unrestricted).
+ * @param {string[]|null} parent
+ * @param {string[]|null} child
+ */
+function scopeNarrows(parent, child) {
+  if (parent === null) return true;
+  if (child === null) return false;
+  return child.every((s) => parent.includes(s));
+}
+
+/**
+ * Whether `child` expiry is no later than `parent` expiry (null = never).
+ * @param {number|null} parent
+ * @param {number|null} child
+ */
+function expiresNarrows(parent, child) {
+  if (parent === null) return true;
+  if (child === null) return false;
+  return child <= parent;
+}
+
+/**
  * Manages a graph of KeyLink relationships between identities.
+ *
+ * A keyring may be bound to a `namespace` (any string naming the context:
+ * an account, an app, a mesh). Signed links and unlinks carry the namespace
+ * inside their signature, and the keyring only accepts ones whose namespace
+ * equals its own (`null` matches only `null`), so a link issued for one
+ * keyring cannot be replayed into another.
  *
  * @class
  */
@@ -387,8 +574,17 @@ export class MeshKeyring {
   /** @type {KeyLink[]} */
   #links = [];
 
+  /** @type {SignedKeyUnlink[]} */
+  #revocations = [];
+
   /** @type {*} */
   #storage;
+
+  /** @type {string|null} */
+  #namespace;
+
+  /** @type {boolean} */
+  #acceptLegacyV2;
 
   /** @type {Map<string, SuccessionPolicy>} primaryId -> policy */
   #successions = new Map();
@@ -399,15 +595,31 @@ export class MeshKeyring {
   /**
    * @param {object} [opts]
    * @param {*} [opts.storage] - Optional persistence adapter
+   * @param {string|null} [opts.namespace=null] - Context this keyring accepts links for
+   * @param {boolean} [opts.acceptLegacyV2=false] - Migration aid: also verify
+   *   signatures over the pre-0.10 v2 payload (namespace-less links only).
+   *   Off by default; turn it on only while re-signing persisted links.
    */
   constructor(opts = {}) {
     this.#storage = opts.storage || null;
+    this.#namespace = opts.namespace ?? null;
+    this.#acceptLegacyV2 = opts.acceptLegacyV2 === true;
+  }
+
+  /** The namespace this keyring accepts signed links and unlinks for. */
+  get namespace() {
+    return this.#namespace;
   }
 
   // -- Link management ----------------------------------------------------
 
   /**
-   * Create a link from parent to child with the given relation.
+   * Create an **unsigned, local-only** link from parent to child.
+   *
+   * Unsigned links are useful for local bookkeeping but carry no proof:
+   * {@link MeshKeyring#verifyCryptoChain} refuses them unless called with
+   * `requireSigned: false`. Use {@link SignedKeyLink.create} plus
+   * {@link MeshKeyring#addVerifiedLink} for anything another party relies on.
    *
    * @param {string} parentId - Parent identity pod ID
    * @param {string} childId - Child identity pod ID
@@ -439,13 +651,17 @@ export class MeshKeyring {
       relation,
       scope: opts.scope,
       expires: opts.expires,
+      namespace: this.#namespace,
     });
     this.#links.push(link);
     return link;
   }
 
   /**
-   * Remove a link between parent and child.
+   * Remove a link between parent and child. **Local only**: nothing is
+   * signed and peers are not told. To revoke a link in a way peers can
+   * verify and relay, create a {@link SignedKeyUnlink} and
+   * {@link MeshKeyring#applyUnlink} it.
    *
    * @param {string} parentId
    * @param {string} childId
@@ -458,6 +674,89 @@ export class MeshKeyring {
     if (idx === -1) return false;
     this.#links.splice(idx, 1);
     return true;
+  }
+
+  // -- Revocation ---------------------------------------------------------
+
+  /**
+   * Whether a recorded {@link SignedKeyUnlink} revokes `link`.
+   *
+   * @param {KeyLink} link
+   * @returns {boolean}
+   */
+  isRevoked(link) {
+    return this.#revocations.some((r) => r.revokes(link));
+  }
+
+  /**
+   * Apply a signed revocation: verify the parent's signature, record it
+   * (so the revoked link cannot be re-added or verified later, even if it
+   * arrives after the unlink), and remove the edge.
+   *
+   * Cascades: every descendant of the child loses the authority it derived
+   * through the revoked edge — {@link MeshKeyring#verifyCryptoChain} from
+   * any of them to an ancestor above the edge fails. The descendants are
+   * returned so callers can react (re-enroll, notify).
+   *
+   * @param {SignedKeyUnlink} unlink
+   * @param {CryptoKey} parentPub - The unlink's parent's Ed25519 public key
+   * @returns {Promise<{ removed: boolean, descendants: string[] }>}
+   */
+  async applyUnlink(unlink, parentPub) {
+    if (!(unlink instanceof SignedKeyUnlink)) {
+      throw new Error('Expected a SignedKeyUnlink instance');
+    }
+    if (unlink.namespace !== this.#namespace) {
+      throw new Error(
+        `Namespace mismatch: unlink is for ${JSON.stringify(unlink.namespace)}, keyring is ${JSON.stringify(this.#namespace)}`
+      );
+    }
+    let ok = false;
+    try {
+      ok = await unlink.verify(parentPub);
+    } catch {
+      ok = false;
+    }
+    if (!ok) throw new Error('Signature verification failed');
+
+    const descendants = this.#descendantsOf(unlink.child);
+
+    const dup = this.#revocations.some(
+      (r) => r.parent === unlink.parent && r.child === unlink.child && r.created === unlink.created
+    );
+    if (!dup) this.#revocations.push(unlink);
+
+    const before = this.#links.length;
+    this.#links = this.#links.filter((l) => !unlink.revokes(l));
+    return { removed: this.#links.length < before, descendants };
+  }
+
+  /**
+   * All recorded signed revocations (copies of the list, same objects).
+   * Relay these to peers so they can {@link MeshKeyring#applyUnlink} them.
+   *
+   * @returns {SignedKeyUnlink[]}
+   */
+  listRevocations() {
+    return [...this.#revocations];
+  }
+
+  /** @param {string} id @returns {string[]} */
+  #descendantsOf(id) {
+    const out = [];
+    const seen = new Set([id]);
+    const queue = [id];
+    while (queue.length) {
+      const cur = queue.shift();
+      for (const l of this.#links) {
+        if (l.parent === cur && !seen.has(l.child)) {
+          seen.add(l.child);
+          out.push(l.child);
+          queue.push(l.child);
+        }
+      }
+    }
+    return out;
   }
 
   // -- Chain traversal ----------------------------------------------------
@@ -528,7 +827,8 @@ export class MeshKeyring {
   }
 
   /**
-   * Verify a chain for expiration.
+   * Verify a chain for expiration (structure only, no signatures; see
+   * {@link MeshKeyring#verifyCryptoChain}).
    *
    * @param {KeyLink[]} chain
    * @param {number} [now=Date.now()]
@@ -549,7 +849,8 @@ export class MeshKeyring {
   // -- Signed link support ------------------------------------------------
 
   /**
-   * Add a signed link after verifying its signatures.
+   * Add a signed link after verifying its signatures, its namespace and
+   * that no recorded unlink revokes it.
    *
    * @param {SignedKeyLink} signedLink
    * @param {CryptoKey} parentPub - Parent's Ed25519 public key
@@ -566,8 +867,18 @@ export class MeshKeyring {
     if (signedLink.parent === signedLink.child) {
       throw new Error('Cannot link identity to itself');
     }
+    if (signedLink.namespace !== this.#namespace) {
+      throw new Error(
+        `Namespace mismatch: link is for ${JSON.stringify(signedLink.namespace)}, keyring is ${JSON.stringify(this.#namespace)}`
+      );
+    }
+    if (this.isRevoked(signedLink)) {
+      throw new Error(`Link has been revoked: ${signedLink.parent} -> ${signedLink.child}`);
+    }
 
-    const valid = await signedLink.verifyBoth(parentPub, childPub);
+    const valid = await signedLink.verifyBoth(parentPub, childPub, {
+      acceptLegacyV2: this.#acceptLegacyV2,
+    });
     if (!valid) {
       throw new Error('Signature verification failed');
     }
@@ -584,14 +895,30 @@ export class MeshKeyring {
   }
 
   /**
-   * Verify an entire chain cryptographically (signatures + expiration).
+   * Verify an entire chain cryptographically: every link on the path from
+   * `fromId` up to `toId` must be signed by both ends, unexpired, in this
+   * keyring's namespace, and not revoked by a recorded {@link SignedKeyUnlink}.
+   *
+   * On failure, `brokenAt` is the child ID of the offending link (or
+   * `'no-path'`) and `reason` is one of `'no-path'`, `'expired'`,
+   * `'revoked'`, `'namespace'`, `'unsigned'` or `'bad-signature'`.
    *
    * @param {string} fromId - Starting identity (leaf)
    * @param {string} toId - Target identity (root/ancestor)
    * @param {Function} getPublicKey - async (podId) => CryptoKey
-   * @returns {Promise<{valid: boolean, chain: KeyLink[], brokenAt?: string}>}
+   * @param {object} [opts]
+   * @param {boolean} [opts.requireSigned=true] - Refuse unsigned KeyLinks.
+   *   `false` restores the pre-0.10 behaviour of skipping them; only for
+   *   purely local graphs.
+   * @param {boolean} [opts.acceptLegacyV2] - Defaults to the keyring's setting
+   * @param {number} [opts.now=Date.now()]
+   * @returns {Promise<{valid: boolean, chain: KeyLink[], brokenAt?: string, reason?: string}>}
    */
-  async verifyCryptoChain(fromId, toId, getPublicKey) {
+  async verifyCryptoChain(fromId, toId, getPublicKey, opts = {}) {
+    const requireSigned = opts.requireSigned ?? true;
+    const acceptLegacyV2 = opts.acceptLegacyV2 ?? this.#acceptLegacyV2;
+    const now = opts.now ?? Date.now();
+
     const chain = this.getChain(fromId);
     const relevantChain = [];
 
@@ -606,26 +933,28 @@ export class MeshKeyring {
     }
 
     if (!found) {
-      return { valid: false, chain: relevantChain, brokenAt: 'no-path' };
+      return { valid: false, chain: relevantChain, brokenAt: 'no-path', reason: 'no-path' };
     }
 
-    // Verify each link in the chain
+    const fail = (link, reason) => ({ valid: false, chain: relevantChain, brokenAt: link.child, reason });
+
     for (const link of relevantChain) {
-      if (link.isExpired()) {
-        return { valid: false, chain: relevantChain, brokenAt: link.child };
+      if (link.isExpired(now)) return fail(link, 'expired');
+      if (this.isRevoked(link)) return fail(link, 'revoked');
+      if ((link.namespace ?? null) !== this.#namespace) return fail(link, 'namespace');
+
+      if (!(link instanceof SignedKeyLink)) {
+        if (requireSigned) return fail(link, 'unsigned');
+        continue;
       }
 
-      if (link instanceof SignedKeyLink) {
-        try {
-          const parentPub = await getPublicKey(link.parent);
-          const childPub = await getPublicKey(link.child);
-          const ok = await link.verifyBoth(parentPub, childPub);
-          if (!ok) {
-            return { valid: false, chain: relevantChain, brokenAt: link.child };
-          }
-        } catch {
-          return { valid: false, chain: relevantChain, brokenAt: link.child };
-        }
+      try {
+        const parentPub = await getPublicKey(link.parent);
+        const childPub = await getPublicKey(link.child);
+        const ok = await link.verifyBoth(parentPub, childPub, { acceptLegacyV2 });
+        if (!ok) return fail(link, 'bad-signature');
+      } catch {
+        return fail(link, 'bad-signature');
       }
     }
 
@@ -636,6 +965,9 @@ export class MeshKeyring {
 
   /**
    * Register a succession policy for a primary identity.
+   *
+   * The policy and the activity log are **local state**: nothing about them
+   * is signed. They decide when this keyring acts, not what peers accept.
    *
    * @param {string} primaryId - Identity that must remain active
    * @param {string} successorId - Identity that takes over
@@ -693,17 +1025,30 @@ export class MeshKeyring {
   /**
    * Execute a succession policy for the given primary identity.
    *
-   * - **transfer**: re-links all children of primaryId to successorId,
-   *   removes old links.
-   * - **revoke**: removes all child links of primaryId.
+   * - **transfer**: moves every child of `primaryId` under `successorId`.
+   *   The keyring cannot sign on anyone's behalf, so the caller supplies
+   *   `opts.links`: one {@link SignedKeyLink} per child, signed by the
+   *   successor (as parent) and the child, with the same relation and a
+   *   scope/expiry no wider than the link it replaces, in this keyring's
+   *   namespace. They are all verified (via `opts.getPublicKey`) before
+   *   anything changes; if any is missing or invalid, the call rejects and
+   *   the keyring is untouched. Pass `{ localOnly: true }` instead to get
+   *   the pre-0.10 behaviour of re-linking with **unsigned** local links,
+   *   which `verifyCryptoChain` refuses by default.
+   * - **revoke**: removes all child links of primaryId (locally; to tell
+   *   peers, distribute {@link SignedKeyUnlink}s signed by the primary).
    * - **notify**: returns a notification signal without modifying links.
    *
-   * The policy is removed after execution.
+   * The policy is removed after successful execution.
    *
    * @param {string} primaryId
-   * @returns {{ action: string, primaryId: string, successorId: string, affected: number }}
+   * @param {object} [opts]
+   * @param {SignedKeyLink[]} [opts.links] - Successor-signed replacement links (transfer)
+   * @param {Function} [opts.getPublicKey] - async (podId) => CryptoKey (transfer)
+   * @param {boolean} [opts.localOnly=false] - transfer with unsigned local links
+   * @returns {Promise<{ action: string, primaryId: string, successorId: string, affected: number }>}
    */
-  executeSuccession(primaryId) {
+  async executeSuccession(primaryId, opts = {}) {
     const policy = this.#successions.get(primaryId);
     if (!policy) {
       throw new Error(`No succession policy for: ${primaryId}`);
@@ -713,21 +1058,84 @@ export class MeshKeyring {
     let affected = 0;
 
     if (policy.action === 'transfer') {
-      for (const child of children) {
-        this.unlink(primaryId, child.child);
-        // Only re-link if it won't create a self-link or duplicate
-        if (policy.successorId !== child.child) {
-          const existing = this.#links.find(
-            (l) => l.parent === policy.successorId && l.child === child.child
-          );
-          if (!existing) {
-            this.link(policy.successorId, child.child, child.relation, {
-              scope: child.scope || undefined,
-              expires: child.expires || undefined,
-            });
+      const successorId = policy.successorId;
+      if (opts.localOnly === true) {
+        for (const child of children) {
+          this.unlink(primaryId, child.child);
+          if (successorId !== child.child) {
+            const existing = this.#links.find(
+              (l) => l.parent === successorId && l.child === child.child
+            );
+            if (!existing) {
+              this.link(successorId, child.child, child.relation, {
+                scope: child.scope || undefined,
+                expires: child.expires ?? undefined,
+              });
+            }
           }
+          affected++;
         }
-        affected++;
+      } else {
+        const supplied = opts.links || [];
+        const plan = [];
+        for (const child of children) {
+          if (child.child === successorId) {
+            plan.push({ child, replacement: null });
+            continue;
+          }
+          const alreadyLinked = this.#links.some(
+            (l) => l.parent === successorId && l.child === child.child
+          );
+          if (alreadyLinked) {
+            plan.push({ child, replacement: null });
+            continue;
+          }
+          const replacement = supplied.find(
+            (l) => l && l.parent === successorId && l.child === child.child
+          );
+          if (!(replacement instanceof SignedKeyLink)) {
+            throw new Error(
+              `transfer needs a SignedKeyLink ${successorId} -> ${child.child} signed by both (or pass localOnly: true)`
+            );
+          }
+          if (replacement.relation !== child.relation) {
+            throw new Error(`Replacement link for ${child.child} changes relation`);
+          }
+          if (!scopeNarrows(child.scope, replacement.scope) ||
+              !expiresNarrows(child.expires, replacement.expires)) {
+            throw new Error(`Replacement link for ${child.child} is wider than the link it replaces`);
+          }
+          if (replacement.namespace !== this.#namespace) {
+            throw new Error(`Replacement link for ${child.child} has the wrong namespace`);
+          }
+          if (this.isRevoked(replacement)) {
+            throw new Error(`Replacement link for ${child.child} has been revoked`);
+          }
+          if (typeof opts.getPublicKey !== 'function') {
+            throw new Error('transfer needs opts.getPublicKey to verify replacement links');
+          }
+          let ok = false;
+          try {
+            ok = await replacement.verifyBoth(
+              await opts.getPublicKey(replacement.parent),
+              await opts.getPublicKey(replacement.child),
+              { acceptLegacyV2: this.#acceptLegacyV2 }
+            );
+          } catch {
+            ok = false;
+          }
+          if (!ok) {
+            throw new Error(`Replacement link for ${child.child}: signature verification failed`);
+          }
+          plan.push({ child, replacement });
+        }
+
+        // Every replacement verified: now mutate.
+        for (const { child, replacement } of plan) {
+          this.unlink(primaryId, child.child);
+          if (replacement) this.#links.push(replacement);
+          affected++;
+        }
       }
     } else if (policy.action === 'revoke') {
       for (const child of children) {
@@ -779,40 +1187,62 @@ export class MeshKeyring {
   // -- Serialization ------------------------------------------------------
 
   /**
-   * Serialize all links.
+   * Serialize the keyring.
    *
-   * @returns {object[]}
+   * Shape (since 0.10): `{ v: 3, namespace, links, revocations }`. Before
+   * 0.10 this was a bare array of links; {@link MeshKeyring.fromJSON} still
+   * reads that. An older browsermesh-core given the new object fails to
+   * load it (it is not iterable) rather than misreading revocations as links.
+   *
+   * @returns {{ v: 3, namespace: string|null, links: object[], revocations: object[] }}
    */
   toJSON() {
-    return this.#links.map((l) => l.toJSON());
+    return {
+      v: 3,
+      namespace: this.#namespace,
+      links: this.#links.map((l) => l.toJSON()),
+      revocations: this.#revocations.map((r) => r.toJSON()),
+    };
   }
 
   /**
-   * Deserialize from an array of link data.
+   * Deserialize a keyring.
    *
-   * @param {object[]} data
+   * Accepts the current object form and the pre-0.10 bare array of links.
+   * Signatures are not re-checked here (no keys are available); they are
+   * checked by {@link MeshKeyring#verifyCryptoChain}. Recorded revocations
+   * are restored as-is: a revocation can only remove authority, so trusting
+   * the local copy fails closed.
+   *
+   * @param {object|object[]} data
+   * @param {object} [opts] - Constructor options (`storage`, `namespace`,
+   *   `acceptLegacyV2`). `namespace` defaults to the serialised one and
+   *   must agree with it when both are given.
    * @returns {MeshKeyring}
    */
-  static fromJSON(data) {
-    const kr = new MeshKeyring();
-    for (const d of data) {
+  static fromJSON(data, opts = {}) {
+    const legacy = Array.isArray(data);
+    const links = legacy ? data : (data?.links ?? []);
+    const revocations = legacy ? [] : (data?.revocations ?? []);
+    const storedNs = legacy ? null : (data?.namespace ?? null);
+    if (!legacy && 'namespace' in opts && (opts.namespace ?? null) !== storedNs) {
+      throw new Error('Namespace mismatch between options and serialised keyring');
+    }
+    const kr = new MeshKeyring({ ...opts, namespace: opts.namespace ?? storedNs });
+    for (const d of links) {
       /*
        * Dispatch on the serialised shape. Reviving everything through
-       * `KeyLink.fromJSON` returned a plain KeyLink for signed links too, and
-       * `verifyCryptoChain` only checks a signature `if (link instanceof
-       * SignedKeyLink)` -- so every restored keyring reported `valid: true`
-       * having called `getPublicKey` zero times.
-       *
-       * The signatures were never lost; they survive serialisation intact.
-       * Only the CLASS was, and the class is what the check keys on. So a
-       * keyring that had been persisted, sent to a peer, or reloaded from
-       * disk verified without any cryptography at all.
+       * `KeyLink.fromJSON` returned a plain KeyLink for signed links too, so
+       * a restored keyring verified without any cryptography (#33).
        */
       kr.#links.push(
         d && (d.parentSignature || d.childSignature || d.signed)
           ? SignedKeyLink.fromJSON(d)
           : KeyLink.fromJSON(d)
       );
+    }
+    for (const r of revocations) {
+      kr.#revocations.push(SignedKeyUnlink.fromJSON(r));
     }
     return kr;
   }
