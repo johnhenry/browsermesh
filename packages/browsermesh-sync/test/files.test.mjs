@@ -776,6 +776,102 @@ describe('MeshFileTransfer end-to-end', () => {
 });
 
 // ---------------------------------------------------------------------------
+// MeshFileTransfer — subscribeProgress
+// ---------------------------------------------------------------------------
+
+describe('MeshFileTransfer subscribeProgress', () => {
+  function wirePair() {
+    const sender = new MeshFileTransfer({ chunkSize: 4 });
+    const receiver = new MeshFileTransfer({ chunkSize: 4 });
+    sender.onSend(msg => receiver.dispatch(msg));
+    receiver.onSend(msg => sender.dispatch(msg));
+    receiver.onOffer(offer => receiver.acceptOffer(offer));
+    return { sender, receiver };
+  }
+
+  async function run(sender, receiver, size = 10) {
+    const offer = sender.createOffer('bob', [{ name: 'a.bin', size }], { sender: 'alice' });
+    const data = [new Uint8Array(size).map((_, i) => i + 1)];
+    for await (const c of sender.sendChunks(offer.transferId, data)) {
+      await receiver.receiveChunk(offer.transferId, c.fileIndex, c.cid, c.data);
+    }
+    return offer;
+  }
+
+  it('delivers monotonic progress to multiple listeners on both sides', async () => {
+    const { sender, receiver } = wirePair();
+    const a = [], b = [], r = [];
+    sender.subscribeProgress(e => a.push(e));
+    sender.subscribeProgress(e => b.push(e));
+    receiver.subscribeProgress(e => r.push(e));
+    const offer = await run(sender, receiver);
+
+    assert.deepEqual(a, b);
+    for (const [events, direction] of [[a, 'send'], [r, 'receive']]) {
+      assert.ok(events.length >= 3);
+      assert.ok(events.every(e => e.transferId === offer.transferId && e.direction === direction));
+      assert.ok(events.every(e => e.bytesTotal === 10));
+      for (let i = 1; i < events.length; i++) {
+        assert.ok(events[i].bytesDone >= events[i - 1].bytesDone);
+      }
+      const last = events.at(-1);
+      assert.equal(last.bytesDone, 10);
+      assert.equal(last.state, 'completed');
+      assert.ok(events.slice(0, -1).every(e => e.state === 'transferring'));
+      assert.equal(events.filter(e => e.state === 'completed').length, 1);
+    }
+  });
+
+  it('stops delivery after unsubscribe', async () => {
+    const { sender, receiver } = wirePair();
+    const seen = [], other = [];
+    const off = sender.subscribeProgress(e => seen.push(e));
+    sender.subscribeProgress(e => other.push(e));
+    off();
+    off(); // idempotent
+    await run(sender, receiver);
+    assert.equal(seen.length, 0);
+    assert.ok(other.length > 0);
+  });
+
+  it('isolates a throwing listener', async () => {
+    const { sender, receiver } = wirePair();
+    const good = [];
+    sender.subscribeProgress(() => { throw new Error('boom'); });
+    sender.subscribeProgress(e => good.push(e));
+    const offer = await run(sender, receiver);
+    assert.ok(good.length > 0);
+    assert.equal(sender.getTransfer(offer.transferId).status, 'completed');
+    assert.equal(receiver.getTransfer(offer.transferId).status, 'completed');
+  });
+
+  it('keeps the single-slot onProgress working alongside listeners', async () => {
+    const { sender, receiver } = wirePair();
+    const slot = [], sub = [];
+    sender.onProgress((id, p) => slot.push(p));
+    sender.subscribeProgress(e => sub.push(e));
+    await run(sender, receiver);
+    assert.equal(slot.length, 3);
+    assert.equal(slot.at(-1).bytesTransferred, 10);
+    assert.ok(sub.length >= slot.length);
+  });
+
+  it('reports cancellation', () => {
+    const { sender } = wirePair();
+    const events = [];
+    sender.subscribeProgress(e => events.push(e));
+    const offer = sender.createOffer('bob', [{ name: 'a.bin', size: 10 }]);
+    sender.cancelTransfer(offer.transferId);
+    assert.equal(events.at(-1).state, 'cancelled');
+    assert.equal(events.at(-1).direction, 'send');
+  });
+
+  it('rejects a non-function listener', () => {
+    assert.throws(() => new MeshFileTransfer().subscribeProgress(null), TypeError);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // MeshFileTransfer — serialization
 // ---------------------------------------------------------------------------
 
