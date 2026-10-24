@@ -64,19 +64,20 @@ import { MeshIdentityManager, MeshKeyring, TrustGraph } from '@johnhenry/browser
 - Revoke an edge with `SignedKeyUnlink.create(parentIdentity, childId)` and
   `keyring.applyUnlink(unlink, parentPub)`. Unlinks serialise, can be relayed
   to peers, and cut off every descendant of the child. `unlink()` is local only.
-- A `SignedKeyUnlink` may carry a signed `expires` (ms epoch, like
-  `SignedKeyLink`): `SignedKeyUnlink.create(p, childId, { expires })`, or
-  `SignedKeyUnlink.forLink(parentIdentity, link)` which copies the link's
-  expiry (and namespace). It is in the signed payload only when set, so
-  existing unlinks keep their bytes and still verify (same
-  `keyunlink/v1` domain); changing or stripping `expires` breaks the
-  signature. Once an unlink expires the keyring stops counting it:
-  `listRevocations({ now })`, `toJSON()` and `fromJSON()` drop it,
-  `pruneRevocations(now)` drops them explicitly and returns the count, and
-  `applyUnlink` records nothing for an already-expired one. Rule: an unlink
-  should expire no earlier than the link it revokes (what `forLink` does).
-  If it expires sooner, the revocation lapses and a stale copy of the link
-  is accepted again, but only while the link itself is unexpired;
+- A `SignedKeyUnlink` REQUIRES a signed `expires` (ms epoch, like
+  `SignedKeyLink`): `SignedKeyUnlink.create(p, childId, { expires })` throws
+  without one, or use `SignedKeyUnlink.forLink(parentIdentity, link)`, which
+  copies the link's expiry and namespace (pass `{ expires }` for a link that
+  never expires). It signs `"browsermesh/keyunlink/v2\n"` + canonical JSON.
+  **v1 unlinks (no `expires`) are no longer accepted**: `verify` is false,
+  `applyUnlink` throws, and `MeshKeyring.fromJSON` drops them (listed with a
+  reason in `keyring.droppedRevocations`). Once an unlink expires the keyring
+  stops counting it: `listRevocations({ now })`, `toJSON()` and `fromJSON()`
+  drop it, `pruneRevocations(now)` drops them explicitly and returns the
+  count, and `applyUnlink` records nothing for an already-expired one. Rule:
+  an unlink should expire no earlier than the link it revokes (what `forLink`
+  does). If it expires sooner, the revocation lapses and a stale copy of the
+  link is accepted again, but only while the link itself is unexpired;
   `verifyCryptoChain` always refuses an expired link.
 - `executeSuccession(primary, { links, getPublicKey })` with a `transfer`
   policy needs successor-signed replacement links (`{ localOnly: true }` keeps
