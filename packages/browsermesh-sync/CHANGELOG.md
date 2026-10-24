@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.0
+
+### Minor Changes
+
+- 4786ed0: `MeshFileTransfer.subscribeProgress(fn)` adds a multi-listener progress subscription (returns an unsubscribe function) for both sending and receiving. Events carry `{ transferId, direction, bytesDone, bytesTotal, percentComplete, transferRate, state }` and also fire on completion and cancellation. The single-slot `onProgress` keeps working unchanged. Events are not throttled.
+
 ## 0.3.0
 
 ### Minor Changes
