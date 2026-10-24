@@ -1,6 +1,6 @@
 {
   "name": "@johnhenry/browsermesh-sync",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "CRDT sync engine, delta sync, file transfer, and collaboration for BrowserMesh",
   "type": "module",
   "main": "./src/index.mjs",
