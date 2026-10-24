@@ -1552,6 +1552,7 @@ describe('SignedKeyLink domain separation and namespace binding (#302 item 2)', 
   });
 });
 
+const FAR = Date.now() + 365 * 24 * 3600_000;
 describe('SignedKeyUnlink: signed, transferable, cascading revocation (#302 item 3)', () => {
   /** root -> mid -> leaf, all signed, in namespace `ns`. */
   async function chain(ns = null) {
@@ -1566,7 +1567,7 @@ describe('SignedKeyUnlink: signed, transferable, cascading revocation (#302 item
 
   it('signs KEYUNLINK_DOMAIN + canonical body and round-trips', async () => {
     const { ids: [p, c] } = await makeIds(2);
-    const u = await SignedKeyUnlink.create(p, c.podId, { reason: 'lost device' });
+    const u = await SignedKeyUnlink.create(p, c.podId, { reason: 'lost device', expires: FAR });
     assert.ok(new TextDecoder().decode(u.signedPayload).startsWith(KEYUNLINK_DOMAIN));
     const back = SignedKeyUnlink.fromJSON(JSON.parse(JSON.stringify(u)));
     assert.equal(await back.verify(p.keyPair.publicKey), true);
@@ -1578,7 +1579,7 @@ describe('SignedKeyUnlink: signed, transferable, cascading revocation (#302 item
     const { kr, root, mid, leaf, getPublicKey } = await chain();
     assert.equal((await kr.verifyCryptoChain(leaf.podId, root.podId, getPublicKey)).valid, true);
 
-    const unlink = await SignedKeyUnlink.create(root, mid.podId);
+    const unlink = await SignedKeyUnlink.create(root, mid.podId, { expires: FAR });
     const { removed, descendants } = await kr.applyUnlink(unlink, root.keyPair.publicKey);
     assert.equal(removed, true);
     assert.deepEqual(descendants, [leaf.podId]);
@@ -1594,7 +1595,7 @@ describe('SignedKeyUnlink: signed, transferable, cascading revocation (#302 item
     // Peer B holds the same links.
     const peer = MeshKeyring.fromJSON(JSON.parse(JSON.stringify(a.kr)));
 
-    const unlink = await SignedKeyUnlink.create(a.root, a.mid.podId, { namespace: 'mesh-1' });
+    const unlink = await SignedKeyUnlink.create(a.root, a.mid.podId, { namespace: 'mesh-1', expires: FAR });
     const wire = JSON.parse(JSON.stringify(unlink));
     await peer.applyUnlink(SignedKeyUnlink.fromJSON(wire), a.root.keyPair.publicKey);
 
@@ -1611,7 +1612,7 @@ describe('SignedKeyUnlink: signed, transferable, cascading revocation (#302 item
   it('honors a revocation that arrives before the link, and survives serialisation', async () => {
     const a = await chain();
     const fresh = new MeshKeyring();
-    await fresh.applyUnlink(await SignedKeyUnlink.create(a.root, a.mid.podId), a.root.keyPair.publicKey);
+    await fresh.applyUnlink(await SignedKeyUnlink.create(a.root, a.mid.podId, { expires: FAR }), a.root.keyPair.publicKey);
     await assert.rejects(
       () => fresh.addVerifiedLink(a.l1, a.root.keyPair.publicKey, a.mid.keyPair.publicKey),
       /revoked/
@@ -1631,7 +1632,7 @@ describe('SignedKeyUnlink: signed, transferable, cascading revocation (#302 item
 
   it('a later re-link signed by both parties is not affected', async () => {
     const a = await chain();
-    const unlink = await SignedKeyUnlink.create(a.root, a.mid.podId, { created: a.l1.created });
+    const unlink = await SignedKeyUnlink.create(a.root, a.mid.podId, { created: a.l1.created, expires: FAR });
     await a.kr.applyUnlink(unlink, a.root.keyPair.publicKey);
     const relink = await SignedKeyLink.create(a.root, a.mid, 'org', { created: a.l1.created + 1 });
     await a.kr.addVerifiedLink(relink, a.root.keyPair.publicKey, a.mid.keyPair.publicKey);
@@ -1641,11 +1642,11 @@ describe('SignedKeyUnlink: signed, transferable, cascading revocation (#302 item
   it('refuses an unlink not signed by the parent', async () => {
     const a = await chain();
     // The leaf (or anyone else) cannot revoke root -> mid.
-    const forged = new SignedKeyUnlink({ parent: a.root.podId, child: a.mid.podId });
+    const forged = new SignedKeyUnlink({ parent: a.root.podId, child: a.mid.podId, expires: FAR });
     forged.signature = await a.other.sign(forged.signedPayload);
     await assert.rejects(() => a.kr.applyUnlink(forged, a.root.keyPair.publicKey), /Signature verification failed/);
     await assert.rejects(
-      () => a.kr.applyUnlink(new SignedKeyUnlink({ parent: a.root.podId, child: a.mid.podId }), a.root.keyPair.publicKey),
+      () => a.kr.applyUnlink(new SignedKeyUnlink({ parent: a.root.podId, child: a.mid.podId, expires: FAR }), a.root.keyPair.publicKey),
       /Signature verification failed/
     );
     assert.equal(a.kr.listRevocations().length, 0);
@@ -1654,7 +1655,7 @@ describe('SignedKeyUnlink: signed, transferable, cascading revocation (#302 item
 
   it('refuses an unlink from another namespace', async () => {
     const a = await chain('mesh-1');
-    const u = await SignedKeyUnlink.create(a.root, a.mid.podId, { namespace: 'mesh-2' });
+    const u = await SignedKeyUnlink.create(a.root, a.mid.podId, { namespace: 'mesh-2', expires: FAR });
     await assert.rejects(() => a.kr.applyUnlink(u, a.root.keyPair.publicKey), /Namespace mismatch/);
   });
 });
@@ -1755,20 +1756,48 @@ describe('SignedKeyUnlink optional signed expiry (#262)', () => {
     assert.equal(await SignedKeyUnlink.fromJSON(rest).verify(p.keyPair.publicKey), false);
   });
 
-  it('an unlink without expires signs the exact pre-0.11 bytes and still verifies', async () => {
+  it('an unlink without a signed expires is refused everywhere (v1 is gone)', async () => {
     const { ids: [p, c] } = await makeIds(2);
-    const old = new SignedKeyUnlink({ parent: p.podId, child: c.podId, created: 1000, reason: 'r' });
-    const legacyBytes = domainPayload(KEYUNLINK_DOMAIN, {
+    // create / forLink throw
+    await assert.rejects(() => SignedKeyUnlink.create(p, c.podId), /requires a signed expires/);
+    await assert.rejects(() => SignedKeyUnlink.create(p, c.podId, { expires: null }), /requires a signed expires/);
+    const forever = await SignedKeyLink.create(p, c, 'device');
+    await assert.rejects(() => SignedKeyUnlink.forLink(p, forever), /requires a signed expires/);
+    const explicit = Date.now() + HOUR;
+    assert.equal((await SignedKeyUnlink.forLink(p, forever, { expires: explicit })).expires, explicit);
+
+    // A genuine v1 unlink: old domain, no expires, valid v1 signature.
+    const v1 = new SignedKeyUnlink({ parent: p.podId, child: c.podId, created: 1000, reason: 'r' });
+    v1.signature = await p.sign(domainPayload('browsermesh/keyunlink/v1\n', {
       parent: p.podId, child: c.podId, namespace: null, created: 1000, reason: 'r',
-    });
-    assert.deepEqual(old.signedPayload, legacyBytes);
-    old.signature = await p.sign(legacyBytes);
-    const wire = JSON.parse(JSON.stringify(old));
-    assert.equal('expires' in wire, false);
-    const back = SignedKeyUnlink.fromJSON(wire);
-    assert.equal(back.expires, null);
-    assert.equal(await back.verify(p.keyPair.publicKey), true);
-    assert.equal(back.isExpired(Date.now() + 1e12), false);
+    }));
+    assert.equal(KEYUNLINK_DOMAIN, 'browsermesh/keyunlink/v2\n');
+    assert.equal(await v1.verify(p.keyPair.publicKey), false);
+
+    // Also not rescued by bolting on an expiry: the v1 signature is over other bytes.
+    const upgraded = SignedKeyUnlink.fromJSON({ ...v1.toJSON(), expires: Date.now() + HOUR });
+    assert.equal(await upgraded.verify(p.keyPair.publicKey), false);
+
+    // applyUnlink refuses it, and it is not recorded or relayed.
+    const kr = new MeshKeyring();
+    await assert.rejects(() => kr.applyUnlink(v1, p.keyPair.publicKey), /missing signed expires/);
+    // ...even when relayed over the wire.
+    const wire = JSON.parse(JSON.stringify(v1));
+    await assert.rejects(() => kr.applyUnlink(SignedKeyUnlink.fromJSON(wire), p.keyPair.publicKey), /missing signed expires/);
+    assert.equal(kr.listRevocations().length, 0);
+  });
+
+  it('fromJSON drops v1 / expiry-less revocations with a reason instead of crashing', async () => {
+    const { ids: [p, c] } = await makeIds(2);
+    const good = await SignedKeyUnlink.create(p, c.podId, { expires: Date.now() + HOUR });
+    const v1 = { type: 'unlink', parent: p.podId, child: c.podId, namespace: null, created: 1000, reason: null, signature: 'AAAA' };
+    const kr = MeshKeyring.fromJSON({ v: 3, namespace: null, links: [], revocations: [v1, good.toJSON(), 'garbage'] });
+    assert.equal(kr.listRevocations().length, 1);
+    assert.equal(kr.droppedRevocations.length, 2);
+    assert.match(kr.droppedRevocations[0].reason, /missing signed expires/);
+    assert.match(kr.droppedRevocations[1].reason, /malformed/);
+    // The stale link the v1 unlink used to cover is no longer treated as revoked.
+    assert.equal(kr.toJSON().revocations.length, 1);
   });
 
   it('forLink copies the link expiry, namespace and child', async () => {
@@ -1781,8 +1810,6 @@ describe('SignedKeyUnlink optional signed expiry (#262)', () => {
     assert.equal(u.child, c.podId);
     assert.equal(u.revokes(link), true);
     assert.equal(await u.verify(p.keyPair.publicKey), true);
-    const forever = await SignedKeyLink.create(p, c, 'device');
-    assert.equal((await SignedKeyUnlink.forLink(p, forever)).expires, null);
     await assert.rejects(() => SignedKeyUnlink.forLink(c, link), /not issued/);
   });
 
@@ -1815,14 +1842,12 @@ describe('SignedKeyUnlink optional signed expiry (#262)', () => {
     assert.equal(MeshKeyring.fromJSON(past).listRevocations().length, 1);
   });
 
-  it('pruneRevocations returns the number dropped; no-expiry revocations stay', async () => {
+  it('pruneRevocations returns the number dropped', async () => {
     const exp = Date.now() + HOUR;
     const a = await setup(exp, exp);
     assert.equal(a.kr.pruneRevocations(exp - 1), 0);
     assert.equal(a.kr.pruneRevocations(exp), 1);
-    const b = await setup(undefined, undefined);
-    assert.equal(b.kr.pruneRevocations(Date.now() + 1e12), 0);
-    assert.equal(b.kr.listRevocations().length, 1);
+    assert.equal(a.kr.listRevocations().length, 0);
   });
 
   it('an already-expired unlink is verified but neither recorded nor relayed', async () => {

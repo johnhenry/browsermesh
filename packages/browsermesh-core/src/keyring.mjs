@@ -35,7 +35,7 @@ export const VALID_RELATIONS = Object.freeze([
 export const KEYLINK_DOMAIN = 'browsermesh/keylink/v3\n';
 
 /** Domain prefix of the bytes a {@link SignedKeyUnlink} signs. */
-export const KEYUNLINK_DOMAIN = 'browsermesh/keyunlink/v1\n';
+export const KEYUNLINK_DOMAIN = 'browsermesh/keyunlink/v2\n';
 
 // ---------------------------------------------------------------------------
 // KeyLink
@@ -348,9 +348,11 @@ export class SignedKeyLink extends KeyLink {
 /**
  * A signed, transferable revocation of the `parent -> child` edge.
  *
- * The parent signs `"browsermesh/keyunlink/v1\n" ‖ canonical(body)` over
- * `parent`, `child`, `namespace`, `created`, `reason` and, only when set,
- * `expires`. It revokes every
+ * The parent signs `"browsermesh/keyunlink/v2\n" ‖ canonical(body)` over
+ * `parent`, `child`, `namespace`, `created`, `reason` and `expires`.
+ * `expires` is REQUIRED (ms epoch): a revocation that cannot lapse is not
+ * supported, and v1 unlinks (no `expires`, domain `keyunlink/v1`) are no
+ * longer accepted anywhere. It revokes every
  * link on that edge (in that namespace) created at or before `created`, so
  * a re-link signed later by both parties is not affected, but replaying the
  * old link is. Because authority flows down the chain, every descendant of
@@ -387,13 +389,9 @@ export class SignedKeyUnlink {
   }
 
   /**
-   * Signed bytes. `expires` is part of the canonical body only when set
-   * (canonical JSON omits `undefined`), so an unlink without it signs the
-   * exact bytes it always did. The domain stays `keyunlink/v1`: the body is
-   * self-describing (a present `expires` key changes the bytes, and removing
-   * it from a signed unlink breaks the signature), so a downgrade or
-   * re-interpretation is impossible and a v2 string would only orphan every
-   * existing unlink.
+   * Signed bytes: the `keyunlink/v2` domain plus canonical JSON of every
+   * field including `expires`. The v2 domain means a v1 signature can never
+   * validate here, and a v2 signature is not a valid v1 message.
    *
    * @returns {Uint8Array}
    */
@@ -404,7 +402,7 @@ export class SignedKeyUnlink {
       namespace: this.namespace,
       created: this.created,
       reason: this.reason,
-      expires: this.expires ?? undefined,
+      expires: this.expires,
     });
   }
 
@@ -426,6 +424,9 @@ export class SignedKeyUnlink {
    * @returns {Promise<SignedKeyUnlink>}
    */
   static async create(parentIdentity, childId, opts = {}) {
+    if (!Number.isFinite(opts.expires)) {
+      throw new TypeError('SignedKeyUnlink requires a signed expires (ms epoch)');
+    }
     const unlink = new SignedKeyUnlink({
       parent: parentIdentity.podId,
       child: childId,
@@ -440,13 +441,14 @@ export class SignedKeyUnlink {
 
   /**
    * Create an unlink for a known link: same child and namespace, and
-   * `expires` set to the link's expiry (none if the link never expires), so
-   * the revocation lives exactly as long as the link it revokes. `opts` may
-   * override `expires`, `reason` and `created`.
+   * `expires` set to the link's expiry, so the revocation lives exactly as
+   * long as the link it revokes. A link that never expires needs an explicit
+   * `opts.expires` (throws otherwise). `opts` may also override `reason` and
+   * `created`.
    *
    * @param {import('./identity.mjs').PodIdentity} parentIdentity
    * @param {KeyLink} link
-   * @param {{ reason?: string, created?: number, expires?: number|null }} [opts]
+   * @param {{ reason?: string, created?: number, expires?: number }} [opts]
    * @returns {Promise<SignedKeyUnlink>}
    */
   static async forLink(parentIdentity, link, opts = {}) {
@@ -457,7 +459,7 @@ export class SignedKeyUnlink {
       namespace: link.namespace ?? undefined,
       reason: opts.reason,
       created: Math.max(opts.created ?? Date.now(), link.created),
-      expires: 'expires' in opts ? (opts.expires ?? undefined) : (link.expires ?? undefined),
+      expires: opts.expires ?? link.expires ?? undefined,
     });
   }
 
@@ -467,8 +469,16 @@ export class SignedKeyUnlink {
    * @returns {Promise<boolean>}
    */
   async verify(parentPub) {
-    if (!this.signature) return false;
+    if (!this.signature || !Number.isFinite(this.expires)) return false;
     return crypto.subtle.verify('Ed25519', parentPub, this.signature, this.signedPayload);
+  }
+
+  /**
+   * Why this unlink cannot be used, or null if it is well formed.
+   * @returns {string|null}
+   */
+  get defect() {
+    return Number.isFinite(this.expires) ? null : 'missing signed expires (v1 unlink)';
   }
 
   /**
@@ -493,7 +503,7 @@ export class SignedKeyUnlink {
       namespace: this.namespace,
       created: this.created,
       reason: this.reason,
-      ...(this.expires !== null ? { expires: this.expires } : {}),
+      expires: this.expires,
       signature: this.signature ? encodeBase64url(this.signature) : null,
     };
   }
@@ -629,6 +639,8 @@ export class MeshKeyring {
 
   /** @type {SignedKeyUnlink[]} */
   #revocations = [];
+  /** @type {{ data: object, reason: string }[]} */
+  #dropped = [];
 
   /** @type {*} */
   #storage;
@@ -747,6 +759,16 @@ export class MeshKeyring {
   }
 
   /**
+   * Revocations `fromJSON` refused to restore (v1 / expiry-less or
+   * malformed), with the reason, so callers can log or re-request them.
+   *
+   * @returns {{ data: object, reason: string }[]}
+   */
+  get droppedRevocations() {
+    return [...this.#dropped];
+  }
+
+  /**
    * Drop recorded revocations that have expired.
    *
    * @param {number} [now=Date.now()]
@@ -781,6 +803,7 @@ export class MeshKeyring {
         `Namespace mismatch: unlink is for ${JSON.stringify(unlink.namespace)}, keyring is ${JSON.stringify(this.#namespace)}`
       );
     }
+    if (unlink.defect) throw new Error(`Unlink refused: ${unlink.defect}`);
     let ok = false;
     try {
       ok = await unlink.verify(parentPub);
@@ -801,8 +824,7 @@ export class MeshKeyring {
       this.#revocations.push(unlink);
     } else {
       // Same revocation, possibly with a different expiry: keep the longer-lived.
-      const old = this.#revocations[idx];
-      if (old.expires !== null && (unlink.expires === null || unlink.expires > old.expires)) {
+      if (unlink.expires > this.#revocations[idx].expires) {
         this.#revocations[idx] = unlink;
       }
     }
@@ -1326,8 +1348,13 @@ export class MeshKeyring {
       );
     }
     for (const r of revocations) {
-      const u = SignedKeyUnlink.fromJSON(r);
-      if (!u.isExpired()) kr.#revocations.push(u);
+      let u;
+      try { u = SignedKeyUnlink.fromJSON(r); } catch (e) {
+        kr.#dropped.push({ data: r, reason: `malformed: ${e.message}` });
+        continue;
+      }
+      if (u.defect) kr.#dropped.push({ data: r, reason: u.defect });
+      else if (!u.isExpired()) kr.#revocations.push(u);
     }
     return kr;
   }
