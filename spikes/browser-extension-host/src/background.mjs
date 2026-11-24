@@ -1,4 +1,12 @@
 /**
+ * FROZEN SPIKE: do not extend, do not build on it. The driver this worker runs has an
+ * `exec` that evaluates a JavaScript string in a page (`eval` through
+ * `chrome.scripting.executeScript`); that cannot work under a strict
+ * Content-Security-Policy and cannot be allow-listed by path. Remote access to a
+ * page's objects is remote objects over a protocol channel instead
+ * (`@johnhenry/wsh/objects`; see examples/19-wsh-objects-over-protocol-channel.mjs and
+ * docs/protocol-channel.md). Kept as a record; see README.md and issue #272.
+ *
  * background.mjs — the MV3 service worker (issue #185 item 7, deliverable
  * C). Boots a `Pod` representing the EXTENSION ITSELF (kind
  * `'service-worker'` — a real Chrome MV3 background service worker runs in

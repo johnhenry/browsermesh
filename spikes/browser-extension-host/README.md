@@ -1,13 +1,23 @@
 # browser-extension-host spike
 
-> **This is a spike, not a product.** Its `exec` evaluates a JavaScript
-> string inside a page (`eval` through `chrome.scripting.executeScript`).
-> String evaluation cannot work under a strict Content-Security-Policy and
-> cannot be allow-listed by path, so do not build on it. Remote access to a
-> page's objects should go through the protocol-channel seam instead: a
-> path-and-handle protocol opened by name over an authorised channel, see
-> [`docs/protocol-channel.md`](../../docs/protocol-channel.md). The spike is
-> private, not a workspace member, and imported by no published package.
+> **FROZEN. Do not extend this, and do not build on it.** It is kept as a
+> record, not as a direction. Its `exec` evaluates code: a JavaScript string is
+> run inside a page (`eval` through `chrome.scripting.executeScript`). That
+> cannot work under a strict Content-Security-Policy and cannot be allow-listed
+> by path, so it can only ever be all-or-nothing.
+>
+> **What replaces it:** remote objects over a protocol channel. A layered
+> protocol opened by name over an authorised channel carries *paths* and plain
+> values instead of source text, with per-operation allow-lists and per-root
+> authorisation. The remote-object layer is `@johnhenry/wsh/objects`; see
+> [`examples/19-wsh-objects-over-protocol-channel.mjs`](../../examples/19-wsh-objects-over-protocol-channel.mjs)
+> and [`docs/protocol-channel.md`](../../docs/protocol-channel.md). Page access
+> from an extension should serve that layer from the page, not call `exec`.
+>
+> The spike is private, not a workspace member, and imported by no published
+> package (`scripts/spike-frozen.test.mjs` fails if anything under `packages/`
+> starts importing it). Nothing in it has been removed; the decision is on
+> issue #272.
 
 The browser lane's **extension** driver (issue #185 item 7, deliverable
 C): a Manifest V3 extension whose background service worker runs a
