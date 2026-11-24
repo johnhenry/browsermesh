@@ -3,10 +3,11 @@
 A layered protocol (a remote-object layer, a file protocol, a tool protocol)
 should be written once, against a small interface, and run over whatever
 carries it. This document defines that interface, says how it is authorised
-and discovered on the mesh, and sketches how a remote-object layer
+and discovered on the mesh, and says how a remote-object layer
 ([johnhenry/wsh#190](https://github.com/johnhenry/wsh/issues/190),
-`wsh-objects`) would mount on it. Code: `packages/browsermesh-apps/src/protocol-channel.mjs`
-(over `mesh-channel.mjs`, #271).
+`wsh-objects`) mounts on it (`@johnhenry/browsermesh-objects`). Code: `packages/browsermesh-apps/src/protocol-channel.mjs`
+(over `mesh-channel.mjs`, #271), `protocol-roots.mjs` (per-root authorisation) and
+`protocol-stream.mjs` (bodies larger than one message).
 
 ## The interface
 
@@ -67,7 +68,7 @@ const available = await clientHost.api.listProtocols(serverKey)   // only what t
 
 ## Mounting a remote-object layer (`wsh-objects`)
 
-Not implemented here. `wsh-objects` is designed in wsh with a transport-neutral core: handles and path addressing, `get`/`call`/`set`, events by subscription, bounded snapshots. Its transport needs map directly onto the interface above:
+Built: `@johnhenry/browsermesh-objects` (`exposeObjectsOnMesh`, `openObjectsOnMesh`; `examples/19`). `wsh-objects` is built in wsh with a transport-neutral core: handles and path addressing, `get`/`call`/`set`, events by subscription, one-way callbacks, bounded snapshots. Its transport needs map onto the interface above as follows (the design table; what the package does is below it):
 
 | `wsh-objects` need | Protocol channel |
 |---|---|
@@ -78,16 +79,18 @@ Not implemented here. `wsh-objects` is designed in wsh with a transport-neutral 
 | who is calling | `ctx.peer` on every handler |
 | close / lease cleanup | `onClose` |
 
-A mount would be: `serveProtocol('objects', channel => objectsServer.attach(channel))`, where `attach` registers `get`/`call`/`set`/`subscribe`/`release` with `channel.onRequest`, checks `objects:<root>:get|call|set` against `registry.checkAccess(ctx.peer, 'objects:<root>', action)` in each handler (the `protocol:objects:open` scope only gates opening the layer), and `openProtocol(peer, 'objects')` yields the client. The CSP-safe design (paths and handles, never evaluated strings) is exactly what this seam carries.
+What the package does: `exposeObjectsOnMesh(service, { roots, allow })` is `serveProtocol('objects', channel => ...)`. The layer's own messages (its requests, responses, progress, events and callbacks, JSON-RPC shaped) travel as the channel's raw messages (`send` / `onMessage`), through wsh's `createDuplexPeer`, not as `request` / `notify` of the channel; the table above is the mapping that was designed, and the raw-message form is what wsh's layer needs and what was built. Every operation is judged by its own action, `objects:<root>:get|call|set|on`, through `createRootAuthorizer` for the channel's verified peer, after wsh's allow-lists (the `protocol:objects:open` scope only gates opening the layer); a revoked grant ends what it allowed. See the package README and [`security.md`](security.md#mesh-rpc-the-message-channel-and-the-protocol-seam).
 
-Still missing for that:
+What was missing when this note was written, and is now there:
 
-- the object layer itself (handles, lifetimes, path resolution, snapshots): wsh#190;
-- subscription flow control above the raw notify (a slow subscriber is bounded by credit, but coalescing or dropping events is the layer's policy);
-- ~~a way to learn a peer supports the channel without trying~~: done in `channel-advertisement.mjs` (`channelAdvertisement()` goes into what a peer announces, `peerSupportsFromAdvertisements(lookup)` is the `peerSupports` hook; a peer that advertises nothing is still tried, and an advertisement is a claim, not an authorisation). Nothing publishes the advertisement for you yet: a deployment adds it to its runtime-registry record (as pod hosts add `pod-host`);
-- per-root authorisation helpers (today each handler calls `checkAccess`);
-- streams larger than one message (large reads must be chunked by the protocol with `progress`; a stream abstraction over the link is not built);
-- a real-WebRTC test of the channel (only in-memory duplexes are tested).
+- the object layer itself: wsh (`@johnhenry/wsh/objects`, from 0.46; events, handles and callbacks from 0.48);
+- subscription flow control above the raw notify: the layer's bounded queue (`maxQueuedEvents`) waits on the channel's credit and drops, counted, what a slow reader cannot take; the adapter makes the write wait for that credit and cuts off a peer that keeps asking without reading;
+- a way to learn a peer supports the channel without trying: `channel-advertisement.mjs` (`channelAdvertisement()` goes into what a peer announces, `peerSupportsFromAdvertisements(lookup)` is the `peerSupports` hook; a peer that advertises nothing is still tried, and an advertisement is a claim, not an authorisation). Nothing publishes the advertisement for you yet: a deployment adds it to its runtime-registry record (as pod hosts add `pod-host`);
+- per-root authorisation: `createRootAuthorizer` and `service.api.rootAuthorizer(protocol)` (`protocol-roots.mjs`);
+- streams larger than one message: `createStreamLayer(channel)` (`protocol-stream.mjs`), a per-stream byte window the receiver grants; (a protocol that sends one large message instead is carried by the channel's own chunking up to `maxMessageBytes`);
+- a real-WebRTC test of the channel: `tests/browser/protocol-channel.spec.mjs` (and `tests/browser/objects.spec.mjs` for the object layer), in Chromium, Firefox and WebKit, and a real-peer test under `packages/browsermesh-objects/test/real-peer`.
+
+Still not built here: MCP across the mesh (#334 item 3) and wsh over a mesh link (reaching a browser through a mesh peer, #334 item 7).
 
 ## The remote-eval spike
 
