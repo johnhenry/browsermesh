@@ -35,6 +35,22 @@ export {
   MemoryRevocationStore,
 } from "./session.mjs";
 
+// Key agreement keys bound to pod ids, and sealing to them
+export {
+  KeyAgreementError,
+  KEY_STATEMENT_VERSION,
+  MAX_STATEMENT_LIFETIME_MS,
+  DEFAULT_STATEMENT_LIFETIME_MS,
+  DEFAULT_MAX_SEALED_BYTES,
+  supportsKeyAgreement,
+  generateAgreementKeyPair,
+  keyIdOf,
+  createKeyStatement,
+  verifyKeyStatement,
+  sealToStatement,
+  openSealed,
+} from "./key-agreement.mjs";
+
 // Wire format
 export { messageTypeRegistry, encodeMeshMessage, decodeMeshMessage } from "./wire.mjs";
 

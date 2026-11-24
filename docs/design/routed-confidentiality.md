@@ -1,8 +1,48 @@
 # Confidentiality for routed messages: options
 
-Status: not built. This note lays out what exists, what is missing, and the
-options, so that a scheme is chosen deliberately rather than improvised. What
-is protected today: [`../security.md`](../security.md).
+Status: **built** (option 1, below, with the choices listed under "What was
+built"). The rest of this note is the analysis the choice was made from, kept
+as written. What is protected today, stated precisely:
+[`../security.md`](../security.md#multi-hop-forwarding).
+
+## What was built
+
+- **Key statement** (option 1): `{ v, podId, pk, ka, kid, notBefore, notAfter,
+  sig }`, signed with the pod's Ed25519 key over a domain-separated encoding
+  (`browsermesh/key-agreement/v1`). `podId` must be the hash of `pk`; at most 24
+  h (default 2 h); no grace after `notAfter`; refused when the identity has
+  been retired in the session-certificate revocation store, which fails closed.
+  Code: `browsermesh-primitives` `key-agreement.mjs`.
+- **Carried** on the direct link when a peer is added (`mesh-routing-keys`) and
+  fetched on demand with a routed request (`ensureKey`). Not carried in the pod
+  hello: the hello is a pod-layer message and the routing service has its own
+  link envelope, which keeps the change inside `browsermesh-apps`.
+- **Agreement**: ephemeral-static, not static-static. A fresh X25519 key per
+  message gives the sender forward secrecy and makes a repeated (key, nonce)
+  pair impossible, so the random 12-byte nonce needs no counter or state.
+  Static-static would give neither. The recipient's key is static for up to its
+  rotation interval (1 h) and is deleted when its statement expires; that is
+  the whole of the forward secrecy against the recipient, which is none per
+  message. A signed prekey or a session (option 4) would add it.
+- **AEAD**: AES-256-GCM, because ChaCha20-Poly1305 is not in WebCrypto in Node
+  or the browsers tested. HKDF-SHA-256 with the ephemeral and static public
+  keys as salt.
+- **Associated data**: originator, recipient and message id (domain
+  separated). The session counter is assigned when the envelope is signed,
+  after sealing, so it cannot be in the associated data; the outer signature
+  covers the ciphertext and the counter together, which binds them.
+- **Envelope**: `kind` stays `mesh-routed/v1`; the signed payload carries
+  `sealed` and `message: null`. Hops that predate this verify and forward it
+  unchanged.
+- **Not decided above, now decided**: a message to a pod with no known
+  statement is sent readable (and starts a fetch), flagged `sealed: false` at
+  delivery, unless `requireSealed` is set, which refuses it with a named error
+  and a `drop` event. Algorithms are fixed (no negotiation): a pod that
+  publishes a statement supports them. The application sees `sealed: true |
+  false` beside `authenticated`.
+- **Not built**: forward secrecy against the recipient's key, post-compromise
+  recovery, hiding the originator, recipient, size or timing from hops, a
+  signed hello that carries the statement, per-peer pinning of statements.
 
 ## Where things stand
 

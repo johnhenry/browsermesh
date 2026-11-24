@@ -670,7 +670,9 @@ describe('createMeshRoutingService: multi-hop forwarding closes the real capabil
 
     const bobForwards = [];
     const { api: bobApi, on: bobOn } = attachService(nodeB, undefined, createMeshRoutingService({}));
-    bobOn('mesh-routing:forward', (envelope) => bobForwards.push(envelope));
+    // (The service also asks for the destination's key statement the first time it is sent something: those
+    // control requests are forwarded too and are not what this test counts.)
+    bobOn('mesh-routing:forward', (envelope) => { if (envelope.message?.$mesh === undefined) bobForwards.push(envelope) });
     // Bob knows Carol directly; this is the routing-table knowledge that
     // makes Bob able to relay onward, entirely separate from transport
     // reachability (which wireRestrictedMesh already grants for B<->C).

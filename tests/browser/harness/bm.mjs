@@ -69,6 +69,47 @@ const bm = {
     return PodIdentity.verify(publicKey, unb64(signatureB64), new TextEncoder().encode(text))
   },
 
+  // -- sealed routed messages: key statements and the box, real WebCrypto ------
+
+  sealing: null,
+  /** Make an identity, an X25519 agreement key and a signed key statement for them; returns the statement. */
+  async sealingPublish() {
+    const { PodIdentity, generateAgreementKeyPair, createKeyStatement, supportsKeyAgreement } = await import('@johnhenry/browsermesh-primitives')
+    const identity = await PodIdentity.generate()
+    const agreement = await generateAgreementKeyPair()
+    const statement = await createKeyStatement(identity, agreement, { lifetimeMs: 3_600_000 })
+    bm.sealing = { identity, agreement, statement }
+    return { supported: await supportsKeyAgreement(), statement }
+  },
+  /** Verify a statement made in ANOTHER page and seal `text` to it; `header` stands for the routing header. Returns the box, or the refusal code. */
+  async sealingSeal(statement, header, text) {
+    const { verifyKeyStatement, sealToStatement } = await import('@johnhenry/browsermesh-primitives')
+    const enc = new TextEncoder()
+    try {
+      const verified = await verifyKeyStatement(statement, {})
+      return { box: await sealToStatement(verified, { aad: enc.encode(header), plaintext: enc.encode(text) }) }
+    } catch (err) {
+      return { refused: err.code ?? String(err) }
+    }
+  },
+  /** Open a box sealed in ANOTHER page with this page's key; the refusal code when it does not open. */
+  async sealingOpen(box, header) {
+    const { openSealed } = await import('@johnhenry/browsermesh-primitives')
+    const keys = new Map([[bm.sealing.statement.kid, bm.sealing.agreement]])
+    try {
+      return { text: new TextDecoder().decode(await openSealed(box, { privateKeys: keys, aad: new TextEncoder().encode(header) })) }
+    } catch (err) {
+      return { refused: err.code ?? String(err) }
+    }
+  },
+  /** A statement signed by a different identity but naming this page's pod id: it must be refused. */
+  async sealingForge(statement) {
+    const { PodIdentity, generateAgreementKeyPair, createKeyStatement } = await import('@johnhenry/browsermesh-primitives')
+    const other = await PodIdentity.generate()
+    const forged = await createKeyStatement(other, await generateAgreementKeyPair(), { lifetimeMs: 3_600_000 })
+    return { ...forged, podId: statement.podId }
+  },
+
   // -- pods over BroadcastChannel or the WebSocket relay --------------------
 
   pod: null,
