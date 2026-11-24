@@ -254,5 +254,12 @@ export async function createHardenedNegotiator({ negotiator, retryOptions, onLog
     return instrumentTransport(transport, transportMetrics)
   }
 
-  return { negotiate, metrics, failovers, retries }
+  return {
+    negotiate,
+    metrics,
+    failovers,
+    retries,
+    /** The wrapped negotiator's `require` (see `MeshTransportNegotiator`), so PeerNode still fails closed. */
+    get required() { return negotiator.required ?? null },
+  }
 }

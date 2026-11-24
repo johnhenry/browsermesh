@@ -310,6 +310,7 @@ import { PeerNode } from './peer-node.mjs'
 import { PeerRegistry } from './peer-registry.mjs'
 import { MeshSignalingChannel } from './signaling.mjs'
 import { createWebRTCTransportFactory } from './webrtc-negotiator.mjs'
+import { createWshAuthorizer, attachWshLinks } from './wsh-negotiator.mjs'
 import { createMeshSync } from './mesh-sync.mjs'
 import { MeshRelayHost } from './mesh-relay-host.mjs'
 import { attachService } from './mesh-service.mjs'
@@ -364,6 +365,23 @@ import { registerOrchestratorTools } from './mesh-orchestrator-tools.mjs'
  *   `[new ManualStrategy()]` there instead.
  * @param {string} [options.discoveryChannelName='mesh-discovery']
  * @param {number} [options.announceInterval]
+ * @param {object} [options.wsh] - Opt in to the sealed wsh peer link
+ *   (`@johnhenry/browsermesh-transport`'s `WshPeerLinks`, which needs the
+ *   optional peer `@johnhenry/wsh`). Off unless given. The node's own identity
+ *   is the wsh identity. `relays` (pipe relay URLs) and any other
+ *   `WshPeerLinks` option are passed through (`WebSocket`, `socketFactory`,
+ *   `reconnect`, `maxFrameBytes`, ...). Also: `authorize` (default
+ *   `createWshAuthorizer(registry)`: a peer may link only if the registry
+ *   grants it `mesh:link:connect`), `listen` (default true: wait at this
+ *   pod's rendezvous id so peers can reach it), and `require` (default false:
+ *   a `wsh` endpoint is tried first and, if the caller also gave other
+ *   endpoints, a failed wsh link falls through to them; when true the
+ *   negotiator uses ONLY wsh for `connectToPeer()` and a failed
+ *   wsh link is a failed connect, never a session on another transport.
+ *   `require` governs outbound connects: inbound WebRTC offers are still
+ *   answered while a WebRTC signaling bus is wired). Reach a peer with
+ *   `node.connectToPeer(podId, { wsh: podId })`. The handle is `node.wsh`
+ *   (`{ links, detach }`); `node.shutdown()` closes the links.
  * @param {string[]} [options.capabilities] - Advertised in the local discovery record.
  * @param {{send: Function, onMessage: Function, open?: Function, close?: Function}} options.signalingTransport
  *   Required. Injectable bus for WebRTC offer/answer/ICE relay -- see
@@ -796,6 +814,7 @@ export async function createMeshNode(options = {}) {
     discoveryStrategies,
     discoveryChannelName = 'mesh-discovery',
     announceInterval,
+    wsh,
     capabilities = [],
     signalingTransport,
     iceServers,
@@ -972,7 +991,10 @@ export async function createMeshNode(options = {}) {
   // ordering is what lets the webrtc factory's onIncomingConnection hook
   // below close over `node` and call PeerNode.adoptIncomingSession() --
   // resolving the callee-side session gap (see peer-node.mjs / Phase 3).
-  const transportNegotiator = new MeshTransportNegotiator()
+  // With `wsh` given, a `wsh` endpoint is tried first; `wsh.require` makes it the only one.
+  const transportNegotiator = new MeshTransportNegotiator(
+    !wsh ? {} : wsh.require ? { require: 'wsh' } : { preferenceOrder: ['wsh', 'webrtc', 'wsh-wt', 'wsh-ws'] },
+  )
 
   // -- Transport hardening (opt-in) -----------------------------------------
   // Wrapping happens before PeerNode is constructed, but adapter
@@ -1034,6 +1056,24 @@ export async function createMeshNode(options = {}) {
   node.meshManager = meshManager
   node.signaling = signaling
   node.transportNegotiator = transportNegotiator
+
+  // -- wsh peer link (opt-in) -------------------------------------------------
+  // Sealed, key-authenticated links over wsh (see wsh-negotiator.mjs). The
+  // node's own identity is the wsh identity; a peer may link only if the
+  // registry grants it mesh:link:connect unless `wsh.authorize` says otherwise.
+  if (wsh) {
+    const { WshPeerLinks } = await import('@johnhenry/browsermesh-transport')
+    const { require: _require, listen = true, authorize, ...hubOptions } = wsh
+    const links = new WshPeerLinks({
+      identity: identityManager.getIdentity(podId),
+      authorize: authorize || createWshAuthorizer(registry),
+      onLog: (line) => onLog('mesh-bootstrap:wsh', { line }),
+      ...hubOptions,
+    })
+    node.wsh = attachWshLinks({ node, links, negotiator: transportNegotiator, onLog })
+    node.on('shutdown', () => { links.close().catch(() => {}) })
+    if (listen && !skipBoot) await links.listen()
+  }
 
   // -- Audit chain (opt-in) --------------------------------------------------
   // Attached for inspection/verification, mirroring node.sync/node.relayHost's
