@@ -95,6 +95,13 @@ export class WebSocketTransport {
     this.#onLog = onLog || (() => {})
   }
 
+  /**
+   * The relay stamps `source` and can rewrite or inject envelopes, so nothing
+   * about a message is authenticated by this link. A pod requires signed
+   * messages over it unless told otherwise (`allowUnsigned`).
+   */
+  get trust() { return 'untrusted' }
+
   /** @returns {boolean} true once the primary connection is registered */
   get ready() { return this.#ready }
 
@@ -410,7 +417,10 @@ export class WebSocketTransport {
 
   #deliver(source, envelope) {
     if (!this.#handler || !envelope || typeof envelope !== 'object') return
-    const msg = ('from' in envelope) ? envelope : { ...envelope, from: source }
+    // `source` is written by the relay. It is passed on as `relaySource` for
+    // diagnostics and is never used as the sender's identity: the envelope's
+    // own `from` is a claim too, and a pod checks it against a signature.
+    const msg = { ...envelope, relaySource: source }
     this.#handler(msg)
   }
 }

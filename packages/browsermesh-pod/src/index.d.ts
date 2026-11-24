@@ -143,7 +143,14 @@ export declare function createRpcResponse(opts: {
 
 export interface TransportAdapter {
   readonly ready: boolean;
-  onMessage(handler: (msg: any) => void): void;
+  /**
+   * 'same-origin' when only scripts of this origin/process can put messages on the transport
+   * (unsigned messages are accepted by default); anything else, or absent, means signatures
+   * are required by default.
+   */
+  readonly trust?: 'same-origin' | 'untrusted';
+  /** `meta.peerId`: set by a transport whose link authenticated the peer's identity. */
+  onMessage(handler: (msg: any, meta?: { peerId?: string }) => void): void;
   open(): Promise<void>;
   send(msg: any): void;
   close(): Promise<void>;
@@ -266,6 +273,17 @@ export interface PodBootOptions {
   handshakeTimeout?: number;
   discoveryTimeout?: number;
   globalThis?: typeof globalThis;
+  /** Sign outgoing messages with the pod key (default true). `send()` then settles after signing. */
+  sign?: boolean;
+  /**
+   * Accept unsigned pod:message / pod:rpc-response from older peers. Default: true for a
+   * transport whose `trust` is 'same-origin' and for window messages, false otherwise.
+   * Unsigned pod:rpc-request is never accepted.
+   */
+  allowUnsigned?: boolean;
+  /** Overrides the transport's `trust`. */
+  trust?: 'same-origin' | 'untrusted';
+  replay?: { maxSenders?: number; maxSessionsPerSender?: number };
 }
 
 export interface PodShutdownOptions {
@@ -296,8 +314,10 @@ export declare class Pod {
 
   boot(opts?: PodBootOptions): Promise<void>;
   shutdown(opts?: PodShutdownOptions): Promise<void>;
-  send(targetPodId: string, payload: unknown): void;
-  broadcast(payload: unknown): void;
+  /** Messages refused so far, by reason. */
+  get dropped(): Record<'unsigned' | 'unsigned-rpc' | 'malformed' | 'sender-mismatch' | 'bad-signature' | 'replay', number>;
+  send(targetPodId: string, payload: unknown): Promise<void>;
+  broadcast(payload: unknown): Promise<void>;
   on(event: string, cb: (data: any) => void): void;
   off(event: string, cb: (data: any) => void): void;
   toJSON(): PodJSON;

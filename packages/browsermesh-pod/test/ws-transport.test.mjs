@@ -134,7 +134,7 @@ describe('WebSocketTransport — wire encoding', () => {
 // ---------------------------------------------------------------------------
 
 describe('WebSocketTransport — point-to-point relay', () => {
-  it('delivers a targeted message via relay/relayed, attaching "from" when absent', async () => {
+  it('delivers a targeted message via relay/relayed; the relay-stamped source is kept apart from "from"', async () => {
     const net = createFakeWebSocketNetwork()
     const relay = net.createRelayServer()
     net.registerServer('ws://relay.test', relay)
@@ -152,7 +152,8 @@ describe('WebSocketTransport — point-to-point relay', () => {
 
     assert.equal(received.length, 1)
     assert.equal(received[0].to, 'bob')
-    assert.equal(received[0].from, 'alice') // injected because the envelope had no "from"
+    assert.equal(received[0].from, undefined, 'the relay-written source is not turned into a sender identity')
+    assert.equal(received[0].relaySource, 'alice')
     assert.deepEqual(received[0].payload, { text: 'hi' })
   })
 
