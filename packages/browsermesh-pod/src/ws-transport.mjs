@@ -43,6 +43,58 @@
 
 const DEFAULT_RECONNECT = { baseMs: 250, maxMs: 10000, maxAttempts: Infinity }
 
+/** The registration protocol this transport speaks when a signalling server offers it. */
+export const SIGNALING_PROTOCOL = 2
+export const DEFAULT_CHALLENGE_WAIT_MS = 2000
+
+/**
+ * A registration the signalling server refused, or one this transport could
+ * not complete. `code` is the server's own where it sent one
+ * (`protocol-unsupported`, `bad-nonce`, `challenge-expired`, `bad-pod-id`,
+ * `bad-key`, `bad-signature`, `pod-id-mismatch`) or this transport's
+ * (`no-challenge`, `auth-required`, `sign-failed`).
+ */
+export class SignalingAuthError extends Error {
+  constructor(code, message) {
+    super(message)
+    this.name = 'SignalingAuthError'
+    this.code = code
+  }
+}
+
+/** The server requires protocol 2 (a signed registration) and this transport has no identity to sign with. */
+export class SignalingAuthRequiredError extends SignalingAuthError {
+  constructor(message = 'the signalling server requires authenticated registration (protocol 2): pass { identity } (a PodIdentity) to WebSocketTransport') {
+    super('auth-required', message)
+    this.name = 'SignalingAuthRequiredError'
+  }
+}
+
+/** The ws:// / wss:// origin a registration is signed for, from the URL this transport was configured with. */
+function signalingOrigin(url) {
+  const u = new URL(String(url))
+  if (u.protocol === 'http:') u.protocol = 'ws:'
+  else if (u.protocol === 'https:') u.protocol = 'wss:'
+  if (u.protocol !== 'ws:' && u.protocol !== 'wss:') throw new TypeError(`signalling URL must be ws:// or wss:// (got ${u.protocol})`)
+  return u.origin
+}
+
+function registrationMessage({ origin, podId, nonce }) {
+  for (const [k, v] of Object.entries({ origin, podId, nonce })) {
+    if (typeof v !== 'string' || !v || /[\r\n]/.test(v)) throw new TypeError(`${k} must be a non-empty string without line breaks`)
+  }
+  return `browsermesh-signaling/2\npurpose:register\norigin:${origin}\npodId:${podId}\nnonce:${nonce}`
+}
+
+function toBase64Url(bytes) {
+  let bin = ''
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000))
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
+/** Refusals that retrying the same way cannot fix: the transport stops reconnecting on them. */
+const PERMANENT_AUTH_CODES = new Set(['auth-required', 'protocol-unsupported', 'no-challenge', 'bad-pod-id', 'bad-key', 'bad-signature', 'pod-id-mismatch', 'sign-failed'])
+
 /**
  * TransportAdapter backed by a WebSocket connection to a browsermesh relay
  * (or signaling) server. Implements the same `send/onMessage/open/close/ready`
@@ -66,9 +118,17 @@ export class WebSocketTransport {
   #hintedPeers = new Set()
   #verifiedPeers = new Set()
   #peerJoinedHandlers = new Set()
+  /** pod ids the signalling server itself stamped `verified` (a statement by the server, not a peer's signature) */
+  #serverVerifiedPeers = new Set()
 
-  #primaryReconnect = { attempts: 0, timer: null }
-  #sigReconnect = { attempts: 0, timer: null }
+  #identity
+  #authentication
+  #origin
+  #challengeWaitMs
+  #registration = null
+
+  #primaryReconnect = { attempts: 0, timer: null, halted: false }
+  #sigReconnect = { attempts: 0, timer: null, halted: false }
 
   /**
    * @param {object} opts
@@ -80,6 +140,10 @@ export class WebSocketTransport {
    * @param {boolean} [opts.peersFromSignaling=false] - open a second connection to `signalingUrl` to seed `knownPeers` from `peers`/`peer-joined`/`peer-left`
    * @param {{baseMs?: number, maxMs?: number, maxAttempts?: number}} [opts.reconnect] - exponential backoff config
    * @param {(msg: string) => void} [opts.onLog] - diagnostic log sink
+   * @param {object} [opts.identity] - a `PodIdentity` (or anything with `podId`, `rawPublicKey()` and `sign(bytes)`). Lets the transport answer a signalling server's authenticated-registration challenge (protocol 2); its `podId` must equal `podId`. Used only for the signalling dialect (`protocol: 'signaling'` and the `signalingUrl` connection); the relay dialect is unchanged.
+   * @param {'auto'|'required'|'off'} [opts.authentication='auto'] - `auto`: protocol 2 when the server offers it, else register as before. `required`: never fall back to the open flow (needs `identity`). `off`: never sign.
+   * @param {string} [opts.origin] - the server origin to sign when it differs from the URL's (a server reached through a proxy or internal name). Defaults to the origin of the URL being connected to.
+   * @param {number} [opts.challengeWaitMs=2000] - with an identity in `auto` mode: how long to wait for the challenge before registering the open way (an open-mode or older server sends none)
    */
   constructor({
     url,
@@ -90,9 +154,29 @@ export class WebSocketTransport {
     peersFromSignaling = false,
     reconnect = {},
     onLog,
+    identity = null,
+    authentication = 'auto',
+    origin,
+    challengeWaitMs = DEFAULT_CHALLENGE_WAIT_MS,
   } = {}) {
     if (!url) throw new Error('WebSocketTransport requires { url }')
     if (!podId) throw new Error('WebSocketTransport requires { podId }')
+    if (authentication !== 'auto' && authentication !== 'required' && authentication !== 'off') {
+      throw new TypeError("authentication must be 'auto', 'required' or 'off'")
+    }
+    if (identity) {
+      if (typeof identity.sign !== 'function' || typeof identity.rawPublicKey !== 'function') {
+        throw new TypeError('identity must provide podId, rawPublicKey() and sign(bytes) (a PodIdentity)')
+      }
+      if (identity.podId !== podId) {
+        throw new TypeError('identity.podId must equal podId: the server binds the pod id to the key')
+      }
+    }
+    if (authentication === 'required' && !identity) throw new SignalingAuthRequiredError()
+    this.#identity = identity || null
+    this.#authentication = authentication
+    this.#origin = origin ?? null
+    this.#challengeWaitMs = challengeWaitMs
     this.#url = url
     this.#podId = podId
     this.#WS = WS !== undefined ? WS : globalThis.WebSocket
@@ -124,6 +208,25 @@ export class WebSocketTransport {
   get verifiedPeers() { return new Set(this.#verifiedPeers) }
 
   /**
+   * Pod ids the signalling server itself stamped verified (it checked that the
+   * id is the hash of a key the pod proved it holds). This is the server's word
+   * about a link: it is still a hint, it does not make a pod a broadcast
+   * recipient (`verifiedPeers` does that, on the pod's own signature), and it is
+   * empty against an open-mode or older server.
+   * @returns {Set<string>}
+   */
+  get serverVerifiedPeers() { return new Set(this.#serverVerifiedPeers) }
+
+  /**
+   * What the signalling server said when it accepted the registration:
+   * `{ mode: 'open'|'authenticated', verified }`; an older server that says
+   * neither reads as open and unverified. Null until registered (and for the
+   * relay dialect).
+   * @returns {{ mode: string, verified: boolean }|null}
+   */
+  get registration() { return this.#registration }
+
+  /**
    * Record that discovery verified this peer. From now on a broadcast reaches it.
    * @param {string} podId
    */
@@ -139,6 +242,7 @@ export class WebSocketTransport {
   forgetPeer(podId) {
     this.#verifiedPeers.delete(podId)
     this.#hintedPeers.delete(podId)
+    this.#serverVerifiedPeers.delete(podId)
   }
 
   /**
@@ -175,6 +279,8 @@ export class WebSocketTransport {
     }
     if (this.#ready) return
     this.#closed = false
+    this.#primaryReconnect.halted = false
+    this.#sigReconnect.halted = false
 
     const tasks = [this.#connectAndRegister('primary')]
     if (this.#peersFromSignaling && this.#signalingUrl) {
@@ -283,21 +389,106 @@ export class WebSocketTransport {
       const finishReject = (err) => {
         if (settled) return
         settled = true
+        clearTimeout(challengeTimer)
         reject(err)
       }
 
-      const onOpen = () => {
+      // Registration against a signalling server may be authenticated
+      // (protocol 2); the relay dialect never is.
+      const speaksSignaling = !isPrimary || this.#protocol === 'signaling'
+      const canSign = speaksSignaling && !!this.#identity && this.#authentication !== 'off'
+      const state = isPrimary ? this.#primaryReconnect : this.#sigReconnect
+      let challengeTimer = null
+      let openSent = false
+      let signed = false
+
+      /** A refusal that is final for this connection: say so by name, stop, and do not retry what cannot change. */
+      const refuse = (err) => {
+        if (err instanceof SignalingAuthError && PERMANENT_AUTH_CODES.has(err.code)) state.halted = true
+        this.#onLog(`[ws-transport] ${kind} registration refused: ${err.code ?? err.message}`)
+        finishReject(err)
+        try { ws.close() } catch { /* already closed */ }
+      }
+
+      const sendOpenRegister = () => {
+        openSent = true
         this.#send(ws, { type: 'register', podId: this.#podId })
+      }
+
+      const answerChallenge = (data) => {
+        if (openSent || signed || settled) return
+        if (!canSign) {
+          refuse(new SignalingAuthRequiredError())
+          return
+        }
+        if (data.protocol !== SIGNALING_PROTOCOL || data.purpose !== 'register' || typeof data.nonce !== 'string') {
+          refuse(new SignalingAuthError('protocol-unsupported', `the server offered signalling protocol ${String(data.protocol)}; this transport speaks ${SIGNALING_PROTOCOL}`))
+          return
+        }
+        signed = true
+        clearTimeout(challengeTimer)
+        ;(async () => {
+          // The origin is the one this transport was configured with, never the
+          // challenge's own `origin`: a proof relayed to another server fails there.
+          const origin = this.#origin ?? signalingOrigin(url)
+          const text = registrationMessage({ origin, podId: this.#podId, nonce: data.nonce })
+          const pubKey = await this.#identity.rawPublicKey()
+          const signature = await this.#identity.sign(new TextEncoder().encode(text))
+          if (settled) return
+          this.#send(ws, {
+            type: 'register',
+            protocol: SIGNALING_PROTOCOL,
+            podId: this.#podId,
+            pubKey: toBase64Url(pubKey),
+            nonce: data.nonce,
+            signature: toBase64Url(signature),
+          })
+        })().catch((e) => refuse(new SignalingAuthError('sign-failed', `could not sign the registration: ${e?.message ?? e}`)))
+      }
+
+      const onOpen = () => {
+        if (!speaksSignaling || !canSign) {
+          // The relay dialect, or no identity: register as before. An
+          // authenticated server answers a signalling client without one with
+          // its challenge / `protocol-unsupported`, reported by name below.
+          sendOpenRegister()
+          return
+        }
+        // With an identity: an authenticated server sends its challenge on
+        // connect; an open-mode or older server sends none, so wait a bounded time.
+        challengeTimer = setTimeout(() => {
+          challengeTimer = null
+          if (settled || openSent || signed) return
+          if (this.#authentication === 'required') {
+            refuse(new SignalingAuthError('no-challenge', 'the server sent no authentication challenge and authentication is required'))
+            return
+          }
+          sendOpenRegister()
+        }, this.#challengeWaitMs)
       }
       const handle = (data) => {
         if (!data) return
+        if (speaksSignaling && !settled && data.type === 'challenge') {
+          answerChallenge(data)
+          return
+        }
         if (isPrimary) this.#handlePrimaryMessage(data)
         else this.#handleSignalingMessage(data)
 
         if (data.type === 'registered') {
+          if (speaksSignaling) {
+            this.#registration = { mode: data.mode === 'authenticated' ? 'authenticated' : 'open', verified: data.verified === true }
+          }
           finishResolve()
         } else if (data.type === 'error') {
-          finishReject(new Error(data.message || `WebSocketTransport: ${kind} registration error`))
+          if (speaksSignaling && !settled && typeof data.code === 'string') {
+            // `protocol-unsupported` to a transport that could not have signed is the "needs an identity" case.
+            refuse(data.code === 'protocol-unsupported' && !canSign
+              ? new SignalingAuthRequiredError()
+              : new SignalingAuthError(data.code, data.message || 'registration refused'))
+          } else {
+            finishReject(new Error(data.message || `WebSocketTransport: ${kind} registration error`))
+          }
         }
       }
       // A Blob frame can only be read asynchronously. Once one is in flight,
@@ -363,7 +554,11 @@ export class WebSocketTransport {
   #scheduleReconnect(kind) {
     if (this.#closed) return
     const state = kind === 'primary' ? this.#primaryReconnect : this.#sigReconnect
-    if (state.attempts >= this.#reconnect.maxAttempts) {
+    if (state.halted) {
+      this.#onLog(`[ws-transport] not reconnecting ${kind}: the server refused the registration`)
+      return
+    }
+    if (state.attempts >=this.#reconnect.maxAttempts) {
       this.#onLog(`[ws-transport] giving up reconnect for ${kind} after ${state.attempts} attempts`)
       return
     }
@@ -392,8 +587,13 @@ export class WebSocketTransport {
     switch (data.type) {
       case 'relayed':
       case 'signal': {
-        if (data.source) this.#hintedPeers.add(data.source)
-        this.#deliver(data.source, data.envelope)
+        if (data.source) {
+          this.#hintedPeers.add(data.source)
+          // Only the server's own stamp counts, and only a literal true.
+          if (data.sourceVerified === true) this.#serverVerifiedPeers.add(data.source)
+          else this.#serverVerifiedPeers.delete(data.source)
+        }
+        this.#deliver(data.source, data.envelope, data.sourceVerified === true)
         return
       }
       case 'ping':
@@ -415,21 +615,35 @@ export class WebSocketTransport {
   #handlePeerFrame(data) {
     switch (data.type) {
       case 'peers': {
-        for (const id of data.peers || []) this.#learnPeer(id)
+        for (const id of data.peers || []) {
+          this.#stampPeer(id, data.verified === true)
+          this.#learnPeer(id)
+        }
         return true
       }
       case 'peer-joined': {
+        this.#stampPeer(data.podId, data.verified === true)
         this.#learnPeer(data.podId)
         return true
       }
       case 'peer-left': {
         // Only the hint goes: whether a pod has left is for its own goodbye to say.
-        if (data.podId) this.#hintedPeers.delete(data.podId)
+        if (data.podId) {
+          this.#hintedPeers.delete(data.podId)
+          this.#serverVerifiedPeers.delete(data.podId)
+        }
         return true
       }
       default:
         return false
     }
+  }
+
+  /** Record the server's own `verified` stamp for a peer it announced (a literal true only). */
+  #stampPeer(id, verified) {
+    if (typeof id !== 'string' || !id || id === this.#podId) return
+    if (verified) this.#serverVerifiedPeers.add(id)
+    else this.#serverVerifiedPeers.delete(id)
   }
 
   #learnPeer(id) {
@@ -454,12 +668,15 @@ export class WebSocketTransport {
     }
   }
 
-  #deliver(source, envelope) {
+  #deliver(source, envelope, sourceVerified = false) {
     if (!this.#handler || !envelope || typeof envelope !== 'object') return
     // `source` is written by the relay. It is passed on as `relaySource` for
     // diagnostics and is never used as the sender's identity: the envelope's
     // own `from` is a claim too, and a pod checks it against a signature.
-    const msg = { ...envelope, relaySource: source }
+    // `relaySourceVerified` is the signalling server's own stamp on `source`
+    // (it checked the pod id against a key); both are set after the envelope
+    // is spread, so nothing the sender wrote can stand in for them.
+    const msg = { ...envelope, relaySource: source, relaySourceVerified: sourceVerified === true }
     this.#handler(msg)
   }
 }

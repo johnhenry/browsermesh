@@ -93,6 +93,28 @@ default. To migrate, load them into a keyring with `{ acceptLegacyV2: true }`
 `link.resign(parentIdentity, childIdentity, { namespace })`. v1
 (`a|b|c|d`) signatures are no longer accepted at all; re-create those links.
 
+## Authenticated signalling (protocol 2)
+
+The `browsermesh-servers` signalling server can run in `AUTH_MODE=authenticated`: it sends each connection a single-use challenge and registers a pod only when the pod id is the hash of the Ed25519 key that signs the server's origin, the pod id and the nonce. A client that does not speak it is refused (`protocol-unsupported`); in open mode every peer is stamped `verified: false`.
+
+`SignalingClient` speaks both. Give it an `identity` (a `PodIdentity`, whose `podId` must be `localPodId`):
+
+```js
+const signaler = new SignalingClient({ url: 'wss://signal.example.org', localPodId: identity.podId, identity })
+await signaler.connect()        // resolves on `registered`; rejects with the server's refusal
+signaler.registration           // { mode: 'authenticated', verified: true }
+signaler.onOffer((data, from) => {
+  if (signaler.isSourceVerified(data)) { /* the server vouched for `from` */ }
+})
+```
+
+- With an identity it answers the challenge, signing the origin of `url` (or `origin`, for a server reached under another name; never the origin the challenge names). Against an open-mode or older server, which sends no challenge, it registers as before after `challengeWaitMs` (default 2000). `authentication: 'required'` never falls back (`SignalingAuthError`, `code: 'no-challenge'`); `'off'` never signs.
+- Without an identity against an authenticated server it fails with `SignalingAuthRequiredError` (`code: 'auth-required'`). By default such a client keeps the old behaviour (`connect()` resolves on open) and the refusal is announced as an `auth-error` event and `lastAuthError`; pass `waitForRegistration: true` to have `connect()` reject instead. With an identity `connect()` waits for `registered` by default. Other refusals carry the server's own `code` (`bad-nonce`, `challenge-expired`, `bad-pod-id`, `bad-key`, `bad-signature`, `pod-id-mismatch`).
+- `isSourceVerified(message)` is true only when the server stamped `sourceVerified: true` on a forwarded message (it overwrites whatever the sender put there). It is the server's statement about the link, not proof about the peer's payload; open-mode and older servers read as false.
+- A client in `auto` mode can be pushed into the open flow by something that strips the challenge from an unprotected `ws://` link; use `wss://` and `authentication: 'required'` where that matters.
+
+`fetchIceServers({ url | signalingUrl, token })` calls the server's `GET /ice-servers`, which answers only a caller that sends `Authorization: Bearer <ICE_API_TOKEN>` or is the same origin as the server, and returns time-limited TURN credentials. The token is sent as a header only, never over plain `http` to a non-loopback host, and a redirect is never followed with it. Failures are named: `ice-unauthorized`, `ice-rate-limited`, `ice-bad-response`, `ice-insecure-token`. Pass the result as `iceServers` to `HandshakeCoordinator`.
+
 ## Padding group-key envelopes
 
 `GroupKeyManager.encrypt()` leaks the exact plaintext length to anything that
