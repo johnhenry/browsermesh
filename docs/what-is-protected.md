@@ -3,7 +3,9 @@
 This page states, per area, which properties hold between peers in the code
 as released, and which do not. It is kept short and is updated by the change
 that alters a property. Each statement names the package that provides it.
-(Tracking issue for implementation status: #269.)
+(Tracking issue for implementation status: #269.) Other areas have their own
+pages next to this one (`what-is-protected-*.md`), added by the changes that
+establish them.
 
 "Peer key" below means the key of the session a message arrived on, as
 reported by the transport to `PeerNode.onIncomingData()`. It is never a field
@@ -31,13 +33,3 @@ Not protected:
   forward it. Messages that pass through other peers are readable by them.
 - Who may call `createProxyHandler()` when it is mounted on a site: that
   check belongs to whatever serves the site.
-
-<!-- section: relayed connections -->
-
-
-
-<!-- section: message authorship -->
-
-
-
-<!-- section: peer connection identity -->
