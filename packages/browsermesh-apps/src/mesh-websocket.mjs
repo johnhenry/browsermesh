@@ -230,6 +230,7 @@
 
 import { createLazyRequire } from './internal/lazy-node-require.mjs'
 import { decodeWireData } from './internal/wire-envelope.mjs'
+import { randomRequestId } from './internal/secure-id.mjs'
 
 /** Default `envelope.type` used to route mesh-websocket payloads on the shared `onIncomingData()` bus. */
 const DEFAULT_ENVELOPE_TYPE = 'mesh-websocket'
@@ -295,9 +296,9 @@ function invalidStateError(message) {
   return err
 }
 
-/** Monotonic-ish unique id for correlating a connection's envelopes, matching mesh-rpc.mjs's nextRequestId() shape. */
-function nextConnectionId(podId) {
-  return `${podId || 'local'}:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`
+/** Unguessable id correlating a connection's envelopes (the platform CSPRNG; there is no fallback). */
+function nextConnectionId() {
+  return randomRequestId()
 }
 
 // ---------------------------------------------------------------------------
@@ -439,6 +440,8 @@ export class BrowserMeshWebSocket {
       const data = decodeWireData(rawData)
       if (!data || typeof data !== 'object') return
       if (data.type !== this.#envelopeType || data.connectionId !== this.#connectionId) return
+      // The connection id is correlation data; the peer on the other end is the only one that may speak on it.
+      if (fromPubKey !== this.#remotePodId) return
       this.#handleEnvelope(fromPubKey, data)
     })
   }

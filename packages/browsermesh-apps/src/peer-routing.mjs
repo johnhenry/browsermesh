@@ -25,6 +25,7 @@
  *   node --import ./test/_setup-globals.mjs --test test/peer-routing.test.mjs
  */
 
+import { randomRequestId } from './internal/secure-id.mjs'
 import {
   PROXY_LIMITS_DEFAULTS,
   DEFAULT_ALLOWED_METHODS,
@@ -934,8 +935,7 @@ export function createMeshRoutingService(opts = {}) {
           onLog: (msg) => log('mesh-routing:server-share-log', { message: msg }),
         })
 
-        let proxyReqSeq = 0
-        const nextProxyRequestId = () => `${localPodId}:${Date.now()}:${++proxyReqSeq}`
+        const nextProxyRequestId = randomRequestId
 
         async function handleProxyRequest(fromPubKey, msg) {
           const { requestId } = msg

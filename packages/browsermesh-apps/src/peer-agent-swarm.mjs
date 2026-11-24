@@ -20,12 +20,7 @@
  *   cd packages/browsermesh-apps && node --import ./test/_setup-globals.mjs --test test/peer-agent-swarm.test.mjs
  */
 
-// ---------------------------------------------------------------------------
-// UUID polyfill
-// ---------------------------------------------------------------------------
-
-if (!globalThis.crypto) globalThis.crypto = {}
-if (!crypto.randomUUID) crypto.randomUUID = () => 'swarm-' + Math.random().toString(36).slice(2)
+import { randomUUID } from './internal/secure-id.mjs'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -153,7 +148,7 @@ export class SwarmInstance {
    * @param {number} [opts.timeoutMs]
    */
   constructor({ id, goal, leader, members, strategy, status, timeoutMs }) {
-    this.id = id ?? crypto.randomUUID()
+    this.id = id ?? randomUUID()
     this.goal = goal
     this.leader = leader
     this.members = members ? [...members] : []
@@ -306,7 +301,7 @@ export class AgentSwarmCoordinator {
     const timeoutMs = opts.timeoutMs ?? SWARM_DEFAULTS.timeoutMs
 
     const swarm = new SwarmInstance({
-      id: crypto.randomUUID(),
+      id: randomUUID(),
       goal,
       leader,
       members,

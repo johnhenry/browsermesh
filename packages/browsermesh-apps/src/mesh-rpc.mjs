@@ -8,6 +8,7 @@
  * Cancellation is advisory: aborting does not undo side effects already made.
  */
 import { encodeBody, decodeBody } from './internal/rpc-body.mjs'
+import { randomRequestId } from './internal/secure-id.mjs'
 
 const DEFAULT_ENVELOPE_TYPE = 'mesh-rpc'
 const DEFAULT_REQUEST_TIMEOUT_MS = 10000
@@ -33,9 +34,7 @@ export function createMeshRpcService({
   return {
     name: 'mesh-rpc',
     attach(peerNode, ctx) {
-      let seq = 0, closed = false
-      // Per-attach random part: ids stay unique across restarts and reconnects, not only within one process.
-      const nonce = Array.from(crypto.getRandomValues(new Uint8Array(8)), b => b.toString(16).padStart(2, '0')).join('')
+      let closed = false
       const pending = new Map()
       const incoming = new Map()
       const incomingCounts = new Map()
@@ -128,7 +127,7 @@ export function createMeshRpcService({
         if (pending.size >= maxInflight) return Promise.reject(new Error('mesh-rpc: too many requests in flight'))
         let encoded
         try { encoded = encodeBody(body, maxBodyBytes) } catch (error) { return Promise.reject(error) }
-        const requestId = `${peerNode?.podId || 'local'}:${Date.now()}:${nonce}:${++seq}`
+        const requestId = randomRequestId()
         return new Promise((resolve, reject) => {
           const onAbort = () => cancel(requestId, abortError(signal.reason))
           const timer = setTimeout(() => {

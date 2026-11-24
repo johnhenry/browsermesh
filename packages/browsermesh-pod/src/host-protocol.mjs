@@ -797,21 +797,23 @@ export const POD_HOST_EVENT_KIND = Object.freeze({
  * @property {boolean} restartable
  */
 
-/** @type {number} Monotonic suffix making generated request ids unique within a process. */
-let requestCounter = 0
-
 /**
- * A request id that is unique per process without needing `crypto`
- * (`randomUUID` is used when available, which is everywhere this package
- * targets, but the counter fallback keeps the module total).
+ * An unguessable request id: `crypto.randomUUID`, or 128 bits from
+ * `crypto.getRandomValues`. Where the platform has neither, this throws: an id
+ * built from the clock and a counter could be predicted by whoever sees the
+ * traffic, so none is made up.
  *
  * @returns {string}
  */
 function nextRequestId() {
-  requestCounter += 1
-  const rand = globalThis.crypto?.randomUUID?.()
-  if (rand) return rand
-  return `pod-host-${Date.now().toString(36)}-${requestCounter.toString(36)}`
+  const c = globalThis.crypto
+  if (typeof c?.randomUUID === 'function') return c.randomUUID()
+  if (typeof c?.getRandomValues !== 'function') {
+    throw new Error('No secure random source (crypto.getRandomValues) is available: refusing to create a request id')
+  }
+  const bytes = new Uint8Array(16)
+  c.getRandomValues(bytes)
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
 }
 
 /**
