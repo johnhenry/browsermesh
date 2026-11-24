@@ -54,9 +54,7 @@ describe('secure identifiers', () => {
 
   it('no module builds a request or connection id from the clock and a counter, or from Math.random', () => {
     const offenders = []
-    // pod-host-service.mjs is the hosted-pods lane, handled with that lane: its default `requestId` is a local
-    // label for a call made in-process, not an id a peer's response is matched on.
-    const elsewhere = new Set(['pod-host-service.mjs'])
+    const elsewhere = new Set()
     for (const file of readdirSync(SRC).filter((f) => f.endsWith('.mjs') && !elsewhere.has(f))) {
       const lines = readFileSync(path.join(SRC, file), 'utf8').split('\n')
       lines.forEach((line, i) => {
@@ -175,6 +173,24 @@ describe('a response is accepted only from the peer the request went to, and ids
     assert.deepEqual(received, ['real'])
     assert.equal(client.readyState, BrowserMeshWebSocket.OPEN)
     client.close()
+  })
+
+  it('pod-host client: only the host a request went to can answer it', async () => {
+    const { createPodHostClient } = await import('../src/pod-host-service.mjs')
+    const { POD_HOST_RESPONSE } = await import('@johnhenry/browsermesh-pod')
+    let deliver
+    const sent = []
+    const node = { onIncomingData(cb) { deliver = cb; return () => {} }, async sendTo(to, env) { sent.push(env) } }
+    const client = createPodHostClient({ peerNode: node, timeoutMs: 60_000 })
+    const result = client.list('host-b')
+    await settle()
+    const { requestId } = sent[0]
+    assert.match(requestId, /^[0-9a-f]{8}-|^[0-9a-f]{32}$/)
+    deliver('host-c', { type: POD_HOST_RESPONSE, requestId, ok: true, result: 'forged' })
+    assert.equal(await stillPending(result), true)
+    deliver('host-b', { type: POD_HOST_RESPONSE, requestId, ok: true, result: 'real' })
+    assert.equal(await result, 'real')
+    client.close?.()
   })
 
   it('peer-routing proxy requests', async () => {

@@ -91,6 +91,7 @@ import {
 } from '@johnhenry/browsermesh-pod'
 import { PLACEMENT_AUDIT } from './orchestrator.mjs'
 import { decodeWireData } from './internal/wire-envelope.mjs'
+import { randomRequestId } from './internal/secure-id.mjs'
 
 /** Envelope type of a host-metadata request. Not one of the eight verbs -- see the module doc comment. */
 export const POD_HOST_DESCRIBE = 'pod-host:describe'
@@ -490,7 +491,7 @@ export function createPodHostService({
        * @param {{requestId?: string}} [opts]
        * @returns {Promise<*>}
        */
-      async function gatedDispatch(pubKey, verb, rawPayload, { requestId = `local:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 8)}` } = {}) {
+      async function gatedDispatch(pubKey, verb, rawPayload, { requestId = `local:${randomRequestId()}` } = {}) {
         if (verb === POD_HOST_VERB.SPAWN) {
           await recordAudit(PLACEMENT_AUDIT.REQUESTED, {
             requester: pubKey, requestId, name: rawPayload?.name ?? null,
@@ -724,6 +725,8 @@ export function createPodHostClient({ peerNode, ctx, timeoutMs = DEFAULT_POD_HOS
       log('pod-host-client:unmatched-response', { from: pubKey, requestId: data.requestId })
       return
     }
+    // Only the host the request went to can answer it.
+    if (entry.host !== pubKey) return
     pending.delete(data.requestId)
     clearTimeout(entry.timer)
     if (data.ok) entry.resolve(data.result)
@@ -754,7 +757,7 @@ export function createPodHostClient({ peerNode, ctx, timeoutMs = DEFAULT_POD_HOS
       // Never hold a Node process open for an in-flight request.
       if (typeof timer === 'object' && typeof timer.unref === 'function') timer.unref()
 
-      pending.set(envelope.requestId, { resolve, reject, timer })
+      pending.set(envelope.requestId, { host: hostPubKey, resolve, reject, timer })
       Promise.resolve(node.sendTo(hostPubKey, envelope)).catch((err) => {
         pending.delete(envelope.requestId)
         clearTimeout(timer)
