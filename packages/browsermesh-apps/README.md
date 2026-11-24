@@ -15,6 +15,7 @@ Application layer for BrowserMesh: marketplace, chat, payments, compute orchestr
 - [Connecting a real mesh node: `createMeshNode()`](#connecting-a-real-mesh-node-createmeshnode)
   - [TURN server configuration](#turn-server-configuration)
 - [Sharing a `VirtualNetwork` with specific peers: mesh relay](#sharing-a-virtualnetwork-with-specific-peers-mesh-relay)
+- [Sharing a local HTTP server: `ServerSharing`](#sharing-a-local-http-server-serversharing)
 - [CloudStorage bucket authorization and key distribution](#cloudstorage-bucket-authorization-and-key-distribution)
 - [CloudStorage: the ergonomic SDK](#cloudstorage-the-ergonomic-sdk)
 - [Torrent service: durable stores, authorization and serve limits](#torrent-service-durable-stores-authorization-and-serve-limits)
@@ -284,6 +285,50 @@ inherited `Backend` "not implemented" throws). See
 `examples/06-mesh-relay.mjs` for a full runnable walkthrough (in-process
 simulated mesh connection) and
 `test/real-peer/mesh-relay.test.mjs` for the real-WebRTC, real-TCP proof.
+
+## Sharing a local HTTP server: `ServerSharing`
+
+`ServerSharing` (also wired by `createMeshRoutingService({ fetchFn, registry })`)
+lets a peer make requests to an HTTP server you `expose(port, name, opts)`.
+What it enforces:
+
+- **Access.** Every request that arrives from a peer must pass
+  `registry.checkAccess(peerKey, 'server-share:<name>', 'request')`, i.e. the
+  scope `server-share:<name>:request` (wildcards such as
+  `server-share:*:request` work, as for `mesh-relay:<service>:connect`).
+  `peerKey` is the key of the session the message arrived on, never a field of
+  the message. With no registry, every peer request is refused. A direct
+  `handleRequest(request)` call with no second argument is an in-process call
+  and is not access-checked.
+  Share names may not contain `:` or `*`.
+  ```js
+  host.registry.grantCapabilities(bob.podId, ['server-share:web:request']);
+  ```
+- **Target.** The upstream URL is built from the configured origin
+  (`protocol://hostname:port`) as base. The peer supplies a path and query
+  only; it must begin with a single `/`, may not contain a scheme, an
+  authority, a backslash, whitespace, a control character or a `#` fragment,
+  and after resolution the origin must equal the configured one. Anything else
+  is refused with status 400 before anything is sent.
+- **Method and headers.** Methods default to `GET, HEAD, POST, PUT, PATCH,
+  DELETE, OPTIONS` (`allowedMethods` narrows them). Of the peer's headers only
+  `accept`, `accept-language`, `cache-control`, `content-type`, `if-*` and
+  `range` are forwarded (`allowedRequestHeaders` adds names); `Host`,
+  hop-by-hop headers, `Cookie`, `Authorization`, `Forwarded` and `X-Forwarded-*`
+  are never taken from a peer. Headers the sharer sets with
+  `expose(port, name, { headers })` are always sent and cannot be overridden.
+- **Redirects** are not followed, for any origin; the 3xx response is returned
+  to the peer as it is.
+- **Sizes.** Defaults: path 2048 characters, 32 headers / 8 KiB of headers,
+  request body 1 MiB (`maxRequestBodyBytes`), response body 8 MiB
+  (`maxResponseBytes`; a larger response is refused with 502, never truncated),
+  30 s per request (`requestTimeoutMs`). Cookies and hop-by-hop headers are
+  not passed back to the peer.
+
+`createProxyHandler()` (`serverless-proxy.mjs`) applies the same target rule,
+does not follow redirects and bounds the response (`maxResponseBytes`,
+`requestTimeoutMs`). It does not itself check who the caller is; that is done
+by whatever serves the site.
 
 ## CloudStorage bucket authorization and key distribution
 

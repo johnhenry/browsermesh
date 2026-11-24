@@ -26,6 +26,8 @@
  * @module serverless-proxy
  */
 
+import { PROXY_LIMITS_DEFAULTS, resolveTarget } from './internal/request-target.mjs'
+
 /** Request headers unsafe/meaningless to forward to the proxy target as-is -- `fetch()` recomputes these itself. */
 const HOP_BY_HOP_REQUEST_HEADERS = new Set([
   'host', 'connection', 'content-length', 'keep-alive', 'transfer-encoding',
@@ -88,21 +90,60 @@ function bodyForFetch(body, method) {
  * @returns {(req: {path: string, method?: string, headers?: object, body?: *}) => Promise<{status: number, headers: object, body: Uint8Array|string}>}
  *   Never returns `null` -- see module doc comment.
  */
-export function createProxyHandler({ targetOrigin, spaFallback = false } = {}) {
+export function createProxyHandler({ targetOrigin, spaFallback = false, maxResponseBytes = PROXY_LIMITS_DEFAULTS.maxResponseBytes, requestTimeoutMs = PROXY_LIMITS_DEFAULTS.requestTimeoutMs } = {}) {
   if (!targetOrigin || typeof targetOrigin !== 'string') {
     throw new Error('createProxyHandler: opts.targetOrigin is required and must be a string')
   }
   const origin = new URL(targetOrigin) // throws synchronously on an invalid URL -- fail at construction, not on first request
 
+  /**
+   * Read a response body as bytes, never holding more than `maxResponseBytes`.
+   * @param {Response} res
+   * @returns {Promise<Uint8Array|null>} null when the body exceeds the bound
+   */
+  async function readBytes(res) {
+    const declared = Number(res.headers.get('content-length'))
+    if (Number.isFinite(declared) && declared > maxResponseBytes) {
+      try { await res.body?.cancel() } catch { /* already closed */ }
+      return null
+    }
+    if (!res.body) return new Uint8Array(await res.arrayBuffer())
+    const reader = res.body.getReader()
+    const chunks = []
+    let total = 0
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      total += value.byteLength
+      if (total > maxResponseBytes) {
+        try { await reader.cancel() } catch { /* already closed */ }
+        return null
+      }
+      chunks.push(value)
+    }
+    const out = new Uint8Array(total)
+    let offset = 0
+    for (const chunk of chunks) { out.set(chunk, offset); offset += chunk.byteLength }
+    return out
+  }
+
+  // A redirect is returned to the caller as it is and never followed, so a
+  // request cannot leave the target origin.
+  const fetchOptions = (init) => ({ ...init, redirect: 'manual', signal: AbortSignal.timeout(requestTimeoutMs) })
+
   return async function handleProxy({ path = '/', method = 'GET', headers = {}, body } = {}) {
-    const target = new URL(path, origin)
+    const resolved = resolveTarget(origin.origin, path)
+    if (!resolved.ok) {
+      return { status: 400, headers: { 'content-type': 'text/plain' }, body: `Bad Request: ${resolved.reason}` }
+    }
+    const target = resolved.url
     const init = { method, headers: filterHeaders(headers, HOP_BY_HOP_REQUEST_HEADERS) }
     const fetchBody = bodyForFetch(body, method)
     if (fetchBody !== undefined) init.body = fetchBody
 
     let res
     try {
-      res = await fetch(target, init)
+      res = await fetch(target, fetchOptions(init))
     } catch (err) {
       return { status: 502, headers: { 'content-type': 'text/plain' }, body: `Bad Gateway: ${err?.message || String(err)}` }
     }
@@ -111,17 +152,27 @@ export function createProxyHandler({ targetOrigin, spaFallback = false } = {}) {
       const fallbackTarget = new URL('/index.html', origin)
       let fallbackRes
       try {
-        fallbackRes = await fetch(fallbackTarget)
+        fallbackRes = await fetch(fallbackTarget, fetchOptions({}))
       } catch {
         fallbackRes = null
       }
       if (fallbackRes && fallbackRes.ok) {
-        const bytes = new Uint8Array(await fallbackRes.arrayBuffer())
-        return { status: 200, headers: { 'content-type': fallbackRes.headers.get('content-type') || 'text/html' }, body: bytes }
+        const fallbackBytes = await readBytes(fallbackRes)
+        if (fallbackBytes) {
+          return { status: 200, headers: { 'content-type': fallbackRes.headers.get('content-type') || 'text/html' }, body: fallbackBytes }
+        }
       }
     }
 
-    const bytes = new Uint8Array(await res.arrayBuffer())
+    let bytes
+    try {
+      bytes = await readBytes(res)
+    } catch (err) {
+      return { status: 502, headers: { 'content-type': 'text/plain' }, body: `Bad Gateway: ${err?.message || String(err)}` }
+    }
+    if (bytes === null) {
+      return { status: 502, headers: { 'content-type': 'text/plain' }, body: 'Bad Gateway: response too large' }
+    }
     return { status: res.status, headers: responseHeadersToObject(res.headers), body: bytes }
   }
 }
