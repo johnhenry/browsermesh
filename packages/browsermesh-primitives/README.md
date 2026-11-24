@@ -89,9 +89,10 @@ console.log(set.has('item')) // true
 
 ### Identity
 
-- `PodIdentity` -- Ed25519 key pair with sign/verify
+- `PodIdentity` -- Ed25519 key pair with sign/verify; also `fromCryptoKeyPair`, `fromJwk`, `fromPkcs8`, `fromSigner`, `generate({ extractable })` (see [Vault-friendly identity](#vault-friendly-identity-session-certificates-and-revocation))
 - `derivePodId(publicKey)` -- SHA-256 hash to base64url pod ID
 - `encodeBase64url(bytes)` / `decodeBase64url(str)` -- URL-safe base64
+- Session certificates and signed revocation: `createSession`, `issueSessionCertificate`, `verifyPeerCredential`, `scopeAllows`, `revokeSessionCertificate`, `retireIdentity`, `receiveRevocation`, `isRevoked`, `MemoryRevocationStore`, `CredentialError`
 
 ### Wire Format
 
@@ -193,6 +194,58 @@ acl.revokeAll(sender);
 acl.check(sender, 'mesh://memory/notes', 'write'); // { allowed: false, reason: 'grant_revoked' }
 ```
 
+
+### Vault-friendly identity, session certificates and revocation
+
+**Where the key lives.** `PodIdentity` can be built four ways, and every signature goes through one `sign()` seam:
+
+```js
+await PodIdentity.generate();                          // as before: extractable key
+await PodIdentity.generate({ extractable: false });    // usable, never readable by the page
+await PodIdentity.fromJwk(jwk);                        // import (non-extractable unless { extractable: true })
+await PodIdentity.fromPkcs8(bytes, { publicKey });     // PKCS#8 has no public half: pass it, or ask for extractable: true
+await PodIdentity.fromCryptoKeyPair(storedKeyPair);    // e.g. a non-extractable pair loaded from IndexedDB
+await PodIdentity.fromSigner({ publicKey, sign });     // the private key is in a vault, token, extension...
+```
+
+Nothing in this package calls `exportKey` on a private key; `identity.exportPrivateKey()` is the only way, and it rejects unless the identity was made exportable. The signer is `{ publicKey, sign(data) }` -- `publicKey` the raw 32-byte key or a public `CryptoKey`, `sign` returning the 64-byte signature, sync or async. That is the same shape as `@johnhenry/wsh`'s "Signing with a page-held signer", so one signer object can serve both libraries.
+
+**Session certificates.** Use the long-lived identity key rarely: once per session, to certify a short-lived, non-extractable session key.
+
+```js
+const { session, certificate } = await createSession(identity, {
+  scope: ['chat:*:read', 'mesh:peer:send'],   // required; [] grants nothing, ['*'] is "everything"
+  ttlSeconds: 3600,                           // default 1 h; the issuer and every verifier cap it at 24 h by default
+});
+const sig = await session.sign(message);      // the session key signs traffic, the identity key is not touched
+// ...send `certificate` (bytes, or encodeBase64url(certificate)) once, with a proof of possession:
+const proof = await createSessionProof(session, challenge);
+
+// verifier
+const peer = await verifyPeerCredential(certificate, {
+  now: Date.now(), skewSeconds: 30, revocations: store,
+  expectedIdentity: knownPodId, requireScope: 'chat:room1:read', proof: { challenge, signature: proof },
+});
+// -> { identityKey, podId, sessionKey, scope, serial, notBefore, notAfter }; throws CredentialError otherwise
+```
+
+Rules: a certificate is valid during `[notBefore - skew, notAfter + skew)` in whole seconds (`skewSeconds` defaults to 30, at most 300); a verifier enforces its own `maxLifetimeSeconds` (default 86400) whatever the issuer chose; chain length is exactly one (a session key cannot issue certificates, and a list of certificates is refused); an empty scope grants nothing (the conservative choice: "all" has to be written as `'*'`); scope entries use the `namespace:resource:action` form of `matchScope`. A certificate proves the identity authorised that session key -- it does not prove the sender holds it, so also verify message signatures against `peer.sessionKey` (`verifyWithRawPublicKey`) or pass a `proof`. Pass `expectedIdentity` when you know whom you are talking to; otherwise the certificate only says "some identity key vouches for this session".
+
+**Encoding** (so another implementation can match; test vectors are in `test/session.test.mjs`): `"BMSC" | u8 version=1 | field identityKey | field sessionKey | field serial(16) | u64 notBefore | u64 notAfter | u16 scopeCount | field scope... | field signature`, where `field` is a big-endian u16 length plus bytes and scopes are sorted bytewise and unique. The signature covers `"browsermesh/session-certificate/v1\n" + body`.
+
+**Revocation.** The identity key signs `revokeSessionCertificate(identity, certificate)` (one session, by serial) or `retireIdentity(identity)` (the identity is done; all its certificates, past and future, are refused). Only the key a statement names can sign it, so a key can revoke only its own sessions and itself. Feed what arrives to a store:
+
+```js
+const store = new MemoryRevocationStore({ maxEntries: 10000, filter: (st) => iCareAbout(st.identityKey) });
+store.onRevocation(({ bytes }) => broadcast(bytes));   // fires once per NEW revocation: forward these
+const { status } = await receiveRevocation(bytes, store); // 'added' | 'duplicate' | 'ignored'; throws CredentialError if malformed or mis-signed
+```
+
+Revocations are idempotent and may arrive before the certificate. A certificate revocation is dropped once the certificate's own `notAfter` plus 300 s has passed; retirements are kept. The store is bounded: expired entries go first, then the revocation nearest expiry; if it holds only retirements and is full, `add` throws `store-full`. Because anyone can mint identities and sign statements for them, give the store a `filter` that admits only identities you care about on an open network. A store is any object with `add(statement, bytes)` and `isRevoked(identityKey, serial)` (sync or async); a store that throws makes verification fail closed.
+
+**What this does and does not protect.** It limits the damage of a stolen session key to its lifetime and scope, and keeps the identity key off the hot path (so it can sit in a vault or token that prompts the user). Revocation only reaches peers that hear of it: a peer that is offline, partitioned or not forwarding keeps accepting the certificate until it expires, so keep lifetimes short and treat revocation as a way to shorten the tail, not an instant switch. It does not protect against theft of the identity key itself (retiring it needs the identity key, so a thief can race you; there is no recovery or key-rotation chain here), against a compromised page that can ask a signer to sign anything, or against a verifier with a wrong clock beyond the skew. Message signing, replay protection and channel binding remain the transport's job.
+
+**Adoption by other layers.** A peer layer should send the certificate (and a challenge proof) when it introduces a session key, call `verifyPeerCredential(credential, { now, revocations, expectedIdentity })` before trusting any message signed by `sessionKey`, and wire `store.onRevocation` to its broadcast and a new-connection sync (`store.list()`). The wsh transport can use `PodIdentity.fromSigner` to wrap its signer, mint a session per connection with `createSession`, and verify the remote with `verifyPeerCredential`.
 
 ### Test Utilities
 

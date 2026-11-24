@@ -126,6 +126,7 @@ import {
   resolveIceTransportPolicy,
   DEFAULT_ICE_SERVERS,
   PUBLIC_STUN_SERVERS,
+  resetNoIceServersNote,
   DEFAULT_CONNECTION_ID,
 } from '../src/webrtc.mjs'
 
@@ -1590,5 +1591,45 @@ describe('WebRTCMeshManager and transient disconnects', () => {
     const forced = await mgr.reconnectPeer('node-2', { force: true })
     assert.equal(forced.renegotiation, true)
     assert.equal(offers.length, 1)
+  })
+})
+
+// ── one-time note when a failure likely needs an ICE server ───────────
+
+describe('no-ICE-server note', () => {
+  async function failedConn(opts = {}) {
+    const conn = new WebRTCPeerConnection({ localPodId: 'a', remotePodId: 'b', ...opts })
+    await conn.createOffer()
+    const pc = _lastMockPC
+    pc.connectionState = 'failed'
+    pc.onconnectionstatechange()
+    return conn
+  }
+
+  it('logs once, with how to configure a server, when a connection with no ICE servers fails', async () => {
+    resetNoIceServersNote()
+    const logs = []
+    await failedConn({ onLog: (m) => logs.push(m) })
+    await failedConn({ onLog: (m) => logs.push(m) })
+    const notes = logs.filter((m) => /no ICE servers/i.test(m))
+    assert.equal(notes.length, 1, 'once per process, not once per failure')
+    assert.match(notes[0], /iceServers/)
+    assert.match(notes[0], /PUBLIC_STUN_SERVERS/)
+  })
+
+  it('does not log when ICE servers were supplied', async () => {
+    resetNoIceServersNote()
+    const logs = []
+    await failedConn({ iceServers: [{ urls: 'stun:stun.example.com' }], onLog: (m) => logs.push(m) })
+    assert.equal(logs.filter((m) => /no ICE servers/i.test(m)).length, 0)
+  })
+
+  it('falls back to console.warn when no onLog is given', async () => {
+    resetNoIceServersNote()
+    const warns = []
+    const prev = console.warn
+    console.warn = (m) => warns.push(String(m))
+    try { await failedConn() } finally { console.warn = prev }
+    assert.equal(warns.filter((m) => /no ICE servers/i.test(m)).length, 1)
   })
 })
