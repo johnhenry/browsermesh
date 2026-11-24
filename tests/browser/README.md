@@ -81,6 +81,12 @@ Locally you may point Playwright at a browser you already have with
   the untrusted label, cancel reaching the tool's signal, list-changed. wsh's browser-safe `page` entry is
   served from `node_modules` for this (`/vendor/wsh/`), the one third-party module the harness serves; the
   default DOM dialog of that bridge is not used (the harness answers with its own `prompt`).
+- A page that answers real HTTP (`@johnhenry/browsermesh-ingress`, `ingress.spec.mjs`, `docs/design/http-ingress.md`):
+  the page serves a `(Request) => Response` handler on the protocol `http`, the ingress and a Node listener run in
+  the test process (a real `node-datachannel` peer for the page's own `RTCPeerConnection`, signalled through
+  `/signaling`), and a real HTTP client talks to the listener. Default deny then a grant then a revocation, the
+  verified ingress pod id as the only identity the handler sees, a POST body and a 600 KB answer in chunks, a
+  page's cookie, policy and redirect not reaching the client, and a client that hangs up aborting the handler.
 - Examples 01, 02 and 05 unmodified in a page (their own transports stay
   simulated).
 - The packages load and run under the strict policy above.
