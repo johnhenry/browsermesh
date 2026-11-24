@@ -95,6 +95,26 @@ import { decodeWireData } from './internal/wire-envelope.mjs'
 /** Envelope type of a host-metadata request. Not one of the eight verbs -- see the module doc comment. */
 export const POD_HOST_DESCRIBE = 'pod-host:describe'
 
+/** What an env value or `run.input` becomes for a requester that did not spawn the pod. */
+const REDACTED = '[redacted]'
+
+/**
+ * A podspec with its `env` values and `run.input` replaced by a marker: the
+ * names, the module, the limits and the labels stay visible.
+ * @param {object} spec
+ * @returns {object}
+ */
+function redactSpec(spec) {
+  const out = { ...spec }
+  if (spec.env && typeof spec.env === 'object') {
+    out.env = Object.fromEntries(Object.keys(spec.env).map((key) => [key, REDACTED]))
+  }
+  if (spec.run && typeof spec.run === 'object' && spec.run.input !== undefined) {
+    out.run = { ...spec.run, input: REDACTED }
+  }
+  return out
+}
+
 /** Default ACL resource every verb is checked against. */
 export const DEFAULT_POD_HOST_RESOURCE = 'pod-host'
 
@@ -230,6 +250,27 @@ export function createPodHostService({
        * @type {Map<string, Set<string>>} pod name -> pubKeys
        */
       const interested = new Map()
+
+      /**
+       * Who spawned each pod through this service, by pod name. Only the
+       * spawner sees a pod's `env` values and `run.input` in `status`/`list`
+       * results; everyone else sees the names with the values redacted. A pod
+       * the service did not spawn has no owner, so it is redacted for all.
+       * @type {Map<string, string>} pod name -> pubKey
+       */
+      const owners = new Map()
+
+      /**
+       * A copy of a pod status as `pubKey` may see it.
+       * @param {string} pubKey
+       * @param {*} status
+       * @returns {*}
+       */
+      function presentStatus(pubKey, status) {
+        if (!status || typeof status !== 'object' || !status.spec) return status
+        if (owners.get(status.name) === pubKey) return status
+        return { ...status, spec: redactSpec(status.spec) }
+      }
 
       /**
        * @param {string} operation - A `PLACEMENT_AUDIT` value.
@@ -456,6 +497,7 @@ export function createPodHostService({
         // 4. Dispatch.
         try {
           const result = await dispatch(verb, validated.value)
+          if (verb === POD_HOST_VERB.SPAWN) owners.set(validated.value.name, pubKey)
           if (verb === POD_HOST_VERB.SPAWN) {
             await recordAudit(PLACEMENT_AUDIT.READY, {
               requester: pubKey, requestId, name: validated.value.name, state: result?.state ?? null,
@@ -466,7 +508,7 @@ export function createPodHostService({
             })
           }
           ctx.emit('pod-host:completed', { from: pubKey, verb, requestId, ok: true, code: null })
-          return result
+          return Array.isArray(result) ? result.map((entry) => presentStatus(pubKey, entry)) : presentStatus(pubKey, result)
         } catch (err) {
           const driverError = PodHostDriverError.from(err)
           log('pod-host:verb-failed', { from: pubKey, verb, code: driverError.code, error: driverError.message })
