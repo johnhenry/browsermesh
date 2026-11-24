@@ -597,3 +597,58 @@ export declare function createInPageDriver(opts: {
   BCConstructor?: new (name: string) => unknown;
   driverId?: string;
 }): PodHostDriver & { close(): void };
+
+// ── Pod runtimes (the adapter between a lane driver and what runs a module) ──
+
+export type RuntimeBoundary = "none" | "process" | "language" | "hardware";
+
+export declare const RUNTIME_BOUNDARY: Readonly<{
+  NONE: "none";
+  PROCESS: "process";
+  LANGUAGE: "language";
+  HARDWARE: "hardware";
+}>;
+
+/** Environment variable names a requester may not set (they change how code is loaded or limited). */
+export declare const FORBIDDEN_ENV_NAME: RegExp;
+
+export interface PodRuntimeStartOptions {
+  name: string;
+  /** Absolute path on the host, from the host's own catalog. */
+  modulePath: string;
+  readPaths: string[];
+  env: Record<string, string>;
+  input: unknown;
+  limits: { memMib?: number };
+  onLog(line: string): void;
+  /** Fires once if the pod stops on its own; not for a `terminate()`. */
+  onExit(info: { code: number | null; reason: "oom" | "crashed" | "exited" }): void;
+}
+
+export interface PodRuntimeHandle {
+  request(payload: unknown, opts?: { timeoutMs?: number }): Promise<unknown>;
+  terminate(): Promise<void>;
+}
+
+/**
+ * What a lane driver needs from whatever runs a module. `worker_threads`
+ * (`boundary: "none"`) and a permission-model child process
+ * (`boundary: "process"`) are in `@johnhenry/browsermesh-pod/node-runtimes`;
+ * a runtime claiming `lane: "isolate"` must have boundary "language" or "hardware".
+ */
+export interface PodRuntime {
+  kind: string;
+  lane: PodLane;
+  boundary: RuntimeBoundary;
+  start(opts: PodRuntimeStartOptions): Promise<PodRuntimeHandle>;
+}
+
+export declare function createRuntimeLaneDriver(opts: {
+  runtime: PodRuntime;
+  /** Module names a podspec's `run.ref` may name, to absolute paths on this host. */
+  modules?: Record<string, string | { path: string; readPaths?: string[] }>;
+  maxPods?: number;
+  maxMemMib?: number;
+  defaultMemMib?: number;
+  sendTimeoutMs?: number;
+}): PodHostDriver & { runtime: PodRuntime };
