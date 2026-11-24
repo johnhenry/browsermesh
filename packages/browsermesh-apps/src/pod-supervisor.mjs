@@ -54,6 +54,12 @@
 import { validatePodSpec, PodHostDriverError } from '@johnhenry/browsermesh-pod'
 import { createPodHostClient } from './pod-host-service.mjs'
 import { pickAutoHost } from './orchestrator.mjs'
+import {
+  DEFAULT_BACKOFF_MS,
+  DEFAULT_MAX_RESTARTS,
+  policyWantsRestart,
+  restartDelayMs,
+} from './restart-policy.mjs'
 
 /**
  * Audit record kinds this file writes that are NOT already covered by
@@ -71,38 +77,12 @@ export const SUPERVISOR_AUDIT = Object.freeze({
   HOST_LOST: 'supervisor_host_lost',
 })
 
-/** Default `restart.maxRestarts` when a podspec did not say (matches `host-protocol.mjs`'s own silence on a default -- 3 is this file's choice, not the protocol's). */
-const DEFAULT_MAX_RESTARTS = 3
-/** Default `restart.backoffMs` base. */
-const DEFAULT_BACKOFF_MS = 1000
-/** Backoff never waits longer than this, regardless of restart count. */
-const MAX_BACKOFF_MS = 60_000
+// Restart policy, default `maxRestarts`/backoff and the backoff curve live in
+// restart-policy.mjs, shared with pod-placement.mjs.
 
 /** @param {{host: string, name: string}} ref @returns {string} */
 function refKey(ref) {
   return `${ref.host}::${ref.name}`
-}
-
-/**
- * Whether `policy` says to restart a pod that exited with `{code, reason}`.
- * `reason === 'drained'` is handled by the CALLER, before this is ever
- * consulted -- an intentional drain is never a restart candidate under any
- * policy (see `#onExit()`).
- *
- * @param {'never'|'on-failure'|'always'} policy
- * @param {{code?: number, reason?: string}} exit
- * @returns {boolean}
- */
-function policyWantsRestart(policy, { code, reason }) {
-  switch (policy) {
-    case 'always':
-      return true
-    case 'on-failure':
-      return code !== 0 || reason === 'crashed' || reason === 'host-lost'
-    case 'never':
-    default:
-      return false
-  }
 }
 
 /**
@@ -545,8 +525,7 @@ export function createPodSupervisor({
       return
     }
 
-    const base = entry.spec.restart?.backoffMs ?? DEFAULT_BACKOFF_MS
-    const delayMs = Math.min(base * (2 ** entry.restarts), MAX_BACKOFF_MS)
+    const delayMs = restartDelayMs(entry.restarts, entry.spec.restart?.backoffMs ?? DEFAULT_BACKOFF_MS)
     entry.restarts += 1
     const attempt = entry.restarts
 
