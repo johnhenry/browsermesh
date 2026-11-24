@@ -376,8 +376,34 @@ gives an indicator or says `unattended: true`.
   timing and sizes and the plain handshake (host key, user name, client key), and can drop, delay or
   end it; it cannot read, alter, replay or take over anything after sealing. Verified: the real wsh
   client over the in-memory bus with a hostile hop (reads, alters either direction, drops) and over
-  real WebRTC (`browsermesh-apps` `test/wsh-services-mesh.test.mjs`, `test/real-peer/`). Not built:
-  a relaying pod (a mesh `--via`): it is the owner's decision (see the design note).
+  real WebRTC (`browsermesh-apps` `test/wsh-services-mesh.test.mjs`, `test/real-peer/`).
+
+### A relaying pod (wsh `--via` over the mesh)
+
+Package: `browsermesh-transport` (`WshRelay`, `connectWshServicesViaRelay`, `wsh-relay.mjs`). Design:
+[`design/wsh-over-mesh.md`](design/wsh-over-mesh.md) ("The relaying pod"); the owner decided to build it with a per-target
+grant. A pod carries a requester's sealed wsh session to a target it can reach, without reading it. **Off:** nothing in the
+repository constructs it; `start()` needs an `indicator` or `unattended: true`.
+
+- **Who may ask.** The control channel needs `protocol:wsh-relay:open` (default deny, asked on every message) and each session
+  needs **`wsh-relay:<target>:open` for that exact target** (a pod id, or a name the operator mapped to a pipe relay URL and
+  rendezvous id). The target is never an address the requester supplies, so the relay is not an open proxy and cannot be aimed
+  at an address of the requester's choosing. A wildcard target in the configuration is refused at creation, and a requester's
+  `wsh-relay:*:open` grant is refused at request time, unless `wideTargets: true`. Revoking the grant ends the session at once.
+- **Bounds.** At most `maxSessions` at once (default 2), one per requesting pod, a byte budget, a time budget and an idle timeout
+  per session; each refusal and end is named and audited (`relay-open`, `relay-refused`, `relay-close`: pod ids, target, bytes,
+  duration; never content). A relayed session is not relayed onward (hop marker plus the grant model).
+- **What the relay sees and can do.** Who asks for which target, that a session exists, its timing and sizes, and the plain
+  handshake (host key, user name, client key). It can drop, delay, end or refuse. It cannot read, alter, replay or take over a
+  sealed session, and it cannot answer as the target: the client pins the target's host key (a pod id for a pod; the key the client
+  names for a machine), and the target requires sealing and decides on the KEY (`wsh-services:open`) carried by a relay it lists in
+  `acceptVia`. The relay never terminates wsh and cannot tell a sealed session from a plain one; the target refuses a plain one.
+- **Not protected.** A relay that is granted a target can make that session fail or stall, and learns who talks to whom and when;
+  a granted requester can make the relay open sessions to the targets it is granted, up to the bounds.
+- **Verified.** In memory with real registries and the real wsh client (allowed and refused requesters, a target not granted, wildcard,
+  count, byte, time and idle bounds, no chains, revocation mid-session, a relay that reads, alters either way or drops, a relay that
+  answers as the target, a machine host behind a mapped name) and over three real WebRTC peers
+  (`browsermesh-apps` `test/wsh-relay.test.mjs`, `test/real-peer/wsh-relay.test.mjs`). Each rule was broken once. Not in a browser.
 
 ### Multi-hop forwarding
 
