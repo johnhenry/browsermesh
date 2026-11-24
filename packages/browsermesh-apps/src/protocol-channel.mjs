@@ -45,6 +45,7 @@
  * before the open request is sent) if the server may speak first.
  */
 import { ChannelErrorCode, MeshChannelError, createMeshChannelService } from './mesh-channel.mjs'
+import { createRootAuthorizer } from './protocol-roots.mjs'
 
 export const PROTOCOL_OPEN_METHOD = 'mesh.protocol.open'
 export const PROTOCOL_LIST_METHOD = 'mesh.protocol.list'
@@ -341,6 +342,18 @@ export function createMeshProtocolService({ authorize, ...channelOptions } = {})
           },
           openProtocols: peer => { const l = inner.api.link(peer); return l ? host.openProtocols(l) : [] },
           closeProtocols: host.closeProtocols,
+          /**
+           * A per-root authorizer for `protocol`, backed by this node's registry
+           * (`<protocol>:<root>:<action>` through `checkAccess`; nothing is allowed without a registry).
+           * See `protocol-roots.mjs`.
+           */
+          rootAuthorizer: (protocol, opts = {}) => createRootAuthorizer({
+            ...opts,
+            protocol,
+            check: (peer, resource, action) => registry && typeof registry.checkAccess === 'function'
+              ? registry.checkAccess(peer, resource, action)
+              : false,
+          }),
           channel: inner.api,
         },
         teardown: async () => { offAccess(); await inner.teardown?.() },

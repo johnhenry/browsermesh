@@ -79,6 +79,8 @@ const app = {
   blob: () => new Uint8Array(200_000).fill(7), // larger than one message of the link
 }
 const seen = []
+// Per-root scopes `objects:<root>:<action>`, backed by bob's registry.
+const roots = bob.api.rootAuthorizer('objects', { actions: ['get', 'call', 'set'] })
 const objects = createObjectsServer({
   roots: { app },
   mode: 'values',
@@ -86,16 +88,16 @@ const objects = createObjectsServer({
   // Asked for every operation the allow-list let through: the per-root scope of the verified peer.
   authorize(who, op) {
     const action = op.kind === 'set' ? 'set' : op.kind === 'call' || op.kind === 'construct' ? 'call' : 'get'
-    const verdict = bobNode.registry.checkAccess(who.fingerprint, `objects:${op.root}`, action)
-    seen.push(`${op.kind} ${op.text} by ${who.fingerprint === aliceNode.podId ? 'alice' : 'someone'}: ${verdict.allowed ? 'ok' : 'refused'}`)
-    return verdict.allowed
+    const allowed = roots.can(who.fingerprint, op.root, action)
+    seen.push(`${op.kind} ${op.text} by ${who.fingerprint === aliceNode.podId ? 'alice' : 'someone'}: ${allowed ? 'ok' : 'refused'}`)
+    return allowed
   },
 })
 bob.api.serveProtocol('objects', (channel) => {
   // `who` is the channel's verified peer, not a field of any message.
   objects.attach(objectsPeerOver(channel), { who: { username: null, fingerprint: channel.peer } })
 })
-bobNode.registry.grantCapabilities(aliceNode.podId, [protocolScope('objects'), 'objects:app:get', 'objects:app:call'])
+bobNode.registry.grantCapabilities(aliceNode.podId, [protocolScope('objects'), ...roots.scopes('app', ['get', 'call'])])
 
 // ── alice ────────────────────────────────────────────────────────────────────
 const channel = await alice.api.openProtocol(bobNode.podId, 'objects')
@@ -126,7 +128,7 @@ await assert.rejects(eve.api.openProtocol(bobNode.podId, 'objects'), { code: Cha
 console.log('eve could not open the protocol (default deny)')
 
 // ── revocation applies to the next request ──────────────────────────────────
-bobNode.registry.revokeCapabilities(aliceNode.podId, ['objects:app:get', 'objects:app:call'])
+bobNode.registry.revokeCapabilities(aliceNode.podId, roots.scopes('app', ['get', 'call']))
 await assert.rejects(async () => remote.title, /refused|authori/i)
 console.log('bob revoked her grants: her next request was refused')
 

@@ -793,6 +793,67 @@ service ignores it and `open()` rejects with `MeshChannelError`
 `examples/17-mesh-channel.mjs` and the module comment in `mesh-channel.mjs`
 for the wire frames, the memory model and the error codes.
 
+## Protocol channels, streams and per-root authorisation
+
+`createMeshProtocolService()` (`protocol-channel.mjs`) puts named, authorised
+protocols on a channel link: a server registers `serveProtocol(name, handler)`,
+a client calls `openProtocol(peer, name)`, and opening needs the scope
+`protocol:<name>:open` (default deny). A layered protocol is written against the
+small channel interface (`request`, `notify`, `onRequest`, `onNotification`,
+`onMessage`, `onClose`, `peer`, `maxMessageBytes`) and runs unchanged over the
+mesh, an in-memory duplex or anything else that satisfies
+`assertProtocolChannel`.
+
+**Streams** (`protocol-stream.mjs`, also `@johnhenry/browsermesh-apps/protocol-stream`):
+`createStreamLayer(channel)` moves a body larger than one message, bounded,
+backpressured and cancellable.
+
+```js
+const streams = createStreamLayer(channel, {
+  window: 256 * 1024,      // bytes of one stream the receiver will hold unread (and grants the writer)
+  maxStreamBytes: 2 ** 30, // the most one stream may carry
+  authorize: (meta, { peer }) => roots.assert(peer, meta.root, 'write'), // before the open is answered
+})
+streams.onStream(async (reader, { meta, peer }) => {
+  for await (const chunk of reader) sink.write(chunk)   // each read hands credit back
+})
+
+const w = await streams.open({ root: 'inbox', name: 'big.bin' }, { signal })
+await w.write(bytes)   // waits for credit; a reader that stops reading stops the writer at one window
+await w.end()          // or w.abort(reason); reader.cancel(reason) from the other end
+await streams.sendBody(readableStreamOrAsyncIterable, meta)   // also bytes; reader.bytes({ maxBytes }); reader.toReadableStream()
+```
+
+The receiver grants a byte window when a stream opens and the reader returns
+credit as it consumes chunks (the same credit scheme as the link, one level up
+and per stream), so memory per stream is bounded by the window whatever the
+writer does, and a stalled stream does not hold the link or other requests on
+the channel. A writer that ignores its credit, sends out of sequence or past
+`maxStreamBytes` is cut off (`stream-violation`, `stream-too-large`); a closed
+channel fails every stream (`channel-closed`). Stream frames are ordinary
+notifications and one `stream.open` request, so a peer that does not run the
+layer answers -32601 and nothing else is sent to it.
+
+**Per-root authorisation** (`protocol-roots.mjs`): a protocol with several named
+roots (`docs`, `logs`, ...) asks the registry about the root a request names, for
+the channel's verified peer, on every request. The scope is
+`<protocol>:<root>:<action>` (`objects:docs:get`), default deny, with the
+registry's wildcards (`objects:*:get`, `objects:docs:*`), expiry and revocation
+(the next request is refused).
+
+```js
+const roots = service.api.rootAuthorizer('objects', { actions: ['get', 'call', 'set'] })
+channel.onRequest('get', roots.guard(({ root, path }) => read(root, path), { action: 'get', root: p => p.root }))
+registry.grantCapabilities(peer, ['protocol:objects:open', ...roots.scopes('docs', ['get'])])
+roots.can(peer, 'docs', 'set')            // false
+roots.allowed(peer, allRoots, 'get')      // the roots this peer may read
+```
+
+`createRootAuthorizer({ protocol, check })` takes any `check(peer, resource, action)`.
+Root and action names cannot carry scope syntax (no `:` or `*`). An open stream or
+subscription was authorised when it started; call `can()` again where a long-lived
+one needs it.
+
 ## `fetch()`/`WebSocket`-shaped mesh access: `browserMeshFetch` and `BrowserMeshWebSocket`
 
 Two web-standard-API-shaped wrappers over a mesh connection, so existing

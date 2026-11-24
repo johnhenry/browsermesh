@@ -53,14 +53,15 @@ async function meshObjects({ authorizeLog } = {}) {
   const b = attachService(bob, undefined, createMeshProtocolService())
   const e = attachService(eve, undefined, createMeshProtocolService())
   const app = makeApp()
+  const roots = b.api.rootAuthorizer('objects', { actions: ['get', 'call', 'set'] })
   const server = wsh.createObjectsServer({
     roots: { app },
     mode: 'values',
     allow,
     authorize(who, op) {
-      const verdict = bob.registry.checkAccess(who.fingerprint, `objects:${op.root}`, actionOf(op.kind))
-      authorizeLog?.push({ who: who.fingerprint, kind: op.kind, text: op.text, allowed: verdict.allowed })
-      return verdict.allowed
+      const allowed = roots.can(who.fingerprint, op.root, actionOf(op.kind))
+      authorizeLog?.push({ who: who.fingerprint, kind: op.kind, text: op.text, allowed })
+      return allowed
     },
   })
   b.api.serveProtocol('objects', (channel) => {
