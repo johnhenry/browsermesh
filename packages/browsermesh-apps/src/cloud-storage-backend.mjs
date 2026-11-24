@@ -169,6 +169,7 @@
  */
 
 import { createLazyRequire } from './internal/lazy-node-require.mjs'
+import { readJsonMessage } from './internal/json-message.mjs'
 
 import { IndexedDBChunkStore, IndexedDBSyncStorage, TRANSFER_DEFAULTS } from '@johnhenry/browsermesh-sync'
 import { LWWMap } from '@johnhenry/browsermesh-primitives'
@@ -438,20 +439,17 @@ function resolveCloudStorageBackendClass() {
 
   /** @param {import('@johnhenry/browsermesh-netway').StreamSocket} socket */
   async #handleConnection(socket) {
-    const decoder = new TextDecoder()
     const encoder = new TextEncoder()
 
     while (true) {
-      const chunk = await socket.read()
-      if (chunk === null) break
+      const msg = await readJsonMessage(socket)
+      if (msg.eof) break
 
-      let cmd
-      try {
-        cmd = JSON.parse(decoder.decode(chunk))
-      } catch {
+      if (msg.error) {
         await socket.write(encoder.encode(JSON.stringify({ error: 'Invalid JSON' })))
         continue
       }
+      const cmd = msg.value
 
       let result
       try {

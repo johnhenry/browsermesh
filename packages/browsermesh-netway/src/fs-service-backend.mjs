@@ -12,6 +12,40 @@ import { StreamSocket } from './stream-socket.mjs';
 import { ConnectionRefusedError } from './errors.mjs';
 
 /**
+ * Read one JSON command from a socket. A write larger than the socket's
+ * receive window reaches the reader in window-sized pieces, so after a piece
+ * that fills the whole window this reads on and parses the concatenation; a
+ * shorter piece (or a socket with no window) ends the message.
+ *
+ * @param {StreamSocket} socket
+ * @returns {Promise<{eof: true}|{eof: false, value?: any, error?: Error}>}
+ */
+async function readJsonMessage(socket) {
+  const first = await socket.read();
+  if (first === null) return { eof: true };
+  const window = socket.windowBytes ?? 0;
+  const parts = [first];
+  let last = first;
+  while (true) {
+    let bytes = first;
+    if (parts.length > 1) {
+      bytes = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+      let off = 0;
+      for (const p of parts) { bytes.set(p, off); off += p.length; }
+    }
+    try {
+      return { eof: false, value: JSON.parse(new TextDecoder().decode(bytes)) };
+    } catch (error) {
+      if (!(window > 0 && last.length >= window)) return { eof: false, error };
+    }
+    const next = await socket.read();
+    if (next === null) return { eof: false, error: new Error('socket closed in the middle of a message') };
+    parts.push(next);
+    last = next;
+  }
+}
+
+/**
  * Backend that provides OPFS file access as a service.
  * When connected, returns a socket pair where the server side handles
  * file operation messages.
@@ -56,20 +90,17 @@ export class FsServiceBackend extends Backend {
   }
 
   async #handleConnection(socket) {
-    const decoder = new TextDecoder();
     const encoder = new TextEncoder();
 
     while (true) {
-      const chunk = await socket.read();
-      if (chunk === null) break;
+      const msg = await readJsonMessage(socket);
+      if (msg.eof) break;
 
-      let cmd;
-      try {
-        cmd = JSON.parse(decoder.decode(chunk));
-      } catch {
+      if (msg.error) {
         await socket.write(encoder.encode(JSON.stringify({ error: 'Invalid JSON' })));
         continue;
       }
+      const cmd = msg.value;
 
       try {
         let result;

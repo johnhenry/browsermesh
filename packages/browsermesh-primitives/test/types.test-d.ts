@@ -34,3 +34,21 @@ function checkResetEd25519Probe(): void {
 void checkProbeEd25519Support;
 void checkSupportsEd25519;
 void checkResetEd25519Probe;
+
+// Session certificates and vault-friendly identity.
+import { PodIdentity, createSession, verifyPeerCredential, MemoryRevocationStore, retireIdentity, receiveRevocation } from "@johnhenry/browsermesh-primitives";
+
+async function checkSessions(key: Uint8Array, sign: (d: Uint8Array) => Promise<Uint8Array>): Promise<void> {
+  const identity = await PodIdentity.fromSigner({ publicKey: key, sign });
+  const s = await createSession(identity, { scope: ["chat:*:read"], ttlSeconds: 600 });
+  const store = new MemoryRevocationStore({ maxEntries: 100 });
+  store.onRevocation(({ bytes }) => void bytes);
+  const peer = await verifyPeerCredential(s.certificate, { revocations: store, requireScope: "chat:a:read" });
+  const scope: string[] = peer.scope;
+  void scope;
+  await receiveRevocation(await retireIdentity(identity), store);
+  const hidden = await PodIdentity.generate({ extractable: false });
+  const ext: boolean = hidden.extractable;
+  void ext;
+}
+void checkSessions;
