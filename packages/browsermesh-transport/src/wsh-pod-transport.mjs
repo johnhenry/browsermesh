@@ -13,6 +13,9 @@
  * The sender of an inbound message is the authenticated key of the link it
  * arrived on, never a field of the message: `from` is set to it, and a message
  * whose own `from` or `podId` names another pod is dropped (`foreign-sender`).
+ * The handler is called as `handler(msg, { peerId })` with that same key, which
+ * a `Pod` takes as a link-authenticated sender (no per-message signature needed;
+ * signed messages from pods that sign by default are accepted as well).
  *
  * `send(msg)` goes to the link named by `msg.to`, or to every link for a
  * broadcast (`to` absent or `'*'`). It never throws and never returns a
@@ -143,11 +146,14 @@ export class WshPodTransport {
         return;
       }
     }
-    this.#deliver({ ...msg, from });
+    // The second argument tells the pod that this link authenticated the peer:
+    // the pod then takes `from` as the link's identity without asking for a
+    // per-message signature (a mismatching `from` would be dropped there too).
+    this.#deliver({ ...msg, from }, { peerId: from });
   }
 
-  #deliver(msg) {
+  #deliver(msg, meta) {
     if (!this.#handler) return;
-    try { this.#handler(msg); } catch { /* a throwing handler does not break the link */ }
+    try { this.#handler(msg, meta); } catch { /* a throwing handler does not break the link */ }
   }
 }
