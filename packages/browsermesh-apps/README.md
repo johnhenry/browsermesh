@@ -279,6 +279,53 @@ bobNetwork.addBackend('via-alice', createMeshRelayBackend({ node: bob, relayPeer
 const socket = await bobNetwork.connect('via-alice://s3-local'); // refused (ConnectionRefusedError) until granted
 ```
 
+### Lifetime and limits of relayed connections
+
+A relayed connection lasts only as long as the permission that allowed it:
+
+- The host re-checks every open connection when the registry announces an
+  access change (`registry.onAccessChange()`, fired by `revokeCapabilities()`,
+  `removePeer()`, `updatePermissions()` and `notifyAccessChange()`), on
+  `host.recheck([pubKey])`, and every `recheckIntervalMs`. It does not check
+  per packet. Call `notifyAccessChange(pubKey)` (or `host.recheck()`) after
+  changing the ACL by a path the registry does not see.
+- A connection that is no longer allowed, whose service was hidden
+  (`hideService()`), or whose host was detached is closed in both directions:
+  no further byte is delivered either way, the peer is sent a `close` frame
+  with a reason, and the client socket reports it as `socket.closeReason`
+  (`access revoked`, `service hidden`, `service detached`, ...). A connect that
+  finishes after one of these is not acknowledged and its socket is closed.
+- Flow control uses byte credit per connection: each side advertises a window
+  (`highWaterBytes`) in `connect`/`ok`; a sender that has that many bytes
+  outstanding stops reading its local socket until credit brings it to
+  `lowWaterBytes` or less. Nothing is dropped. Bytes received and not yet
+  consumed are capped per connection and per peer; exceeding a cap, or sending
+  past the window, closes the connection with a reason (`buffer limit
+  exceeded`, `flow control violation`).
+- `host.stats()` and `backend.stats()` report `connections`, `bufferedBytes`
+  and `inFlightBytes` (the host also per peer), for monitoring.
+
+| Option (`MeshRelayHost`; the client takes the first four) | Default |
+| --- | --- |
+| `highWaterBytes` (window per connection; pause point) | 262144 |
+| `lowWaterBytes` (resume point) | 65536 |
+| `maxBufferedBytesPerConnection` (hard cap) | 1048576 |
+| `maxFrameBytes` (largest data frame) | 65536 |
+| `maxBufferedBytesPerPeer` (hard cap, host) | 4194304 |
+| `maxConnectionsPerPeer` (host) | 16 |
+| `recheckIntervalMs` (host; 0 turns the interval off) | 30000 |
+
+With `createMeshNode({ enableRelayHost })` pass these as `relayHostOptions`.
+The memory held for one connection is bounded by `maxBufferedBytesPerConnection`
+plus the service socket's own buffer (`STREAM_DEFAULTS` in
+`@johnhenry/browsermesh-netway`: 1 MiB by default).
+
+An older peer: it sends no window, so it is never sent `credit` frames and
+cannot be paused; it is held to the byte caps and gets a `close` frame (which
+it already understands) when a cap or a revocation ends its connection. An
+older host answers `ok` without a window; the client then sends no `credit`
+frames and holds the host to the byte cap.
+
 TCP-only for now (`listen()`/`bindDatagram()` on `MeshRelayBackend` are the
 inherited `Backend` "not implemented" throws). See
 `examples/06-mesh-relay.mjs` for a full runnable walkthrough (in-process

@@ -122,11 +122,16 @@ export class UnknownSchemeError extends NetwayError {
  * backend.
  *
  * @property {string} code - Always `'ECLOSED'`.
+ * @property {string|null} reason - Why the socket was closed, when known.
  */
 export class SocketClosedError extends NetwayError {
-  constructor() {
-    super('Socket is closed', 'ECLOSED');
+  /**
+   * @param {string} [reason] - Why the socket was closed, when known.
+   */
+  constructor(reason) {
+    super(reason ? `Socket is closed: ${reason}` : 'Socket is closed', 'ECLOSED');
     this.name = 'SocketClosedError';
+    this.reason = reason ?? null;
   }
 }
 

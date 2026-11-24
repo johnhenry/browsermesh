@@ -52,6 +52,7 @@
 
 import { createLazyRequire } from './internal/lazy-node-require.mjs'
 import { decodeWireData } from './internal/wire-envelope.mjs'
+import { CreditReceiver, CreditSender, resolveFlowOptions } from './internal/relay-flow.mjs'
 
 /** Default `envelope.type` used to route relay payloads on the shared `onIncomingData()` bus. */
 const DEFAULT_ENVELOPE_TYPE = 'mesh-relay'
@@ -127,8 +128,11 @@ function resolveMeshRelayBackendClass() {
   /** @type {Map<string, {resolve: Function, reject: Function, service: string}>} connId -> pending connect */
   #pending = new Map()
 
-  /** @type {Map<string, import('@johnhenry/browsermesh-netway').StreamSocket>} connId -> relay-side socket */
+  /** @type {Map<string, {socket: import('@johnhenry/browsermesh-netway').StreamSocket, tx: CreditSender, rx: CreditReceiver, closed: boolean}>} connId -> relay-side connection */
   #connections = new Map()
+
+  /** @type {Readonly<import('./internal/relay-flow.mjs').RELAY_FLOW_DEFAULTS>} */
+  #flow
 
   /** @type {(() => void)|null} */
   #unsubscribeIncoming = null
@@ -140,14 +144,19 @@ function resolveMeshRelayBackendClass() {
    * @param {string} [opts.envelopeType='mesh-relay']
    * @param {number} [opts.connectTimeoutMs=15000] - `0` disables the timeout.
    * @param {Function} [opts.onLog]
+   * @param {number} [opts.highWaterBytes=262144] - Receive window per connection; the host pauses at it.
+   * @param {number} [opts.lowWaterBytes=65536]
+   * @param {number} [opts.maxBufferedBytesPerConnection=1048576] - Hard cap on bytes received and not yet consumed.
+   * @param {number} [opts.maxFrameBytes=65536]
    */
-  constructor({ node, relayPeerPubKey, envelopeType, connectTimeoutMs, onLog } = {}) {
+  constructor({ node, relayPeerPubKey, envelopeType, connectTimeoutMs, onLog, ...flow } = {}) {
     super()
     if (!node) throw new Error('node is required')
     if (!relayPeerPubKey || typeof relayPeerPubKey !== 'string') {
       throw new Error('relayPeerPubKey is required')
     }
 
+    this.#flow = resolveFlowOptions(flow)
     this.#node = node
     this.#relayPeerPubKey = relayPeerPubKey
     this.#envelopeType = envelopeType || DEFAULT_ENVELOPE_TYPE
@@ -197,7 +206,7 @@ function resolveMeshRelayBackendClass() {
       this.#pending.set(connId, { resolve, reject, service: host })
     })
 
-    await this.#send({ op: 'connect', connId, service: host })
+    await this.#send({ op: 'connect', connId, service: host, window: this.#flow.highWaterBytes })
 
     if (!this.#connectTimeoutMs) return pending
 
@@ -234,8 +243,28 @@ function resolveMeshRelayBackendClass() {
       this.#pending.delete(connId)
 
       const [userSocket, relaySocket] = StreamSocket.createPair()
-      this.#connections.set(connId, relaySocket)
-      this.#pumpToRemote(connId, relaySocket)
+      // The host advertises a window only if it understands credit; an older
+      // host is sent no credit frames and is held to the buffer bound only.
+      const creditAware = Number.isInteger(data.window) && data.window > 0
+      const conn = {
+        socket: relaySocket,
+        closed: false,
+        tx: new CreditSender({
+          window: creditAware ? Math.min(data.window, this.#flow.maxBufferedBytesPerConnection) : 0,
+          lowWater: this.#flow.lowWaterBytes,
+        }),
+        rx: new CreditReceiver({
+          window: this.#flow.highWaterBytes,
+          lowWater: this.#flow.lowWaterBytes,
+          maxBuffered: this.#flow.maxBufferedBytesPerConnection,
+          creditAware,
+          grant: (bytes) => {
+            if (!conn.closed) this.#send({ op: 'credit', connId, bytes }).catch(() => {})
+          },
+        }),
+      }
+      this.#connections.set(connId, conn)
+      this.#pumpToRemote(connId, conn)
       pending.resolve(userSocket)
       return
     }
@@ -252,23 +281,83 @@ function resolveMeshRelayBackendClass() {
 
     // 'data' / 'close' only act on connIds this backend itself originated
     // and that are still open -- unrecognized connIds are ignored.
-    const relaySocket = this.#connections.get(connId)
-    if (!relaySocket) return
+    const conn = this.#connections.get(connId)
+    if (!conn) return
 
     if (op === 'data') {
       if (typeof data.data !== 'string') return
+      const approx = Math.floor((data.data.length * 3) / 4)
+      if (approx > this.#flow.maxBufferedBytesPerConnection
+        || (conn.rx.creditAware && approx > this.#flow.maxFrameBytes + 3)) {
+        this.#closeConnection(connId, conn, { notifyHost: true, reason: 'buffer limit exceeded' })
+        return
+      }
+      const bytes = fromBase64(data.data)
+      const verdict = conn.rx.receive(bytes.length)
+      if (verdict !== 'ok') {
+        this.#closeConnection(connId, conn, {
+          notifyHost: true,
+          reason: verdict === 'violation' ? 'flow control violation' : 'buffer limit exceeded',
+        })
+        return
+      }
       try {
-        await relaySocket.write(fromBase64(data.data))
+        await conn.socket.write(bytes)
       } catch (err) {
-        this.#onLog('mesh-relay-backend:data:write-failed', { connId, error: err?.message || String(err) })
+        if (!conn.closed) this.#onLog('mesh-relay-backend:data:write-failed', { connId, error: err?.message || String(err) })
+      } finally {
+        conn.rx.consumed(bytes.length)
+      }
+      return
+    }
+
+    if (op === 'credit') {
+      if (conn.tx.enabled && !conn.tx.credit(data.bytes)) {
+        this.#closeConnection(connId, conn, { notifyHost: true, reason: 'flow control violation' })
       }
       return
     }
 
     if (op === 'close') {
-      this.#connections.delete(connId)
-      try { await relaySocket.close() } catch { /* already closed */ }
+      await this.#closeConnection(connId, conn, {
+        notifyHost: false,
+        reason: typeof data.reason === 'string' ? data.reason.slice(0, 200) : 'closed by host',
+      })
     }
+  }
+
+  /**
+   * Close a relayed connection: both endpoints of the local socket pair see
+   * end of stream and `closeReason`.
+   *
+   * @param {string} connId
+   * @param {{socket: object, tx: CreditSender, closed: boolean}} conn
+   * @param {{notifyHost: boolean, reason: string}} opts
+   */
+  async #closeConnection(connId, conn, { notifyHost, reason }) {
+    if (conn.closed) return
+    conn.closed = true
+    this.#connections.delete(connId)
+    conn.tx.close()
+    try { await conn.socket.close(reason) } catch { /* already closed */ }
+    if (notifyHost) await this.#send({ op: 'close', connId, reason }).catch(() => {})
+  }
+
+  /**
+   * Counters for bytes held for relayed connections.
+   * `bufferedBytes`: received and not yet consumed, plus queued unread on the
+   * local socket; `inFlightBytes`: sent to the host and not yet credited back.
+   *
+   * @returns {{ connections: number, bufferedBytes: number, inFlightBytes: number }}
+   */
+  stats() {
+    let bufferedBytes = 0
+    let inFlightBytes = 0
+    for (const conn of this.#connections.values()) {
+      bufferedBytes += conn.rx.outstanding + (conn.socket.bufferedOutbound ?? 0)
+      inFlightBytes += conn.tx.inFlight
+    }
+    return { connections: this.#connections.size, bufferedBytes, inFlightBytes }
   }
 
   /**
@@ -279,20 +368,24 @@ function resolveMeshRelayBackendClass() {
    * @param {string} connId
    * @param {import('@johnhenry/browsermesh-netway').StreamSocket} relaySocket
    */
-  #pumpToRemote(connId, relaySocket) {
+  #pumpToRemote(connId, conn) {
     (async () => {
       try {
-        while (true) {
-          const chunk = await relaySocket.read()
+        outer: while (!conn.closed) {
+          const chunk = await conn.socket.read()
           if (chunk === null) break
-          await this.#send({ op: 'data', connId, data: toBase64(chunk) })
+          for (let off = 0; off < chunk.length;) {
+            const want = Math.min(chunk.length - off, this.#flow.maxFrameBytes)
+            const n = await conn.tx.reserve(want)
+            if (n === 0 || conn.closed) break outer
+            await this.#send({ op: 'data', connId, data: toBase64(chunk.subarray(off, off + n)) })
+            off += n
+          }
         }
       } catch (err) {
-        this.#onLog('mesh-relay-backend:pump:error', { connId, error: err?.message || String(err) })
+        if (!conn.closed) this.#onLog('mesh-relay-backend:pump:error', { connId, error: err?.message || String(err) })
       }
-      if (this.#connections.delete(connId)) {
-        await this.#send({ op: 'close', connId }).catch(() => {})
-      }
+      await this.#closeConnection(connId, conn, { notifyHost: true, reason: 'closed by client' })
     })()
   }
 
@@ -316,9 +409,8 @@ function resolveMeshRelayBackendClass() {
       this.#unsubscribeIncoming()
       this.#unsubscribeIncoming = null
     }
-    for (const [connId, socket] of [...this.#connections]) {
-      this.#connections.delete(connId)
-      try { await socket.close() } catch { /* already closed */ }
+    for (const [connId, conn] of [...this.#connections]) {
+      await this.#closeConnection(connId, conn, { notifyHost: false, reason: 'relay backend closed' })
     }
     for (const [connId, pending] of [...this.#pending]) {
       this.#pending.delete(connId)

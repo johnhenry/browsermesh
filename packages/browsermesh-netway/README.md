@@ -70,7 +70,7 @@ await net.close();
 
 ### Core Abstractions
 
-- `StreamSocket` -- reliable ordered byte stream (TCP-like), with `createPair()` for paired sockets
+- `StreamSocket` -- reliable ordered byte stream (TCP-like), with `createPair()` for paired sockets. Byte-level flow control per direction: `write()` stays pending while `highWaterBytes` (default 1 MiB) are queued unread and continues once the reader brings the queue to `lowWaterBytes` (default a quarter of that); nothing is dropped. A queue that would pass `maxBufferedBytes` (default 4 MiB; one chunk is always accepted into an empty queue) or `highWaterMark` chunks (default 1024) closes the socket, and `closeReason` / `SocketClosedError.reason` say why. `close(reason)` records a reason for both endpoints. `bufferedInbound` / `bufferedOutbound` are the queued byte counts. `STREAM_DEFAULTS` holds the defaults; `0` turns a limit off.
 - `DatagramSocket` -- unreliable message socket (UDP-like)
 - `Listener` -- server-side accept queue for incoming connections
 

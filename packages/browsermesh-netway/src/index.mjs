@@ -63,7 +63,7 @@ export {
 } from './errors.mjs';
 
 // Core abstractions
-export { StreamSocket } from './stream-socket.mjs';
+export { StreamSocket, STREAM_DEFAULTS } from './stream-socket.mjs';
 export { DatagramSocket } from './datagram-socket.mjs';
 export { Listener } from './listener.mjs';
 

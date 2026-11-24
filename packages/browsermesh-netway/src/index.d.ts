@@ -159,8 +159,10 @@ export class UnknownSchemeError extends NetwayError {
 /** Thrown when attempting to write to or send through a closed socket. */
 export class SocketClosedError extends NetwayError {
   readonly code: 'ECLOSED';
+  /** Why the socket was closed, when known. */
+  readonly reason: string | null;
 
-  constructor();
+  constructor(reason?: string);
 }
 
 /** Thrown when a gateway operation does not receive a response within the configured timeout. */
@@ -236,7 +238,32 @@ export interface StreamSocketPairOptions {
    * @default 1024
    */
   highWaterMark?: number;
+  /**
+   * A write waits while this many bytes are queued unread, per direction.
+   * `0` never waits.
+   * @default 1048576
+   */
+  highWaterBytes?: number;
+  /**
+   * Waiting writes continue once the queue is at or below this. Must be below
+   * `highWaterBytes`.
+   * @default highWaterBytes / 4
+   */
+  lowWaterBytes?: number;
+  /**
+   * Hard cap on queued bytes; exceeding it closes the socket with a reason.
+   * A single chunk is always accepted when nothing is queued. `0` for none.
+   * @default 4194304
+   */
+  maxBufferedBytes?: number;
 }
+
+/** Defaults for the byte limits of a stream. */
+export const STREAM_DEFAULTS: Readonly<{
+  highWaterBytes: number;
+  lowWaterBytes: number;
+  maxBufferedBytes: number;
+}>;
 
 /**
  * A reliable, ordered, bidirectional byte stream socket (TCP-like).
@@ -249,21 +276,33 @@ export class StreamSocket {
   read(): Promise<Uint8Array | null>;
 
   /**
-   * Write a chunk of data to the stream.
+   * Write a chunk of data to the stream. The promise stays pending while the
+   * peer has not read the bytes already queued up to the high-water mark.
    *
    * @param data - The data to send.
-   * @throws SocketClosedError if the socket has already been closed.
+   * @throws SocketClosedError if the socket has been closed (see `reason`).
    */
   write(data: Uint8Array): Promise<void>;
 
   /**
    * Close the socket, shutting down both directions.
    * Calling close on an already-closed socket is a no-op.
+   *
+   * @param reason - Recorded as `closeReason` on both endpoints.
    */
-  close(): Promise<void>;
+  close(reason?: string): Promise<void>;
 
   /** Whether this socket has been closed. */
   readonly closed: boolean;
+
+  /** Why the socket was closed (by either side, or by a limit), or null. */
+  readonly closeReason: string | null;
+
+  /** Bytes queued for this socket to read. */
+  readonly bufferedInbound: number;
+
+  /** Bytes this socket has written that the peer has not read yet. */
+  readonly bufferedOutbound: number;
 
   /**
    * Create a connected pair of StreamSockets for in-memory communication.
