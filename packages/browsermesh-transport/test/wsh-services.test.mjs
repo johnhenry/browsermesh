@@ -9,7 +9,7 @@ import { PodIdentity } from '@johnhenry/browsermesh-primitives';
 
 import {
   WshServices, servicesRendezvousId, podIdToFingerprint, podIdFromRawKey, WshPeerLinks,
-} from '../src/index.mjs';
+} from '../src/wsh.mjs';
 import { waitFor, settle } from './_wait.mjs';
 import { RELAY, makeEnv } from './helpers/wsh-rig.mjs';
 import { fakeRegistry } from './helpers/fake-registry.mjs';

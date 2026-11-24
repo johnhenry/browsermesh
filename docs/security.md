@@ -94,7 +94,7 @@ hand-written.
 | `browsermesh-primitives` | yes | `.` | yes | no | yes |
 | `browsermesh-priority-mux` | yes | `.` | yes | no | no |
 | `browsermesh-sync` | yes | `.` | yes | no | yes |
-| `browsermesh-transport` | yes | `.` `./wsh-in-process` | yes | yes | yes |
+| `browsermesh-transport` | yes | `.` `./wsh` `./wsh-in-process` | yes | yes | yes |
 <!-- status-facts:end -->
 
 Netway's README now lists the capability tags that exist in

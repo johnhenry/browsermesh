@@ -12,7 +12,7 @@ import assert from 'node:assert/strict'
 
 import { PodIdentity } from '@johnhenry/browsermesh-primitives'
 import { MeshPeerManager, TrustGraph, MeshACL } from '@johnhenry/browsermesh-core'
-import { WshServices, connectWshServicesOverMesh } from '@johnhenry/browsermesh-transport'
+import { WshServices, connectWshServicesOverMesh } from '@johnhenry/browsermesh-transport/wsh'
 import { PeerRegistry } from '../src/peer-registry.mjs'
 import { attachService } from '../src/mesh-service.mjs'
 import { createMeshProtocolService } from '../src/protocol-channel.mjs'

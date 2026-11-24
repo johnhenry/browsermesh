@@ -78,7 +78,7 @@ describeIfReal('a relaying pod: alice reaches bob\'s services through a third po
     const { createMeshNode, attachService, createMeshProtocolService } = await import('@johnhenry/browsermesh-apps')
     const { MeshIdentityManager } = await import('@johnhenry/browsermesh-core')
     const { ManualStrategy } = await import('@johnhenry/browsermesh-discovery')
-    const { WshServices, WshRelay } = await import('@johnhenry/browsermesh-transport')
+    const { WshServices, WshRelay } = await import('@johnhenry/browsermesh-transport/wsh')
 
     const shared = bus()
     for (const label of ['alice', 'relay', 'bob']) {
@@ -127,7 +127,7 @@ describeIfReal('a relaying pod: alice reaches bob\'s services through a third po
 
   it('is refused without the per-target grant, then serves the real wsh client end to end, unreadable to the relay, until the grant is revoked', async () => {
     const { alice, relay: relayNode, bob } = nodes
-    const { connectWshServicesViaRelay } = await import('@johnhenry/browsermesh-transport')
+    const { connectWshServicesViaRelay } = await import('@johnhenry/browsermesh-transport/wsh')
     const { openObjects } = await import('@johnhenry/wsh/objects')
     const aliceKey = managers.alice.getIdentity(alice.podId)
     const credentials = async () => ({ username: 'alice', signer: { publicKey: await aliceKey.rawPublicKey(), sign: (data) => aliceKey.sign(data) }, timeout: 10_000 })

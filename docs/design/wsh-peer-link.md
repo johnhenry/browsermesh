@@ -340,10 +340,12 @@ with the pod's own `WebSocketTransport`, and has not been built here; the
 `@johnhenry/wsh` is `sideEffects: false` with one entry point per role, and
 is imported lazily (`import()` with a literal specifier on first use, so a
 bundler splits it into chunks a page that never links over wsh never fetches).
+The wsh modules sit behind their own subpath (`@johnhenry/browsermesh-transport/wsh`): the main entry's import
+graph holds no wsh specifier, so an application that does not use wsh bundles the transport without it.
 The dialling role imports `@johnhenry/wsh` (the client); the listening role
 imports `@johnhenry/wsh/memory` (the host). The in-process test relay is a
-separate subpath (`@johnhenry/browsermesh-transport/wsh-in-process`) because it
-imports wsh's pipe relay, which has a Node-only listener.
+separate, Node-only subpath (`@johnhenry/browsermesh-transport/wsh-in-process`, a `node` export condition only)
+because it imports wsh's pipe relay, which has a Node-only listener.
 
 Measured with esbuild (minified, browser, splitting), wsh 0.45.0: a page that
 uses no wsh link pays +0.56 kB raw / +0.16 kB gzip in the main chunk (the

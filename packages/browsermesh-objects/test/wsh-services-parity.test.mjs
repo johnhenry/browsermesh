@@ -6,7 +6,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { actionFor } from '../src/actions.mjs'
-import { wshObjectActionFor } from '@johnhenry/browsermesh-transport'
+import { wshObjectActionFor } from '@johnhenry/browsermesh-transport/wsh'
 
 const KINDS = ['get', 'describe', 'snapshot', 'call', 'construct', 'set', 'on']
 

@@ -5,7 +5,7 @@
 import { describe, it, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { WshLinkError, rendezvousId, usernameForPodId } from '../src/index.mjs';
+import { WshLinkError, rendezvousId, usernameForPodId } from '../src/wsh.mjs';
 import { waitFor, settle } from './_wait.mjs';
 import { RELAY, makeEnv, makeIdentities, makeHub, bytesContain, concatRecorded } from './helpers/wsh-rig.mjs';
 
@@ -128,7 +128,7 @@ describe('wsh link: identity', () => {
     const env = await makeEnv();
     cleanups.push(() => env.close());
     const [ia, ib] = await makeIdentities(2);
-    const { WshPeerLinks } = await import('../src/index.mjs');
+    const { WshPeerLinks } = await import('../src/wsh.mjs');
     const A = new WshPeerLinks({ identity: ia, relays: [RELAY], WebSocket: env.WebSocket, authorize: () => true });
     const B = new WshPeerLinks({ identity: ib, relays: [RELAY], WebSocket: env.WebSocket });
     cleanups.push(() => A.close(), () => B.close());

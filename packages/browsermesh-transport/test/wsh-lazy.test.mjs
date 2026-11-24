@@ -24,7 +24,7 @@ describe('@johnhenry/wsh is optional and lazy', () => {
   it('the main entry does not export the in-process relay (it reaches wsh\'s Node-only pipe relay)', () => {
     const index = readFileSync(join(srcDir, 'index.mjs'), 'utf8');
     assert.equal(/^export .*wsh-in-process/m.test(index), false);
-    assert.equal(pkg.exports['./wsh-in-process'], './src/wsh-in-process.mjs');
+    assert.deepEqual(pkg.exports['./wsh-in-process'], { node: './src/wsh-in-process.mjs' });
   });
 
   it('wsh is an optional peer dependency, and a dev dependency for the tests', () => {

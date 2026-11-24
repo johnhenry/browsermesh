@@ -11,7 +11,7 @@ import { describe, it, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 
 import { podIdToFingerprint } from '@johnhenry/browsermesh-primitives'
-import { WshServices, WshRelay, connectWshServicesViaRelay } from '@johnhenry/browsermesh-transport'
+import { WshServices, WshRelay, connectWshServicesViaRelay } from '@johnhenry/browsermesh-transport/wsh'
 import { pods, hostile, waitFor } from './helpers/mesh-pods.mjs'
 
 const { openObjects } = await import('@johnhenry/wsh/objects')

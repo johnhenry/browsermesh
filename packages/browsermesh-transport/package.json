@@ -5,8 +5,14 @@
   "type": "module",
   "main": "./src/index.mjs",
   "exports": {
-    ".": "./src/index.mjs",
-    "./wsh-in-process": "./src/wsh-in-process.mjs"
+    ".": {
+      "node": "./src/index-node-compat.mjs",
+      "default": "./src/index.mjs"
+    },
+    "./wsh": "./src/wsh.mjs",
+    "./wsh-in-process": {
+      "node": "./src/wsh-in-process.mjs"
+    }
   },
   "files": [
     "src",
@@ -21,7 +27,7 @@
   },
   "peerDependencies": {
     "@johnhenry/browsermesh-primitives": ">=0.6.0 <1.0.0",
-    "@johnhenry/wsh": ">=0.45.0 <1.0.0"
+    "@johnhenry/wsh": "*"
   },
   "peerDependenciesMeta": {
     "@johnhenry/wsh": {

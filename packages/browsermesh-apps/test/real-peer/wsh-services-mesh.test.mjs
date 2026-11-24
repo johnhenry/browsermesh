@@ -77,7 +77,7 @@ describeIfReal('wsh services over a mesh channel: alice dials bob\'s services ov
     const { createMeshNode, attachService, createMeshProtocolService } = await import('@johnhenry/browsermesh-apps')
     const { MeshIdentityManager } = await import('@johnhenry/browsermesh-core')
     const { ManualStrategy } = await import('@johnhenry/browsermesh-discovery')
-    const { WshServices } = await import('@johnhenry/browsermesh-transport')
+    const { WshServices } = await import('@johnhenry/browsermesh-transport/wsh')
 
     const shared = bus()
     for (const label of ['alice', 'bob']) {
@@ -118,7 +118,7 @@ describeIfReal('wsh services over a mesh channel: alice dials bob\'s services ov
 
   it('refuses a peer with no grant, then serves the real wsh client under the grants, with nothing readable on the channel after login', async () => {
     const { alice, bob } = nodes
-    const { connectWshServicesOverMesh } = await import('@johnhenry/browsermesh-transport')
+    const { connectWshServicesOverMesh } = await import('@johnhenry/browsermesh-transport/wsh')
     const { openObjects } = await import('@johnhenry/wsh/objects')
     const aliceKey = managers.alice.getIdentity(alice.podId)
     const credentials = async () => ({ username: 'alice', signer: { publicKey: await aliceKey.rawPublicKey(), sign: (data) => aliceKey.sign(data) }, timeout: 10_000 })

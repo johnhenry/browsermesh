@@ -10,10 +10,8 @@ import {
   MeshTransportNegotiator,
   MockMeshTransport,
   TransportFactory,
-  createWshTransportFactory,
-  WshLink,
-  WshLinkError,
 } from '../src/index.mjs';
+import { createWshTransportFactory, WshLink, WshLinkError } from '../src/wsh.mjs';
 import { waitFor } from './_wait.mjs';
 import { makeEnv, makeIdentities, makeHub } from './helpers/wsh-rig.mjs';
 

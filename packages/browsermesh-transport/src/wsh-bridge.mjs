@@ -20,7 +20,7 @@
  * along with the rest of the suite).
  */
 
-import { podIdToFingerprint, fingerprintToPodId } from './wsh-links.mjs';
+import { podIdToFingerprint, fingerprintToPodId } from '@johnhenry/browsermesh-primitives';
 
 // ---------------------------------------------------------------------------
 // Hex <-> Base64url conversion helpers
