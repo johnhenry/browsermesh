@@ -37,10 +37,12 @@
     "example:15": "node examples/15-agent-spawns-hosted-pod.mjs",
     "example:16": "node examples/16-supervised-hosted-pods.mjs",
     "example:17": "node examples/17-mesh-channel.mjs",
-    "example:18": "node examples/18-wsh-sealed-peer-link.mjs"
+    "example:18": "node examples/18-wsh-sealed-peer-link.mjs",
+    "example:19": "node examples/19-wsh-objects-over-protocol-channel.mjs"
   },
   "devDependencies": {
     "@changesets/cli": "^2.27.0",
+    "@johnhenry/wsh": "^0.46.0",
     "@playwright/test": "1.65.1",
     "turbo": "^2.0.0"
   },
