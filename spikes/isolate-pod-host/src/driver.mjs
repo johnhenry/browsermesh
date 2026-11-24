@@ -52,11 +52,13 @@ const STATUS_CODES = Object.freeze({
  * @param {object} opts
  * @param {string} opts.baseUrl - Where the Worker is listening, e.g.
  *   `http://localhost:8787` (a trailing slash is tolerated).
+ * @param {string} [opts.token] - The host's `CONTROL_TOKEN`, sent as a bearer
+ *   token on every request. Needed whenever the host has one configured.
  * @param {typeof globalThis.fetch} [opts.fetch] - Injectable, like every
  *   other adapter in this family. Defaults to the global `fetch`.
  * @returns {import('@johnhenry/browsermesh-pod').PodHostDriver}
  */
-export function createIsolatePodDriver({ baseUrl, fetch: fetchImpl } = {}) {
+export function createIsolatePodDriver({ baseUrl, fetch: fetchImpl, token } = {}) {
   if (!baseUrl || typeof baseUrl !== 'string') {
     throw new Error('createIsolatePodDriver: baseUrl is required')
   }
@@ -74,7 +76,9 @@ export function createIsolatePodDriver({ baseUrl, fetch: fetchImpl } = {}) {
   async function call(path, init = {}) {
     let response
     try {
-      response = await doFetch(`${root}${path}`, init)
+      response = await doFetch(`${root}${path}`, token
+        ? { ...init, headers: { ...init.headers, Authorization: `Bearer ${token}` } }
+        : init)
     } catch (err) {
       // The host is unreachable, which is not any of the pod-level errors.
       throw new PodHostDriverError(

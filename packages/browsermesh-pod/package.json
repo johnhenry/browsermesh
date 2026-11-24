@@ -9,6 +9,10 @@
     ".": {
       "types": "./src/index.d.ts",
       "import": "./src/index.mjs"
+    },
+    "./node-runtimes": {
+      "types": "./src/node-runtimes.d.ts",
+      "import": "./src/node-runtimes.mjs"
     }
   },
   "files": [

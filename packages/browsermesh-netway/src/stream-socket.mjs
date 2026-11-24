@@ -1,209 +1,232 @@
 /**
- * StreamSocket — reliable, ordered byte stream built on an internal async buffer.
+ * StreamSocket — reliable, ordered byte stream with byte-level backpressure.
  *
  * Provides a TCP-like abstraction where two endpoints exchange `Uint8Array` chunks
  * in order. Uses {@link AsyncBuffer} internally instead of `TransformStream` so that
  * both ends can be closed cleanly without dangling readers or writers.
  *
+ * ## Backpressure
+ *
+ * Each direction is one {@link AsyncBuffer}. The RECEIVING end advertises a
+ * window (`windowBytes`) on it; the sending end's `write()` resolves only once
+ * every byte has been taken into that window, so a reader that does not read
+ * stops its writer, and the data held on each side is bounded: at most
+ * `windowBytes` unread bytes at the receiver (`readableLength`), and at most
+ * the not-yet-accepted remainder of the writes still in flight at the sender
+ * (`writableLength`). Reading returns credit and wakes the writer. A chunk
+ * larger than the window is delivered in window-sized pieces (views, no copy).
+ *
+ * ## Compatibility
+ *
+ * A buffer with no window (`windowBytes: 0`, or a buffer object from before
+ * windows existed, which has no `windowBytes` property) is served exactly as
+ * before: `write()` returns as soon as the chunk is queued and the buffer
+ * closes after `highWaterMark` queued chunks. A sender never waits for credit
+ * from a receiver that did not advertise a window, and a windowed receiver
+ * tolerates a sender that ignores credit (it just falls back to the chunk cap).
+ *
  * Typical usage: call {@link StreamSocket.createPair} to get two connected sockets,
  * or receive one from {@link Listener#accept} / {@link Backend#connect}.
- *
- * Flow control: each direction counts the bytes queued and not yet read.
- * `write()` waits (it does not return) while that count is at or above
- * `highWaterBytes`, and continues once the reader has brought it to
- * `lowWaterBytes` or below, so a fast writer cannot outrun a slow reader.
- * Nothing is dropped. If the count would pass `maxBufferedBytes`, or the
- * queue passes `highWaterMark` chunks, the socket closes and records why
- * (`closeReason`).
  *
  * @module stream-socket
  */
 
 import { SocketClosedError } from './errors.mjs';
 
-/**
- * Defaults for the byte limits of a stream, per direction.
- *
- * - `highWaterBytes`: a write waits while this many bytes are queued unread.
- * - `lowWaterBytes`: waiting writes continue once the queue is at or below this.
- * - `maxBufferedBytes`: hard cap; exceeding it closes the socket with a reason.
- *   A single chunk is always accepted when nothing is queued, whatever its size.
- *
- * A value of `0` disables the corresponding limit.
- */
-export const STREAM_DEFAULTS = Object.freeze({
-  highWaterBytes: 1024 * 1024,
-  lowWaterBytes: 256 * 1024,
-  maxBufferedBytes: 4 * 1024 * 1024,
-});
+/** Default per-direction receive window, in bytes. */
+export const DEFAULT_WINDOW_BYTES = 256 * 1024;
 
 /**
- * Asynchronous FIFO buffer with blocking pull semantics and byte accounting.
+ * Asynchronous FIFO buffer with blocking pull semantics and an optional byte
+ * window. One buffer carries one direction of a socket pair.
  *
- * Data offered to the buffer is either delivered immediately to a waiting
- * consumer or queued until a consumer calls {@link AsyncBuffer#pull}. Once
- * closed, all pending and future pulls resolve with `null`.
+ * Writer side: {@link AsyncBuffer#put} (credit-aware) or the legacy
+ * {@link AsyncBuffer#push}; {@link AsyncBuffer#end} signals EOF after the
+ * queued data. Reader side: {@link AsyncBuffer#pull}; {@link AsyncBuffer#cancel}
+ * says no more data is wanted. {@link AsyncBuffer#destroy} aborts both with an
+ * error.
  *
  * @private
  */
-class AsyncBuffer {
+export class AsyncBuffer {
   #queue = [];
-  #waiters = [];
-  #pendingWrites = [];
-  #closed = false;
-  #closeReason = null;
-  #blocked = false;
   #bytes = 0;
+  #readers = [];
+  #spaceWaiters = [];
+  #ended = false;
+  #cancelled = false;
+  #error = null;
+  #closeReason = null;
   #highWaterMark;
-  #highWaterBytes;
-  #lowWaterBytes;
-  #maxBufferedBytes;
+  #windowBytes;
 
   /**
    * @param {Object} [opts={}]
-   * @param {number} [opts.highWaterMark=0] - Maximum queue depth in chunks before the
-   *   buffer is closed to prevent unbounded memory growth. `0` means unlimited.
-   * @param {number} [opts.highWaterBytes=0] - Queued bytes at which `offer()` starts waiting. `0`: never.
-   * @param {number} [opts.lowWaterBytes=0] - Queued bytes at or below which waiting offers continue.
-   * @param {number} [opts.maxBufferedBytes=0] - Queued bytes above which the buffer closes. `0`: never.
+   * @param {number} [opts.highWaterMark=0] - Maximum queued chunks. Unwindowed:
+   *   the buffer closes when reached (legacy). Windowed: writers wait instead.
+   *   `0` means unlimited.
+   * @param {number} [opts.windowBytes=0] - Receive window in bytes; `0` means
+   *   no window (legacy behavior).
    */
-  constructor({ highWaterMark = 0, highWaterBytes = 0, lowWaterBytes = 0, maxBufferedBytes = 0 } = {}) {
+  constructor({ highWaterMark = 0, windowBytes = 0 } = {}) {
     this.#highWaterMark = highWaterMark;
-    this.#highWaterBytes = highWaterBytes;
-    this.#lowWaterBytes = lowWaterBytes;
-    this.#maxBufferedBytes = maxBufferedBytes;
+    this.#windowBytes = windowBytes > 0 ? windowBytes : 0;
   }
 
-  /** Bytes queued and not yet pulled. */
-  get bytes() { return this.#bytes; }
+  /** Receive window advertised to the writer (0 = none). */
+  get windowBytes() { return this.#windowBytes; }
 
-  /** Why the buffer was closed, or `null`. */
+  /** Unread bytes currently queued. */
+  get bufferedBytes() { return this.#bytes; }
+
+  /** Whether no more data will be accepted (ended, cancelled or destroyed). */
+  get isClosed() { return this.#ended || this.#cancelled || this.#error !== null; }
+
+  /** Why this direction was closed, when a reason was recorded (the first one is kept). */
   get closeReason() { return this.#closeReason; }
 
-  /**
-   * Hand a chunk to the buffer. Resolves when the chunk has been accepted:
-   * at once while the queued bytes are under the high-water mark, otherwise
-   * after the reader has drained the queue to the low-water mark. Chunks keep
-   * their order. Rejects if the buffer is, or becomes, closed.
-   *
-   * @param {Uint8Array} data
-   * @returns {Promise<void>}
-   */
-  offer(data) {
-    if (this.#closed) return Promise.reject(new SocketClosedError(this.#closeReason));
-    if (this.#blocked || this.#atHighWater()) {
-      this.#blocked = true;
-      return new Promise((resolve, reject) => this.#pendingWrites.push({ data, resolve, reject }));
-    }
-    return this.#accept(data) ? Promise.resolve() : Promise.reject(new SocketClosedError(this.#closeReason));
+  /** Record why this direction is being closed; the first reason given is kept. */
+  setCloseReason(reason) {
+    if (reason) this.#closeReason ??= reason;
   }
 
-  #atHighWater() {
-    return this.#highWaterBytes > 0 && this.#bytes >= this.#highWaterBytes;
+  #wake(list, value) {
+    const waiting = list.splice(0);
+    for (const w of waiting) w(value);
   }
 
   /**
-   * Deliver or enqueue a chunk now. A chunk that goes straight to a waiting
-   * reader is not counted. If the queue exceeds a limit the buffer closes.
+   * Legacy push: queue (or hand to a waiting reader) without waiting for
+   * credit. Closes the buffer when `highWaterMark` chunks are queued.
    *
    * @param {Uint8Array} data
-   * @returns {boolean} `true` if accepted, `false` if the buffer is closed.
+   * @returns {boolean} `true` if accepted, `false` if closed (or overflowed).
    */
-  #accept(data) {
-    if (this.#closed) return false;
-    if (this.#waiters.length > 0) {
-      this.#waiters.shift()(data);
+  push(data) {
+    if (this.isClosed) return false;
+    if (this.#readers.length > 0) {
+      this.#readers.shift()({ value: data });
       return true;
-    }
-    if (this.#maxBufferedBytes > 0 && this.#bytes > 0 && this.#bytes + data.length > this.#maxBufferedBytes) {
-      this.close('buffer limit exceeded');
-      return false;
     }
     this.#queue.push(data);
     this.#bytes += data.length;
-    // Check the chunk limit — stop accepting new data but keep the queue
-    // intact so existing data can still be drained by pull().
     if (this.#highWaterMark > 0 && this.#queue.length >= this.#highWaterMark) {
-      this.#closed = true;
-      this.#closeReason ??= 'queue limit exceeded';
-      this.#rejectPending();
+      // Stop accepting new pushes but keep the queue so it can still be drained.
+      this.#ended = true;
       return false;
     }
     return true;
   }
 
   /**
-   * Pull the next data chunk from the buffer. If data is already queued, resolves
-   * immediately. If the buffer is empty and open, blocks until data arrives. If the
-   * buffer is closed (or closes while waiting), resolves with `null`.
+   * Credit-aware put: resolves once every byte of `data` is inside the window.
    *
-   * @returns {Promise<Uint8Array|null>} The next chunk, or `null` if the buffer is closed.
+   * @param {Uint8Array} data
+   * @param {(n: number) => void} [onAccepted] - Called with the size of each
+   *   piece as it is accepted (for the writer's pending-bytes counter).
+   * @param {() => boolean} [aborted] - Polled after each wait; true aborts.
+   * @returns {Promise<void>}
+   * @throws {SocketClosedError} If the buffer closes before all bytes fit.
    */
-  pull() {
-    if (this.#queue.length > 0) {
-      const chunk = this.#queue.shift();
-      this.#bytes -= chunk.length;
-      if (this.#blocked && this.#bytes <= this.#lowWaterBytes) this.#releaseWrites();
-      return Promise.resolve(chunk);
-    }
-    if (this.#closed) return Promise.resolve(null);
-    return new Promise(resolve => this.#waiters.push(resolve));
-  }
-
-  /** Let waiting writes continue, in order, until the high-water mark is reached again. */
-  #releaseWrites() {
-    this.#blocked = false;
-    while (this.#pendingWrites.length > 0) {
-      if (this.#atHighWater()) {
-        this.#blocked = true;
-        return;
+  async put(data, onAccepted, aborted) {
+    let off = 0;
+    while (off < data.length) {
+      if (this.isClosed || (aborted && aborted())) throw new SocketClosedError(this.#closeReason);
+      const remaining = data.length - off;
+      if (this.#readers.length > 0) {
+        const n = Math.min(remaining, this.#windowBytes || remaining);
+        this.#readers.shift()({ value: data.subarray(off, off + n) });
+        off += n;
+        onAccepted?.(n);
+        continue;
       }
-      const { data, resolve, reject } = this.#pendingWrites.shift();
-      if (this.#accept(data)) resolve();
-      else reject(new SocketClosedError(this.#closeReason));
-      if (this.#closed) return;
+      const room = this.#windowBytes - this.#bytes;
+      const chunkRoom = this.#highWaterMark > 0 ? this.#highWaterMark - this.#queue.length : Infinity;
+      if (room <= 0 || chunkRoom <= 0) {
+        await new Promise((resolve) => this.#spaceWaiters.push(resolve));
+        continue;
+      }
+      const n = Math.min(remaining, room);
+      this.#queue.push(n === data.length ? data : data.subarray(off, off + n));
+      this.#bytes += n;
+      off += n;
+      onAccepted?.(n);
     }
-  }
-
-  #rejectPending() {
-    const pending = this.#pendingWrites.splice(0);
-    for (const { reject } of pending) reject(new SocketClosedError(this.#closeReason));
   }
 
   /**
-   * Close the buffer. All currently waiting consumers receive `null`, waiting
-   * writers are rejected. Any remaining queued data is discarded. Further
-   * offers are rejected.
+   * Pull the next chunk. Resolves `null` at EOF (after the queue drains), and
+   * rejects if the buffer was destroyed with an error.
    *
-   * @param {string} [reason] - Why it was closed; the first reason given is kept.
+   * @returns {Promise<Uint8Array|null>}
    */
-  close(reason) {
-    this.#closed = true;
-    if (reason) this.#closeReason ??= reason;
-    for (const w of this.#waiters) w(null);
-    this.#waiters.length = 0;
-    this.#queue.length = 0;
-    this.#bytes = 0;
-    this.#rejectPending();
+  pull() {
+    if (this.#error) return Promise.reject(this.#error);
+    if (this.#queue.length > 0) {
+      const item = this.#queue.shift();
+      this.#bytes -= item.length;
+      this.#wake(this.#spaceWaiters); // credit returned to the writer
+      return Promise.resolve(item);
+    }
+    if (this.isClosed) return Promise.resolve(null);
+    return new Promise((resolve, reject) => {
+      this.#readers.push((r) => (r.error ? reject(r.error) : resolve(r.value ?? null)));
+    });
   }
 
-  /** Whether this buffer has been closed. */
-  get isClosed() { return this.#closed; }
+  /** Writer is done: readers get what is queued, then EOF. */
+  end() {
+    this.#ended = true;
+    this.#wake(this.#readers, { value: null });
+    this.#wake(this.#spaceWaiters);
+  }
+
+  /** Reader wants no more data: queued data is dropped, writers fail. */
+  cancel() {
+    this.#cancelled = true;
+    this.#queue.length = 0;
+    this.#bytes = 0;
+    this.#wake(this.#readers, { value: null });
+    this.#wake(this.#spaceWaiters);
+  }
+
+  /** Abort with an error: queued data is dropped, readers reject with `err`. */
+  destroy(err) {
+    this.#error = err ?? new SocketClosedError();
+    this.#queue.length = 0;
+    this.#bytes = 0;
+    this.#wake(this.#readers, { error: this.#error });
+    this.#wake(this.#spaceWaiters);
+  }
+
+  /** Legacy close: both ends of this direction are done; queued data is dropped. */
+  close() {
+    this.cancel();
+  }
 }
 
 /**
  * A reliable, ordered, bidirectional byte stream socket.
  *
- * Each socket holds references to two {@link AsyncBuffer}s: one for inbound data
- * (data arriving *to* this socket) and one for outbound data (data leaving *from*
+ * Each socket holds references to two buffers: one for inbound data (data
+ * arriving *to* this socket) and one for outbound data (data leaving *from*
  * this socket, which is the peer's inbound buffer).
  *
- * Closing a socket closes both buffers, which signals EOF to both endpoints.
+ * `close()` stops writing (the peer still reads what was already accepted,
+ * then sees EOF) and discards this side's unread input. `end()` is the
+ * half-close: only the write direction stops. `destroy(err)` aborts both
+ * directions and makes the peer's pending and next reads reject with `err`.
+ * `close(reason)` also records why, on both endpoints (`closeReason`).
  */
 export class StreamSocket {
-  #inbound;   // AsyncBuffer — data coming TO this socket
-  #outbound;  // AsyncBuffer — data going FROM this socket (peer's inbound)
+  #inbound;   // data coming TO this socket
+  #outbound;  // data going FROM this socket (peer's inbound)
   #closed = false;
+  #writeEnded = false;
+  #writeTail = Promise.resolve();
+  #pendingWriteBytes = 0;
+  #readable = null;
+  #writable = null;
 
   /**
    * Create a StreamSocket with pre-wired inbound and outbound buffers.
@@ -221,7 +244,9 @@ export class StreamSocket {
 
   /**
    * Read the next chunk of data from the stream. Blocks until data is available.
-   * Returns `null` when the socket (or its inbound buffer) is closed, signaling EOF.
+   * Returns `null` at EOF (the peer closed or ended and everything it sent has
+   * been read, or this socket is closed). Rejects if the peer destroyed the
+   * socket with an error.
    *
    * @returns {Promise<Uint8Array|null>} The next data chunk, or `null` on EOF.
    */
@@ -231,45 +256,142 @@ export class StreamSocket {
   }
 
   /**
-   * Write a chunk of data to the stream. The data is pushed to the peer's
-   * inbound buffer. While the peer has not read the bytes already queued up to
-   * the high-water mark, the returned promise stays pending; it settles once
-   * the chunk has been accepted.
+   * Write a chunk of data to the stream. With a windowed peer the promise
+   * resolves only once the peer's window has taken every byte (so a peer that
+   * does not read eventually stalls its writer); concurrent writes are
+   * delivered in call order. Against a peer with no window it resolves as soon
+   * as the chunk is queued, as before.
    *
    * @param {Uint8Array} data - The data to send.
-   * @throws {SocketClosedError} If the socket has been closed (the error carries `reason`).
+   * @throws {SocketClosedError} If the socket is closed or write-ended, or the
+   *   peer closes before the bytes are accepted (the error carries `reason`).
    */
-  async write(data) {
-    if (this.#closed) throw new SocketClosedError(this.closeReason);
-    await this.#outbound.offer(data);
+  write(data) {
+    if (this.#closed || this.#writeEnded) return Promise.reject(new SocketClosedError(this.closeReason));
+    const out = this.#outbound;
+    if (!(out.windowBytes > 0) || typeof out.put !== 'function') {
+      // Peer advertised no window: served as before.
+      if (!out.push(data)) return Promise.reject(new SocketClosedError(this.closeReason));
+      return Promise.resolve();
+    }
+    if (data.length === 0) return Promise.resolve();
+    this.#pendingWriteBytes += data.length;
+    let accepted = 0;
+    const run = async () => {
+      try {
+        await out.put(data, (n) => { accepted += n; this.#pendingWriteBytes -= n; }, () => this.#closed);
+      } finally {
+        this.#pendingWriteBytes -= data.length - accepted; // unsent remainder on failure
+        accepted = data.length;
+      }
+    };
+    const result = this.#writeTail.then(run);
+    this.#writeTail = result.catch(() => {});
+    return result;
   }
 
   /**
-   * Close the socket, shutting down both directions. Subsequent reads return
-   * `null`; subsequent writes throw {@link SocketClosedError}. Calling close on
-   * an already-closed socket is a no-op.
+   * Half-close: no more writes. Waits for writes already made to be accepted,
+   * then the peer reads what was sent and sees EOF. This socket can still read.
    *
-   * @param {string} [reason] - Recorded as `closeReason` on both endpoints.
+   * @returns {Promise<void>}
+   */
+  async end() {
+    if (this.#writeEnded) return;
+    this.#writeEnded = true;
+    await this.#writeTail;
+    this.#endOutbound();
+  }
+
+  #endOutbound() {
+    if (typeof this.#outbound.end === 'function') this.#outbound.end();
+    else this.#outbound.close(); // pre-window buffer: only close() exists
+  }
+
+  /**
+   * Close the socket. Writes stop (a write still waiting for the peer rejects
+   * with {@link SocketClosedError}); what the peer was already given stays
+   * readable for it, followed by EOF. This side's unread input is discarded and
+   * its reads return `null`. Calling close on a closed socket is a no-op.
+   *
+   * @param {string} [reason] - Why the socket is being closed. Recorded as
+   *   `closeReason` on both endpoints (the first reason given is kept) and
+   *   carried by the {@link SocketClosedError} of later writes.
    * @returns {Promise<void>}
    */
   async close(reason) {
     if (this.#closed) return;
     this.#closed = true;
-    this.#inbound.close(reason);
-    this.#outbound.close(reason);
+    this.#writeEnded = true;
+    if (reason) {
+      this.#inbound.setCloseReason?.(reason);
+      this.#outbound.setCloseReason?.(reason);
+    }
+    this.#cancelInbound();
+    // Ending the outbound buffer also wakes a writer stuck on credit, which
+    // then sees the buffer closed and rejects.
+    this.#endOutbound();
+  }
+
+  #cancelInbound() {
+    if (typeof this.#inbound.cancel === 'function') this.#inbound.cancel();
+    else this.#inbound.close();
+  }
+
+  /**
+   * Abort both directions. This side's reads return `null`; the peer's pending
+   * and later reads reject with `err`, and its writes fail with
+   * {@link SocketClosedError}.
+   *
+   * @param {Error} [err]
+   */
+  destroy(err) {
+    if (this.#closed) return;
+    this.#closed = true;
+    this.#writeEnded = true;
+    this.#cancelInbound();
+    if (typeof this.#outbound.destroy === 'function') this.#outbound.destroy(err);
+    else this.#outbound.close();
   }
 
   /** Whether this socket has been closed. */
   get closed() { return this.#closed; }
 
-  /** Why the socket was closed (by either side, or by a limit), or `null`. */
-  get closeReason() { return this.#inbound.closeReason ?? this.#outbound.closeReason; }
+  /** Why the socket was closed, when `close(reason)` was given one (by either side), or `null`. */
+  get closeReason() { return this.#inbound.closeReason ?? this.#outbound.closeReason ?? null; }
 
-  /** Bytes queued for this socket to read. */
-  get bufferedInbound() { return this.#inbound.bytes; }
+  /** The receive window this socket advertises to its writer, in bytes (0 = none). */
+  get windowBytes() { return this.#inbound.windowBytes ?? 0; }
 
-  /** Bytes this socket has written that the peer has not read yet. */
-  get bufferedOutbound() { return this.#outbound.bytes; }
+  /** The window the peer advertises to this socket's writes, in bytes (0 = none). */
+  get peerWindowBytes() { return this.#outbound.windowBytes ?? 0; }
+
+  /** Unread bytes buffered for this socket's reader. Never exceeds `windowBytes` when a window is set. */
+  get readableLength() { return this.#inbound.bufferedBytes ?? 0; }
+
+  /** Bytes from `write()` calls that the peer has not yet taken into its window. */
+  get writableLength() { return this.#pendingWriteBytes; }
+
+  /** A Web `ReadableStream` view (pulled one chunk at a time, so it honours backpressure). */
+  get readable() {
+    return this.#readable ??= new ReadableStream({
+      pull: async (controller) => {
+        const chunk = await this.read();
+        if (chunk === null) controller.close();
+        else controller.enqueue(chunk);
+      },
+      cancel: () => this.close(),
+    }, { highWaterMark: 0 });
+  }
+
+  /** A Web `WritableStream` view; `close()` is a half-close and `abort(err)` destroys. */
+  get writable() {
+    return this.#writable ??= new WritableStream({
+      write: (chunk) => this.write(chunk),
+      close: () => this.end(),
+      abort: (err) => this.destroy(err instanceof Error ? err : undefined),
+    });
+  }
 
   /**
    * Create a connected pair of StreamSockets suitable for in-memory (loopback)
@@ -277,27 +399,21 @@ export class StreamSocket {
    * vice versa.
    *
    * @param {Object} [opts={}]
-   * @param {number} [opts.highWaterMark=1024] - Maximum queue depth (chunks) per buffer
-   *   before the socket is closed to prevent unbounded memory growth. Set to
-   *   `0` for unlimited (not recommended for production use).
-   * @param {number} [opts.highWaterBytes=1048576] - A write waits while this many bytes are queued unread (per direction). `0`: never wait.
-   * @param {number} [opts.lowWaterBytes=highWaterBytes/4] - Waiting writes continue at or below this. Must be below `highWaterBytes`.
-   * @param {number} [opts.maxBufferedBytes=4194304] - Hard cap; exceeding it closes the socket with a reason. `0`: none.
+   * @param {number} [opts.highWaterMark=1024] - Maximum queued chunks per
+   *   direction. Windowed directions make the writer wait at this depth; an
+   *   unwindowed direction closes instead (as before). `0` is unlimited.
+   * @param {number|[number, number]} [opts.windowBytes=DEFAULT_WINDOW_BYTES] -
+   *   The receive window of `[socketA, socketB]` (a single number applies to
+   *   both). `0` gives that socket no window, which is how a peer that cannot
+   *   send credit back (for example one fed from a wire with no flow control)
+   *   is served exactly as before.
    * @returns {[StreamSocket, StreamSocket]} A two-element array `[socketA, socketB]`
    *   where writing to `socketA` delivers to `socketB.read()`, and vice versa.
    */
-  static createPair({
-    highWaterMark = 1024,
-    highWaterBytes = STREAM_DEFAULTS.highWaterBytes,
-    lowWaterBytes = Math.floor(highWaterBytes / 4),
-    maxBufferedBytes = Math.max(STREAM_DEFAULTS.maxBufferedBytes, highWaterBytes * 4),
-  } = {}) {
-    if (highWaterBytes > 0 && lowWaterBytes >= highWaterBytes) {
-      throw new RangeError('lowWaterBytes must be below highWaterBytes');
-    }
-    const limits = { highWaterMark, highWaterBytes, lowWaterBytes, maxBufferedBytes };
-    const bufA = new AsyncBuffer(limits);
-    const bufB = new AsyncBuffer(limits);
+  static createPair({ highWaterMark = 1024, windowBytes = DEFAULT_WINDOW_BYTES } = {}) {
+    const [winA, winB] = Array.isArray(windowBytes) ? windowBytes : [windowBytes, windowBytes];
+    const bufA = new AsyncBuffer({ highWaterMark, windowBytes: winB }); // A -> B, B's window
+    const bufB = new AsyncBuffer({ highWaterMark, windowBytes: winA }); // B -> A, A's window
     const socketA = new StreamSocket({ inbound: bufB, outbound: bufA });
     const socketB = new StreamSocket({ inbound: bufA, outbound: bufB });
     return [socketA, socketB];

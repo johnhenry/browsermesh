@@ -368,6 +368,75 @@ describe('createPodHostService: access control', () => {
   })
 })
 
+describe('createPodHostService: what a requester sees of another requester\'s pod', () => {
+  /** @type {any} */ let host
+  /** @type {any} */ let bobClient
+  /** @type {any} */ let carolClient
+  /** @type {any} */ let driver
+
+  beforeEach(async () => {
+    host = await createPeer('host')
+    const bob = await createPeer('bob')
+    const carol = await createPeer('carol')
+    const nodes = wireMesh([host, bob, carol])
+    driver = new InMemoryPodHostDriver({ lane: POD_LANE.NODE })
+    attachService(nodes.get(host.podId), undefined, createPodHostService({ driver }))
+    host.registry.grantCapabilities(bob.podId, ALL_SCOPES)
+    host.registry.grantCapabilities(carol.podId, ALL_SCOPES)
+    bobClient = createPodHostClient({ peerNode: nodes.get(bob.podId), timeoutMs: 1000 })
+    carolClient = createPodHostClient({ peerNode: nodes.get(carol.podId), timeoutMs: 1000 })
+  })
+
+  const SECRET_SPEC = {
+    name: 'bobs-pod', lane: POD_LANE.NODE, run: { kind: 'command', ref: '/bin/true', input: { token: 'input-secret' } },
+    env: { API_KEY: 'env-secret', MODE: 'prod' }, labels: { team: 'a' },
+  }
+
+  it('the requester that spawned a pod sees its env and input', async () => {
+    const spawned = await bobClient.spawn(host.podId, SECRET_SPEC)
+    assert.deepEqual(spawned.spec.env, { API_KEY: 'env-secret', MODE: 'prod' })
+    assert.deepEqual((await bobClient.status(host.podId, 'bobs-pod')).spec.env, { API_KEY: 'env-secret', MODE: 'prod' })
+    assert.deepEqual((await bobClient.list(host.podId))[0].spec.run.input, { token: 'input-secret' })
+  })
+
+  it('another requester sees the pod, its names and labels, but not env values or input', async () => {
+    await bobClient.spawn(host.podId, SECRET_SPEC)
+    const viaStatus = await carolClient.status(host.podId, 'bobs-pod')
+    const viaList = (await carolClient.list(host.podId))[0]
+    for (const seen of [viaStatus, viaList]) {
+      assert.equal(seen.name, 'bobs-pod')
+      assert.equal(seen.state, POD_LIFECYCLE.REGISTERED)
+      assert.deepEqual(Object.keys(seen.spec.env).sort(), ['API_KEY', 'MODE'], 'the names are still visible')
+      assert.deepEqual(seen.spec.env, { API_KEY: '[redacted]', MODE: '[redacted]' })
+      assert.equal(seen.spec.run.input, '[redacted]')
+      assert.equal(seen.spec.run.ref, '/bin/true')
+      assert.deepEqual(seen.spec.labels, { team: 'a' })
+    }
+    assert.ok(!JSON.stringify([viaStatus, viaList]).includes('env-secret'))
+    assert.ok(!JSON.stringify([viaStatus, viaList]).includes('input-secret'))
+  })
+
+  it('a pod spawned by someone else\'s name reuse is attributed to its new spawner', async () => {
+    await bobClient.spawn(host.podId, SECRET_SPEC)
+    await bobClient.drain(host.podId, 'bobs-pod')
+    await carolClient.spawn(host.podId, { ...SECRET_SPEC, env: { API_KEY: 'carols-secret' } })
+    assert.equal((await carolClient.status(host.podId, 'bobs-pod')).spec.env.API_KEY, 'carols-secret')
+    assert.equal((await bobClient.status(host.podId, 'bobs-pod')).spec.env.API_KEY, '[redacted]')
+  })
+
+  it('a pod the service never saw spawned (made directly on the driver) is redacted for everyone', async () => {
+    await driver.spawn({ name: 'direct', lane: 'node', run: { kind: 'command', ref: 'x' }, env: { K: 'v' } })
+    assert.equal((await bobClient.status(host.podId, 'direct')).spec.env.K, '[redacted]')
+  })
+
+  it('a pod without env or input is returned unchanged', async () => {
+    await bobClient.spawn(host.podId, { name: 'plain', lane: 'node', run: { kind: 'command', ref: 'x' } })
+    const seen = await carolClient.status(host.podId, 'plain')
+    assert.equal(seen.spec.env, undefined)
+    assert.equal(seen.spec.run.input, undefined)
+  })
+})
+
 describe('createPodHostService: lanes', () => {
   it('answers exec/snapshot/restore with ELANE on an isolate-lane host', async () => {
     const alice = await createPeer('alice-isolate-host')

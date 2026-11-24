@@ -14,4 +14,4 @@ Relayed connections end with the permission that allowed them, and hold a bounde
 
 `@johnhenry/browsermesh-netway`:
 
-- `StreamSocket` has byte-level backpressure (issue #267): `write()` stays pending while `highWaterBytes` (default 1 MiB) are queued unread and continues at `lowWaterBytes`; a queue past `maxBufferedBytes` (default 4 MiB) or `highWaterMark` chunks closes the socket with a reason. New `close(reason)`, `closeReason`, `bufferedInbound`, `bufferedOutbound`, `STREAM_DEFAULTS`; `SocketClosedError` carries `reason`. A write made while a very large amount is already queued now waits instead of returning at once.
+- `StreamSocket#close(reason)` records why a socket was closed: the reason is readable as `closeReason` on both endpoints (the first reason given is kept) and is carried by `SocketClosedError#reason` on writes that fail afterwards. `close()` without a reason behaves as before. (Byte-level backpressure for `StreamSocket` is described in its own changeset.)

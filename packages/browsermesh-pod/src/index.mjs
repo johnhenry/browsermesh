@@ -25,6 +25,9 @@ export {
   InMemoryPodHostDriver,
 } from './host-protocol.mjs'
 export {
+  RUNTIME_BOUNDARY, FORBIDDEN_ENV_NAME, createRuntimeLaneDriver,
+} from './pod-runtime.mjs'
+export {
   bootHostedPod, readPodName,
   DEFAULT_DISCOVERY_CHANNEL, BROWSER_HOST_READY,
 } from './browser-host-child.mjs'

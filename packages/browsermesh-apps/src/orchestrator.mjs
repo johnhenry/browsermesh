@@ -497,13 +497,10 @@ export class MeshOrchestrator {
    * matching `listHostedPods()`/`listPods()`.
    *
    * Deliberately NOT routed through `#collectComputeDescriptors()` /
-   * `listComputeCandidates()`: those drop any pod host with no `exec`
-   * (every ISOLATE-lane host, by lane definition -- see
-   * `pod-host-service.mjs`'s `podHostRuntimePeer()` doc comment and this
-   * package's README "Known limitation" section) before a caller ever gets
-   * a chance to filter on lane. Reading `#runtimeDescriptors()` directly
-   * sidesteps that filter, so an isolate host is listed here even though it
-   * is invisible to `listComputeCandidates()`.
+   * `listComputeCandidates()`: by default those drop any pod host with no
+   * `exec` (every ISOLATE-lane host, by lane definition) so nothing that
+   * needs a shell can reach one. Reading `#runtimeDescriptors()` directly
+   * lists every pod host regardless of verbs.
    *
    * @returns {Array<{podId: string, lane: string|null, verbs: string[], runtimeClasses: string[], shellBackend: string|null, resource: string, capabilities: string[], hostedBy: string|null}>}
    */
@@ -884,8 +881,17 @@ export class MeshOrchestrator {
     return this.runComputeTask({ selector: podId, command })
   }
 
-  async listComputeCandidates(constraints = {}) {
-    return this.#collectComputeDescriptors(constraints).map((descriptor) => ({
+  /**
+   * @param {object} [constraints]
+   * @param {object} [opts]
+   * @param {boolean} [opts.includeSpawnHosts=false] - Also list pod hosts that
+   *   can `spawn` pods but have no shell (the isolate and browser lanes).
+   *   They carry `spawn` and `runtime:<lane>` but never `compute`, and are
+   *   never returned unless this is set: everything that needs a shell
+   *   (`runComputeTask()`, `execOnPod()`) keeps seeing exec-capable hosts only.
+   */
+  async listComputeCandidates(constraints = {}, { includeSpawnHosts = false } = {}) {
+    return this.#collectComputeDescriptors(constraints, { includeSpawnHosts }).map((descriptor) => ({
       podId: descriptor.podId,
       resources: { ...descriptor.resources },
       capabilities: [...descriptor.capabilities],
@@ -894,7 +900,7 @@ export class MeshOrchestrator {
     }))
   }
 
-  selectComputeTarget({ selector = null, constraints = {}, request = null } = {}) {
+  selectComputeTarget({ selector = null, constraints = {}, request = null, includeSpawnHosts = false } = {}) {
     const nextRequest = request instanceof ComputeRequest
       ? request
       : new ComputeRequest({
@@ -905,7 +911,14 @@ export class MeshOrchestrator {
           requesterId: this.localPodId,
         })
 
-    const descriptors = this.#collectComputeDescriptors(nextRequest.constraints || {})
+    // A spawn-only host (no `compute`) is only a candidate while the scorer
+    // rates it above zero for this request: a request it cannot serve (a
+    // shell module, a lane it does not offer) must not fall through to it
+    // just because it is the only descriptor left.
+    const descriptors = this.#collectComputeDescriptors(nextRequest.constraints || {}, { includeSpawnHosts })
+      .filter((descriptor) => descriptor.capabilities.includes('compute')
+        || selector
+        || ResourceScorer.score(nextRequest, descriptor) > 0)
     if (selector) {
       const selected = descriptors.find((descriptor) => descriptor.podId === selector)
       if (!selected) {
@@ -1276,7 +1289,7 @@ export class MeshOrchestrator {
     return route ? 'online' : 'unknown'
   }
 
-  #collectComputeDescriptors(constraints = {}) {
+  #collectComputeDescriptors(constraints = {}, { includeSpawnHosts = false } = {}) {
     const merged = new Map()
     const descriptors = []
 
@@ -1303,7 +1316,7 @@ export class MeshOrchestrator {
     }
 
     for (const peer of this.#runtimeDescriptors()) {
-      const descriptor = runtimePeerToComputeDescriptor(peer)
+      const descriptor = runtimePeerToComputeDescriptor(peer, { includeSpawnHosts })
       if (!descriptor) continue
       if (constraints && !descriptor.matches(constraints)) continue
       descriptors.push(descriptor)
@@ -1318,7 +1331,18 @@ export class MeshOrchestrator {
   }
 }
 
-function runtimePeerToComputeDescriptor(peer) {
+/**
+ * Whether a runtime-registry peer is a pod host that can `spawn` pods
+ * (`podHostRuntimePeer()` records the verbs it serves).
+ * @param {object} peer
+ * @returns {boolean}
+ */
+function isSpawnHost(peer) {
+  const verbs = peer?.metadata?.podHost?.verbs
+  return Array.isArray(verbs) && verbs.includes('spawn') && peer?.metadata?.deploymentSupport?.canDeploy === true
+}
+
+function runtimePeerToComputeDescriptor(peer, { includeSpawnHosts = false } = {}) {
   const podId = peer?.identity?.podId
     || peer?.identity?.fingerprint
     || peer?.identity?.canonicalId
@@ -1336,7 +1360,10 @@ function runtimePeerToComputeDescriptor(peer) {
       : []),
   ])
   if (!capabilities.includes('compute')) {
-    return null
+    // A host with no shell can still place pods. It is only ever surfaced
+    // for placement scoring (`includeSpawnHosts`), and never claims `compute`.
+    if (!(includeSpawnHosts && isSpawnHost(peer))) return null
+    capabilities.push('spawn')
   }
   const route = (peer.reachability || [])[0] || null
   const availability = route?.health === 'offline'
@@ -1817,16 +1844,14 @@ function formatPodHostError(err, { host, verb } = {}) {
  * Primary path: `orchestrator.listComputeCandidates()` (the same
  * `ResourceScorer`-adjacent descriptor list `MeshctlComputeTool` reads),
  * narrowed to hosts advertising `runtime:<lane>`, preferring one with
- * `availability: 'online'`.
+ * `availability: 'online'`. Candidates are requested with
+ * `includeSpawnHosts`, so an ISOLATE-lane host (no `exec`, by lane
+ * definition -- same for `browser`) is a candidate too, without ever being
+ * a `compute` one.
  *
- * Fallback: `orchestrator.listPodHosts()`. This exists because of a
- * documented gap (`pod-host-service.mjs`'s `podHostRuntimePeer()` doc
- * comment, and this package's README "Known limitation" section):
- * `listComputeCandidates()` derives its `compute` capability from `exec`,
- * so an ISOLATE-lane host (no `exec`, by lane definition -- same for
- * `browser`) never appears in it at all, regardless of lane filtering.
- * `listPodHosts()` reads the same runtime-registry peers directly, without
- * that filter, so it still finds such a host.
+ * Fallback: `orchestrator.listPodHosts()`, for an orchestrator whose
+ * `listComputeCandidates()` does not accept the option (a duck-typed
+ * facade) or lists nothing: it reads the runtime-registry peers directly.
  *
  * @param {object} orchestrator - A `MeshOrchestrator` (or the tool facade
  *   `mesh-orchestrator-tools.mjs` builds around one).
@@ -1840,7 +1865,7 @@ export async function pickAutoHost(orchestrator, lane) {
       ? ISOLATION.MICROVM
       : ISOLATION.ANY
   const candidates = typeof orchestrator.listComputeCandidates === 'function'
-    ? await orchestrator.listComputeCandidates({ isolation })
+    ? await orchestrator.listComputeCandidates({ isolation }, { includeSpawnHosts: true })
     : []
   const laneCandidates = candidates.filter((c) => c.capabilities.includes(`runtime:${lane}`))
   const best = laneCandidates.find((c) => c.availability === 'online') || laneCandidates[0] || null

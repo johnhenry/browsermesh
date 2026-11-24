@@ -287,9 +287,11 @@ export class MeshRelayHost {
   /**
    * Counters for what is held in memory on behalf of peers.
    *
-   * `bufferedBytes` is bytes received from peers and not yet consumed by the
-   * service plus bytes the service has queued unread; `inFlightBytes` is bytes
-   * sent to peers and not yet credited back.
+   * `bufferedBytes` is bytes received from peers and not yet accepted by the
+   * service socket plus bytes the service wrote that the relay has not yet read;
+   * bytes the service socket holds in its own receive window (at most
+   * `windowBytes` per connection, 256 KiB by default) are not counted.
+   * `inFlightBytes` is bytes sent to peers and not yet credited back.
    *
    * @returns {{ connections: number, bufferedBytes: number, inFlightBytes: number,
    *   peers: Record<string, { connections: number, bufferedBytes: number }> }}
@@ -300,7 +302,7 @@ export class MeshRelayHost {
     /** @type {Record<string, { connections: number, bufferedBytes: number }>} */
     const peers = {}
     for (const conn of this.#connections.values()) {
-      const queued = typeof conn.socket.bufferedOutbound === 'number' ? conn.socket.bufferedOutbound : 0
+      const queued = typeof conn.socket.readableLength === 'number' ? conn.socket.readableLength : 0
       const held = conn.rx.outstanding + queued
       bufferedBytes += held
       inFlightBytes += conn.tx.inFlight

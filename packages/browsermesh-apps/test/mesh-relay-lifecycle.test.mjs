@@ -20,7 +20,7 @@ import { MeshRelayHost } from '../src/mesh-relay-host.mjs'
 import { createMeshRelayBackend } from '../src/mesh-relay-backend.mjs'
 import { RELAY_FLOW_DEFAULTS } from '../src/internal/relay-flow.mjs'
 import { MeshPeerManager, TrustGraph, MeshACL } from '@johnhenry/browsermesh-core'
-import { VirtualNetwork, STREAM_DEFAULTS } from '@johnhenry/browsermesh-netway'
+import { VirtualNetwork, DEFAULT_WINDOW_BYTES } from '@johnhenry/browsermesh-netway'
 
 const settle = () => new Promise((resolve) => setImmediate(resolve))
 const ALICE = 'alice-pod'
@@ -371,7 +371,7 @@ describe('relayed connections hold a bounded amount of memory', () => {
     await settle()
     const stalled = written
     assert.ok(stalled < TOTAL, `the sender is held back (wrote ${stalled} of ${TOTAL})`)
-    const bound = RELAY_FLOW_DEFAULTS.highWaterBytes + STREAM_DEFAULTS.highWaterBytes + FRAME
+    const bound = RELAY_FLOW_DEFAULTS.highWaterBytes + DEFAULT_WINDOW_BYTES + FRAME
     const s1 = host.stats()
     assert.ok(s1.bufferedBytes <= bound, `host buffered ${s1.bufferedBytes} <= ${bound}`)
     assert.ok(backend.stats().bufferedBytes <= bound + RELAY_FLOW_DEFAULTS.highWaterBytes)
@@ -401,7 +401,7 @@ describe('relayed connections hold a bounded amount of memory', () => {
     await settle()
     const stalled = written
     assert.ok(stalled < TOTAL, `the service is held back (wrote ${stalled} of ${TOTAL})`)
-    const bound = RELAY_FLOW_DEFAULTS.highWaterBytes + STREAM_DEFAULTS.highWaterBytes + FRAME
+    const bound = RELAY_FLOW_DEFAULTS.highWaterBytes + DEFAULT_WINDOW_BYTES + FRAME
     assert.ok(backend.stats().bufferedBytes <= bound, `client buffered ${backend.stats().bufferedBytes} <= ${bound}`)
     assert.ok(host.stats().inFlightBytes <= RELAY_FLOW_DEFAULTS.highWaterBytes)
 

@@ -345,8 +345,10 @@ function resolveMeshRelayBackendClass() {
 
   /**
    * Counters for bytes held for relayed connections.
-   * `bufferedBytes`: received and not yet consumed, plus queued unread on the
-   * local socket; `inFlightBytes`: sent to the host and not yet credited back.
+   * `bufferedBytes`: received and not yet accepted by the user-facing socket,
+   * plus bytes the user wrote that the relay has not yet read (bytes held in
+   * the user-facing socket's own receive window are not counted);
+   * `inFlightBytes`: sent to the host and not yet credited back.
    *
    * @returns {{ connections: number, bufferedBytes: number, inFlightBytes: number }}
    */
@@ -354,7 +356,7 @@ function resolveMeshRelayBackendClass() {
     let bufferedBytes = 0
     let inFlightBytes = 0
     for (const conn of this.#connections.values()) {
-      bufferedBytes += conn.rx.outstanding + (conn.socket.bufferedOutbound ?? 0)
+      bufferedBytes += conn.rx.outstanding + (conn.socket.readableLength ?? 0)
       inFlightBytes += conn.tx.inFlight
     }
     return { connections: this.#connections.size, bufferedBytes, inFlightBytes }

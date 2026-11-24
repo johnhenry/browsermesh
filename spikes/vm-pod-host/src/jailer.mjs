@@ -78,6 +78,10 @@ export function buildJailerArgv(opts = {}) {
   if (!execFile) throw new Error('jailer: execFile is required')
   if (uid === undefined || uid === null) throw new Error('jailer: uid is required')
   if (gid === undefined || gid === null) throw new Error('jailer: gid is required')
+  // The jailer exists to drop the VMM to an unprivileged identity before it
+  // runs guest-facing code; dropping "to" root would defeat that.
+  if (!Number.isInteger(uid) || uid <= 0) throw new Error('jailer: uid must be a non-zero integer')
+  if (!Number.isInteger(gid) || gid <= 0) throw new Error('jailer: gid must be a non-zero integer')
 
   const argv = [
     jailerBin,
@@ -134,4 +138,59 @@ export function jailerApiSocketPath(opts = {}) {
   const base = chrootBaseDir.replace(/\/+$/, '')
   const rel = apiSockRelPath.replace(/^\/+/, '')
   return `${base}/${execFileName}/${id}/root/${rel}`
+}
+
+/**
+ * The jail's `root` directory as the host sees it: what Firecracker sees as
+ * `/`. Every file the VMM is given lives under it.
+ *
+ * @param {{execFile: string, id: string, chrootBaseDir?: string}} opts
+ * @returns {string}
+ */
+export function jailerRootPath({ execFile, id, chrootBaseDir = '/srv/jailer' } = {}) {
+  if (!execFile) throw new Error('jailerRootPath: execFile is required')
+  if (!id) throw new Error('jailerRootPath: id is required')
+  const execFileName = execFile.split('/').filter(Boolean).pop()
+  return `${chrootBaseDir.replace(/\/+$/, '')}/${execFileName}/${id}/root`
+}
+
+/**
+ * Where a daemonized jailer records the VMM's process id: `<exec file
+ * name>.pid` next to the chroot's `root`. NOT verified against a real
+ * jailer (this module has never run one); `test:real-firecracker` is where
+ * that gets checked.
+ *
+ * @param {{execFile: string, id: string, chrootBaseDir?: string}} opts
+ * @returns {string}
+ */
+export function jailerPidFilePath({ execFile, id, chrootBaseDir = '/srv/jailer' } = {}) {
+  if (!execFile) throw new Error('jailerPidFilePath: execFile is required')
+  if (!id) throw new Error('jailerPidFilePath: id is required')
+  const execFileName = execFile.split('/').filter(Boolean).pop()
+  const base = chrootBaseDir.replace(/\/+$/, '')
+  return `${base}/${execFileName}/${id}/root/${execFileName}.pid`
+}
+
+/**
+ * Whether a `/proc/<pid>/cmdline` value (NUL-separated) is the VMM started
+ * for exactly this pod id: an argument `--id` immediately followed by the id
+ * (or the single argument `--id=<id>`), compared for equality. A pid file
+ * can go stale and its pid be reused, so a process is only stopped when this
+ * says it is ours, and an id that is a prefix or suffix of another pod's id
+ * never matches that pod.
+ *
+ * @param {string} cmdline
+ * @param {string} id
+ * @returns {boolean}
+ */
+export function vmmCommandLineMatches(cmdline, id) {
+  if (typeof cmdline !== 'string' || !cmdline || !id) return false
+  const args = cmdline.split('\0')
+  if (args.at(-1) === '') args.pop()
+  // Only the VMM's own arguments count, never a later value of some other flag.
+  for (let i = 1; i < args.length; i += 1) {
+    if (args[i] === `--id=${id}`) return true
+    if (args[i] === '--id') return args[i + 1] === id
+  }
+  return false
 }

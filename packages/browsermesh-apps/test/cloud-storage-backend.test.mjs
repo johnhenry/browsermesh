@@ -16,6 +16,7 @@ import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 
 import { createCloudStorageBackend } from '../src/cloud-storage-backend.mjs'
+import { readJsonMessage } from '../src/internal/json-message.mjs'
 import { IndexedDBChunkStore } from '@johnhenry/browsermesh-sync'
 
 // Use a fresh bucket name per test so tests don't interact through shared
@@ -47,11 +48,12 @@ function fromBase64(str) {
  */
 async function send(socket, cmd) {
   const encoder = new TextEncoder()
-  const decoder = new TextDecoder()
   await socket.write(encoder.encode(JSON.stringify(cmd)))
-  const chunk = await socket.read()
-  assert.ok(chunk !== null, 'socket closed before a response arrived')
-  return JSON.parse(decoder.decode(chunk))
+  // A response over the socket's window arrives in several reads.
+  const msg = await readJsonMessage(socket)
+  assert.ok(!msg.eof, 'socket closed before a response arrived')
+  if (msg.error) throw msg.error
+  return msg.value
 }
 
 describe('CloudStorageBackend', () => {
