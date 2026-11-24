@@ -782,7 +782,14 @@ platform still works, and `isolatedVmAvailability()` says whether the addon
 loaded (`createIsolatedVmRuntime()` throws an error with code
 `ERR_ISOLATED_VM_UNAVAILABLE` and the reason when it did not). It needs
 `isolated-vm` 7.x on Node 26 (prebuilt binaries ship for macOS arm64 and Linux
-x64/arm64); it did not need `--no-node-snapshot` on Node 26.10. A `workerd`
+x64/arm64, glibc and musl). Its tests pass with the prebuilt binary on macOS arm64
+(Node 26.10), on Linux arm64 and x64 (glibc; Node 26.0.0 and 26.13) and on Linux
+arm64 musl (Alpine), without an install script or a compiler. It does not need
+`--no-node-snapshot` on Node 26, and you should not pass it: with the flag the
+process sometimes aborts at exit with an `isolated-vm` assertion (about 1 run in
+10 of the isolate test file on Linux arm64; none in 165 runs without it). Setting
+`REQUIRE_ISOLATED_VM=1` makes that test file fail, instead of skipping, when the
+addon does not load (CI sets it). A `workerd`
 runtime (`spikes/isolate-pod-host`) implements the same `PodRuntime` interface.
 
 ```js
