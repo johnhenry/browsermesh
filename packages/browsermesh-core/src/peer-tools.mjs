@@ -1,11 +1,11 @@
 /**
- * clawser-mesh-peer-tools.js — BrowserTool subclasses for mesh peer subsystems
+ * peer-tools.mjs — BrowserTool subclasses for mesh peer subsystems
  *
  * Exposes chat, compute, scheduling, health, escrow, routing, timestamp,
  * stealth, delta-sync, gateway, torrent, IPFS, ACL, and capability tools
  * to the AI agent.
  *
- * @module clawser-mesh-peer-tools
+ * @module peer-tools
  */
 
 import { BrowserTool } from './compat.mjs'

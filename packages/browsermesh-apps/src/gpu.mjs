@@ -1,5 +1,5 @@
 /**
- * clawser-mesh-gpu.js -- WebGPU Training Orchestration.
+ * gpu.mjs --WebGPU Training Orchestration.
  *
  * Distributed training across mesh peers using WebGPU and wsh backends:
  *
@@ -35,7 +35,7 @@
  * file and this package's README for the full finding.
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-mesh-gpu.test.mjs
+ *   cd packages/browsermesh-apps && node --import ./test/_setup-globals.mjs --test test/gpu.test.mjs
  */
 
 import { MESH_TYPE } from '@johnhenry/browsermesh-primitives'

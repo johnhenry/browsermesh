@@ -45,7 +45,7 @@ higher-level packages built on top of them
 — `browsermesh-core`,
 `-transport`, `-discovery`, most of `-apps`, `browsermesh-embed` — are
 exercised end-to-end in a real browser by
-[clawser](https://github.com/erisera-code/clawser)'s Mesh and Peers panels;
+the host application's Mesh and Peers panels;
 see their own package READMEs for API-level usage.
 
 ## Hosted pods

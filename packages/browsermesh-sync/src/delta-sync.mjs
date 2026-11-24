@@ -1,6 +1,6 @@
 /**
-// STATUS: INTEGRATED — wired into ClawserPod lifecycle, proven via E2E testing
- * clawser-mesh-delta-sync.js -- Delta-Based Synchronization Protocol.
+// STATUS: INTEGRATED — wired into Pod (@johnhenry/browsermesh-pod) lifecycle, proven via E2E testing
+ * delta-sync.mjs -- Delta-Based Synchronization Protocol.
  *
  * Efficient state synchronization using delta (diff) encoding:
  *
@@ -14,7 +14,7 @@
  * No browser-only imports at module level.
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-mesh-delta-sync.test.mjs
+ *   cd packages/browsermesh-sync && node --import ./test/_setup-globals.mjs --test test/delta-sync.test.mjs
  */
 
 // ---------------------------------------------------------------------------

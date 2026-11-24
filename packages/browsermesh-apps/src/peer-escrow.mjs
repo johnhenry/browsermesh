@@ -1,5 +1,5 @@
 /**
- * clawser-peer-escrow.js — Hold credits in escrow until consensus confirms delivery.
+ * peer-escrow.mjs —Hold credits in escrow until consensus confirms delivery.
  *
  * Enables trustless compute marketplace, dispute resolution, and
  * guaranteed payment for services.
@@ -14,7 +14,7 @@
  * `ctx.sendTo()`/`ctx.onIncomingData()`/`ctx.registry.checkAccess()`.
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-peer-escrow.test.mjs
+ *   cd packages/browsermesh-apps && node --import ./test/_setup-globals.mjs --test test/peer-escrow.test.mjs
  */
 
 // ---------------------------------------------------------------------------

@@ -1,13 +1,13 @@
 import { silentCatch } from './silent-catch.mjs'
 /**
-// STATUS: INTEGRATED — wired into ClawserPod lifecycle, proven via E2E testing
- * clawser-mesh-migration.js -- Pod State Migration Between Peers.
+// STATUS: INTEGRATED — wired into Pod (@johnhenry/browsermesh-pod) lifecycle, proven via E2E testing
+ * migration.mjs -- Pod State Migration Between Peers.
  *
  * Manages checkpointing, transferring, verifying, and activating pod state
  * on a target peer. Supports zero-downtime handoff via a dual-active window.
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-mesh-migration.test.mjs
+ *   cd packages/browsermesh-sync && node --import ./test/_setup-globals.mjs --test test/migration.test.mjs
  */
 
 // ---------------------------------------------------------------------------
@@ -913,7 +913,7 @@ export class MigrationEngine {
         if (valid) {
           this.#checkpoints.set(payload.migrationId || checkpoint.checkpointId, checkpoint);
         }
-      } catch (e) { silentCatch('clawser-mesh-migration', 'ignore-malformed-checkpoints', e) }
+      } catch (e) { silentCatch('migration', 'ignore-malformed-checkpoints', e) }
     });
 
     // Inbound: state transfer payload

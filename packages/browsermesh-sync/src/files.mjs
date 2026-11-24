@@ -1,11 +1,11 @@
 /**
-// STATUS: INTEGRATED — wired into ClawserPod lifecycle, proven via E2E testing
- * Clawser Mesh Files
+// STATUS: INTEGRATED — wired into Pod (@johnhenry/browsermesh-pod) lifecycle, proven via E2E testing
+ * Mesh Files
  *
  * Content-addressed file transfer with SHA-256 chunking, progress tracking,
  * and resume support. Builds on the streams module for transport.
  *
- * @module clawser-mesh-files
+ * @module files
  */
 
 import { MESH_TYPE, MESH_ERROR } from '@johnhenry/browsermesh-primitives';

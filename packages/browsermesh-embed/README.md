@@ -35,7 +35,7 @@ omitting it entirely) falls back to sane defaults.
 
 ## Provenance
 
-Extracted from the private `clawser` monorepo (previously `packages/clawser-embed`), where it was manually published to npm, unscoped, as `clawser-embed@0.1.1` (2026-07-17) with no CI ever automating that publish. This is its first release as part of the `@johnhenry/browsermesh` monorepo; the version restarts at `0.0.0` per family convention.
+Extracted from a private monorepo (previously `packages/clawser-embed`), where it was manually published to npm, unscoped, as `clawser-embed@0.1.1` (2026-07-17) with no CI ever automating that publish. This is its first release as part of the `@johnhenry/browsermesh` monorepo; the version restarts at `0.0.0` per family convention.
 
 
 ## Install
@@ -75,8 +75,9 @@ exact contract `sendMessage()` relies on.
 
 ## Backward compatibility
 
-`ClawserEmbed` is exported as an alias of `EmbeddedPod` for callers migrating
-from an earlier naming.
+`BrowsermeshEmbed` is exported as an alias of `EmbeddedPod`. The earlier
+`ClawserEmbed` export is a deprecated alias of `BrowsermeshEmbed`, kept for
+callers migrating from an earlier naming.
 
 ## License
 

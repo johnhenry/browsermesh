@@ -1,5 +1,5 @@
 /**
- * clawser-mesh-identity.js -- Mesh identity management.
+ * identity.mjs -- Mesh identity management.
  *
  * Manages multiple Ed25519 cryptographic identities with vault-encrypted
  * storage. Imports primitives from mesh-primitives; adds persistence,
@@ -9,7 +9,7 @@
  * Storage adapter pattern allows OPFS in browser, in-memory in tests.
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-mesh-identity.test.mjs
+ *   cd packages/browsermesh-core && node --import ./test/_setup-globals.mjs --test test/identity.test.mjs
  */
 
 import { silentCatch } from './silent-catch.mjs'
@@ -1000,7 +1000,7 @@ export class VaultIdentityStorage {
             encryptedPrivateKey: await encryptWithPassphrase(plaintext, passphrase, VAULT_TYPE),
           });
         } catch (err) {
-          silentCatch('clawser-mesh-identity', 'vault-upgrade', err);
+          silentCatch('identity', 'vault-upgrade', err);
         }
       }
     }
@@ -1145,7 +1145,7 @@ export class IdentitySyncCoordinator {
 
     if (msg.type === 'created' || msg.type === 'deleted') {
       for (const cb of this.#changeListeners) {
-        try { cb(msg); } catch (e) { silentCatch('clawser-mesh-identity', 'swallow', e) }
+        try { cb(msg); } catch (e) { silentCatch('identity', 'swallow', e) }
       }
     }
   }
@@ -1257,7 +1257,7 @@ export class AutoIdentityManager {
     this.#identityManager.setDefault(podId);
 
     for (const cb of this.#switchListeners) {
-      try { cb({ oldId, newId: podId }); } catch (e) { silentCatch('clawser-mesh-identity', 'swallow', e) }
+      try { cb({ oldId, newId: podId }); } catch (e) { silentCatch('identity', 'swallow', e) }
     }
   }
 

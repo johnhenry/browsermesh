@@ -14,8 +14,8 @@ import {
 } from '../src/hardening.mjs';
 
 // Sibling package, not yet published — MockMeshTransport/MeshTransportNegotiator
-// live in browsermesh-transport (verified byte-identical to the live
-// web/clawser-mesh-transport.js this was ported from). Once both packages
+// live in browsermesh-transport (ported from the original
+// private monorepo and verified byte-identical). Once both packages
 // are published, switch this to a real "browsermesh-transport" dependency.
 import {
   MockMeshTransport,

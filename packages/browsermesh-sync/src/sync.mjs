@@ -1,5 +1,5 @@
 /**
- * clawser-mesh-sync.js — CRDT State Replication Engine.
+ * sync.mjs — CRDT State Replication Engine.
  * Manages CRDT documents with storage persistence and delta-based peer sync.
  *
  * Usage:

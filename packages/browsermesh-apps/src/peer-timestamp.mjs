@@ -1,6 +1,6 @@
 /**
-// STATUS: INTEGRATED — wired into ClawserPod lifecycle, proven via E2E testing
- * clawser-peer-timestamp.js — Distributed timestamp consensus.
+// STATUS: INTEGRATED — wired into the Pod lifecycle (@johnhenry/browsermesh-pod), proven via E2E testing
+ * peer-timestamp.mjs —Distributed timestamp consensus.
  *
  * Peers propose timestamps, network agrees on canonical order via
  * median computation and outlier rejection. Enables legal-grade
@@ -13,7 +13,7 @@
  * No browser-only imports at module level.
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-peer-timestamp.test.mjs
+ *   cd packages/browsermesh-apps && node --import ./test/_setup-globals.mjs --test test/peer-timestamp.test.mjs
  */
 
 import { assertIdentityFirst, isVerifyOrderError } from './internal/verify-order.mjs'

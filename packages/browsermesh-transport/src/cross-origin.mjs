@@ -1,6 +1,6 @@
 /**
-// STATUS: INTEGRATED — wired into ClawserPod lifecycle, proven via E2E testing
- * clawser-mesh-cross-origin.js -- Cross-origin communication bridge.
+// STATUS: INTEGRATED — wired into the `Pod` lifecycle (@johnhenry/browsermesh-pod), proven via E2E testing
+ * cross-origin.mjs -- Cross-origin communication bridge.
  *
  * Enables mesh pods running in different browser contexts (iframes,
  * popups, different-origin tabs) to communicate securely using
@@ -9,7 +9,7 @@
  * No browser-only imports at module level.
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-mesh-cross-origin.test.mjs
+ *   cd packages/browsermesh-transport && node --import ./test/_setup-globals.mjs --test test/cross-origin.test.mjs
  */
 
 // ---------------------------------------------------------------------------

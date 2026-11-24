@@ -315,8 +315,8 @@ describe('EscrowManager', () => {
 // mutateLedger hook -- default behavior, opt-in override, error propagation
 // -----------------------------------------------------------------------
 //
-// Issue erisera-code/clawser#195: EscrowManager.create()/release()/refund()/
-// checkExpired() are async specifically so a caller (clawser, when its PBFT
+// EscrowManager.create()/release()/refund()/
+// checkExpired() are async specifically so a caller (the host application, when its PBFT
 // consensus feature is enabled) can supply a `mutateLedger` hook that routes
 // each ledger mutation through an awaited consensus round instead of
 // mutating creditLedger directly. These tests prove:

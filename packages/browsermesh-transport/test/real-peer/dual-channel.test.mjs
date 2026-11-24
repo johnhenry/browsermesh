@@ -141,7 +141,7 @@ describeIfReal('Dual data channels against real peers', () => {
   //   SCTP streams independently, which is the entire rationale the WebRTC
   //   spec gives for using multiple data channels to avoid this exact
   //   problem -- validating THAT claim needs a real-browser harness (see
-  //   clawser's Playwright-based `web/test/mesh-p2p-e2e.spec.mjs`), which is
+  //   the Playwright-based specs under `tests/browser/`), which is
   //   out of reach for this package's Node-only test suite.
 
   const CHUNK_SIZE = 64 * 1024        // 64 KiB

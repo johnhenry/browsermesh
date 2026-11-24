@@ -1,12 +1,12 @@
 /**
-// STATUS: INTEGRATED — wired into ClawserPod lifecycle, proven via E2E testing
- * clawser-peer-health.js — Automatic health monitoring with self-healing.
+// STATUS: INTEGRATED — wired into the Pod lifecycle (@johnhenry/browsermesh-pod), proven via E2E testing
+ * peer-health.mjs —Automatic health monitoring with self-healing.
  *
  * Watches heartbeats, detects failures, triggers workload migration.
  * Enables "self-healing personal mesh infrastructure" scenario.
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-peer-health.test.mjs
+ *   cd packages/browsermesh-apps && node --import ./test/_setup-globals.mjs --test test/peer-health.test.mjs
  */
 
 // ---------------------------------------------------------------------------

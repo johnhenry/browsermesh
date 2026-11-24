@@ -1,5 +1,5 @@
 /**
- * clawser-mesh-sw-routing.js -- ServiceWorker mesh:// fetch routing.
+ * sw-routing.mjs -- ServiceWorker mesh:// fetch routing.
  *
  * Intercepts mesh:// protocol requests and *.mesh.local hostnames
  * in the Service Worker fetch handler, delegating to mesh RPC.
@@ -25,7 +25,7 @@
  * No browser-only imports at module level.
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-mesh-sw-routing.test.mjs
+ *   cd packages/browsermesh-discovery && node --import ./test/_setup-globals.mjs --test test/sw-routing.test.mjs
  */
 
 import { parseMeshRequest } from '@johnhenry/browsermesh-primitives'

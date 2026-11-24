@@ -1,5 +1,5 @@
 /**
- * clawser-mesh-relay.js -- Relay Client for Peer Discovery & Signal Forwarding.
+ * relay.mjs -- Relay Client for Peer Discovery & Signal Forwarding.
  *
  * Two paths:
  *   1. MockRelayServer — in-memory, used by tests and offline scenarios.
@@ -21,7 +21,7 @@
  *     {type:'error',   message}
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-mesh-relay.test.mjs
+ *   cd packages/browsermesh-transport && node --import ./test/_setup-globals.mjs --test test/relay.test.mjs
  */
 
 // ---------------------------------------------------------------------------

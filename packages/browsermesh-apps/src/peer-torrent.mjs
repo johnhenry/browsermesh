@@ -1,6 +1,6 @@
 /**
-// STATUS: INTEGRATED — wired into ClawserPod lifecycle, proven via E2E testing
- * clawser-peer-torrent.js -- WebTorrent integration for P2P file distribution.
+// STATUS: INTEGRATED — wired into the Pod lifecycle (@johnhenry/browsermesh-pod), proven via E2E testing
+ * peer-torrent.mjs --WebTorrent integration for P2P file distribution.
  *
  * Uses a WebTorrent client the caller supplies (`new TorrentManager({
  * webtorrent })`: the `WebTorrent` constructor or a ready client) or one
@@ -21,7 +21,7 @@
  * own storage and ignores both.
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-peer-torrent.test.mjs
+ *   cd packages/browsermesh-apps && node --import ./test/_setup-globals.mjs --test test/peer-torrent.test.mjs
  */
 
 import { ChunkStore } from '@johnhenry/browsermesh-sync'

@@ -1,6 +1,6 @@
 /**
-// STATUS: INTEGRATED — wired into ClawserPod lifecycle, proven via E2E testing
- * clawser-mesh-stealth.js -- Agent state sharding across the DHT.
+// STATUS: INTEGRATED — wired into Pod (@johnhenry/browsermesh-pod) lifecycle, proven via E2E testing
+ * stealth.mjs -- Agent state sharding across the DHT.
  *
  * NOT ENCRYPTED, NOT ANONYMOUS. This module splits a state string into
  * `threshold` plaintext data shards plus `total - threshold` XOR parity shards
@@ -51,7 +51,7 @@
  * No browser-only imports at module level.
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-mesh-dht.test.mjs
+ *   cd packages/browsermesh-discovery && node --import ./test/_setup-globals.mjs --test test/dht.test.mjs
  */
 
 // ---------------------------------------------------------------------------
@@ -455,7 +455,7 @@ export class StateShard {
  * Distributes agent state as shards across the DHT.
  */
 export class ShardDistributor {
-  /** @type {import('./clawser-mesh-dht.js').DhtNode} */
+  /** @type {import('./dht.mjs').DhtNode} */
   #dhtNode
 
   /** @type {number} */
@@ -466,7 +466,7 @@ export class ShardDistributor {
 
   /**
    * @param {object} opts
-   * @param {import('./clawser-mesh-dht.js').DhtNode} opts.dhtNode - DHT node for storage
+   * @param {import('./dht.mjs').DhtNode} opts.dhtNode - DHT node for storage
    * @param {number} [opts.threshold=3] - Minimum shards for recovery
    * @param {number} [opts.totalShards=5] - Total shards to create
    */
@@ -583,7 +583,7 @@ export class ShardDistributor {
  * Collects and reconstructs agent state from DHT shards.
  */
 export class ShardCollector {
-  /** @type {import('./clawser-mesh-dht.js').DhtNode} */
+  /** @type {import('./dht.mjs').DhtNode} */
   #dhtNode
 
   /** @type {number} */
@@ -591,7 +591,7 @@ export class ShardCollector {
 
   /**
    * @param {object} opts
-   * @param {import('./clawser-mesh-dht.js').DhtNode} opts.dhtNode - DHT node for retrieval
+   * @param {import('./dht.mjs').DhtNode} opts.dhtNode - DHT node for retrieval
    * @param {number} [opts.threshold=3] - Minimum shards needed
    */
   constructor({ dhtNode, threshold = 3 }) {
@@ -716,7 +716,7 @@ export class StealthAgent {
   /** @type {string} */
   #agentId
 
-  /** @type {import('./clawser-mesh-dht.js').DhtNode} */
+  /** @type {import('./dht.mjs').DhtNode} */
   #dhtNode
 
   /** @type {number} */
@@ -756,7 +756,7 @@ export class StealthAgent {
   /**
    * @param {object} opts
    * @param {string} opts.agentId - Agent identifier
-   * @param {import('./clawser-mesh-dht.js').DhtNode} opts.dhtNode - DHT node
+   * @param {import('./dht.mjs').DhtNode} opts.dhtNode - DHT node
    * @param {number} [opts.threshold=3] - Minimum shards for recovery
    * @param {number} [opts.totalShards=5] - Total shards to create
    * @param {CryptoKey} [opts.key] - AES-GCM key (see `deriveStealthKey`); enables `hideEncrypted()` / `reconstituteEncrypted()`

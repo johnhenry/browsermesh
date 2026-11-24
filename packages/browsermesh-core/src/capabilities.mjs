@@ -1,6 +1,6 @@
 /**
-// STATUS: INTEGRATED — wired into ClawserPod lifecycle, proven via E2E testing
- * clawser-mesh-capabilities.js -- Capability Attenuation & WASM Sandbox.
+// STATUS: INTEGRATED — wired into Pod (@johnhenry/browsermesh-pod) lifecycle, proven via E2E testing
+ * capabilities.mjs -- Capability Attenuation & WASM Sandbox.
  *
  * Implements the object-capability (ocap) model for BrowserMesh:
  *
@@ -14,7 +14,7 @@
  * No browser-only imports at module level.
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-mesh-capabilities.test.mjs
+ *   cd packages/browsermesh-core && node --import ./test/_setup-globals.mjs --test test/capabilities.test.mjs
  */
 
 import { encodeBase64url, decodeBase64url } from '@johnhenry/browsermesh-primitives';

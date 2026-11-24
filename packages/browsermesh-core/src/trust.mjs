@@ -1,5 +1,5 @@
 /**
- * clawser-mesh-trust.js -- Trust graph management.
+ * trust.mjs -- Trust graph management.
  *
  * Float [0.0, 1.0] trust with multiplicative transitive decay,
  * scope intersection, and reputation aggregation.
@@ -11,7 +11,7 @@
  * No browser-only imports at module level.
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-mesh-trust.test.mjs
+ *   cd packages/browsermesh-core && node --import ./test/_setup-globals.mjs --test test/trust.test.mjs
  */
 
 import {

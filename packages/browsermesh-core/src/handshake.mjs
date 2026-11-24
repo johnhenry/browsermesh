@@ -1,7 +1,7 @@
 import { silentCatch } from './silent-catch.mjs'
 /**
-// STATUS: INTEGRATED — wired into ClawserPod lifecycle, proven via E2E testing
- * clawser-mesh-handshake.js -- Connection Handshake Protocol.
+// STATUS: INTEGRATED — wired into Pod (@johnhenry/browsermesh-pod) lifecycle, proven via E2E testing
+ * handshake.mjs -- Connection Handshake Protocol.
  *
  * Coordinates signaling, direct input exchange (QR + clipboard), and
  * session establishment between two mesh peers.
@@ -22,7 +22,7 @@ import { silentCatch } from './silent-catch.mjs'
  * via constructor.
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-mesh-handshake.test.mjs
+ *   cd packages/browsermesh-core && node --import ./test/_setup-globals.mjs --test test/handshake.test.mjs
  */
 
 // ---------------------------------------------------------------------------
@@ -240,7 +240,7 @@ export class SignalingClient {
       this.#ws.removeEventListener('message', this.#handleMessage)
       this.#ws.removeEventListener('close', this.#handleClose)
       this.#ws.close()
-    } catch (e) { silentCatch('clawser-mesh-handshake', 'ignore-close-errors', e) }
+    } catch (e) { silentCatch('handshake', 'ignore-close-errors', e) }
     this.#ws = null
     this.#onLog(2, 'SignalingClient disconnected')
   }
@@ -370,7 +370,7 @@ export class SignalingClient {
       const data = typeof ev.data === 'string' ? JSON.parse(ev.data) : ev.data
       if (!data || !data.type) return
       this.#fire(data.type, data)
-    } catch (e) { silentCatch('clawser-mesh-handshake', 'ignore-malformed-messages', e) }
+    } catch (e) { silentCatch('handshake', 'ignore-malformed-messages', e) }
   }
 
   /** @type {() => void} */
@@ -398,7 +398,7 @@ export class SignalingClient {
     // direct server messages (e.g. `registered`) that have no `source`.
     const fromPodId = data.source ?? data.from
     for (const cb of set) {
-      try { cb(data, fromPodId) } catch (e) { silentCatch('clawser-mesh-handshake', 'swallow-listener-errors', e) }
+      try { cb(data, fromPodId) } catch (e) { silentCatch('handshake', 'swallow-listener-errors', e) }
     }
   }
 }
@@ -1256,7 +1256,7 @@ export class HandshakeCoordinator {
     const set = this.#listeners.get(event)
     if (!set) return
     for (const cb of set) {
-      try { cb(data) } catch (e) { silentCatch('clawser-mesh-handshake', 'swallow-listener-errors', e) }
+      try { cb(data) } catch (e) { silentCatch('handshake', 'swallow-listener-errors', e) }
     }
   }
 }

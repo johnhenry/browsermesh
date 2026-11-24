@@ -524,7 +524,7 @@ composes better, and it's what this plan's own new code (the 8
 registry validation — check which `BrowserTool` your class is actually
 extending.** `orchestrator.mjs` predates `compat.mjs`'s real `BrowserTool`
 and was written to interoperate with a real, browser-only, richer
-`globalThis.BrowserTool` (clawser's own, in a real browser), falling back to
+`globalThis.BrowserTool` (the host application's own, in a real browser), falling back to
 `class { constructor() {} }` — a do-nothing stub, no `.spec` getter at all —
 whenever `globalThis.BrowserTool` was undefined (plain Node, e.g. this
 package's own test suite, or any standalone use of `orchestrator.mjs`). That

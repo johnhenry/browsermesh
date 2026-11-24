@@ -1,10 +1,10 @@
 /**
- * Clawser Mesh Tools
+ * BrowserMesh Mesh Tools
  *
  * BrowserTool subclasses exposing mesh stream and file transfer operations
- * to the AI agent. Follows the pattern in clawser-wsh-tools.js.
+ * to the AI agent.
  *
- * @module clawser-mesh-tools
+ * @module tools
  */
 
 import { BrowserTool } from './compat.mjs';

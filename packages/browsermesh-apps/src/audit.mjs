@@ -1,5 +1,5 @@
 /**
- * clawser-mesh-audit.js -- Cryptographic audit trail for BrowserMesh.
+ * audit.mjs --Cryptographic audit trail for BrowserMesh.
  *
  * Provides a tamper-evident, hash-chained log of operations with
  * Ed25519 signatures, Merkle proof generation/verification, and
@@ -8,7 +8,7 @@
  * No browser-only imports at module level.
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-mesh-audit.test.mjs
+ *   cd packages/browsermesh-apps && node --import ./test/_setup-globals.mjs --test test/audit.test.mjs
  */
 
 import { encodeBase64url, decodeBase64url } from '@johnhenry/browsermesh-primitives';

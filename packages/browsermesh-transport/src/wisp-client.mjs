@@ -1,6 +1,6 @@
 import { silentCatch } from './silent-catch.mjs'
 /**
- * clawser-wisp.mjs -- WISP (WebSocket Internet Subprotocol) Transport.
+ * wisp-client.mjs -- WISP (WebSocket Internet Subprotocol) Transport.
  *
  * Multiplexes TCP streams over a single WebSocket connection to a WISP
  * relay server. Each stream gets a unique 32-bit stream ID. Messages
@@ -17,10 +17,10 @@ import { silentCatch } from './silent-catch.mjs'
  *   0x05 INFO     — relay→client: server info (WISP v2 extension)
  *
  * Can be used standalone for tunneling or as the backing transport for
- * clawser-wisp-transport.mjs (WSH adapter).
+ * wisp.mjs (WSH adapter).
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-wisp.test.mjs
+ *   cd packages/browsermesh-transport && node --import ./test/_setup-globals.mjs --test test/wisp-client.test.mjs
  */
 
 // ---------------------------------------------------------------------------
@@ -313,7 +313,7 @@ export class WispStream {
    */
   _fireEvent(event, data) {
     for (const cb of this.#callbacks[event] || []) {
-      try { cb(data) } catch (e) { silentCatch('clawser-wisp', 'swallow-listener-errors', e) }
+      try { cb(data) } catch (e) { silentCatch('wisp-client', 'swallow-listener-errors', e) }
     }
   }
 
@@ -741,7 +741,7 @@ export class WispClient {
    */
   _fireEvent(event, data) {
     for (const cb of this.#callbacks[event] || []) {
-      try { cb(data) } catch (e) { silentCatch('clawser-wisp', 'swallow-listener-errors', e) }
+      try { cb(data) } catch (e) { silentCatch('wisp-client', 'swallow-listener-errors', e) }
     }
   }
 }

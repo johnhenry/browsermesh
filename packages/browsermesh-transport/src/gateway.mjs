@@ -1,6 +1,6 @@
 /**
-// STATUS: INTEGRATED — wired into ClawserPod lifecycle, proven via E2E testing
- * clawser-mesh-gateway.js -- Gateway Node for BrowserMesh.
+// STATUS: INTEGRATED — wired into the `Pod` lifecycle (@johnhenry/browsermesh-pod), proven via E2E testing
+ * gateway.mjs -- Gateway Node for BrowserMesh.
  *
  * Thin wrapper around relay functionality providing multi-hop routing,
  * route advertisement, and gateway discovery for the mesh network.
@@ -13,7 +13,7 @@
  * No browser-only imports at module level.
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-mesh-gateway.test.mjs
+ *   cd packages/browsermesh-transport && node --import ./test/_setup-globals.mjs --test test/gateway.test.mjs
  */
 
 // ---------------------------------------------------------------------------

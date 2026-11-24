@@ -1,12 +1,12 @@
 /**
- * clawser-mesh-swarm.js -- Swarm Coordination for BrowserMesh.
+ * swarm.mjs -- Swarm Coordination for BrowserMesh.
  *
  * Leader election, task distribution, and swarm lifecycle management.
  * Peers form a swarm where one node acts as leader, distributing tasks
  * across followers using pluggable strategies.
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-mesh-swarm.test.mjs
+ *   cd packages/browsermesh-discovery && node --import ./test/_setup-globals.mjs --test test/swarm.test.mjs
  */
 
 // ---------------------------------------------------------------------------

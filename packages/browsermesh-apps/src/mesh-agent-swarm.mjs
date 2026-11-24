@@ -33,7 +33,7 @@
  *     UNCONDITIONALLY -- it never checks whether `assignee` is this node or
  *     some other one. In the original, single-node code (a single
  *     `AgentSwarmCoordinator` + a single `agentProxy` that happens to be able
- *     to `chat()` with several locally-known `podId`s, e.g. several ClawserPod
+ *     to `chat()` with several locally-known `podId`s, e.g. several `Pod`
  *     agents in one process), that's fine: every `assignee` is reachable
  *     through the same local `agentProxy`. In a real mesh deployment,
  *     `assignee` is frequently a REMOTE peer's podId -- so today's code, as

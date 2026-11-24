@@ -1,5 +1,5 @@
 /**
- * clawser-peer-node.js -- Top-level P2P mesh orchestrator.
+ * peer-node.mjs --Top-level P2P mesh orchestrator.
  *
  * Wires together IdentityWallet, PeerRegistry, DiscoveryManager,
  * MeshTransportNegotiator, and AuditChain into a unified PeerNode
@@ -9,7 +9,7 @@
  * No browser-only imports at module level.
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-peer-node.test.mjs
+ *   cd packages/browsermesh-apps && node --import ./test/_setup-globals.mjs --test test/peer-node.test.mjs
  */
 
 // ---------------------------------------------------------------------------
@@ -81,7 +81,7 @@ export class PeerNode {
   #listeners = new Map()
 
   /** @type {Set<Function>} listeners for raw incoming session data
-   *  (cb(pubKey, data, {sessionId, transport})). Used by ClawserPod
+   *  (cb(pubKey, data, {sessionId, transport})). Used by `Pod`
    *  to surface a pod-level message bus on top of per-transport
    *  inbound bytes. */
   #dataListeners = new Set()
@@ -483,7 +483,7 @@ export class PeerNode {
    * Shared session-bookkeeping helper for both `connectToPeer()` (caller
    * side) and `adoptIncomingSession()` (callee side): creates the
    * `#sessions` entry and wires inbound data fan-out to `onIncomingData()`
-   * subscribers -- this is what backs `ClawserPod.onMessage` so workspace
+   * subscribers -- this is what backs `Pod.onMessage` so workspace
    * consumers can route incoming sync/deploy envelopes by `envelope.type`.
    *
    * @param {string} pubKey
@@ -688,7 +688,7 @@ export class PeerNode {
   /**
    * Subscribe to raw incoming data from any session. The callback
    * receives `(pubKey, data, {sessionId, transport})`. Used by
-   * `ClawserPod.onMessage` to fan an envelope-level dispatch on
+   * `Pod.onMessage` to fan an envelope-level dispatch on
    * top of per-transport bytes. Returns an unsubscribe function.
    *
    * @param {(pubKey:string, data:any, meta:{sessionId:string, transport:string}) => void} cb

@@ -1,5 +1,5 @@
 /**
- * clawser-peer-payments.js -- Payment mechanisms for resource sharing.
+ * peer-payments.mjs --Payment mechanisms for resource sharing.
  *
  * Provides a PaymentProvider abstraction with two implementations:
  * 1. MultiPartyCreditLedger — internal credit system (no real money)
@@ -16,7 +16,7 @@
  * No browser-only imports at module level. All dependencies injected.
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-peer-payments.test.mjs
+ *   cd packages/browsermesh-apps && node --import ./test/_setup-globals.mjs --test test/peer-payments.test.mjs
  */
 
 // ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 /**
 // STATUS: EXPERIMENTAL — complete implementation, not yet integrated into main application
- * clawser-peer-collab.js -- Real-time collaborative editing via Yjs CRDT.
+ * collab.mjs -- Real-time collaborative editing via Yjs CRDT.
  *
  * YjsAdapter: wraps Yjs Doc with shared types and sync primitives.
  * AwarenessState: cursor/selection presence (custom, no Yjs awareness dep).
@@ -11,7 +11,7 @@
  * No browser-only imports at module level.
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-peer-collab.test.mjs
+ *   cd packages/browsermesh-sync && node --import ./test/_setup-globals.mjs --test test/collab.test.mjs
  */
 
 // ---------------------------------------------------------------------------

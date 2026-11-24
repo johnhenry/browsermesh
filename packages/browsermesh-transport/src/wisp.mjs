@@ -1,5 +1,5 @@
 /**
- * clawser-wisp-transport.mjs -- WISP Transport Adapter for WSH.
+ * wisp.mjs -- WISP Transport Adapter for WSH.
  *
  * Adapts a WispClient as a mesh transport that can carry WSH protocol
  * messages through a WISP relay tunnel. WSH commands are serialized
@@ -7,7 +7,7 @@
  * opened for data transfer, RPC, or mesh relay connections.
  *
  * Implements the same interface as WebSocketTransport from
- * clawser-mesh-websocket.js so it can be used interchangeably.
+ * websocket.mjs so it can be used interchangeably.
  *
  * Standalone uses beyond WSH:
  *   - Exposing RPC mode over a tunneled port
@@ -15,7 +15,7 @@
  *   - Future v86 guest networking
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-wisp-transport.test.mjs
+ *   cd packages/browsermesh-transport && node --import ./test/_setup-globals.mjs --test test/wisp.test.mjs
  */
 
 import { WispClient, WispStream, WISP_DATA } from './wisp-client.mjs'
@@ -342,7 +342,7 @@ export class WispTransport {
    */
   _fireEvent(event, data) {
     for (const cb of this.#callbacks[event] || []) {
-      try { cb(data) } catch (e) { silentCatch('clawser-wisp-transport', 'swallow-listener-errors', e) }
+      try { cb(data) } catch (e) { silentCatch('wisp', 'swallow-listener-errors', e) }
     }
   }
 }

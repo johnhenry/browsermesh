@@ -1,6 +1,6 @@
 /**
-// STATUS: INTEGRATED — wired into ClawserPod lifecycle, proven via E2E testing
- * clawser-mesh-naming.js -- Decentralized name resolution for BrowserMesh.
+// STATUS: INTEGRATED — wired into Pod (@johnhenry/browsermesh-pod) lifecycle, proven via E2E testing
+ * naming.mjs -- Decentralized name resolution for BrowserMesh.
  *
  * Human-friendly names (@alice, mesh://alice/path) mapped to identity
  * fingerprints. First-come-first-served registration, TTL-based expiry,
@@ -9,7 +9,7 @@
  * No browser-only imports at module level.
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-mesh-naming.test.mjs
+ *   cd packages/browsermesh-discovery && node --import ./test/_setup-globals.mjs --test test/naming.test.mjs
  */
 
 import { MESH_TYPE } from '@johnhenry/browsermesh-primitives';

@@ -1,5 +1,5 @@
 import { silentCatch } from './silent-catch.mjs'
-// clawser-channel-relay.js — Channel Relay Plugin
+// channel-relay.mjs — Channel Relay Plugin
 //
 // Virtual server route for webhooks + BroadcastChannel relay.
 // Normalizes inbound messages via createInboundMessage().
@@ -107,7 +107,7 @@ export class ChannelRelay {
     this.running = false;
 
     if (this._bc) {
-      try { this._bc.close(); } catch (e) { silentCatch('clawser-channel-relay', 'this._bc.close', e) }
+      try { this._bc.close(); } catch (e) { silentCatch('channel-relay', 'this._bc.close', e) }
       this._bc = null;
     }
   }

@@ -1,6 +1,6 @@
 /**
 // STATUS: EXPERIMENTAL — complete implementation, not yet integrated into main application
- * clawser-mesh-peer.js -- Peer Connection Manager.
+ * peer.mjs -- Peer Connection Manager.
  *
  * Discovers, connects to, and maintains connections with mesh peers.
  * Does not handle the actual transport -- delegates to MeshTransportManager.
@@ -8,7 +8,7 @@
  * Peer status lifecycle: disconnected -> connecting -> connected -> authenticated
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-mesh-peer.test.mjs
+ *   cd packages/browsermesh-core && node --import ./test/_setup-globals.mjs --test test/peer.test.mjs
  */
 
 // ---------------------------------------------------------------------------

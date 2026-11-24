@@ -1,5 +1,5 @@
 /**
- * clawser-mesh-visualizations.js -- Trust & Topology Visualization Data.
+ * visualizations.mjs --Trust & Topology Visualization Data.
  *
  * Produces structured data for rendering trust graphs and mesh topology.
  * UI-agnostic — outputs JSON-friendly objects suitable for any renderer
@@ -15,7 +15,7 @@
  * No browser-only imports at module level.
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-mesh-visualizations.test.mjs
+ *   cd packages/browsermesh-apps && node --import ./test/_setup-globals.mjs --test test/visualizations.test.mjs
  */
 
 // ---------------------------------------------------------------------------

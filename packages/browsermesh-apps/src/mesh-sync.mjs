@@ -9,7 +9,7 @@
  * underlying transport JSON-serializes them, see `WebRTCPeerConnection.send`),
  * inbound via `onIncomingData()`, filtering by `envelope.type` (default
  * `'mesh-sync'`) exactly the way `peer-node.mjs`'s own doc comments describe
- * `ClawserPod.onMessage` routing "by `envelope.type`" -- multiple independent
+ * `Pod.onMessage` routing "by `envelope.type`" -- multiple independent
  * consumers of `onIncomingData()` can coexist on the same bus this way, each
  * ignoring envelopes that aren't theirs.
  *

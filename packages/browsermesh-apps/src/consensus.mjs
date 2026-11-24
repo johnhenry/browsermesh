@@ -1,5 +1,5 @@
 /**
- * clawser-mesh-consensus.js -- Voting and consensus protocols for BrowserMesh.
+ * consensus.mjs --Voting and consensus protocols for BrowserMesh.
  *
  * Supports simple majority, super majority (>66.7%), unanimous, and weighted
  * voting.  Each Proposal tracks options, quorum, deadline, and status.
@@ -11,7 +11,7 @@
  * No browser-only imports at module level.
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-mesh-consensus.test.mjs
+ *   cd packages/browsermesh-apps && node --import ./test/_setup-globals.mjs --test test/consensus.test.mjs
  */
 
 import { MESH_TYPE } from '@johnhenry/browsermesh-primitives';
@@ -457,8 +457,8 @@ export class Tally {
  * weighted VOTING (see VoteType), not PBFT: there's no pre-prepare/
  * prepare/commit round, no view changes, and no Byzantine fault
  * tolerance guarantee (3f+1 quorum). For that, see the opt-in
- * `@johnhenry/raijin-consensus` package wired at clawser-pod.js's PBFT integration
- * (~line 417-478) — a separate, heavier protocol for when Byzantine
+ * `@johnhenry/raijin-consensus` package, wired in by the host application's
+ * PBFT integration — a separate, heavier protocol for when Byzantine
  * safety actually matters (e.g. payment finality). This class is the
  * lightweight default: mesh-wide polls, config changes, elections.
  */
@@ -711,7 +711,7 @@ export class ConsensusManager {
         const proposal = Proposal.fromJSON(payload);
         const tally = new Tally(proposal);
         this.#tallies.set(proposal.proposalId, tally);
-      } catch (e) { silentCatch('clawser-mesh-consensus', 'ignore-malformed-proposals', e) }
+      } catch (e) { silentCatch('consensus', 'ignore-malformed-proposals', e) }
     });
 
     // Inbound: receive votes
@@ -719,12 +719,12 @@ export class ConsensusManager {
       try {
         const { proposalId, choice, weight } = payload;
         this.vote(proposalId, fromPodId, choice, weight ?? 1);
-      } catch (e) { silentCatch('clawser-mesh-consensus', 'ignore-invalid-votes', e) }
+      } catch (e) { silentCatch('consensus', 'ignore-invalid-votes', e) }
     });
 
     // Inbound: receive close requests
     subscribeFn(CONSENSUS_CLOSE, (payload, fromPodId) => {
-      try { this.closeProposal(payload.proposalId); } catch (e) { silentCatch('clawser-mesh-consensus', 'this.closeProposal', e) }
+      try { this.closeProposal(payload.proposalId); } catch (e) { silentCatch('consensus', 'this.closeProposal', e) }
     });
 
     // Inbound: receive results (informational, for sync)
