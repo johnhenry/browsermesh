@@ -15,6 +15,7 @@ import {
   isolatedVmAvailability,
 } from '../src/node-runtimes.mjs'
 import { driverConformance } from './helpers/driver-conformance.mjs'
+import { isolatedVmSuiteOptions } from './helpers/require-isolated-vm.mjs'
 
 const FIXTURES = path.join(fileURLToPath(new URL('.', import.meta.url)), 'fixtures', 'runtime-modules')
 const MODULES = {
@@ -41,9 +42,28 @@ describe('isolate runtime: availability', () => {
   })
 })
 
-const availability = isolatedVmAvailability()
+describe('isolate runtime: the REQUIRE_ISOLATED_VM switch', () => {
+  const missing = { available: false, reason: 'no binary for this platform' }
+  it('skips the suite when the addon is missing and nothing requires it', () => {
+    assert.deepEqual(isolatedVmSuiteOptions(missing, {}), { skip: 'isolated-vm is not available here: no binary for this platform', required: false })
+    assert.deepEqual(isolatedVmSuiteOptions(missing, { REQUIRE_ISOLATED_VM: '0' }).required, false)
+  })
+  it('does not skip the suite when REQUIRE_ISOLATED_VM=1, so a missing addon fails', () => {
+    assert.deepEqual(isolatedVmSuiteOptions(missing, { REQUIRE_ISOLATED_VM: '1' }), { skip: false, required: true })
+  })
+  it('does not skip the suite when the addon is there', () => {
+    assert.deepEqual(isolatedVmSuiteOptions({ available: true }, {}), { skip: false, required: false })
+  })
+})
 
-describe('isolate runtime (isolated-vm)', { skip: availability.available ? false : `isolated-vm is not available here: ${availability.reason}` }, () => {
+const availability = isolatedVmAvailability()
+const suite = isolatedVmSuiteOptions(availability)
+
+describe('isolate runtime (isolated-vm)', { skip: suite.skip }, () => {
+  it('the addon loaded (this is what REQUIRE_ISOLATED_VM=1 turns a skip into)', () => {
+    assert.equal(availability.available, true, `isolated-vm did not load: ${availability.reason}`)
+  })
+
   const made = []
   /** A driver over a fresh isolate runtime. */
   function makeDriver(runtimeOpts = {}, driverOpts = {}) {

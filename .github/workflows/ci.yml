@@ -28,6 +28,16 @@ jobs:
       - name: Run tests
         run: npm test
 
+      # The isolate lane's runtime (isolated-vm, an optional native addon) on
+      # Linux x64 with its prebuilt binary. `npm test` above already runs this
+      # file, but it SKIPS it when the addon does not load, and a skipped suite
+      # reports success. REQUIRE_ISOLATED_VM=1 makes a missing addon a failure,
+      # so a dependency or Node bump that loses the binary is seen here.
+      - name: Run the isolate runtime tests (must not skip)
+        env:
+          REQUIRE_ISOLATED_VM: '1'
+        run: node --test packages/browsermesh-pod/test/isolate-runtime.test.mjs
+
       # Real WebRTC peers, run on their own after the parallel suite has
       # finished. These stall under machine load rather than failing: 0/40
       # idle, 6/40 immediately after a heavy run, every stall the full 15s
