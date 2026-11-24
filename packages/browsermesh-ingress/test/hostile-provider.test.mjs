@@ -98,7 +98,7 @@ describe('forbidden headers', () => {
     const res = await t.get('/')
     assert.equal(res.status, 200)
     assert.deepEqual([...res.headers.keys()].sort(), ['cache-control', 'content-security-policy', 'content-type', 'vary', 'x-content-type-options'])
-    assert.equal(res.headers.get('content-security-policy'), "default-src 'none'; sandbox")
+    assert.equal(res.headers.get('content-security-policy'), "default-src 'none'; frame-ancestors 'none'; sandbox")
     assert.equal(res.headers.get('cache-control'), 'no-store')
     assert.equal(res.headers.get('x-content-type-options'), 'nosniff')
     assert.equal(res.headers.getSetCookie().length, 0)

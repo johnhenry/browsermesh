@@ -123,7 +123,7 @@ test('a page answers real HTTP: default deny, then a grant, then a revocation', 
     const home = await request({ port, path: '/?q=1' })
     expect(home.status).toBe(200)
     expect(home.body.toString()).toBe('<h1>served by a page</h1>')
-    expect(home.headers['content-security-policy']).toBe("default-src 'none'; sandbox")
+    expect(home.headers['content-security-policy']).toBe("default-src 'none'; frame-ancestors 'none'; sandbox")
     expect(home.headers['x-content-type-options']).toBe('nosniff')
     expect(home.headers['cache-control']).toBe('no-store')
 
@@ -166,7 +166,7 @@ test('what a page cannot make the HTTP client believe: cookies, its own policy, 
     const hostile = await request({ port, path: '/hostile' })
     expect(hostile.status).toBe(200)
     expect(hostile.headers['set-cookie']).toBeUndefined()
-    expect(hostile.headers['content-security-policy']).toBe("default-src 'none'; sandbox")
+    expect(hostile.headers['content-security-policy']).toBe("default-src 'none'; frame-ancestors 'none'; sandbox")
     expect(hostile.headers['cache-control']).toBe('no-store')
     const redirect = await request({ port, path: '/redirect' })
     expect(redirect.status).toBe(502)

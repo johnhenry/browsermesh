@@ -8,8 +8,8 @@
  * This entry imports no `node:` module (a test asserts it).
  */
 export { createMeshIngress } from './ingress.mjs'
-export { serveHttpOnMesh, fromSiteHandler, PROVIDER_LIMIT_DEFAULTS } from './provider.mjs'
+export { serveHttpOnMesh, fromSiteHandler, declineRequest, PROVIDER_LIMIT_DEFAULTS } from './provider.mjs'
 export { INGRESS_LIMIT_DEFAULTS, parseBytes, parseDuration } from './limits.mjs'
 export { IngressError, REASON_HEADER } from './errors.mjs'
 export { DEFAULT_CSP, DEFAULT_FORWARD_REQUEST_HEADERS, DEFAULT_PASS_RESPONSE_HEADERS } from './headers.mjs'
-export { HTTP_PROTOCOL, HTTP_VERSIONS, signedBytes } from './wire.mjs'
+export { HTTP_PROTOCOL, HTTP_VERSIONS, signedBytes, signedRequestBytes } from './wire.mjs'

@@ -796,12 +796,28 @@ Threat model, by what an attacker is and wants:
   ingress fetches: the target is built from parsed parts and the ingress fetches nothing. A provider serves only ingress
   pods it granted: `protocol:http:open` in its registry (default deny) and `allowFrom` (required); revoking the grant
   closes the channel at once.
+- **An ingress whose pod id is new each session.** `allowFrom` may be a function `(podId, context)` (asked on open and for
+  every request; only `true` serves; a throw refuses; omitting `allowFrom` is still an error). With a function, **the
+  provider's own check carries the weight**: the pod id and the registry grant no longer name the ingress, so the provider
+  verifies another proof, for example a signed request. `verifyRequest(request, { peer, sig, bytes })` on the provider runs
+  before the handler and refuses anything but `true`; the ingress's `signRequest` makes the signature, which covers the
+  request, a fresh nonce, the headers as sent and the body digest. The package picks no cryptography. On a link whose peer
+  identity is only asserted by a third party (a relay that vouches for who is on the other end), the signed-response and
+  signed-request hooks should be mandatory in the application, because the pod id alone is only as good as that third
+  party; the protocol channel itself needs only a byte duplex with a peer identity.
+- **A provider that is not the right one for a request.** `declineRequest()` is a provider's way to say "not me": the ingress
+  reports the named 502 `provider-declined` and never sends it as the provider's response. `retry` (off by default) asks
+  `resolve` again, with the pods already tried, after a failure in which the provider did no work (unreachable, wrong pod,
+  declined): at most 1 to 5 more times, one deadline, every attempt authorised and audited, never after a provider started
+  answering, and `POST` and `PATCH` only on request. There is no multi-hop delivery; `retry` does not route.
 - **A hostile provider that wants to hurt the client or the operator.** Bounded: response bytes (8 MiB; a declared length
   over it is refused before anything is sent, a body that outgrows it is cut), the whole request (30 s), idle time between
   chunks (15 s), header count and bytes. Outbound headers are an allow-list: `Set-Cookie`, `Content-Encoding`,
   `Strict-Transport-Security`, `Refresh`, CORS and unknown headers are dropped; `Content-Security-Policy: default-src
-  'none'; sandbox`, `X-Content-Type-Options: nosniff`, `Cache-Control: no-store` and `Vary` are the ingress's; a mapping
-  can opt out of the policy only explicitly. A redirect is never followed, and a `Location` that is not a path on the same
+  'none'; frame-ancestors 'none'; sandbox` (a response is never framed by default), `X-Content-Type-Options: nosniff`,
+  `Cache-Control: no-store` and `Vary` are the ingress's; a mapping can opt out of the policy only explicitly, and can add
+  headers its operator wrote (`response.addHeaders`: at most 16, no line breaks, no hop-by-hop or framing header, and
+  never a forced header unless that header's own opt-out is set). A redirect is never followed, and a `Location` that is not a path on the same
   origin makes the response 502 `provider-redirect-refused`. A malformed head, a status outside 200-599, a body the head did
   not announce, a stream for a request that was never made, and a body of the wrong length are each a named 502.
 - **A hostile HTTP client.** GET and HEAD only until `methods` allows more; CONNECT and TRACE never; a body on GET/HEAD,

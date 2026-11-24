@@ -33,13 +33,16 @@ import { listenNode } from '@johnhenry/browsermesh-ingress/node'
 
 const ingress = createMeshIngress({
   service,                       // attachService(node, undefined, createMeshProtocolService()); or `node` to attach one
-  resolve: async (request) => ({ peer: podId, path?, headers?, response? }) | null,
+  resolve: async (request, { attempt, tried }) => ({ peer: podId, path?, headers?, response? }) | null,
   authorize: async (request, target) => boolean,   // optional; false -> 403
   deny: (request) => Response | true | null,       // optional; true -> 451
   limits: { ... },                                 // see "Defaults"
   methods: ['GET', 'HEAD'],
   forwardHeaders: [],            // extra request headers a client may pass to the provider
+  exposeHeaders: [],             // extra response headers a provider may set
   verifyResponse: undefined,     // optional signed responses
+  signRequest: undefined,        // optional signed requests (the provider's verifyRequest checks them)
+  retry: undefined,              // optional { attempts, on, nonIdempotent }: see "Declining and retry"
   rpc: undefined,                // opt-in buffered fallback for a peer without the protocol
   onAudit: (record) => {},
 })
@@ -58,13 +61,53 @@ Provider side:
 import { serveHttpOnMesh } from '@johnhenry/browsermesh-ingress'
 const served = serveHttpOnMesh(service, (request, { peer, signal }) => new Response('hello'), {
   allowFrom: [ingressPodId],     // required; a pod not named is refused even if the registry would let it open
+                                 // or (podId, context) => boolean | Promise<boolean>: see "allowFrom as a function"
   limits: { ... },
   sign: undefined,               // optional signed responses
+  verifyRequest: undefined,      // optional: (request, { peer, sig, bytes }) => boolean, runs before the handler
 })
 registry.grantCapabilities(ingressPodId, ['protocol:http:open'])    // the registry grant is required too
 ```
 
-`handler` is a function or `{ fetch(request, ctx) }`.
+`handler` is a function or `{ fetch(request, ctx) }`. A handler that cannot answer and has done no work returns
+`declineRequest()`.
+
+### `allowFrom` as a function, and signed requests
+
+An ingress whose pod identity is new each session cannot be listed by id. `allowFrom` may then be a function
+`(podId, context) => boolean | Promise<boolean>`, `context = { peer, protocol, version }`, asked on open and again for every
+request; only `true` serves, and a throw or a rejection refuses. It stays required: omitting it is an error. **With a
+function the provider's own check carries the weight**: the registry grant and the pod id no longer say which ingress this
+is, so the provider decides by another proof. The provider's `verifyRequest(request, { peer, sig, bytes, rid, nonce })`
+runs before the handler on a clone of the request and refuses anything but `true` (the channel error `request-unverified`,
+a 502 `provider-refused-request` for the client); the ingress's `signRequest(bytes, { peer })` makes the `sig` in the
+`fetch` head. The signed bytes (`signedRequestBytes`) are `{ v, dir: 'request', rid, nonce, host, method, target,
+headers, client, digest }` with a fresh nonce per request, so a signature made for one request does not verify for
+another; they are symmetrical to the response's (`dir` keeps the two apart). The package picks no cryptography.
+
+### Declining and retry
+
+A provider that cannot answer says so with `declineRequest()`: on the wire the head `{ status: 421, headers: [], body:
+false, declined: true }`, which the ingress turns into the named failure `provider-declined` (502). It is never sent to
+the client as the provider's own response (a handler's plain 421 is an ordinary answer; only the helper's object
+declines, and a decline with headers, a body or a signature is refused as a bad head). An older ingress ignores
+`declined` and shows its client an empty 421.
+
+`retry: { attempts, on, nonIdempotent }` (off by default) re-asks `resolve`, with `{ attempt, tried }`, after a failure in
+which the provider did no work: `provider-unreachable`, `provider-pin-mismatch`, `provider-declined` (all three by
+default; nothing else can be named). `attempts` is 1 to 5, the whole request keeps one deadline, a mapping that returns
+`null` or a pod already tried ends it with the original failure, and every attempt is mapped, authorised, rate-limited and
+audited on its own (`attempt`, `retried: true`). Never after a provider started answering (its own error, a bad or missing
+signature, a refused request, a stalled body); `POST` and `PATCH` only with `nonIdempotent: true`.
+
+### Operator response headers
+
+`response: { addHeaders: { name: value } }` in a mapping adds headers the operator wrote: at most 16, each value text of at
+most 1024 bytes (4 KiB in all) with no control character, names that are tokens; no hop-by-hop or framing header
+(`connection`, `transfer-encoding`, `upgrade`, `proxy-*`, `content-length`, `content-encoding`, ...); not a forced header
+unless that header's own opt-out is set (`content-security-policy` with `contentSecurityPolicy: false`, `cache-control`
+with `cacheControl: false`; `x-content-type-options` never; `set-cookie` with `allowSetCookie`). A bad one is a 500
+`bad-mapping`, found before any provider is asked. They replace what the provider sent under the same name.
 
 ### How it relates to the existing serverless site service
 
@@ -94,8 +137,8 @@ provider's registry (default deny). Nothing else on the envelope changes.
 Methods are on the channel (`http/<method>`), bodies on `createStreamLayer(channel)` (`stream.*`):
 
 ```
-request  fetch   { rid, method, target, host, headers: [[name, value]...], body: bool, client? }
-                 -> { status, headers: [[name, value]...], body: bool, sig? }
+request  fetch   { rid, nonce, method, target, host, headers: [[name, value]...], body: bool, client?, sig? }
+                 -> { status, headers: [[name, value]...], body: bool, sig?, declined? }
 stream   meta { rid, kind: 'request' }     ingress -> provider, the request body (when body: true)
 stream   meta { rid, kind: 'response' }    provider -> ingress, opened BEFORE the head is returned
 ```
@@ -109,7 +152,13 @@ stream   meta { rid, kind: 'response' }    provider -> ingress, opened BEFORE th
 - An older peer without the protocol answers `mesh.protocol.open` with `unknown-protocol`/`-32601`; nothing else
   is sent to it. A refusal (`not-authorized`) is never retried through the fallback.
 - A provider that wants to sign sends `sig` in the head. Signing providers buffer the response (bounded) so the
-  signature can cover the body digest.
+  signature can cover the body digest. An ingress that signs requests sends `sig` in the request head; a provider that
+  does not know it ignores it (an older provider simply does not verify), and `declined: true` is the provider's "not
+  me" (above).
+- **What it needs of the transport**: the channel is a protocol on a mesh link, so it needs only a byte duplex with a
+  peer identity, and rides a relayed link as well as a direct one. On a link whose peer identity is only asserted by a
+  third party, the signed-response and signed-request hooks should be mandatory in the application (all four set,
+  unsigned answers and requests refused).
 
 ### Pinning
 
@@ -148,20 +197,22 @@ The answer is accepted only from the pod the mapping named:
 | `Transfer-Encoding` with `Content-Length`, bad or repeated `Content-Length`, bad `Host` | 400 |
 | `Upgrade` / WebSocket | 426 with a sentence |
 | Response headers | allow-list; `Set-Cookie`, `Content-Encoding`, `Strict-Transport-Security`, `Refresh`, CORS and unknown headers dropped |
-| Forced response headers | `Content-Security-Policy: default-src 'none'; sandbox`, `X-Content-Type-Options: nosniff`, `Cache-Control: no-store`, `Vary` (provider's plus the forwarded request headers) |
+| Forced response headers | `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'; sandbox`, `X-Content-Type-Options: nosniff`, `Cache-Control: no-store`, `Vary` (provider's plus the forwarded request headers) |
 | Redirects | never followed; a `Location` that is not an absolute path on the same origin makes the response 502 `provider-redirect-refused` |
 | Provider URL | a peer never supplies a URL the ingress fetches; the ingress fetches nothing |
 | Audit | `{ peer, host, method, status, reason?, requestBytes, responseBytes, durationMs }`; never query strings, paths or bodies |
 
 A mapping can opt out of the response policy explicitly, per mapping, in `resolve`'s result:
-`response: { contentSecurityPolicy: string | false, cacheControl: string | false, allowSetCookie: boolean }`.
+`response: { contentSecurityPolicy: string | false, cacheControl: string | false, allowSetCookie: boolean, addHeaders: object }`.
+The README carries the one table of every status and reason the ingress produces (pinned to the code by a test) and the
+one table of the headers that cross by default.
 
 ## Not built in v1
 
 - WebSocket (`Upgrade`) is refused with 426. A later bridge would map each upgrade onto `mesh-websocket` frames
   over a second protocol (`http-ws`), with the same pin, per-connection byte and idle limits, and an explicit
   `Origin` policy; none of that exists yet.
-- Routed (multi-hop) delivery, as above.
+- Routed (multi-hop) delivery, as above: there is no multi-hop delivery; `retry` picks another named pod, it does not route.
 - Streaming request bodies end to end while the client is still sending: the ingress reads the (capped) body first, so
   a slow client holds no provider resources; the body then crosses as a stream, and the provider reads it whole (also
   capped) before the handler runs, because a `ReadableStream` is not accepted as a `Request` body by every browser and a

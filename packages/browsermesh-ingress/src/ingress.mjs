@@ -10,12 +10,12 @@ import { attachService } from '@johnhenry/browsermesh-apps/mesh-service'
 import { createMeshProtocolService } from '@johnhenry/browsermesh-apps/protocol-channel'
 import { IngressError, REASON_HEADER } from './errors.mjs'
 import {
-  NO_BODY_STATUS, applyForcedHeaders, checkClientRequestShape, checkHost, checkMappedPath, checkTarget, isPodId,
+  NO_BODY_STATUS, applyForcedHeaders, checkAddHeaders, checkClientRequestShape, checkHost, checkMappedPath, checkTarget, isPodId,
   requestHeadersForProvider, responseHeadersForClient,
 } from './headers.mjs'
 import { createInflight, createRateLimiter, resolveLimits } from './limits.mjs'
 import {
-  FETCH_METHOD, HTTP_PROTOCOL, HTTP_VERSIONS, KIND_RESPONSE, KIND_REQUEST, WIRE_METHODS, signedBytes, sha256Hex, validateResponseHead,
+  FETCH_METHOD, HTTP_PROTOCOL, HTTP_VERSIONS, KIND_RESPONSE, KIND_REQUEST, WIRE_METHODS, signedBytes, signedRequestBytes, sha256Hex, validateResponseHead,
   validateStreamMeta,
 } from './wire.mjs'
 
@@ -38,14 +38,38 @@ function within(promise, ms, make) {
 
 const reasonOf = (e) => (e instanceof IngressError ? e.reason : e?.name === 'AbortError' ? 'client-aborted' : 'error')
 
+/** The failures in which the provider did no work, so a retry cannot repeat anything it did. Nothing else is ever retried. */
+export const RETRYABLE_REASONS = Object.freeze(['provider-unreachable', 'provider-pin-mismatch', 'provider-declined'])
+const MAX_RETRY_ATTEMPTS = 5
+const IDEMPOTENT = new Set(['GET', 'HEAD', 'OPTIONS', 'PUT', 'DELETE'])
+
+function resolveRetry(retry) {
+  if (retry === undefined) return null
+  if (!retry || typeof retry !== 'object' || Array.isArray(retry)) throw new TypeError('createMeshIngress: retry must be { attempts, on?, nonIdempotent? }')
+  const { attempts, on = RETRYABLE_REASONS, nonIdempotent = false } = retry
+  if (!Number.isInteger(attempts) || attempts < 1 || attempts > MAX_RETRY_ATTEMPTS) throw new TypeError(`createMeshIngress: retry.attempts must be an integer from 1 to ${MAX_RETRY_ATTEMPTS}`)
+  if (!Array.isArray(on) || !on.length || !on.every((r) => RETRYABLE_REASONS.includes(r))) throw new TypeError(`createMeshIngress: retry.on must be a non-empty list of ${RETRYABLE_REASONS.join(', ')}`)
+  if (typeof nonIdempotent !== 'boolean') throw new TypeError('createMeshIngress: retry.nonIdempotent must be a boolean')
+  return { attempts, on: new Set(on), nonIdempotent }
+}
+
 /**
  * @param {object} opts
  * @param {object} [opts.service] - a mesh service with the protocol channel: `attachService(node, undefined, createMeshProtocolService())`, or its `.api`
  * @param {object} [opts.node] - alternatively a mesh node: this attaches a protocol service to it (do not also attach one yourself) and `close()` detaches it
- * @param {(request: Request) => Promise<{ peer: string, path?: string, headers?: Record<string,string>, response?: object }|null>} opts.resolve
+ * @param {(request: Request, attempt: { attempt: number, tried: string[] }) => Promise<{ peer: string, path?: string, headers?: Record<string,string>, response?: object }|null>} opts.resolve
  *   Which pod answers. `null` is a 404. `peer` is the pod id the answer is pinned to; `path` replaces the request's path;
- *   `headers` are added to what the provider is sent; `response` is `{ contentSecurityPolicy, cacheControl, allowSetCookie }`
- *   to opt this mapping out of the response policy.
+ *   `headers` are added to what the provider is sent; `response` is `{ contentSecurityPolicy, cacheControl, allowSetCookie,
+ *   addHeaders }` to opt this mapping out of the response policy, or to add headers the operator authors (`addHeaders`: at
+ *   most 16 names to values; no line breaks, hop-by-hop or framing headers; the forced headers only where their own opt-out is set).
+ *   The second argument is `{ attempt: 0, tried: [] }` the first time; with `retry` it is asked again with the pod ids already tried.
+ * @param {{ attempts: number, on?: string[], nonIdempotent?: boolean }} [opts.retry]
+ *   Off by default. After a failure in which the provider did no work (`on`: any of `provider-unreachable`,
+ *   `provider-pin-mismatch`, `provider-declined`; all three by default), `resolve` is called again, up to `attempts` (1 to 5) more
+ *   times, with the pods already tried; each attempt is authorised and audited on its own. Never after a provider started answering;
+ *   POST and PATCH only with `nonIdempotent: true`.
+ * @param {(bytes: Uint8Array, info: { peer: string }) => (string|Promise<string>)} [opts.signRequest]
+ *   Sign each request for the provider's `verifyRequest` (the request counterpart of `verifyResponse`). The package picks no cryptography.
  * @param {(request: Request, target: object) => (boolean|Promise<boolean>)} [opts.authorize] - falsy: 403
  * @param {(request: Request) => (Response|boolean|null|Promise<Response|boolean|null>)} [opts.deny] - a Response is sent as it is; `true` is a 451
  * @param {object} [opts.limits] - see `INGRESS_LIMIT_DEFAULTS`
@@ -61,11 +85,12 @@ const reasonOf = (e) => (e instanceof IngressError ? e.reason : e?.name === 'Abo
  */
 export function createMeshIngress({
   service, node, resolve, authorize, deny, limits: limitOptions, methods = ['GET', 'HEAD'], forwardHeaders = [], exposeHeaders = [],
-  forwardClientAddress = false, verifyResponse, rpc, onAudit, clock, protocol = HTTP_PROTOCOL,
+  forwardClientAddress = false, verifyResponse, signRequest, retry, rpc, onAudit, clock, protocol = HTTP_PROTOCOL,
 } = {}) {
   if (typeof resolve !== 'function') throw new TypeError('createMeshIngress: resolve(request) is required: nothing is served without a mapping')
   if (!service && !node) throw new TypeError('createMeshIngress: a mesh service (or a node to attach one to) is required')
-  for (const [name, fn] of Object.entries({ authorize, deny, verifyResponse, onAudit })) if (fn !== undefined && typeof fn !== 'function') throw new TypeError(`createMeshIngress: ${name} must be a function`)
+  for (const [name, fn] of Object.entries({ authorize, deny, verifyResponse, signRequest, onAudit })) if (fn !== undefined && typeof fn !== 'function') throw new TypeError(`createMeshIngress: ${name} must be a function`)
+  const retrying = resolveRetry(retry)
   if (rpc !== undefined && typeof rpc?.request !== 'function') throw new TypeError('createMeshIngress: rpc must be a mesh-rpc api with request()')
   const allowedMethods = new Set(methods.map((m) => String(m).toUpperCase()))
   for (const m of allowedMethods) if (!WIRE_METHODS.has(m)) throw new TypeError(`createMeshIngress: method ${m} is never served (allowed: ${[...WIRE_METHODS].join(', ')})`)
@@ -86,7 +111,7 @@ export function createMeshIngress({
   const LEGACY_MEMORY_MS = 60_000
   const active = new Set() // abort controllers of requests in flight
   let closed = false
-  const counters = { requests: 0, served: 0, refused: 0, failed: 0, requestBytes: 0, responseBytes: 0, fallbacks: 0, reasons: {} }
+  const counters = { requests: 0, served: 0, refused: 0, failed: 0, requestBytes: 0, responseBytes: 0, fallbacks: 0, retries: 0, reasons: {} }
   const count = (reason) => { counters.reasons[reason] = (counters.reasons[reason] ?? 0) + 1 }
 
   // ------------------------------------------------------------ HTTP responses the ingress makes itself
@@ -195,8 +220,14 @@ export function createMeshIngress({
 
   async function handle(request, info = {}) {
     const startedAt = now()
-    const record = { peer: null, host: null, method: request?.method ?? null, status: 0, reason: undefined, requestBytes: 0, responseBytes: 0, durationMs: 0 }
+    const record = { peer: null, host: null, method: request?.method ?? null, status: 0, reason: undefined, requestBytes: 0, responseBytes: 0, durationMs: 0, attempt: 0 }
     let audited = false
+    // An attempt that was handed on (see `retry`): audited as it happened, then the request goes on.
+    const auditAttempt = (rec, e) => {
+      counters.retries += 1
+      count(e.reason)
+      if (onAudit) { try { onAudit({ ...rec, status: e.status, reason: e.reason, retried: true, durationMs: Math.max(0, now() - startedAt) }) } catch { /* an audit sink never breaks a request */ } }
+    }
     const audit = (status, reason) => {
       if (audited) return
       audited = true
@@ -252,39 +283,64 @@ export function createMeshIngress({
         if (verdict) throw new IngressError(451, 'denied', 'Unavailable for legal reasons.')
       }
 
-      let mapping
-      try { mapping = await resolve(request) } catch { throw new IngressError(500, 'resolve-error', 'The mapping failed.') }
-      if (!mapping) throw new IngressError(404, 'no-mapping', 'Nothing is served at this address.')
-      if (!isPodId(mapping.peer)) throw new IngressError(500, 'bad-mapping', 'A mapping named something that is not a pod id.')
-      const peer = mapping.peer
-      record.peer = peer
-      const path = mapping.path === undefined ? undefined : checkMappedPath(mapping.path)
-      const outTarget = path === undefined ? target : checkTarget(path + url.search, limits.maxTargetLength)
-      const outHeaders = requestHeadersForProvider(request.headers, { forward: forwardHeaders, extra: mapping.headers })
+      // One attempt per pass. Without `retry` there is exactly one. With it, a failure in which the provider did no work
+      // (it was unreachable, it was the wrong pod, it declined) asks `resolve` again, with the pods already tried; every
+      // attempt is mapped, authorised, rate-limited and audited on its own, and all of them share the one deadline.
+      const tried = []
+      let attempt = 0
+      let lastFailure = null
+      let bodyBytes = null
+      let theirs = null
+      for (;;) {
+        let mapping
+        try { mapping = await resolve(request, { attempt, tried: [...tried] }) } catch { throw new IngressError(500, 'resolve-error', 'The mapping failed.') }
+        if (!mapping) throw lastFailure ?? new IngressError(404, 'no-mapping', 'Nothing is served at this address.')
+        if (!isPodId(mapping.peer)) throw new IngressError(500, 'bad-mapping', 'A mapping named something that is not a pod id.')
+        const peer = mapping.peer
+        if (tried.includes(peer)) throw lastFailure // a pod already tried is not asked twice
+        record.peer = peer
+        record.attempt = attempt
+        const path = mapping.path === undefined ? undefined : checkMappedPath(mapping.path)
+        const outTarget = path === undefined ? target : checkTarget(path + url.search, limits.maxTargetLength)
+        const outHeaders = requestHeadersForProvider(request.headers, { forward: forwardHeaders, extra: mapping.headers })
+        const policy = mapping.response && typeof mapping.response === 'object' ? mapping.response : {}
+        checkAddHeaders(policy) // a bad operator header is a bad mapping, found before any provider is asked
 
-      if (authorize) {
-        let ok = false
-        try { ok = (await authorize(request, mapping)) === true } catch { ok = false }
-        if (!ok) throw new IngressError(403, 'forbidden', 'This request is not authorised.')
+        if (authorize) {
+          let ok = false
+          try { ok = (await authorize(request, mapping)) === true } catch { ok = false }
+          if (!ok) throw new IngressError(403, 'forbidden', 'This request is not authorised.')
+        }
+        const pr = providerRate.take(peer)
+        if (!pr.ok) throw new IngressError(503, 'provider-rate', 'This provider is receiving too many requests.', { headers: { 'retry-after': String(Math.ceil(pr.retryAfterMs / 1000)) } })
+        theirs?.() // the pod this attempt replaces
+        theirs = inflight.enter(`p:${peer}`, limits.maxInflightPerProvider)
+        if (!theirs) throw new IngressError(503, 'provider-inflight', 'This provider is busy.', { headers: { 'retry-after': '1' } })
+        releases.push(theirs)
+
+        if (attempt === 0) {
+          // The whole request is bounded from here: the client's body, the provider's head and its body.
+          deadline = unref(setTimeout(() => ac.abort(new IngressError(504, 'provider-timeout', 'The provider did not answer in time.')), limits.timeoutMs))
+          request.signal?.addEventListener('abort', () => ac.abort(new IngressError(499, 'client-aborted', 'The client went away.')), { once: true })
+          bodyBytes = await readBody(request, shape.contentLength, limits.maxRequestBodyBytes)
+          record.requestBytes = bodyBytes.byteLength
+        }
+        const forward = { method, target: outTarget, host, headers: outHeaders, body: bodyBytes, client: forwardClientAddress ? client.slice(0, 64) : undefined, peer }
+        try {
+          // A streamed response keeps the deadline and the slots until its body ends; a buffered one is finished here.
+          const response = await forwardToProvider(forward, policy, ac, record, (status, reason) => { clearTimeout(deadline); audit(status, reason); done() })
+          if (response.finished) { clearTimeout(deadline); audit(response.status, undefined); done() }
+          return response.response
+        } catch (e) {
+          const retryable = retrying && e instanceof IngressError && retrying.on.has(e.reason) && attempt < retrying.attempts && !ac.signal.aborted
+            && (retrying.nonIdempotent || IDEMPOTENT.has(method))
+          if (!retryable) throw e
+          auditAttempt(record, e)
+          lastFailure = e
+          tried.push(peer)
+          attempt += 1
+        }
       }
-      const pr = providerRate.take(peer)
-      if (!pr.ok) throw new IngressError(503, 'provider-rate', 'This provider is receiving too many requests.', { headers: { 'retry-after': String(Math.ceil(pr.retryAfterMs / 1000)) } })
-      const theirs = inflight.enter(`p:${peer}`, limits.maxInflightPerProvider)
-      if (!theirs) throw new IngressError(503, 'provider-inflight', 'This provider is busy.', { headers: { 'retry-after': '1' } })
-      releases.push(theirs)
-
-      // The whole request is bounded from here: the client's body, the provider's head and its body.
-      deadline = unref(setTimeout(() => ac.abort(new IngressError(504, 'provider-timeout', 'The provider did not answer in time.')), limits.timeoutMs))
-      request.signal?.addEventListener('abort', () => ac.abort(new IngressError(499, 'client-aborted', 'The client went away.')), { once: true })
-
-      const bodyBytes = await readBody(request, shape.contentLength, limits.maxRequestBodyBytes)
-      record.requestBytes = bodyBytes.byteLength
-      const forward = { method, target: outTarget, host, headers: outHeaders, body: bodyBytes, client: forwardClientAddress ? client.slice(0, 64) : undefined, peer }
-      const policy = mapping.response && typeof mapping.response === 'object' ? mapping.response : {}
-      // A streamed response keeps the deadline and the slots until its body ends; a buffered one is finished here.
-      const response = await forwardToProvider(forward, policy, ac, record, (status, reason) => { clearTimeout(deadline); audit(status, reason); done() })
-      if (response.finished) { clearTimeout(deadline); audit(response.status, undefined); done() }
-      return response.response
     } catch (e) {
       clearTimeout(deadline)
       if (process.env.DEBUG_INGRESS && !(e instanceof IngressError && e.status < 500)) console.error('DEBUG-INGRESS', e)
@@ -314,10 +370,19 @@ export function createMeshIngress({
     }
     if (ac.signal.aborted) throw ac.signal.reason
     const rid = state.nextRid++
-    const entry = { reader: null, readerReady: deferred(), fail: (e) => ac.abort(e) }
-    state.pending.set(rid, entry)
     const nonce = randomHex(16)
     const hasBody = forward.body.byteLength > 0
+    // A signed request: the provider's `verifyRequest` is given exactly these bytes, rebuilt from what arrives.
+    let sig
+    if (signRequest) {
+      try {
+        const bytes = signedRequestBytes({ rid, nonce, host: forward.host, method: forward.method, target: forward.target, headers: forward.headers, client: forward.client, digest: await sha256Hex(forward.body) })
+        sig = await signRequest(bytes, { peer })
+      } catch { sig = undefined }
+      if (typeof sig !== 'string' || !sig || sig.length > 2048) throw new IngressError(500, 'sign-error', 'The ingress could not sign the request.')
+    }
+    const entry = { reader: null, readerReady: deferred(), fail: (e) => ac.abort(e) }
+    state.pending.set(rid, entry)
     const cleanup = () => state.pending.delete(rid)
     const cancelReader = (why) => { entry.reader?.cancel(why).catch(() => {}); entry.readerReady.promise.then((r) => r.cancel(why).catch(() => {}), () => {}) }
     const onAbort = () => cancelReader('request ended')
@@ -327,11 +392,13 @@ export function createMeshIngress({
     try {
       const fetchP = state.channel.request(FETCH_METHOD, {
         rid, nonce, method: forward.method, target: forward.target, host: forward.host,
-        headers: forward.headers, body: hasBody, ...(forward.client ? { client: forward.client } : {}),
+        headers: forward.headers, body: hasBody, ...(forward.client ? { client: forward.client } : {}), ...(sig ? { sig } : {}),
       }, { signal: ac.signal, timeoutMs: limits.timeoutMs })
       // The body travels as a stream. A provider may answer before it has read all of it: the head decides.
       if (hasBody) state.streams.sendBody(forward.body, { rid, kind: KIND_REQUEST }, { signal: ac.signal, timeoutMs: limits.openTimeoutMs }).catch(() => {})
       head = validateResponseHead(await fetchP, limits)
+      // "Not me, try another": never the provider's own answer, and nothing of it reaches the client.
+      if (head.declined === true) throw new IngressError(502, 'provider-declined', 'The provider declined this request.')
     } catch (e) {
       cleanup()
       ac.signal.removeEventListener('abort', onAbort)
@@ -340,6 +407,7 @@ export function createMeshIngress({
       if (e instanceof IngressError) throw e
       if (e?.reason === 'timeout') throw new IngressError(504, 'provider-timeout', 'The provider did not answer in time.')
       if (e?.reason === 'not-authorized') throw new IngressError(502, 'provider-not-authorized', 'The provider no longer accepts this ingress.')
+      if (e?.reason === 'request-unverified') throw new IngressError(502, 'provider-refused-request', 'The provider did not accept the request\'s signature.')
       if (e?.reason === 'too-large' || e?.reason === 'stream-too-large') throw new IngressError(502, 'provider-refused-body', 'The provider would not take the request body.')
       throw new IngressError(502, e?.code === -32603 ? 'provider-error' : 'provider-failed', 'The provider failed to answer.')
     }

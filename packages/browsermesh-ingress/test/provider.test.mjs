@@ -229,7 +229,7 @@ describe('the opt-in buffered fallback for a provider that does not serve http',
     assert.equal(res.status, 200)
     assert.equal(await res.text(), 'legacy:POST:/page?q=1:hello')
     assert.equal(res.headers.getSetCookie().length, 0)
-    assert.equal(res.headers.get('content-security-policy'), "default-src 'none'; sandbox")
+    assert.equal(res.headers.get('content-security-policy'), "default-src 'none'; frame-ancestors 'none'; sandbox")
     assert.equal(t.mesh.stats().fallbacks, 1)
   })
 

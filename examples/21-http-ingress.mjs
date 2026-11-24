@@ -87,7 +87,7 @@ const page = await fetch(`${base}/?secret=not-in-the-audit-log`)
 assert.equal(page.status, 200)
 assert.equal(await page.text(), '<h1>hello from a pod</h1>')
 assert.equal(page.headers.getSetCookie().length, 0) // the pod's cookie never reaches the client
-assert.equal(page.headers.get('content-security-policy'), "default-src 'none'; sandbox") // nor its own policy
+assert.equal(page.headers.get('content-security-policy'), "default-src 'none'; frame-ancestors 'none'; sandbox") // nor its own policy
 assert.equal(page.headers.get('cache-control'), 'no-store')
 assert.equal(page.headers.get('x-content-type-options'), 'nosniff')
 

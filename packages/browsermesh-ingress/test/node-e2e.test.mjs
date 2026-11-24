@@ -18,7 +18,7 @@ describe('over a real socket', () => {
     assert.equal(res.status, 200)
     assert.equal(await res.text(), '<p>/hello</p>')
     assert.equal(res.headers.get('content-type'), 'text/html')
-    assert.equal(res.headers.get('content-security-policy'), "default-src 'none'; sandbox")
+    assert.equal(res.headers.get('content-security-policy'), "default-src 'none'; frame-ancestors 'none'; sandbox")
     assert.equal(res.headers.get('x-content-type-options'), 'nosniff')
     assert.equal(res.headers.get('cache-control'), 'no-store')
     assert.equal(res.headers.getSetCookie().length, 0)

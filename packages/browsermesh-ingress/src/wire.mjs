@@ -32,6 +32,7 @@ export function validateRequestHead(head, { maxHeaderCount, maxHeaderBytes, maxT
   if (typeof body !== 'boolean') throw new IngressError(400, 'bad-request-head', 'The body flag is not a boolean.')
   if (head.client !== undefined && (typeof head.client !== 'string' || head.client.length > 64)) throw new IngressError(400, 'bad-request-head', 'The client field is not a short string.')
   if (typeof head.nonce !== 'string' || !/^[0-9a-f]{16,64}$/.test(head.nonce)) throw new IngressError(400, 'bad-request-head', 'The nonce is not 16 to 64 hex characters.')
+  if (head.sig !== undefined && (typeof head.sig !== 'string' || head.sig.length > 2048)) throw new IngressError(400, 'bad-request-head', 'The signature is not a short string.')
   return head
 }
 
@@ -43,6 +44,9 @@ export function validateResponseHead(head, { maxHeaderCount, maxHeaderBytes }) {
   checkHeaderList(headers, { maxCount: maxHeaderCount, maxBytes: maxHeaderBytes, status: 502, reason: 'bad-response-head' })
   if (typeof body !== 'boolean') throw new IngressError(502, 'bad-response-head', 'The body flag is not a boolean.')
   if (head.sig !== undefined && (typeof head.sig !== 'string' || head.sig.length > 2048)) throw new IngressError(502, 'bad-response-head', 'The signature is not a short string.')
+  // A provider that declines ("not me, try another") says so with `declined: true` and nothing else: status 421, no headers, no body.
+  if (head.declined !== undefined && typeof head.declined !== 'boolean') throw new IngressError(502, 'bad-response-head', 'The declined flag is not a boolean.')
+  if (head.declined === true && (status !== 421 || head.headers.length || body || head.sig !== undefined)) throw new IngressError(502, 'bad-response-head', 'A declined answer carries no headers, body or signature.')
   return head
 }
 
@@ -67,4 +71,15 @@ export async function sha256Hex(bytes) {
 export function signedBytes({ rid, nonce, host, method, target, status, headers, digest }) {
   for (const [name] of headers) if (!isToken(name)) throw new TypeError('bad header name')
   return new TextEncoder().encode(JSON.stringify({ v: 1, rid, nonce, host, method, target, status, headers, digest }))
+}
+
+/**
+ * What a request signature covers (`signRequest` on the ingress, `verifyRequest` on the provider): the request's id and a
+ * fresh nonce (so a signature cannot be replayed for another request), the host, method and target, the header list as sent,
+ * and the SHA-256 of the body. `dir: 'request'` keeps it apart from a response's bytes.
+ * @returns {Uint8Array}
+ */
+export function signedRequestBytes({ rid, nonce, host, method, target, headers, client, digest }) {
+  for (const [name] of headers) if (!isToken(name)) throw new TypeError('bad header name')
+  return new TextEncoder().encode(JSON.stringify({ v: 1, dir: 'request', rid, nonce, host, method, target, headers, client, digest }))
 }

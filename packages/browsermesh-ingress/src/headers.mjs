@@ -31,7 +31,8 @@ export const DEFAULT_PASS_RESPONSE_HEADERS = Object.freeze([
   'etag', 'last-modified', 'location', 'vary', 'retry-after', 'allow',
 ])
 
-export const DEFAULT_CSP = "default-src 'none'; sandbox"
+// `frame-ancestors 'none'`: a response the ingress serves is never something a page frames, unless the mapping says so.
+export const DEFAULT_CSP = "default-src 'none'; frame-ancestors 'none'; sandbox"
 
 /** Statuses that carry no body. */
 export const NO_BODY_STATUS = new Set([204, 205, 304])
@@ -153,6 +154,44 @@ export function checkClientRequestShape(headers, method, { maxCount, maxBytes })
   return { contentLength: cl === null ? null : Number(cl.trim()), chunked: te !== null }
 }
 
+const HOP_BY_HOP_RESPONSE = new Set(['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'proxy-connection', 'te', 'trailer', 'transfer-encoding', 'upgrade'])
+const FRAMING_RESPONSE = new Set(['content-length', 'content-encoding'])
+export const MAX_ADD_HEADERS = 16
+export const MAX_ADD_HEADER_VALUE = 1024
+export const MAX_ADD_HEADERS_BYTES = 4096
+
+/**
+ * The headers an operator adds to a mapping's responses (`response.addHeaders`), checked: at most 16 of at most 1024 bytes
+ * of text each (4 KiB in all), names that are tokens, values with no control character (so no line break), no hop-by-hop or
+ * framing header, and none of the forced headers unless that header's own opt-out is set (`contentSecurityPolicy: false`,
+ * `cacheControl: false`; `x-content-type-options` has none; `set-cookie` needs `allowSetCookie`). A bad one is a bad mapping.
+ * @param {object} response - the mapping's `response` policy
+ * @returns {Array<[string, string]>} lower-cased names
+ */
+export function checkAddHeaders(response = {}) {
+  const add = response.addHeaders
+  if (add === undefined) return []
+  const bad = () => new IngressError(500, 'bad-mapping', 'A mapping named a response header that may not be added.')
+  if (!add || typeof add !== 'object' || Array.isArray(add)) throw bad()
+  const entries = Object.entries(add)
+  if (entries.length > MAX_ADD_HEADERS) throw bad()
+  const out = []
+  let bytes = 0
+  for (const [rawName, value] of entries) {
+    const name = rawName.toLowerCase()
+    if (!isToken(name) || typeof value !== 'string' || !isValue(value) || byteLength(value) > MAX_ADD_HEADER_VALUE) throw bad()
+    if (HOP_BY_HOP_RESPONSE.has(name) || name.startsWith('proxy-') || FRAMING_RESPONSE.has(name)) throw bad()
+    if (name === 'content-security-policy' && response.contentSecurityPolicy !== false) throw bad()
+    if (name === 'cache-control' && response.cacheControl !== false) throw bad()
+    if (name === 'x-content-type-options') throw bad()
+    if (name === 'set-cookie' && response.allowSetCookie !== true) throw bad()
+    bytes += byteLength(name) + byteLength(value) + 4
+    if (bytes > MAX_ADD_HEADERS_BYTES) throw bad()
+    out.push([name, value])
+  }
+  return out
+}
+
 /** Is this a Location the ingress may pass on? Only an absolute path on the same origin; never another origin or scheme. */
 export function safeLocation(value) {
   return typeof value === 'string' && value.startsWith('/') && !value.startsWith('//') && !/[\\\u0000-\u001f\u007f]/.test(value)
@@ -169,6 +208,8 @@ export function responseHeadersForClient(list, { response = {}, forward = [], ex
   if (response.allowSetCookie === true) pass.add('set-cookie')
   const out = new Headers()
   const vary = new Set(varyNames(forward))
+  const added = checkAddHeaders(response)
+  for (const [name, value] of added) if (name === 'vary') for (const v of value.split(',')) if (v.trim()) vary.add(v.trim().toLowerCase())
   for (const [name, value] of list) {
     const lower = name.toLowerCase()
     if (lower === 'content-encoding') {
@@ -185,6 +226,12 @@ export function responseHeadersForClient(list, { response = {}, forward = [], ex
   if (vary.has('*')) out.set('vary', '*')
   else if (vary.size) out.set('vary', [...vary].join(', '))
   applyForcedHeaders(out, response)
+  // The operator's own headers last: they replace what the provider set under the same name.
+  for (const [name, value] of added) {
+    if (name === 'vary') continue // merged above
+    if (name === 'set-cookie') out.append(name, value)
+    else out.set(name, value)
+  }
   return out
 }
 
