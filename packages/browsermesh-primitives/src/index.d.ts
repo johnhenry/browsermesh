@@ -37,11 +37,35 @@ export declare function supportsEd25519(): boolean | null;
 /** Reset the cached Ed25519 probe. Tests only. */
 export declare function _resetEd25519Probe(): void;
 
+/**
+ * An external signer: `@johnhenry/wsh`'s "page-held signer" shape. `publicKey`
+ * is the raw 32-byte Ed25519 key or a public `CryptoKey`; `sign` returns the
+ * 64-byte signature, sync or async.
+ */
+export interface Ed25519Signer {
+  publicKey: Uint8Array | CryptoKey;
+  sign(data: Uint8Array): Uint8Array | Promise<Uint8Array>;
+}
+
 export declare class PodIdentity {
+  /** For a signer identity `privateKey` is `null`. */
   keyPair: CryptoKeyPair;
   podId: string;
-  constructor(opts: { keyPair: CryptoKeyPair; podId: string });
-  static generate(): Promise<PodIdentity>;
+  constructor(opts: { keyPair: CryptoKeyPair; podId: string; signer?: (data: BufferSource) => Uint8Array | Promise<Uint8Array> });
+  /** Private key is extractable by default; pass `{ extractable: false }` for a key this page cannot read. */
+  static generate(opts?: { extractable?: boolean }): Promise<PodIdentity>;
+  static fromCryptoKeyPair(keyPair: CryptoKeyPair): Promise<PodIdentity>;
+  static fromJwk(jwk: object, opts?: { extractable?: boolean }): Promise<PodIdentity>;
+  static fromPkcs8(pkcs8: BufferSource, opts?: { extractable?: boolean; publicKey?: Uint8Array | CryptoKey }): Promise<PodIdentity>;
+  static fromSigner(signer: Ed25519Signer, opts?: { check?: boolean }): Promise<PodIdentity>;
+  /** True when the private key is an extractable CryptoKey this object holds. */
+  readonly extractable: boolean;
+  /** True when signing goes to an external signer. */
+  readonly isExternalSigner: boolean;
+  /** Raw 32-byte public key (public key export only). */
+  rawPublicKey(): Promise<Uint8Array>;
+  /** Rejects unless the identity is exportable. */
+  exportPrivateKey(format?: 'jwk' | 'pkcs8'): Promise<object | Uint8Array>;
   sign(data: BufferSource): Promise<Uint8Array>;
   /**
    * Argument order is (publicKey, signature, data), matching WebCrypto.
@@ -49,6 +73,112 @@ export declare class PodIdentity {
    * TypeError if the old order is detected (64-byte data, non-64-byte signature).
    */
   static verify(publicKey: CryptoKey, signature: BufferSource, data: BufferSource): Promise<boolean>;
+}
+
+// ---- Session certificates and signed revocation ----
+
+export declare const CERT_VERSION: 1;
+export declare const DEFAULT_MAX_LIFETIME_SECONDS: number;
+export declare const DEFAULT_SKEW_SECONDS: number;
+export declare const MAX_SKEW_SECONDS: number;
+export declare const MAX_SCOPE_ENTRIES: number;
+export declare const MAX_SCOPE_ENTRY_BYTES: number;
+export declare const DEFAULT_REVOCATION_STORE_SIZE: number;
+export declare const REVOCATION_KIND: Readonly<{ SESSION: 1; IDENTITY: 2 }>;
+
+export declare class CredentialError extends Error {
+  /** malformed | unsupported-version | bad-signature | not-yet-valid | expired | invalid-lifetime | lifetime-too-long | chain-too-long | revoked | identity-retired | wrong-identity | scope-denied | bad-proof | bad-argument | store-full */
+  code: string;
+  constructor(code: string, message: string);
+}
+
+export interface SessionCertificateFields {
+  identityKey: Uint8Array;
+  sessionKey: Uint8Array;
+  serial: Uint8Array;
+  notBefore: number;
+  notAfter: number;
+  scope: string[];
+}
+export interface DecodedSessionCertificate extends SessionCertificateFields {
+  version: number;
+  signature: Uint8Array;
+  body: Uint8Array;
+}
+export interface IssuedSessionCertificate {
+  certificate: Uint8Array;
+  serial: string;
+  identityKey: Uint8Array;
+  sessionKey: Uint8Array;
+  scope: string[];
+  notBefore: number;
+  notAfter: number;
+}
+export interface IssueOptions {
+  scope: string[];
+  ttlSeconds?: number;
+  notBefore?: number;
+  notAfter?: number;
+  serial?: Uint8Array;
+  now?: number | Date;
+  maxLifetimeSeconds?: number;
+}
+export interface PeerCredential {
+  identityKey: Uint8Array;
+  podId: string;
+  sessionKey: Uint8Array;
+  scope: string[];
+  serial: string;
+  notBefore: number;
+  notAfter: number;
+}
+export interface RevocationStatement {
+  kind: number;
+  identityKey: Uint8Array;
+  serial: Uint8Array;
+  issuedAt: number;
+  retainUntil: number;
+  bytes: Uint8Array;
+}
+export interface RevocationStore {
+  add(statement: RevocationStatement, bytes: Uint8Array): boolean | 'ignored' | Promise<boolean | 'ignored'>;
+  isRevoked(identityKey: Uint8Array, serial: Uint8Array | null): boolean | Promise<boolean>;
+}
+
+export declare function verifyWithRawPublicKey(rawPublicKey: Uint8Array, signature: Uint8Array, data: BufferSource): Promise<boolean>;
+export declare function podIdFromRawKey(rawPublicKey: Uint8Array): Promise<string>;
+export declare function encodeSessionCertificateBody(c: SessionCertificateFields): Uint8Array;
+export declare function decodeSessionCertificate(credential: Uint8Array | string): DecodedSessionCertificate;
+export declare function issueSessionCertificate(identity: PodIdentity, opts: IssueOptions & { sessionPublicKey: Uint8Array | CryptoKey }): Promise<IssuedSessionCertificate>;
+export declare function createSession(identity: PodIdentity, opts: IssueOptions): Promise<IssuedSessionCertificate & { session: PodIdentity }>;
+export declare function createSessionProof(session: PodIdentity, challenge: Uint8Array): Promise<Uint8Array>;
+export declare function scopeAllows(scope: string[], required: string): boolean;
+export declare function verifyPeerCredential(
+  credential: Uint8Array | string | Array<Uint8Array | string>,
+  opts?: {
+    now?: number | Date;
+    skewSeconds?: number;
+    maxLifetimeSeconds?: number;
+    revocations?: RevocationStore;
+    expectedIdentity?: Uint8Array | string;
+    requireScope?: string;
+    proof?: { challenge: Uint8Array; signature: Uint8Array };
+  }
+): Promise<PeerCredential>;
+export declare function revokeSessionCertificate(identity: PodIdentity, certificate: Uint8Array | string, opts?: { now?: number | Date }): Promise<Uint8Array>;
+export declare function retireIdentity(identity: PodIdentity, opts?: { now?: number | Date }): Promise<Uint8Array>;
+export declare function verifyRevocation(bytes: Uint8Array | string): Promise<RevocationStatement>;
+export declare function receiveRevocation(bytes: Uint8Array | string, store: RevocationStore): Promise<{ status: 'added' | 'duplicate' | 'ignored'; statement: RevocationStatement; bytes: Uint8Array }>;
+export declare function isRevoked(subject: { identityKey: Uint8Array; serial?: Uint8Array | null }, store: RevocationStore): Promise<boolean>;
+export declare class MemoryRevocationStore implements RevocationStore {
+  constructor(opts?: { maxEntries?: number; filter?: (statement: RevocationStatement) => boolean; clock?: () => number });
+  clock: () => number;
+  readonly size: number;
+  prune(now?: number | Date): number;
+  add(statement: RevocationStatement, bytes: Uint8Array): boolean | 'ignored';
+  isRevoked(identityKey: Uint8Array, serial: Uint8Array | null): boolean;
+  list(): Uint8Array[];
+  onRevocation(fn: (ev: { statement: RevocationStatement; bytes: Uint8Array }) => void): () => void;
 }
 
 export declare const messageTypeRegistry: Map<number, string>;
