@@ -50,6 +50,8 @@ export * from './chunk-replication.mjs';
 export * from './mesh-rpc.mjs';
 export * from './mesh-channel.mjs';
 export * from './protocol-channel.mjs';
+export * from './protocol-stream.mjs';
+export * from './protocol-roots.mjs';
 export * from './channel-advertisement.mjs';
 export * from './mesh-keepalive.mjs';
 export * from './mesh-fetch.mjs';
