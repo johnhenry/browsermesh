@@ -57,6 +57,18 @@ const STREAM_LIMIT = -32002;
 /** wsh's operation kinds, as the registry action each needs. */
 const OBJECT_ACTION = Object.freeze({ get: 'get', describe: 'get', snapshot: 'get', call: 'call', construct: 'call', set: 'set', on: 'on' });
 
+/**
+ * The registry action an object operation needs (`objects:<root>:<action>`), or null for a kind this table does not
+ * name (which is refused). The same table as `actionFor` of `@johnhenry/browsermesh-objects`: transport cannot depend on
+ * that package, so a test in that package asserts the two agree.
+ * @param {{ kind?: string }} op
+ * @returns {'get'|'call'|'set'|'on'|null}
+ */
+export function wshObjectActionFor(op) {
+  const kind = op?.kind;
+  return typeof kind === 'string' && Object.hasOwn(OBJECT_ACTION, kind) ? OBJECT_ACTION[kind] : null;
+}
+
 let wshModule = null;
 async function loadWsh() {
   if (wshModule) return wshModule;
@@ -266,7 +278,7 @@ export class WshServices {
         // Asked for every operation the page's allow-list let through: the registry, for the key's pod id.
         authorize: (who, op) => {
           const podId = WshServices.#podIdOf(who?.fingerprint);
-          const action = OBJECT_ACTION[op?.kind];
+          const action = wshObjectActionFor(op);
           if (!podId || !action || typeof op.root !== 'string' || !SCOPE_NAME.test(op.root)) return false;
           const allowed = this.#can(podId, `objects:${op.root}`, action);
           if (!allowed) this.#audit('object-refused', { podId, root: op.root, kind: op.kind });
