@@ -27,7 +27,8 @@
  * ISOLATION BOUNDARY. A host states how strongly it separates a pod from
  * itself (`BOUNDARY`): a `worker_threads` pod is `none` (same process, no
  * boundary), a permission-restricted child process is `process`, a V8
- * isolate in its own process is `language`, a microVM is `hardware`. An
+ * isolate (`isolated-vm` in the host's process, or `workerd` in one of its
+ * own) is `language`, a microVM is `hardware`. An
  * untrusted requester (the default) is only placed behind `language` or
  * `hardware`. Nothing here establishes a boundary; it only refuses to place
  * untrusted work where a host says there is none.

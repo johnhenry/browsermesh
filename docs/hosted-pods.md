@@ -239,7 +239,10 @@ Why **not** the other "isolate-ish" options:
   and the message bridge yourself; upstream is in maintenance mode (Node 26
   needs its 7.x line); its own README says to run isolates in a separate
   process from anything critical — which is most of what workerd already
-  does for us.
+  does for us. It is nevertheless built as an optional runtime
+  (`createIsolatedVmRuntime()`, `packages/browsermesh-pod`) for hosts that
+  want the isolate lane from Node alone: it runs in the host's process, so
+  a V8 bug is a host bug (see the security review).
 - **`node:vm` / `worker_threads`: not a security boundary.** Fine for packing
   many *trusted* pods into one process; useless for strangers' code. See the
   callout box below.

@@ -20,7 +20,8 @@ Firecracker lane has never booted a VM: see
 | node: permission-model child process | modules from the host's catalog only | `process` (not a sandbox) | `packages/browsermesh-pod/src/node-runtimes.mjs` |
 | node: `worker_threads` | modules from the host's catalog only | `none` | same |
 | isolate: Worker / Durable Object | **no**: runs a fixed echo pod; `run.ref` is not loaded | V8 isolate (workerd) | `spikes/isolate-pod-host` |
-| isolate: `isolated-vm` / `workerd` runtime | specified only (`pod-runtime.mjs`) | `language` | not built |
+| isolate: `isolated-vm` runtime (`createIsolatedVmRuntime()`) | modules from the host's catalog only | `language`, in the host's own process | `packages/browsermesh-pod/src/isolate-runtime.mjs` |
+| isolate: `workerd` runtime | specified only (`pod-runtime.mjs`) | `language` | not built |
 | browser: in-page, CDP, extension | yes (a page) | a tab / a browser context / an extension world | `packages/browsermesh-pod/src/browser-host-driver.mjs`, `spikes/browser-*-host` |
 
 ## 1. Per-lane reach
@@ -56,6 +57,32 @@ how it is checked.
 | Reach | Result |
 | --- | --- |
 | Everything | **Not defended**, and asserted as such so the documentation cannot drift: a worker-thread pod can read and write host files, open connections and start processes (`node-runtimes.test.mjs`, "NOT DEFENDED"). It shares the host process's memory. Only the environment (`env` option) and the heap limit are applied. The placement planner gives `none`-boundary hosts only to requesters the operator trusts (`pod-placement.test.mjs`). |
+
+### isolate: `isolated-vm` runtime
+
+One V8 isolate per pod, inside the host's own Node process. The boundary is
+V8's: a pod is JavaScript with its own heap and global object and nothing else.
+
+| Reach | Result |
+| --- | --- |
+| Host files, network, processes | The isolate has none of `require`, `process`, `Buffer`, `fetch`, `setTimeout` and the other timers, `WebAssembly` (removed: its memory is not counted against the heap limit) or dynamic `import()`; a hosted module that statically imports anything is refused at start. Denied, tested: `isolate-runtime.test.mjs`, "no ambient authority". |
+| Environment variables | Only the podspec's `env`, delivered as JSON data (`ctx.env`, frozen); the host's environment is not reachable. The driver still refuses `NODE_*`, `LD_*`, `DYLD_*`, `UV_*`, `OPENSSL_*`. |
+| Host objects | None is handed in. Exactly two values enter an isolate, as arguments of a host-written wrapper function and never as globals: a JSON string, and one synchronous `ivm.Callback` that takes a string and returns `undefined` (the log line). Requests go in as JSON text, replies come back as JSON text of a bounded size, log text is bounded and its sink is called from a microtask, outside the isolate's callback. No `Reference`, `ExternalCopy` or host function is given to pod code, and no value from the pod reaches a host function except a string. Tested: constructor chains and a property-and-prototype walk from every value the pod holds, a thenable given to the callback, host subscribers that re-enter or drain the pod from inside the log event, a pod that rewrites its own `JSON`. |
+| Memory | The pod's `limits.memMib` becomes the isolate's heap limit (floor 8 MiB). V8 enforces it as a guideline: upstream documents that a determined pod can reach 2 to 3 times the limit before it is stopped. A breach disposes only that isolate and is reported (`oom`). Tested with arrays and with a larger limit that the same allocation passes. Not covered: memory used outside the isolate by the addon, and the host's own memory pressure while a pod runs. |
+| CPU and time | Every call into the pod (loading, `start()`, each request) has a wall-time limit enforced by the isolate (`limits.timeoutMs` for requests): a tight loop in the first segment, after an `await`, in the microtask queue, a regular expression run-away and `Atomics.wait` are stopped, tested. A breach disposes the isolate and is reported (`timeout`). A call that is waiting on a promise nothing can resolve is stopped by a host timer. Not covered: there is no cumulative CPU budget per pod, and a running pod uses one thread of the host's thread pool for as long as the limit allows. |
+| Other pods | Separate isolates (separate heaps) in one process. A breach in one leaves the others running (tested). Pods share the process, the thread pool and the CPU caches. |
+| Which code runs | Only a module from the host's catalog (read by the host, compiled as the sole dependency of a host-written wrapper). |
+
+What a V8 or `isolated-vm` memory-safety bug means here: the isolate is not a
+process boundary, so a bug in V8 or in the addon that lets pod code write
+outside its heap is a bug in the **host process**: it runs with everything the
+host process can read or do (its files, keys, credentials, network and every
+other pod's memory). The upstream README says to keep isolates in a separate
+process from anything critical. This runtime does not do that by itself, so
+the host running it should hold nothing worth stealing, and the planner places
+requesters of low trust on it only if the operator accepts that risk; a
+hardware boundary (the microVM lane) is the stronger choice for strangers.
+Keeping Node current matters: V8 fixes arrive through Node releases.
 
 ### isolate: Worker / Durable Object (the spike)
 
@@ -132,8 +159,11 @@ establishes.
 - **In-page browser pods** share the host page's origin if served from it.
 - **The guest has no resolver** by default, and `caps` and `limits.timeoutMs`
   are not enforced by the microVM driver.
-- **Requester code in the isolate lane** is not run at all today, so nothing
-  is claimed about running it.
+- **Requester code in the `workerd` isolate spike** is not run at all today,
+  so nothing is claimed about running it. The `isolated-vm` runtime does run
+  catalog modules; see its section above for what that does and does not
+  protect (it is a V8 isolate in the host's process, so a V8 bug is a host
+  bug).
 - **Anything that depends on a real Linux/KVM host** (the jail, the nft rules,
   the guest) is unverified.
 
@@ -146,6 +176,7 @@ establishes.
 | pods only see their own environment | same, "environment"; `runtime-lane-driver.test.mjs` |
 | a podspec cannot name a module path or loader/limit variables | `runtime-lane-driver.test.mjs` |
 | an isolate-lane runtime must have a language or hardware boundary | `runtime-lane-driver.test.mjs` |
+| isolate pods have no ambient authority, no host object, and are stopped on memory or time breach | `packages/browsermesh-pod/test/isolate-runtime.test.mjs` |
 | untrusted requesters are not placed on weak boundaries | `packages/browsermesh-apps/test/pod-placement.test.mjs` |
 | each microVM has its own disk, VMM identity and network rules | `spikes/vm-pod-host/test/*.test.mjs` |
 | the isolate control plane refuses requests without the token | `spikes/isolate-pod-host/test/routes.test.mjs` |
