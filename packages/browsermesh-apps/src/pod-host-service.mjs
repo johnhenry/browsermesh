@@ -135,15 +135,14 @@ const LANE_SHELL_BACKEND = Object.freeze({
  * pod can be registered for placement scoring without that function
  * learning anything about pod hosts.
  *
- * KNOWN LIMITATION, worth stating plainly rather than papering over:
  * `runtimePeerToComputeDescriptor()` returns `null` for any peer whose
  * capabilities do not include `shell`/`exec`/`tools` (that is what it turns
  * into the `compute` capability every scored descriptor needs). An
- * ISOLATE-lane pod host has no `exec` by definition, so it produces no
- * compute descriptor today and can only be reached through this service
- * directly, not through `dispatchCompute()`. Fixing that means teaching the
- * orchestrator that "can spawn" is a kind of compute even without a shell
- * -- a change to WP4's scoring surface, deliberately out of scope here.
+ * ISOLATE-lane pod host has no `exec` by definition, so by default it is not
+ * a compute candidate and nothing that needs a shell can reach it. Placement
+ * asks for spawn hosts explicitly (`includeSpawnHosts`), which surfaces a
+ * host that serves `spawn` as a `spawn` + `runtime:<lane>` descriptor
+ * without ever granting it `compute`.
  *
  * @param {PodHostDescription} description
  * @param {object} [extra]

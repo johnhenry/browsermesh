@@ -53,8 +53,42 @@ const state = await agent.reconstituteEncrypted();
 ```
 
 The payload is bound to the agent id and a wrong key or any tampering rejects.
-Not done yet (tracked in #230): threshold sharing of the key, signed shards,
-agent-anonymous DHT keys, a real checksum and multi-loss parity. The plain
+
+For key rotation and replay bounding, give the agent a `StealthKeyring`
+instead of a single key:
+
+```js
+const keyring = await StealthKeyring.fromGroupSecrets('my-group', [{ id: 'k1', secret: s1 }]);
+const agent = new StealthAgent({ agentId, dhtNode, keyring, maxAgeMs: 86_400_000 });
+await agent.hideEncrypted(state);        // v2.<keyId>.<seq>.<issuedAt>.<AES-GCM(iv || ciphertext)>
+await keyring.add('k2', s2, { makeCurrent: true }); // rotate: new seals use k2, k1 still opens old state
+keyring.remove('k1');                    // when nothing sealed under k1 matters any more
+const r = await agent.tryReconstituteEncrypted(); // { ok, state } | { ok: false, reason }; counted in agent.stats
+```
+
+Each message gets a fresh random 96-bit nonce; a key refuses to seal past
+2^32 messages (`key-exhausted`: rotate). The key id, sequence number and issue
+time are authenticated together with the sender (agent id) and message type as
+associated data. An older state than the newest this agent wrote or accepted
+is refused as `replayed`; `maxAgeMs` refuses `stale` state. A peer without the
+key (or looking at plaintext state) gets `{ ok: false, reason }` and a counter
+in `agent.stats`, not a thrown error.
+
+**What this hides, and from whom.** The content of the state, from nodes that
+hold the DHT shards and anyone relaying them. **Not hidden:** that an agent
+exists (shard keys name it), the size of its state, when it is written or read,
+and who reads it (traffic analysis). Everyone holding the group key can read
+the state and can also forge it: the sender in the associated data is a label,
+not a signature (signed shards are not built). Group key custody and rotation
+when a member leaves are the application's job. Replay protection is best
+effort: an agent that has just started and has seen nothing newer cannot tell
+an old state from the current one unless `maxAgeMs` is set.
+
+**Threshold key sharing is not built.** The issue asks to *decide* on it and
+describes it as needing a design call, not a requirement, so it is written up
+in [docs/design/stealth-threshold.md](https://github.com/johnhenry/browsermesh/blob/main/docs/design/stealth-threshold.md)
+and left unbuilt. Also not done: signed shards, agent-anonymous DHT keys, a
+real checksum and multi-loss parity. The plain
 `hide()` / `reconstitute()` below are unchanged and plaintext:
 
 `StealthAgent.hide(stateString)` / `reconstitute()` split a state string into

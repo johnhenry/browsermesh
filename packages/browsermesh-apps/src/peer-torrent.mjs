@@ -42,7 +42,61 @@ export const TORRENT_DEFAULTS = Object.freeze({
   maxPeers: 10,
   announceIntervalMs: 30000,
   trackerUrl: null,           // Use signaling server as tracker if set
+  maxDownloadBytes: 256 * 1024 * 1024, // largest file download() buffers; per-call `maxBytes` overrides
 })
+
+/**
+ * Read a WebTorrent `File` into memory, never holding more than `maxBytes`.
+ *
+ * WebTorrent 2.x/3.x: `file.stream()` (a W3C ReadableStream) is read chunk by
+ * chunk into one buffer sized from `file.length`, and the running total is
+ * checked as well, so a file that claims to be small cannot grow past the cap.
+ * Otherwise `file.arrayBuffer()`, and for a 1.x client the callback-style
+ * `file.getBuffer()`. The size is checked before anything is read.
+ *
+ * @param {object} file - WebTorrent File
+ * @param {number} maxBytes - Pass Infinity for no cap
+ * @returns {Promise<Uint8Array>}
+ */
+async function readTorrentFile(file, maxBytes) {
+  const length = file.length
+  const tooBig = (n) => new Error(`Torrent file is ${n} bytes, which exceeds maxBytes (${maxBytes})`)
+  if (Number.isFinite(length) && length > maxBytes) throw tooBig(length)
+
+  if (typeof file.stream === 'function') {
+    const reader = file.stream().getReader()
+    const known = Number.isFinite(length)
+    let out = known ? new Uint8Array(length) : new Uint8Array(0)
+    let used = 0
+    try {
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        if (used + value.length > maxBytes) throw tooBig(used + value.length)
+        if (used + value.length > out.length) {
+          const grown = new Uint8Array(Math.max(out.length * 2, used + value.length))
+          grown.set(out.subarray(0, used))
+          out = grown
+        }
+        out.set(value, used)
+        used += value.length
+      }
+    } catch (err) {
+      try { await reader.cancel() } catch { /* already closed */ }
+      throw err
+    }
+    return used === out.length ? out : out.slice(0, used)
+  }
+  if (typeof file.arrayBuffer === 'function') {
+    return new Uint8Array(await file.arrayBuffer())
+  }
+  if (typeof file.getBuffer === 'function') {
+    return new Promise((resolve, reject) => {
+      file.getBuffer((err, buffer) => (err ? reject(err) : resolve(new Uint8Array(buffer))))
+    })
+  }
+  throw new Error('Unsupported WebTorrent File: no stream(), arrayBuffer() or getBuffer()')
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -430,61 +484,72 @@ export class TorrentManager {
    * @returns {Promise<{ data: Uint8Array, info: TorrentInfo }>}
    */
   #downloadReal(magnetURI, opts) {
+    const maxBytes = opts.maxBytes ?? TORRENT_DEFAULTS.maxDownloadBytes
     return new Promise((resolve, reject) => {
       const timeout = opts.timeout || 60000
-      const timer = setTimeout(() => {
-        reject(new Error(`Download timed out after ${timeout}ms`))
+      let settled = false
+      let timer = null
+      const removeTorrent = async () => {
+        // A failed or timed-out download must not linger in the client.
+        // (remove() returns a promise in WebTorrent 2.x+.)
+        try {
+          await this.#client.remove(magnetURI)
+        } catch { /* already gone */ }
+      }
+      const fail = (err) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        removeTorrent().then(() => reject(err))
+      }
+      timer = setTimeout(() => {
+        fail(new Error(`Download timed out after ${timeout}ms`))
       }, timeout)
 
       this.#emit('download:start', { magnetURI })
 
-      try {
-        const torrent = this.#client.add(magnetURI, (torrent) => {
-          torrent.on('download', () => {
-            if (opts.onProgress) {
-              opts.onProgress(torrent.progress)
-            }
-          })
+      const finish = async (torrent) => {
+        try {
+          const file = torrent.files[0]
+          if (!file) throw new Error('Torrent has no files')
+          const data = await readTorrentFile(file, maxBytes)
+          if (settled) return
+          settled = true
+          clearTimeout(timer)
+          const info = {
+            magnetURI,
+            infoHash: torrent.infoHash,
+            name: file.name,
+            size: file.length,
+            peers: torrent.numPeers,
+            progress: 1,
+            speed: 0,
+            state: 'seeding',
+          }
+          this.#activeTorrents.set(magnetURI, info)
+          this.#totalDown += data.length
+          this.#emit('download:complete', info)
+          resolve({ data, info })
+        } catch (err) {
+          fail(err)
+        }
+      }
 
-          torrent.on('done', () => {
-            clearTimeout(timer)
-            const file = torrent.files[0]
-            if (!file) {
-              reject(new Error('Torrent has no files'))
-              return
-            }
-            file.getBuffer((err, buffer) => {
-              if (err) {
-                reject(err)
-                return
-              }
-              const data = new Uint8Array(buffer)
-              const info = {
-                magnetURI,
-                infoHash: torrent.infoHash,
-                name: file.name,
-                size: file.length,
-                peers: torrent.numPeers,
-                progress: 1,
-                speed: 0,
-                state: 'seeding',
-              }
-              this.#activeTorrents.set(magnetURI, info)
-              this.#totalDown += data.length
-              this.#emit('download:complete', info)
-              resolve({ data, info })
-            })
-          })
+      try {
+        const onProgress = opts.onProgress
+        const torrent = this.#client.add(magnetURI, (t) => {
+          // A fast (local) transfer can finish before add() returns control.
+          if (t.done || t.progress === 1) finish(t)
+          else t.on('done', () => finish(t))
         })
         if (torrent && torrent.on) {
-          torrent.on('error', (err) => {
-            clearTimeout(timer)
-            reject(err)
-          })
+          // Attached on the returned torrent, not inside the add callback, so
+          // a fast transfer cannot emit its progress before we listen.
+          if (onProgress) torrent.on('download', () => onProgress(torrent.progress))
+          torrent.on('error', fail)
         }
       } catch (err) {
-        clearTimeout(timer)
-        reject(err)
+        fail(err)
       }
     })
   }
