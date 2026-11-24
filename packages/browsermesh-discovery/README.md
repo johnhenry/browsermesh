@@ -84,11 +84,51 @@ when a member leaves are the application's job. Replay protection is best
 effort: an agent that has just started and has seen nothing newer cannot tell
 an old state from the current one unless `maxAgeMs` is set.
 
-**Threshold key sharing is not built.** The issue asks to *decide* on it and
-describes it as needing a design call, not a requirement, so it is written up
-in [docs/design/stealth-threshold.md](https://github.com/johnhenry/browsermesh/blob/main/docs/design/stealth-threshold.md)
-and left unbuilt. Also not done: signed shards, agent-anonymous DHT keys, a
-real checksum and multi-loss parity. The plain
+**Signed shards and agent-anonymous keys (opt-in).** Give the agent its
+identity and every shard it stores is signed and every shard it reads is
+verified:
+
+```js
+const agent = new StealthAgent({
+  agentId, dhtNode, key,
+  identity,                                                  // a PodIdentity: signs and verifies shards
+  lookupNonce: await deriveStealthLookupNonce(groupSecret, agentId, 0), // optional: keys that do not name the agent
+})
+await agent.hideEncrypted(state)           // signed shards (also hideSigned(): signed, plaintext slices)
+const r = await agent.tryReconstituteEncrypted() // { ok, state } | { ok: false, reason }
+agent.stats // shardBadSignature, shardUnsigned, shardStale, ... (refused and counted)
+```
+
+A signature covers the agent, the key the shard lives under, its index, the
+write's sequence number, its content and the lookup nonce, so a changed shard,
+one moved to another key, one signed by someone else, or an old write mixed
+into a new one is refused and counted; the newest complete write wins. A shard
+with **no** signature (written by an older peer) is refused too unless you pass
+`allowUnsigned: true`. Only keys you name can sign: the agent's own, plus any
+raw public keys in `trustedKeys`. An agent with an `identity` cannot call the
+synchronous `hide()` / `reconstitute()` / `isViable()` (they throw
+`async-required`; use `hideSigned()`, `reconstituteSigned()`, `isRecoverable()`),
+so it never writes or reads unsigned by accident; agents without an `identity`
+are unchanged.
+
+With a `lookupNonce` the DHT keys are `hex(SHA-256("browsermesh-stealth/lookup/1"
+NUL agentId NUL nonce NUL index))` and the records hold no agent id, shard id or
+public key: someone watching the DHT who does not know the nonce cannot link a
+key to the agent, or one agent's shards to each other, by key. They can still see
+that records exist, their sizes and timing and the fields one write shares
+(sequence number, checksum), so a determined observer can group them. Everyone who
+should be able to find the shards must hold the nonce:
+`deriveStealthLookupNonce(groupSecret, agentId, epoch)` derives it from the group
+secret (HKDF-SHA-256), so every member computes the same one with nothing extra
+stored, and a new `epoch` moves the shards to new keys when membership changes;
+or keep a random one with the agent's other custodial keys. The data inside is
+plaintext unless you use the encrypted methods. The DHT still accepts a `store` from anyone,
+so an overwrite makes a shard unusable (refused) rather than accepted.
+
+**Threshold key sharing is not built.** It is written up in
+[docs/design/stealth-threshold.md](https://github.com/johnhenry/browsermesh/blob/main/docs/design/stealth-threshold.md)
+and tracked in a follow-up issue. Also not done: a real checksum and multi-loss
+parity. The plain
 `hide()` / `reconstitute()` below are unchanged and plaintext:
 
 `StealthAgent.hide(stateString)` / `reconstitute()` split a state string into

@@ -13,6 +13,29 @@
 import { MESH_TYPE } from '@johnhenry/browsermesh-primitives';
 import { silentCatch } from './silent-catch.mjs'
 import { guardVerifyFn, isVerifyOrderError } from './internal/verify-order.mjs'
+import { EscrowManager } from './peer-escrow.mjs'
+
+/**
+ * A wire `ESCROW_CREATE` the router refused (see `PaymentRouter.attachEscrowLedger`).
+ * `code` is one of: `no-authenticated-sender`, `bad-request`, `bad-escrow-id`,
+ * `payer-mismatch`, `bad-payee`, `not-for-this-pod`, `bad-amount`, `amount-too-large`,
+ * `bad-memo`, `memo-too-large`, `bad-timeout`, `ledger-refused`.
+ */
+export class EscrowWireError extends Error {
+  constructor(code, message, options) {
+    super(message, options);
+    this.name = 'EscrowWireError';
+    this.code = code;
+  }
+}
+
+const ESCROW_ID_RE = /^[A-Za-z0-9_.:-]{1,128}$/;
+const ESCROW_HOOK_DEFAULTS = Object.freeze({
+  maxAmount: 1_000_000,
+  maxMemoBytes: 256,
+  maxTimeoutMs: 30 * 24 * 60 * 60 * 1000,
+  maxRemembered: 10_000,
+});
 
 // ---------------------------------------------------------------------------
 // Wire constants — imported from canonical registry
@@ -1192,6 +1215,12 @@ export class PaymentRouter {
   /** @type {boolean} Hand inbound ESCROW_CREATE to the manager (attachEscrowManager `delegateWire`). */
   #delegateWireEscrow = false;
 
+  /** @type {object|null} Ledger-hook settings of attachEscrowLedger(), or null when none is attached. */
+  #escrowHook = null;
+
+  /** @type {Map<string, Promise<object>>} sender+request id -> outcome, so a repeat is not charged twice. */
+  #escrowRequests = new Map();
+
   /** @type {function|null} */
   #broadcastFn = null;
 
@@ -1375,6 +1404,133 @@ export class PaymentRouter {
   /** The attached conditional EscrowManager, or null. */
   getEscrowManager() {
     return this.#escrowManager;
+  }
+
+  /**
+   * Hold an inbound wire `ESCROW_CREATE` in a real, funded contract, with the
+   * ledger supplied by the deployment as a hook. Nothing is on by default: until
+   * this is called an inbound `ESCROW_CREATE` is only mirrored in the
+   * `SimpleEscrowBook`, exactly as before.
+   *
+   * `mutateLedger(op, amount, podId, memo)` is the shape `EscrowManager` already
+   * takes: `'debit'` takes `amount` from `podId` (and must throw, or reject, when
+   * the balance is short, so nothing is held) and `'credit'` gives it back or pays
+   * the payee. The documented default shape is a per-pod ledger: wire a
+   * `MultiPartyCreditLedger` with `createMultiPartyLedgerHook(ledger)`.
+   *
+   * The payer is the AUTHENTICATED sender: the `fromPodId` the transport wiring
+   * hands the handler, which must be the link's verified identity or a routed
+   * envelope's verified originator, never a field of the message. A `payerPodId`
+   * in the message that differs is refused (`payer-mismatch`) with no ledger call.
+   * The message's `escrowId` is the request id: a repeat from the same sender is
+   * answered with the first outcome and not charged again (a failed attempt is
+   * not remembered, so it can be retried). Amount, memo, timeout, ids and payee
+   * are bounded. Every refusal is reported to `onAudit` as
+   * `{ type: 'escrow-create-refused', reason, peer, escrowId }` (a duplicate as
+   * `{ type: 'escrow-create-duplicate', reason: 'duplicate', ... }`); events carry
+   * no amount and the router logs none.
+   *
+   * @param {(op: 'debit'|'credit', amount: number, podId: string, memo: string) => (any|Promise<any>)} mutateLedger
+   * @param {object} [opts]
+   * @param {number} [opts.maxAmount=1000000] - Largest escrow accepted.
+   * @param {number} [opts.maxMemoBytes=256] - Largest description (UTF-8 bytes).
+   * @param {number} [opts.maxTimeoutMs=2592000000] - Largest `conditions.timeout`.
+   * @param {number} [opts.maxRemembered=10000] - Request ids remembered for idempotency.
+   * @param {(payeePodId: string) => boolean} [opts.acceptPayee] - Which payees this pod acts for (default: only itself, so a broadcast to another pod debits nobody here).
+   * @param {(event: object) => void} [opts.onAudit]
+   * @returns {EscrowManager} The manager the contracts live in (also `getEscrowManager()`).
+   */
+  attachEscrowLedger(mutateLedger, opts = {}) {
+    if (typeof mutateLedger !== 'function') throw new TypeError('attachEscrowLedger requires a mutateLedger(op, amount, podId, memo) function');
+    const o = { ...ESCROW_HOOK_DEFAULTS, ...opts };
+    for (const k of ['maxAmount', 'maxMemoBytes', 'maxTimeoutMs', 'maxRemembered']) {
+      if (typeof o[k] !== 'number' || !Number.isFinite(o[k]) || o[k] <= 0) throw new TypeError(`attachEscrowLedger: ${k} must be a positive number`);
+    }
+    const acceptPayee = opts.acceptPayee ?? ((payee) => payee === this.#localPodId);
+    if (typeof acceptPayee !== 'function') throw new TypeError('attachEscrowLedger: acceptPayee must be a function');
+    if (opts.onAudit !== undefined && typeof opts.onAudit !== 'function') throw new TypeError('attachEscrowLedger: onAudit must be a function');
+    const manager = new EscrowManager({ mutateLedger });
+    this.attachEscrowManager(manager);
+    this.#escrowHook = { ...o, acceptPayee, onAudit: opts.onAudit ?? null };
+    this.#escrowRequests.clear();
+    return manager;
+  }
+
+  /**
+   * Handle one inbound `ESCROW_CREATE` for a router with a ledger hook
+   * (`attachEscrowLedger`). `authenticatedPeer` is the verified sender and the payer.
+   * Resolves `{ ok: true, escrowId, duplicate? }`; rejects with an `EscrowWireError`
+   * (named `code`) when refused, after auditing it. The wire subscriber calls this
+   * and turns a rejection into `{ ok: false, code }`.
+   *
+   * @param {object} payload
+   * @param {string} authenticatedPeer
+   * @returns {Promise<{ ok: true, escrowId: string, duplicate?: boolean }>}
+   */
+  async handleEscrowCreate(payload, authenticatedPeer) {
+    const hook = this.#escrowHook;
+    if (!hook) throw new Error('no escrow ledger hook attached: call attachEscrowLedger() first');
+    const peer = typeof authenticatedPeer === 'string' && authenticatedPeer ? authenticatedPeer : null;
+    const rawId = payload && typeof payload === 'object' ? payload.escrowId : undefined;
+    const id = typeof rawId === 'string' && ESCROW_ID_RE.test(rawId) ? rawId : null;
+    const audit = (type, reason) => {
+      try { hook.onAudit?.({ type, reason, peer, escrowId: id }); } catch (e) { silentCatch('payments', 'escrow-audit-hook', e); }
+    };
+    const refuse = (code, message, options) => {
+      audit('escrow-create-refused', code);
+      return new EscrowWireError(code, message, options);
+    };
+
+    if (!peer) throw refuse('no-authenticated-sender', 'escrow request without an authenticated sender');
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw refuse('bad-request', 'escrow request must be an object');
+    if (!id) throw refuse('bad-escrow-id', 'escrowId must be 1-128 characters of [A-Za-z0-9_.:-]');
+    if (payload.payerPodId !== undefined && payload.payerPodId !== peer) {
+      throw refuse('payer-mismatch', 'the payer must be the authenticated sender');
+    }
+    const payee = payload.payeePodId;
+    if (typeof payee !== 'string' || !payee || payee.length > 128 || payee === peer) throw refuse('bad-payee', 'invalid payee');
+    if (!hook.acceptPayee(payee)) throw refuse('not-for-this-pod', 'this pod does not act for that payee');
+    const amount = payload.amount;
+    if (typeof amount !== 'number' || !Number.isFinite(amount) || amount <= 0) throw refuse('bad-amount', 'amount must be a positive number');
+    if (amount > hook.maxAmount) throw refuse('amount-too-large', 'amount is above this pod\'s limit');
+    const conditions = payload.conditions ?? {};
+    if (typeof conditions !== 'object' || Array.isArray(conditions)) throw refuse('bad-request', 'conditions must be an object');
+    const description = conditions.description;
+    if (description !== undefined && description !== null) {
+      if (typeof description !== 'string') throw refuse('bad-memo', 'description must be a string');
+      if (new TextEncoder().encode(description).length > hook.maxMemoBytes) throw refuse('memo-too-large', 'description is too long');
+    }
+    const timeout = conditions.timeout;
+    if (timeout !== undefined && timeout !== null
+        && (typeof timeout !== 'number' || !Number.isFinite(timeout) || timeout <= 0 || timeout > hook.maxTimeoutMs)) {
+      throw refuse('bad-timeout', 'timeout must be a positive number within this pod\'s limit');
+    }
+
+    // Idempotency: one outcome per sender and request id, claimed before the ledger is touched.
+    const key = `${peer}\u0000${id}`;
+    const earlier = this.#escrowRequests.get(key);
+    if (earlier) {
+      audit('escrow-create-duplicate', 'duplicate');
+      return { ...(await earlier), duplicate: true };
+    }
+    const attempt = (async () => {
+      try {
+        const contract = await this.#escrowManager.create({
+          payerPodId: peer,
+          payeePodId: payee,
+          amount,
+          description: typeof description === 'string' ? description : undefined,
+          timeoutMs: typeof timeout === 'number' ? timeout : undefined,
+        });
+        return { ok: true, escrowId: contract.id };
+      } catch (cause) {
+        throw refuse('ledger-refused', 'the ledger refused the debit', { cause });
+      }
+    })();
+    this.#escrowRequests.set(key, attempt);
+    attempt.then(undefined, () => { if (this.#escrowRequests.get(key) === attempt) this.#escrowRequests.delete(key); });
+    while (this.#escrowRequests.size > hook.maxRemembered) this.#escrowRequests.delete(this.#escrowRequests.keys().next().value);
+    return attempt;
   }
 
   /**
@@ -1562,6 +1718,13 @@ export class PaymentRouter {
 
     // Inbound: escrow creation
     subscribeFn(ESCROW_CREATE, (payload, fromPodId) => {
+      if (this.#escrowHook) {
+        // The ledger-hook path: the outcome is a result, never a throw, so a transport that ignores the return value is safe.
+        return this.handleEscrowCreate(payload, fromPodId).then(
+          (result) => result,
+          (e) => ({ ok: false, code: e instanceof EscrowWireError ? e.code : 'internal-error' }),
+        );
+      }
       try {
         const { payeePodId, amount, conditions } = payload;
         if (this.#delegateWireEscrow && this.#escrowManager) {

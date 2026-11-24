@@ -51,6 +51,22 @@ describe('real signalling server: authenticated mode', { skip }, () => {
     assert.equal(b.isSourceVerified(d), true)
   })
 
+  it('a pod holds two connections; a third displaces the oldest, which is told "replaced"', async () => {
+    const identity = await PodIdentity.generate()
+    const make = () => track(new SignalingClient({ url: srv.wsUrl, localPodId: identity.podId, identity }))
+    const first = make()
+    const notices = []
+    first.on('replaced', (d) => notices.push(d))
+    await first.connect()
+    await make().connect()
+    assert.equal(first.replaced, false)
+    await make().connect()
+    await new Promise((resolve) => { if (notices.length) resolve(); else first.on('replaced', () => resolve()) })
+    assert.equal(notices[0].code, 'replaced')
+    assert.equal(notices[0].reconnect, false)
+    assert.equal(first.replaced, true)
+  })
+
   it('without an identity: a named error', async () => {
     const c = track(new SignalingClient({ url: srv.wsUrl, localPodId: 'a'.repeat(43), waitForRegistration: true }))
     await assert.rejects(c.connect(), (e) => e instanceof SignalingAuthRequiredError)

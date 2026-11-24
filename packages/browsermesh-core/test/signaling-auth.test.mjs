@@ -223,6 +223,59 @@ describe('SignalingClient: verified and sourceVerified', () => {
   })
 })
 
+describe('SignalingClient: a displaced connection ("replaced")', () => {
+  it('names it, stays down, and never reconnects by itself', async () => {
+    const { net, server, url } = setup({ mode: 'authenticated', maxConnectionsPerPod: 2 })
+    const identity = await PodIdentity.generate()
+    const make = () => new SignalingClient({ url, localPodId: identity.podId, identity, _WebSocket: net.WebSocket })
+    const first = make()
+    const seen = []
+    first.on('replaced', (d) => seen.push(d))
+    await first.connect()
+    const second = make(); await second.connect()
+    const third = make(); await third.connect() // a third connection of the pod displaces the oldest
+    await new Promise((resolve) => { if (seen.length) resolve(); else first.on('replaced', () => resolve()) })
+    assert.equal(seen.length, 1)
+    assert.equal(seen[0].code, 'replaced')
+    assert.equal(seen[0].reconnect, false)
+    assert.equal(first.replaced, true)
+    // The close that follows is not a second notice, and the client opens nothing on its own.
+    await new Promise((r) => setTimeout(r, 30))
+    assert.equal(seen.length, 1)
+    assert.equal(first.connected, false)
+    assert.equal(server.connectionCount, 3)
+    assert.equal(server.connectionsOf(identity.podId), 2)
+    second.disconnect(); third.disconnect()
+  })
+
+  it('a 4409 close with reason "replaced" alone is enough', async () => {
+    const { net, url } = setup({ mode: 'authenticated' })
+    const identity = await PodIdentity.generate()
+    const c = new SignalingClient({ url, localPodId: identity.podId, identity, _WebSocket: net.WebSocket })
+    const seen = []
+    c.on('replaced', (d) => seen.push(d))
+    await c.connect()
+    net.sockets[0]._serverClose(4409, 'replaced')
+    await new Promise((r) => setTimeout(r, 20))
+    assert.equal(seen.length, 1)
+    assert.equal(c.replaced, true)
+  })
+
+  it('open mode keeps today\'s behaviour: "podId already registered" is an ordinary error, not a replaced', async () => {
+    const { net, url } = setup({ mode: 'open' })
+    const a = new SignalingClient({ url, localPodId: 'same-id', _WebSocket: net.WebSocket })
+    await a.connect()
+    const b = new SignalingClient({ url, localPodId: 'same-id', waitForRegistration: true, _WebSocket: net.WebSocket })
+    const replaced = []
+    b.on('replaced', (d) => replaced.push(d))
+    await assert.rejects(b.connect(), /podId already registered/)
+    assert.equal(replaced.length, 0)
+    assert.equal(b.replaced, false)
+    assert.equal(a.connected, true)
+    a.disconnect()
+  })
+})
+
 describe('fetchIceServers', () => {
   function fakeFetch(handler) {
     const calls = []

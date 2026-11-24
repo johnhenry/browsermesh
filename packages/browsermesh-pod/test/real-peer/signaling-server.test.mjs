@@ -56,6 +56,42 @@ describe('real signalling server: authenticated mode', { skip }, () => {
     assert.equal(got[0].relaySourceVerified, true)
   })
 
+  it('a pod holds two connections; a third displaces the oldest, which is told "replaced" and stays down', async () => {
+    const identity = await PodIdentity.generate()
+    const sameId = () => make({ podId: identity.podId, identity })
+    const first = sameId()
+    const notices = []
+    first.onReplaced((n) => notices.push(n))
+    await first.open()
+    const second = sameId(); await second.open()
+    assert.equal(first.ready, true)
+    assert.equal(second.ready, true)
+    const third = sameId(); await third.open()
+    await until(() => notices.length === 1, 'the replaced notice')
+    assert.equal(first.replaced.kind, 'primary')
+    await until(() => !first.ready, 'the displaced connection closing')
+    assert.equal(second.ready && third.ready, true)
+  })
+
+  it('the same server as primary and as signalingUrl: both stay connected, each message arrives once', async () => {
+    const identity = await PodIdentity.generate()
+    const other = await PodIdentity.generate()
+    const pod = make({ podId: identity.podId, identity, signalingUrl: srv.wsUrl, peersFromSignaling: true })
+    const got = []
+    pod.onMessage((m) => got.push(m.n))
+    const replaced = []
+    pod.onReplaced((n) => replaced.push(n))
+    await pod.open()
+    const sender = make({ podId: other.podId, identity: other })
+    await sender.open()
+    for (let n = 1; n <= 5; n++) sender.send({ type: 'pod:hello', to: identity.podId, n })
+    await until(() => got.length >= 5, 'five messages')
+    await new Promise((r) => setTimeout(r, 100))
+    assert.deepEqual(got, [1, 2, 3, 4, 5])
+    assert.equal(replaced.length, 0)
+    assert.equal(pod.ready, true)
+  })
+
   it('without an identity: a named error', async () => {
     const t = make({ podId: 'a'.repeat(43) })
     await assert.rejects(t.open(), (e) => e instanceof SignalingAuthRequiredError)
@@ -96,6 +132,17 @@ describe('real signalling server: open mode', { skip }, () => {
     await until(() => got.length === 1, 'relayed message')
     assert.equal(got[0].relaySourceVerified, false)
     assert.equal(b.serverVerifiedPeers.size, 0)
+  })
+
+  it('a second connection for an id is refused as before ("podId already registered"), and is not a "replaced"', async () => {
+    const a = make({ podId: 'open-dup' })
+    await a.open()
+    const b = make({ podId: 'open-dup' })
+    const notices = []
+    b.onReplaced((n) => notices.push(n))
+    await assert.rejects(b.open(), /podId already registered/)
+    assert.equal(notices.length, 0)
+    assert.equal(a.ready, true)
   })
 
   it('with an identity it falls back to the open flow', async () => {

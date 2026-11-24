@@ -38,7 +38,8 @@
     "example:16": "node examples/16-supervised-hosted-pods.mjs",
     "example:17": "node examples/17-mesh-channel.mjs",
     "example:18": "node examples/18-wsh-sealed-peer-link.mjs",
-    "example:19": "node examples/19-wsh-objects-over-protocol-channel.mjs"
+    "example:19": "node examples/19-wsh-objects-over-protocol-channel.mjs",
+    "example:20": "node examples/20-escrow-over-the-wire.mjs"
   },
   "devDependencies": {
     "@changesets/cli": "^2.27.0",

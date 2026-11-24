@@ -126,6 +126,8 @@ export class WebSocketTransport {
   #origin
   #challengeWaitMs
   #registration = null
+  #replaced = null
+  #replacedHandlers = new Set()
 
   #primaryReconnect = { attempts: 0, timer: null, halted: false }
   #sigReconnect = { attempts: 0, timer: null, halted: false }
@@ -227,6 +229,25 @@ export class WebSocketTransport {
   get registration() { return this.#registration }
 
   /**
+   * Set when the signalling server displaced one of this pod's connections for a newer one of
+   * the same pod (`{ kind: 'primary'|'signaling', message }`), else null. A displaced connection is
+   * NOT reconnected automatically (it would displace the other in turn); `open()` again to
+   * choose to. Cleared by `open()`.
+   * @returns {{ kind: string, message: string }|null}
+   */
+  get replaced() { return this.#replaced }
+
+  /**
+   * Be told when a connection is displaced (`replaced`). The application decides what to do.
+   * @param {(info: { kind: 'primary'|'signaling', message: string }) => void} handler
+   * @returns {() => void} unsubscribe
+   */
+  onReplaced(handler) {
+    this.#replacedHandlers.add(handler)
+    return () => this.#replacedHandlers.delete(handler)
+  }
+
+  /**
    * Record that discovery verified this peer. From now on a broadcast reaches it.
    * @param {string} podId
    */
@@ -281,6 +302,7 @@ export class WebSocketTransport {
     this.#closed = false
     this.#primaryReconnect.halted = false
     this.#sigReconnect.halted = false
+    this.#replaced = null
 
     const tasks = [this.#connectAndRegister('primary')]
     if (this.#peersFromSignaling && this.#signalingUrl) {
@@ -466,10 +488,27 @@ export class WebSocketTransport {
           sendOpenRegister()
         }, this.#challengeWaitMs)
       }
+      // This connection was displaced by a newer one of the same pod: do not reconnect
+      // (that would displace the other one in turn); tell the application, once.
+      let replacedNotified = false
+      const markReplaced = (message) => {
+        state.halted = true
+        if (replacedNotified) return
+        replacedNotified = true
+        this.#replaced = { kind, message }
+        this.#onLog(`[ws-transport] ${kind} connection replaced by a newer connection of this pod; not reconnecting`)
+        for (const handler of [...this.#replacedHandlers]) {
+          try { handler({ kind, message }) } catch { /* a handler error must not break frame handling */ }
+        }
+      }
       const handle = (data) => {
         if (!data) return
         if (speaksSignaling && !settled && data.type === 'challenge') {
           answerChallenge(data)
+          return
+        }
+        if (speaksSignaling && data.type === 'error' && data.code === 'replaced' && data.reconnect === false) {
+          markReplaced(typeof data.message === 'string' ? data.message : 'replaced')
           return
         }
         if (isPrimary) this.#handlePrimaryMessage(data)
@@ -514,9 +553,12 @@ export class WebSocketTransport {
         }
         handle(this.#parse(event))
       }
-      const onClose = () => {
+      const onClose = (event) => {
         if (isPrimary) { this.#ready = false; this.#ws = null }
         else { this.#sigWs = null }
+        // The server closes a displaced connection 4409 "replaced" (after an error frame that
+        // may or may not have arrived): that alone is enough to stand down.
+        if (speaksSignaling && event?.code === 4409 && event?.reason === 'replaced') markReplaced('replaced by a newer connection of the same pod')
         finishReject(new Error(`WebSocketTransport: ${kind} connection closed`))
         this.#scheduleReconnect(kind)
       }
@@ -586,16 +628,9 @@ export class WebSocketTransport {
     if (this.#protocol === 'signaling' && this.#handlePeerFrame(data)) return
     switch (data.type) {
       case 'relayed':
-      case 'signal': {
-        if (data.source) {
-          this.#hintedPeers.add(data.source)
-          // Only the server's own stamp counts, and only a literal true.
-          if (data.sourceVerified === true) this.#serverVerifiedPeers.add(data.source)
-          else this.#serverVerifiedPeers.delete(data.source)
-        }
-        this.#deliver(data.source, data.envelope, data.sourceVerified === true)
+      case 'signal':
+        this.#handleRelayedFrame(data)
         return
-      }
       case 'ping':
         this.#send(this.#ws, { type: 'pong' })
         return
@@ -654,9 +689,25 @@ export class WebSocketTransport {
     }
   }
 
+  #handleRelayedFrame(data) {
+    if (data.source) {
+      this.#hintedPeers.add(data.source)
+      // Only the server's own stamp counts, and only a literal true.
+      if (data.sourceVerified === true) this.#serverVerifiedPeers.add(data.source)
+      else this.#serverVerifiedPeers.delete(data.source)
+    }
+    this.#deliver(data.source, data.envelope, data.sourceVerified === true)
+  }
+
   #handleSignalingMessage(data) {
     if (this.#handlePeerFrame(data)) return
     switch (data.type) {
+      case 'signal':
+        // When the primary is itself a signalling connection to the same server, the server
+        // delivers a message for this pod to its newest connection, which may be this one.
+        // Each message arrives on exactly one connection, so it is handled once.
+        if (this.#protocol === 'signaling') this.#handleRelayedFrame(data)
+        return
       case 'ping':
         this.#send(this.#sigWs, { type: 'pong' })
         return

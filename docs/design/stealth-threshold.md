@@ -1,6 +1,6 @@
 # StealthAgent: threshold sharing of the state key (design, not built)
 
-Status: design only. Nothing in this document is implemented. Tracking issue: #230.
+Status: threshold sharing is design only; nothing in the Shamir sections below is implemented. Tracking issue: #328 (the rest of #230). Decision 4 below was taken: signed shards and agent-anonymous DHT keys (`SHA-256(agentId, nonce, index)`, with `deriveStealthLookupNonce`) are built and opt-in (#230).
 
 ## Where things stand
 

@@ -287,10 +287,12 @@ export class EscrowManager {
    *   already did before this change (e.g. insufficient balance).
    */
   constructor(opts) {
-    if (!opts?.creditLedger) {
+    // A `mutateLedger` hook is a complete ledger on its own (it does every debit and credit),
+    // so a manager that has one needs no `creditLedger`.
+    if (!opts?.creditLedger && !opts?.mutateLedger) {
       throw new Error('EscrowManager requires a creditLedger')
     }
-    this.#creditLedger = opts.creditLedger
+    this.#creditLedger = opts.creditLedger ?? null
     this.#onLog = opts.onLog ?? (() => {})
     if (opts.mutateLedger) {
       this.#mutateLedger = opts.mutateLedger
@@ -644,6 +646,28 @@ export class EscrowManager {
       throw new Error(`Cannot ${action}: contract ${contractId} not found`)
     }
     return contract
+  }
+}
+
+/**
+ * The `mutateLedger` hook for a per-pod ledger (`MultiPartyCreditLedger`: one
+ * book, a balance per pod). A `'debit'` charges the pod and throws when its
+ * balance is short (so nothing is held); a `'credit'` credits it. This is the
+ * default shape for `PaymentRouter.attachEscrowLedger()`; a deployment with its
+ * own ledger writes the same function over that ledger instead.
+ *
+ * @param {{ charge: Function, credit: Function }} ledger
+ * @returns {(op: 'debit'|'credit', amount: number, podId: string, memo: string) => any}
+ */
+export function createMultiPartyLedgerHook(ledger) {
+  if (!ledger || typeof ledger.charge !== 'function' || typeof ledger.credit !== 'function') {
+    throw new TypeError('createMultiPartyLedgerHook needs a ledger with charge() and credit()')
+  }
+  return (op, amount, podId, memo) => {
+    if (op === 'credit') return ledger.credit(podId, amount, memo)
+    const result = ledger.charge(podId, amount, memo)
+    if (!result.success) throw new Error('insufficient balance')
+    return result
   }
 }
 

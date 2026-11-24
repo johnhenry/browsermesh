@@ -15,6 +15,13 @@
  *                   signature verifies over registrationMessage(purpose, origin, podId, nonce)
  *                   with the server's OWN origin. Anything else: error { code, message }
  *                   and a close. A register without protocol 2 gets `protocol-unsupported`.
+ *                   One verified pod may hold up to MAX_CONNECTIONS_PER_POD (default 2)
+ *                   connections; a message for it goes to its NEWEST; a connection past the
+ *                   limit displaces the oldest, which is sent
+ *                   { type:'error', code:'replaced', reconnect:false, message } and closed
+ *                   4409 'replaced'. (Open mode: a second connection for an id is refused with
+ *                   { type:'error', message:'podId already registered' }, closed 4409
+ *                   'podId already registered', no `code`.)
  *
  * The double verifies for real (WebCrypto Ed25519); it does not accept
  * anything it cannot verify. `tests/real-peer`-style suites run the same
@@ -73,8 +80,10 @@ export class SignalingDouble {
    * @param {() => number} [o.now]
    * @param {number} [o.nonceTtlMs=30000]
    * @param {boolean} [o.challenge=true] — authenticated mode only: false never sends the challenge (a stripped one)
+   * @param {number} [o.maxConnectionsPerPod=2] — authenticated mode: MAX_CONNECTIONS_PER_POD
    */
-  constructor({ mode = 'open', publicOrigin = 'ws://signal.test', now = Date.now, nonceTtlMs = 30_000, challenge = true } = {}) {
+  constructor({ mode = 'open', publicOrigin = 'ws://signal.test', now = Date.now, nonceTtlMs = 30_000, challenge = true, maxConnectionsPerPod = 2 } = {}) {
+    this.maxConnectionsPerPod = maxConnectionsPerPod
     this.mode = mode
     this.publicOrigin = publicOrigin
     this.now = now
@@ -101,9 +110,15 @@ export class SignalingDouble {
   }
 
   disconnect(ws) {
-    if (ws.podId && this.#peers.get(ws.podId) === ws) {
+    // A connection that was replaced is already gone from the list; the pod is
+    // released (and announced as gone) only when its last connection is.
+    const conns = ws.podId ? this.#peers.get(ws.podId) : null
+    const i = conns ? conns.indexOf(ws) : -1
+    if (i < 0) return
+    conns.splice(i, 1)
+    if (conns.length === 0) {
       this.#peers.delete(ws.podId)
-      for (const p of this.#peers.values()) p._serverSend({ type: 'peer-left', podId: ws.podId })
+      for (const list of this.#peers.values()) for (const p of list) p._serverSend({ type: 'peer-left', podId: ws.podId })
     }
   }
 
@@ -112,6 +127,12 @@ export class SignalingDouble {
     ws._serverSend({ type: 'error', code, message, ...extra })
     ws._serverClose()
   }
+
+  /** The pod ids of every registered pod (one entry per pod, however many connections it holds). */
+  listPeers() { return [...this.#peers.keys()] }
+
+  /** How many connections `podId` holds. */
+  connectionsOf(podId) { return this.#peers.get(podId)?.length ?? 0 }
 
   async receive(ws, data) {
     this.received.push({ podId: ws.podId, data })
@@ -136,19 +157,30 @@ export class SignalingDouble {
       const existing = this.#peers.get(data.podId)
       if (existing) {
         if (!this.authenticated) {
+          // Open mode: a second connection for an id is refused, with no `code`.
           ws._serverSend({ type: 'error', message: 'podId already registered' })
-          ws._serverClose()
+          ws._serverClose(4409, 'podId already registered')
           return
         }
-        existing._serverClose()
+        // Authenticated: the id is the hash of a key this client just proved it holds, so this is the
+        // same pod. Up to `maxConnectionsPerPod` are kept; past that the oldest is replaced, and told so.
+        while (existing.length >= this.maxConnectionsPerPod) {
+          const old = existing.shift()
+          old._serverSend({
+            type: 'error', code: 'replaced', reconnect: false,
+            message: 'replaced by a newer connection of the same pod; do not reconnect automatically',
+          })
+          old._serverClose(4409, 'replaced')
+        }
       }
       ws.podId = data.podId
-      this.#peers.set(ws.podId, ws)
+      if (existing) existing.push(ws)
+      else this.#peers.set(ws.podId, [ws])
       const verified = this.authenticated
       ws._serverSend({ type: 'registered', podId: ws.podId, mode: this.mode, verified })
       ws._serverSend({ type: 'peers', peers: [...this.#peers.keys()], verified })
       if (!existing) {
-        for (const p of this.#peers.values()) if (p !== ws) p._serverSend({ type: 'peer-joined', podId: ws.podId, verified })
+        for (const list of this.#peers.values()) for (const p of list) if (p !== ws) p._serverSend({ type: 'peer-joined', podId: ws.podId, verified })
       }
       return
     }
@@ -156,7 +188,9 @@ export class SignalingDouble {
 
     if (['offer', 'answer', 'ice-candidate', 'signal'].includes(data.type)) {
       const { target, ...payload } = data
-      const to = this.#peers.get(target)
+      // Delivered once, to the pod's newest connection.
+      const conns = this.#peers.get(target)
+      const to = conns?.[conns.length - 1]
       if (typeof target !== 'string' || !to) {
         ws._serverSend({ type: 'error', message: 'peer not found', target })
         return
@@ -170,7 +204,7 @@ export class SignalingDouble {
   }
 
   /** Push an arbitrary frame to a registered client. */
-  pushTo(podId, data) { this.#peers.get(podId)?._serverSend(data) }
+  pushTo(podId, data) { const c = this.#peers.get(podId); c?.[c.length - 1]._serverSend(data) }
 }
 
 class Target {
@@ -220,13 +254,13 @@ export function createDoubleNetwork() {
       queueMicrotask(() => { if (this.readyState === OPEN) this._dispatch('message', { data: JSON.stringify(data) }) })
     }
 
-    _serverClose() { queueMicrotask(() => this.close()) }
+    _serverClose(code = 1005, reason = '') { queueMicrotask(() => this.close(code, reason)) }
 
-    close() {
+    close(code = 1005, reason = '') {
       if (this.readyState === CLOSED) return
       this.readyState = CLOSED
       this._server.disconnect(this)
-      this._dispatch('close', {})
+      this._dispatch('close', { code, reason })
     }
   }
 
