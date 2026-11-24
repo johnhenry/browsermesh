@@ -11,6 +11,8 @@
     },
     "./compat": "./src/compat.mjs",
     "./mesh-rpc": "./src/mesh-rpc.mjs",
+    "./mesh-channel": "./src/mesh-channel.mjs",
+    "./protocol-channel": "./src/protocol-channel.mjs",
     "./mesh-fetch": "./src/mesh-fetch.mjs",
     "./mesh-service": "./src/mesh-service.mjs",
     "./peer-registry": "./src/peer-registry.mjs"
@@ -27,15 +29,15 @@
     "directory": "packages/browsermesh-apps"
   },
   "peerDependencies": {
-    "@johnhenry/browsermesh-primitives": ">=0.3.1 <1.0.0",
-    "@johnhenry/browsermesh-pod": ">=0.1.0 <1.0.0",
+    "@johnhenry/andbox": ">=0.0.1 <1.0.0",
     "@johnhenry/browsermesh-core": ">=0.5.0 <1.0.0",
-    "@johnhenry/browsermesh-transport": ">=0.1.0 <1.0.0",
-    "@johnhenry/browsermesh-sync": ">=0.0.0 <1.0.0",
     "@johnhenry/browsermesh-discovery": ">=0.0.1 <1.0.0",
     "@johnhenry/browsermesh-kernel": ">=0.0.0 <1.0.0",
     "@johnhenry/browsermesh-netway": ">=0.0.0 <1.0.0",
-    "@johnhenry/andbox": ">=0.0.1 <1.0.0"
+    "@johnhenry/browsermesh-pod": ">=0.1.0 <1.0.0",
+    "@johnhenry/browsermesh-primitives": ">=0.3.1 <1.0.0",
+    "@johnhenry/browsermesh-sync": ">=0.0.0 <1.0.0",
+    "@johnhenry/browsermesh-transport": ">=0.1.0 <1.0.0"
   },
   "peerDependenciesMeta": {
     "@johnhenry/browsermesh-transport": {
@@ -60,14 +62,16 @@
   "devDependencies": {
     "@johnhenry/andbox": ">=0.0.1 <1.0.0",
     "@johnhenry/browsermesh-pod": "^0.1.1",
-    "node-datachannel": "^0.33.4",
     "fake-indexeddb": "^6.2.5",
-    "webgpu": "^0.6.1"
+    "node-datachannel": "^0.33.4",
+    "webgpu": "^0.6.1",
+    "webtorrent": "^3.0.21"
   },
   "scripts": {
     "test": "node --import ./test/_setup-globals.mjs --test test/*.test.mjs",
     "test:real-peer": "node --import ./test/_setup-globals.mjs --test --test-concurrency=1 test/real-peer/*.test.mjs",
-    "test:real-gpu": "node --import ./test/_setup-globals.mjs --test test/gpu-real-webgpu/*.test.mjs"
+    "test:real-torrent": "node --import ./test/_setup-globals.mjs --test --test-concurrency=1 test/real-torrent/*.test.mjs",
+    "test:real-gpu":"node --import ./test/_setup-globals.mjs --test test/gpu-real-webgpu/*.test.mjs"
   },
   "homepage": "https://opensource.johnhenry.me/browsermesh/",
   "engines": {

@@ -120,6 +120,17 @@ export class FakeSignalingServer {
   #clients = new Map() // podId -> FakeWebSocket
   #log = []
   connectionCount = 0
+  #splitFrames
+
+  /**
+   * @param {object} [opts]
+   * @param {boolean} [opts.splitFrames=false] - deliver `peers` in a later task
+   *   than `registered`, as a real network does (the default delivers both
+   *   within one microtask checkpoint, like an in-process fake)
+   */
+  constructor({ splitFrames = false } = {}) {
+    this.#splitFrames = splitFrames
+  }
 
   connect(ws) {
     this.connectionCount++
@@ -146,7 +157,9 @@ export class FakeSignalingServer {
       ws.podId = data.podId
       this.#clients.set(data.podId, ws)
       ws._serverSend({ type: 'registered', podId: data.podId })
-      ws._serverSend({ type: 'peers', peers: [...this.#clients.keys()] })
+      const peers = { type: 'peers', peers: [...this.#clients.keys()] }
+      if (this.#splitFrames) setImmediate(() => ws._serverSend(peers))
+      else ws._serverSend(peers)
       this.#broadcastExcept(ws, { type: 'peer-joined', podId: data.podId })
       return
     }
@@ -205,7 +218,7 @@ export class FakeSignalingServer {
  *   FakeWebSocket: new (url: string) => any,
  *   registerServer: (url: string, server: FakeRelayServer|FakeSignalingServer) => void,
  *   createRelayServer: () => FakeRelayServer,
- *   createSignalingServer: () => FakeSignalingServer,
+ *   createSignalingServer: (opts?: { splitFrames?: boolean }) => FakeSignalingServer,
  * }}
  */
 export function createFakeWebSocketNetwork() {
@@ -264,6 +277,6 @@ export function createFakeWebSocketNetwork() {
     FakeWebSocket,
     registerServer: (url, server) => registry.set(url, server),
     createRelayServer: () => new FakeRelayServer(),
-    createSignalingServer: () => new FakeSignalingServer(),
+    createSignalingServer: (opts) => new FakeSignalingServer(opts),
   }
 }

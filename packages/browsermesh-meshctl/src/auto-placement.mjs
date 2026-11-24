@@ -10,15 +10,13 @@
  * `meshctl hosts`), rather than standing up anything that watches the mesh
  * continuously.
  *
- * `podHostRuntimePeer()` (`browsermesh-apps/src/pod-host-service.mjs`)
- * already documents a real limitation this inherits unchanged: an
- * isolate-lane host has no `exec`, so `runtimePeerToComputeDescriptor()`
- * never derives a `compute` capability for it and the orchestrator's
- * scorer always sees zero isolate candidates. That's WHY this falls back
- * to manually matching `describe().lane === lane` whenever the orchestrator
- * comes back empty or picks a host whose lane doesn't actually match —
- * "orchestrator scoring when cheaply reachable, else lane matching" from
- * the design doc, made concrete.
+ * An isolate-lane host has no `exec`, so it is not a compute candidate; it
+ * is scored here by asking the orchestrator to include spawn hosts
+ * (`includeSpawnHosts`), which never makes it a target for a shell. Manual
+ * matching of `describe().lane === lane` remains as the fallback whenever
+ * the orchestrator comes back empty or picks a host whose lane doesn't
+ * actually match — "orchestrator scoring when cheaply reachable, else lane
+ * matching" from the design doc.
  */
 
 import { MeshOrchestrator, podHostRuntimePeer } from '@johnhenry/browsermesh-apps'
@@ -88,15 +86,17 @@ export async function selectAutoHost({ session, candidateRefs, lane }) {
       peerNode: session.peerNode,
       runtimeRegistry: { listPeers: () => peers },
     })
-    const selection = orchestrator.selectComputeTarget({ constraints: { preferRuntimeClass: lane } })
+    const selection = orchestrator.selectComputeTarget({
+      constraints: { preferRuntimeClass: lane },
+      includeSpawnHosts: true,
+    })
     const picked = candidates.find((c) => c.description.podId === selection.podId)
     if (picked && picked.description.lane === lane) {
       return { podId: picked.podId, description: picked.description, via: 'orchestrator' }
     }
   } catch {
-    // No compute-capable candidate at all (e.g. every candidate is an
-    // isolate host, which never advertises `compute` -- see this module's
-    // header) -- fall through to the manual match below.
+    // No candidate at all, or none the scorer rates above zero for this
+    // request -- fall through to the manual match below.
   }
 
   // -- Fallback: direct describe().lane match -------------------------------
