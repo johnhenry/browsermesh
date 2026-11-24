@@ -13,6 +13,7 @@
     "./mesh-rpc": "./src/mesh-rpc.mjs",
     "./mesh-channel": "./src/mesh-channel.mjs",
     "./protocol-channel": "./src/protocol-channel.mjs",
+    "./channel-advertisement": "./src/channel-advertisement.mjs",
     "./mesh-fetch": "./src/mesh-fetch.mjs",
     "./mesh-service": "./src/mesh-service.mjs",
     "./peer-registry": "./src/peer-registry.mjs"

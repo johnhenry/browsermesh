@@ -52,7 +52,9 @@ section for the full accounting. This is why both packages'
 
 ```bash
 npm install
-npm test               # turbo run test --concurrency=4, all workspaces
+npm test               # turbo run test --concurrency=4, all workspaces, then the docs checks
+                       # (scripts/*.test.mjs: docs/security.md's generated facts;
+                       #  refresh with `node scripts/status-facts.mjs --write`)
 npm run test:real-peer  # real WebRTC peers — serialised, see below
 npm run test:real-gpu   # real headless-Chrome GPU tests, browsermesh-apps only
 npm run examples        # run the runnable examples/ (see examples/README.md)

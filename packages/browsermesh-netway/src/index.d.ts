@@ -144,6 +144,14 @@ export class QueueFullError extends NetwayError {
   constructor();
 }
 
+/** Thrown by `VirtualNetwork#connect` when the network's `maxBufferedBytes` cap is reached. */
+export class BufferLimitError extends NetwayError {
+  readonly code: 'ENOBUFS';
+  readonly limit: number;
+
+  constructor(limit: number);
+}
+
 /** Thrown when the address contains a URI scheme that has no registered backend. */
 export class UnknownSchemeError extends NetwayError {
   /** The unrecognized URI scheme. */
@@ -850,7 +858,17 @@ export interface ScopeOptions {
  * Comes with a LoopbackBackend registered for 'mem' and 'loop' schemes.
  */
 export class VirtualNetwork {
-  constructor();
+  /**
+   * @param opts.maxBufferedBytes - A cap on the bytes held unread or unsent by
+   *   the open stream sockets `connect()` handed out; while reached, `connect()`
+   *   throws `BufferLimitError` (`ENOBUFS`). Off by default.
+   */
+  constructor(opts?: { maxBufferedBytes?: number });
+
+  /** The byte cap, or `null`. */
+  readonly maxBufferedBytes: number | null;
+  /** Bytes held by the open sockets this network handed out (counted only when a cap is set). */
+  readonly bufferedBytes: number;
 
   /**
    * Register an additional backend for a URI scheme.
