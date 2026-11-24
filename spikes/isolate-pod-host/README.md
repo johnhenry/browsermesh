@@ -203,6 +203,16 @@ prove the worker bundles and runs correctly against the real packages. Treat
 turnkey one — it was not touched by the wrangler → cf migration beyond its
 comments, since it never depended on wrangler or cf at runtime.
 
+**The control routes spawn, message and drain pods.** The config listens on
+`127.0.0.1:8080` only. To serve them beyond this machine, set a
+`CONTROL_TOKEN` (the workerd config reads it from the environment; `cf dev`
+reads it from `process.env` in `cloudflare.config.ts`; on a deployed Worker
+use a secret): every route except `GET /health` then requires
+`Authorization: Bearer <token>`, and `createIsolatePodDriver({ token })` sends
+it. Without a token the routes are unauthenticated, as before, so keep that
+setup to loopback. This is exercised in `test/routes.test.mjs` against the
+route table; it has not been run against a real workerd.
+
 ## Measured numbers
 
 All measurements from `npm test` (`node --test test/*.test.mjs`) on this machine (Apple Silicon

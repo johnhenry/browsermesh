@@ -438,6 +438,10 @@ import { registerOrchestratorTools } from './mesh-orchestrator-tools.mjs'
  *   `{ name: targetAddress }` map of services to `exposeService()` on the
  *   new `MeshRelayHost` immediately (equivalent to calling
  *   `node.relayHost.exposeService(name, targetAddress)` for each entry).
+ * @param {object} [options.relayHostOptions] - Flow-control and re-check options
+ *   for the `MeshRelayHost` (`highWaterBytes`, `lowWaterBytes`,
+ *   `maxBufferedBytesPerConnection`, `maxBufferedBytesPerPeer`,
+ *   `maxConnectionsPerPeer`, `maxFrameBytes`, `recheckIntervalMs`).
  * @param {string} [options.relayHostEnvelopeType] - Overrides the
  *   `envelope.type` the relay host routes/sends on `PeerNode`'s dispatch bus
  *   (default `'mesh-relay'`).
@@ -833,6 +837,7 @@ export async function createMeshNode(options = {}) {
     relayHostNetwork,
     relayHostServices,
     relayHostEnvelopeType,
+    relayHostOptions,
     services,
     servicesNetwork,
     enableHardening = false,
@@ -1116,6 +1121,7 @@ export async function createMeshNode(options = {}) {
       network: relayHostNetwork,
       registry,
       envelopeType: relayHostEnvelopeType,
+      ...relayHostOptions,
       onLog,
     })
     if (relayHostServices) {

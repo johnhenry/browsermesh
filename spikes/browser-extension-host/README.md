@@ -1,5 +1,14 @@
 # browser-extension-host spike
 
+> **This is a spike, not a product.** Its `exec` evaluates a JavaScript
+> string inside a page (`eval` through `chrome.scripting.executeScript`).
+> String evaluation cannot work under a strict Content-Security-Policy and
+> cannot be allow-listed by path, so do not build on it. Remote access to a
+> page's objects should go through the protocol-channel seam instead: a
+> path-and-handle protocol opened by name over an authorised channel, see
+> [`docs/protocol-channel.md`](../../docs/protocol-channel.md). The spike is
+> private, not a workspace member, and imported by no published package.
+
 The browser lane's **extension** driver (issue #185 item 7, deliverable
 C): a Manifest V3 extension whose background service worker runs a
 `PodHostDriver` (`lane: 'browser'`) driving pod pages through

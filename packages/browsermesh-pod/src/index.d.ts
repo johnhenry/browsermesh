@@ -143,7 +143,14 @@ export declare function createRpcResponse(opts: {
 
 export interface TransportAdapter {
   readonly ready: boolean;
-  onMessage(handler: (msg: any) => void): void;
+  /**
+   * 'same-origin' when only scripts of this origin/process can put messages on the transport
+   * (unsigned messages are accepted by default); anything else, or absent, means signatures
+   * are required by default.
+   */
+  readonly trust?: 'same-origin' | 'untrusted';
+  /** `meta.peerId`: set by a transport whose link authenticated the peer's identity. */
+  onMessage(handler: (msg: any, meta?: { peerId?: string }) => void): void;
   open(): Promise<void>;
   send(msg: any): void;
   close(): Promise<void>;
@@ -266,6 +273,17 @@ export interface PodBootOptions {
   handshakeTimeout?: number;
   discoveryTimeout?: number;
   globalThis?: typeof globalThis;
+  /** Sign outgoing messages with the pod key (default true). `send()` then settles after signing. */
+  sign?: boolean;
+  /**
+   * Accept unsigned pod:message / pod:rpc-response from older peers. Default: true for a
+   * transport whose `trust` is 'same-origin' and for window messages, false otherwise.
+   * Unsigned pod:rpc-request is never accepted.
+   */
+  allowUnsigned?: boolean;
+  /** Overrides the transport's `trust`. */
+  trust?: 'same-origin' | 'untrusted';
+  replay?: { maxSenders?: number; maxSessionsPerSender?: number };
 }
 
 export interface PodShutdownOptions {
@@ -296,8 +314,10 @@ export declare class Pod {
 
   boot(opts?: PodBootOptions): Promise<void>;
   shutdown(opts?: PodShutdownOptions): Promise<void>;
-  send(targetPodId: string, payload: unknown): void;
-  broadcast(payload: unknown): void;
+  /** Messages refused so far, by reason. */
+  get dropped(): Record<'unsigned' | 'unsigned-rpc' | 'malformed' | 'sender-mismatch' | 'bad-signature' | 'replay', number>;
+  send(targetPodId: string, payload: unknown): Promise<void>;
+  broadcast(payload: unknown): Promise<void>;
   on(event: string, cb: (data: any) => void): void;
   off(event: string, cb: (data: any) => void): void;
   toJSON(): PodJSON;
@@ -597,3 +617,58 @@ export declare function createInPageDriver(opts: {
   BCConstructor?: new (name: string) => unknown;
   driverId?: string;
 }): PodHostDriver & { close(): void };
+
+// ── Pod runtimes (the adapter between a lane driver and what runs a module) ──
+
+export type RuntimeBoundary = "none" | "process" | "language" | "hardware";
+
+export declare const RUNTIME_BOUNDARY: Readonly<{
+  NONE: "none";
+  PROCESS: "process";
+  LANGUAGE: "language";
+  HARDWARE: "hardware";
+}>;
+
+/** Environment variable names a requester may not set (they change how code is loaded or limited). */
+export declare const FORBIDDEN_ENV_NAME: RegExp;
+
+export interface PodRuntimeStartOptions {
+  name: string;
+  /** Absolute path on the host, from the host's own catalog. */
+  modulePath: string;
+  readPaths: string[];
+  env: Record<string, string>;
+  input: unknown;
+  limits: { memMib?: number };
+  onLog(line: string): void;
+  /** Fires once if the pod stops on its own; not for a `terminate()`. */
+  onExit(info: { code: number | null; reason: "oom" | "crashed" | "exited" }): void;
+}
+
+export interface PodRuntimeHandle {
+  request(payload: unknown, opts?: { timeoutMs?: number }): Promise<unknown>;
+  terminate(): Promise<void>;
+}
+
+/**
+ * What a lane driver needs from whatever runs a module. `worker_threads`
+ * (`boundary: "none"`) and a permission-model child process
+ * (`boundary: "process"`) are in `@johnhenry/browsermesh-pod/node-runtimes`;
+ * a runtime claiming `lane: "isolate"` must have boundary "language" or "hardware".
+ */
+export interface PodRuntime {
+  kind: string;
+  lane: PodLane;
+  boundary: RuntimeBoundary;
+  start(opts: PodRuntimeStartOptions): Promise<PodRuntimeHandle>;
+}
+
+export declare function createRuntimeLaneDriver(opts: {
+  runtime: PodRuntime;
+  /** Module names a podspec's `run.ref` may name, to absolute paths on this host. */
+  modules?: Record<string, string | { path: string; readPaths?: string[] }>;
+  maxPods?: number;
+  maxMemMib?: number;
+  defaultMemMib?: number;
+  sendTimeoutMs?: number;
+}): PodHostDriver & { runtime: PodRuntime };

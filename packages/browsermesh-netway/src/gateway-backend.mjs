@@ -15,7 +15,16 @@
  */
 
 import { Backend } from './backend.mjs';
-import { StreamSocket } from './stream-socket.mjs';
+import { StreamSocket, DEFAULT_WINDOW_BYTES } from './stream-socket.mjs';
+
+// Gateway socket pairs are [userSocket, relaySocket]. The user's writes reach
+// the wire through a pump that awaits each send, so the relay side takes a
+// window and the user's `write()` is paced by the wire. Data arriving FROM the
+// wire has no credit protocol to throttle the remote sender (GATEWAY_DATA
+// carries none), so the user side gets no window and is served as before
+// (queued, closed at the chunk cap) rather than letting un-awaited writes pile
+// up without bound.
+const GATEWAY_PAIR_OPTS = Object.freeze({ windowBytes: [0, DEFAULT_WINDOW_BYTES] });
 import { DatagramSocket } from './datagram-socket.mjs';
 import { Listener } from './listener.mjs';
 import { OperationQueue } from './queue.mjs';
@@ -301,7 +310,7 @@ export class GatewayBackend extends Backend {
         if (pendingTcp) {
           this.#pendingConnections.delete(msg.gateway_id);
           // Create a StreamSocket pair — one side for the user, one for wsh data relay
-          const [userSocket, relaySocket] = StreamSocket.createPair();
+          const [userSocket, relaySocket] = StreamSocket.createPair(GATEWAY_PAIR_OPTS);
           this.#activeSockets.set(msg.gateway_id, relaySocket);
           pendingTcp.resolve(userSocket);
           // Start pumping data from relay socket to server
@@ -347,7 +356,7 @@ export class GatewayBackend extends Backend {
         const listener = this.#activeListeners.get(msg.listener_id);
         if (listener && !listener.closed) {
           // Auto-accept: create socket pair, enqueue server socket, send accept
-          const [userSocket, relaySocket] = StreamSocket.createPair();
+          const [userSocket, relaySocket] = StreamSocket.createPair(GATEWAY_PAIR_OPTS);
           const gatewayId = this.#nextGatewayId();
           this.#activeSockets.set(gatewayId, relaySocket);
           listener._enqueue(userSocket);

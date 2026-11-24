@@ -460,4 +460,29 @@ describe('PeerRegistry', () => {
       assert.ok(logs[0].m.includes(PEER_A))
     })
   })
+
+  describe('onAccessChange', () => {
+    it('announces revocation, removal, permission updates and explicit notices, and can be unsubscribed', () => {
+      const seen = []
+      const off = reg.onAccessChange((e) => seen.push(`${e.kind}:${e.pubKey}`))
+      reg.addPeer(PEER_A, 'a', ['files:read'])
+      assert.deepEqual(seen, [], 'granting is not announced')
+      reg.revokeCapabilities(PEER_A, ['files:read'])
+      reg.updatePermissions(PEER_A, 'guest')
+      reg.notifyAccessChange(PEER_B)
+      reg.removePeer(PEER_A)
+      assert.deepEqual(seen, [`revoked:${PEER_A}`, `updated:${PEER_A}`, `changed:${PEER_B}`, `removed:${PEER_A}`])
+      off()
+      reg.notifyAccessChange(PEER_A)
+      assert.equal(seen.length, 4)
+    })
+
+    it('a listener that throws does not stop the change or the other listeners', () => {
+      const seen = []
+      reg.onAccessChange(() => { throw new Error('boom') })
+      reg.onAccessChange((e) => seen.push(e.kind))
+      reg.revokeCapabilities(PEER_A, ['x:y'])
+      assert.deepEqual(seen, ['revoked'])
+    })
+  })
 })

@@ -2,6 +2,7 @@
 export * from './transport.mjs';
 export * from './websocket.mjs';
 export * from './webrtc.mjs';
+export * from './identity-binding.mjs';
 export * from './webtransport.mjs';
 export * from './relay.mjs';
 export * from './gateway.mjs';
