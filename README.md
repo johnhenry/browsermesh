@@ -34,6 +34,7 @@ runtime — that sit on top of them.
 | [`@johnhenry/browsermesh-meshctl`](packages/browsermesh-meshctl) | External CLI for the hosted-pods control surface -- `meshctl` is itself a pod (private, not yet published) |
 | [`@johnhenry/browsermesh-embed`](packages/browsermesh-embed) | Thin widget for embedding a browsermesh-pod-backed workspace on a page |
 | [`@johnhenry/browsermesh-mcp`](packages/browsermesh-mcp) | A page's WebMCP tools served over a protocol channel to another pod, with per-tool grants and the approval kept with the page |
+| [`@johnhenry/browsermesh-ingress`](packages/browsermesh-ingress) | Real HTTP in, a mesh pod answers: a bounded request forwarder (library and `browsermesh-ingress` CLI) from an HTTP listener to the one pod a mapping names |
 
 ## Transports
 

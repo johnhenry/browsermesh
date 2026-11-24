@@ -1,0 +1,56 @@
+{
+  "name": "@johnhenry/browsermesh-ingress",
+  "version": "0.0.0",
+  "description": "Real HTTP in, a mesh peer answers: a bounded request forwarder from an HTTP listener to the one BrowserMesh pod a mapping names, over a protocol channel",
+  "type": "module",
+  "main": "./src/index.mjs",
+  "exports": {
+    ".": "./src/index.mjs",
+    "./node": "./src/node.mjs"
+  },
+  "bin": {
+    "browsermesh-ingress": "./bin/browsermesh-ingress.mjs"
+  },
+  "files": [
+    "src",
+    "bin",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "test:real-peer": "node --test --test-concurrency=1 test/real-peer/*.test.mjs"
+  },
+  "keywords": [
+    "http",
+    "ingress",
+    "gateway",
+    "mesh",
+    "webrtc",
+    "browser"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/johnhenry/browsermesh",
+    "directory": "packages/browsermesh-ingress"
+  },
+  "homepage": "https://opensource.johnhenry.me/browsermesh/",
+  "engines": {
+    "node": ">=26.0.0"
+  },
+  "peerDependencies": {
+    "@johnhenry/browsermesh-apps": ">=0.21.0 <1.0.0"
+  },
+  "optionalDependencies": {
+    "@johnhenry/browsermesh-core": "^0.13.0",
+    "@johnhenry/browsermesh-discovery": "^0.4.0",
+    "@johnhenry/browsermesh-pod": "^0.5.0",
+    "@johnhenry/browsermesh-primitives": "^0.6.1",
+    "@johnhenry/browsermesh-transport": "^0.9.0",
+    "node-datachannel": "^0.33.4"
+  },
+  "devDependencies": {
+    "@johnhenry/browsermesh-apps": "^0.21.1"
+  }
+}

@@ -61,6 +61,7 @@ table; they come from the READMEs, source headers and test directories.
 | `browsermesh-kernel` | implemented | in-process microkernel with capability checks and resource tables; unit tests per module. No cryptography; isolation is by capability and ownership checks, not process boundaries. |
 | `browsermesh-priority-mux` | implemented | sender-side priority scheduler and framer (fake adapter tests). No authentication or encryption. The reassembler has no limit on pending messages. |
 | `browsermesh-mcp` | implemented | a page's WebMCP tools (or an explicit list) as the protocol `mcp` on the protocol seam, and a client for it; per-tool grants, approval kept with the serving page, bounds. In-memory bus (unit), real peers over WebRTC (Node) and two real browsers; threat model [below](#mcp-across-the-mesh). Depends on wsh's WebMCP bridge (peer dependency) through one adapter file. |
+| `browsermesh-ingress` | implemented | real HTTP in, a mesh pod answers: a bounded request forwarder (`createMeshIngress`, a Node listener on its own entry, a CLI) and the provider side (`serveHttpOnMesh`) over the protocol `http` on the protocol seam. Pinned to the pod a mapping names, default deny on the provider, safe defaults on every dimension (unit over an in-memory bus, hostile provider and hostile client suites on real sockets, real WebRTC peers including the CLI as a child process, and a page as the provider in three real browsers). Plain HTTP only, no WebSocket upgrade, direct links only; see [HTTP ingress](#http-ingress). |
 | `browsermesh-embed` | partial | widget wrapper tested against a DOM stub only. |
 | `browsermesh-meshctl` | partial | loopback mode exercised through all eight verbs; the real-mesh path is wired, not exercised end to end; `--relay` is not load-bearing. |
 | `spikes/*` | spikes | `vm-pod-host` (Firecracker driver: never booted a VM), `isolate-pod-host`, `browser-pod-host`, `browser-extension-host`; see [hosted pods](#hosted-pods-per-lane). |
@@ -83,6 +84,7 @@ hand-written.
 | `browsermesh-core` | yes | `.` `./compat` | yes | yes | no |
 | `browsermesh-discovery` | yes | `.` | yes | no | no |
 | `browsermesh-embed` | yes | `.` | yes | no | no |
+| `browsermesh-ingress` | yes | `.` `./node` | yes | yes | yes |
 | `browsermesh-kernel` | yes | `.` | yes | no | no |
 | `browsermesh-mcp` | yes | `.` | yes | yes | yes |
 | `browsermesh-meshctl` | private | `.` | yes | no | no |
@@ -767,6 +769,63 @@ Threat model, by what an attacker is and wants:
   inert text, cancel reaching the tool, list-changed). The default DOM prompt of wsh's
   bridge is not exercised there (the harness answers with its own `prompt`).
 
+## HTTP ingress
+
+Package: `browsermesh-ingress` (`createMeshIngress`, `serveHttpOnMesh`, `listenNode`, the `browsermesh-ingress`
+CLI). Design: [`design/http-ingress.md`](design/http-ingress.md). A real HTTP request reaches a listener; a mapping the
+operator wrote names ONE pod; that pod answers over the protocol `http` (version 1) on the protocol seam, bodies on the
+protocol streams.
+
+**The operator serves content they do not control.** The provider can answer anything; the HTTP client is anyone; the
+ingress is a translating and limiting hop. One origin per provider is the operator's responsibility (two providers behind
+one hostname share cookies, storage and script reach in a browser; the CLI refuses two different pods under one hostname).
+This is not a CDN, not a file server and not an egress proxy (`ServerSharing` goes the other way and is separate).
+
+Threat model, by what an attacker is and wants:
+
+- **A pod that is not the mapped one, answering.** The answer is accepted only from the pod the mapping names: the
+  channel is opened to that pod and `channel.peer` (the session key, never a message field) must equal it, or the channel
+  is closed and the client gets 502 `provider-pin-mismatch`. A `rid` is honoured only on the channel it was issued on.
+  **Routed (multi-hop) delivery is not part of v1**: the protocol channel rides direct links, so a pod with no direct link
+  is refused (502 `provider-unreachable`). Optional signed responses (`sign` on the provider, `verifyResponse` on the
+  ingress; the signature covers the status, the headers as sent, the SHA-256 of the body, the request and a fresh nonce)
+  make the pin independent of the transport.
+- **A provider that wants more than it was given.** It is never told who the client is (unless `forwardClientAddress`),
+  never gets cookies or credentials (an allow-list of request headers; `Host`, `Forwarded`, `X-Forwarded-*`, `Upgrade`,
+  `Proxy-*`, framing headers are never forwarded, whatever the operator allows), and a peer never supplies a URL the
+  ingress fetches: the target is built from parsed parts and the ingress fetches nothing. A provider serves only ingress
+  pods it granted: `protocol:http:open` in its registry (default deny) and `allowFrom` (required); revoking the grant
+  closes the channel at once.
+- **A hostile provider that wants to hurt the client or the operator.** Bounded: response bytes (8 MiB; a declared length
+  over it is refused before anything is sent, a body that outgrows it is cut), the whole request (30 s), idle time between
+  chunks (15 s), header count and bytes. Outbound headers are an allow-list: `Set-Cookie`, `Content-Encoding`,
+  `Strict-Transport-Security`, `Refresh`, CORS and unknown headers are dropped; `Content-Security-Policy: default-src
+  'none'; sandbox`, `X-Content-Type-Options: nosniff`, `Cache-Control: no-store` and `Vary` are the ingress's; a mapping
+  can opt out of the policy only explicitly. A redirect is never followed, and a `Location` that is not a path on the same
+  origin makes the response 502 `provider-redirect-refused`. A malformed head, a status outside 200-599, a body the head did
+  not announce, a stream for a request that was never made, and a body of the wrong length are each a named 502.
+- **A hostile HTTP client.** GET and HEAD only until `methods` allows more; CONNECT and TRACE never; a body on GET/HEAD,
+  `Transfer-Encoding` with `Content-Length`, a repeated or signed `Content-Length`, an obfuscated `Transfer-Encoding`, an
+  absolute-form target, a `Host` with userinfo, a path, spaces or a second `Host`, and `Upgrade` (426, WebSocket is not
+  bridged) are refused before the provider is asked; request body 64 KiB (413), slow body (408), a global in-flight cap
+  (64), per client (8) and per provider (16) in flight, per client and per provider rates, a connection cap and header
+  timeouts on the listener. The client address is the socket's; `trustProxy` takes the entry the trusted proxy appended
+  (the last `X-Forwarded-For` entry for one proxy), never one the client wrote.
+- **What the audit shows.** `{ peer, host, method, status, reason?, requestBytes, responseBytes, durationMs }`: never a
+  query string, a path or a body.
+- **Not protected.** The listener speaks plain HTTP: terminate TLS in front (the CLI refuses a non-loopback bind without
+  `--public` and `--tls-terminated-in-front`). What a provider returns is content the operator does not control; the
+  policy headers make it inert in a browser but do not make it true. The pin is as strong as the link (DTLS and the
+  identity binding on WebRTC). The request body is read whole (bounded) before the provider is asked and, on a page
+  provider, before the handler runs; response bodies stream. A legacy site service reached through the opt-in `rpc`
+  fallback has no default deny of its own.
+- **Verified.** Unit (every header rule, limit and refusal; each rule broken once); the web-standard handler over an
+  in-memory bus; a real HTTP client against the Node listener; hostile provider and hostile client suites (raw sockets);
+  two real Node peers over real WebRTC and the CLI as a child process through a real signalling server
+  (`packages/browsermesh-ingress/test/real-peer`); a page as the provider, the ingress in Node, in Chromium, Firefox and
+  WebKit (`tests/browser/ingress.spec.mjs`). Not verified: a public deployment, TLS in front, a real CDN or proxy in
+  front, WebRTC through NAT.
+
 ## Sync
 
 Package: `browsermesh-sync`.
@@ -892,6 +951,7 @@ twice (two pods, one identity), resource exhaustion beyond configured limits.
 | Shared servers | yes (real loopback upstreams) | | | | browser |
 | mesh-rpc / `browserMeshFetch` | yes | JSON-boundary network | | echo and 404 over a data channel | with a registry and identity in a browser |
 | Message channel, protocol seam | yes | in-memory duplex | | yes (two browsers, real WebRTC) | |
+| HTTP ingress | yes (rules broken once) | in-memory bus; real sockets (hostile client and provider) | yes (two Node peers; the CLI as a child process) | a page as provider, ingress in Node, three browsers | public deployment, TLS in front |
 | Sync | yes | | | CRDT convergence over a data channel | file transfer over a real link |
 | Discovery, DHT, StealthAgent | yes | | | | any network |
 | Hosted pods | yes (fakes) | | | | real microVM, Firecracker host, `workerd`; `isolated-vm` against a real V8 exploit |
