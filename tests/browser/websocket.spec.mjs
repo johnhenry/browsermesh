@@ -1,16 +1,10 @@
 import { test, expect, until } from './fixtures.mjs'
 
-// KNOWN DEFECT, found by this suite and left for the owner of ws-transport.mjs:
-// WebSocketTransport.open() resolves on the signalling server's `registered`
-// frame, but the server sends the `peers` list in a LATER frame (registered,
-// then peers: browsermesh-servers/signaling/index.mjs). Pod.boot() sends its
-// discovery hello as soon as open() resolves, which is before `peers` has been
-// handled, so the hello goes to nobody and the two pods never discover each
-// other over the relay (example 12 hides this: its fake server delivers both
-// frames within one microtask checkpoint). Run with BM_KNOWN_DEFECTS=1 to see it fail.
-const knownDefect = process.env.BM_KNOWN_DEFECTS ? test : test.fixme
-
-knownDefect('two pods in separate browsers DISCOVER each other through the WebSocket relay (known defect: hello races the peers list)', async ({ servers, open }) => {
+// The signalling server sends `registered` and then, in a later frame, `peers`
+// (browsermesh-servers/signaling/index.mjs), so a pod's boot-time hello can go
+// out before it knows anyone. Discovery therefore greets each peer the
+// transport learns of (`peers`, `peer-joined`), whatever the order.
+test('two pods in separate browsers DISCOVER each other through the WebSocket relay', async ({ servers, open }) => {
   const a = await open(servers.a, { isolated: true })
   const b = await open(servers.b, { isolated: true })
   const aId = await a.evaluate(() => window.bm.podBoot({ relay: true }))
