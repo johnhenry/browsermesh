@@ -10,7 +10,7 @@
   "scripts": {
     "test": "turbo run test --concurrency=4 && npm run test:docs",
     "test:docs": "node --test scripts/*.test.mjs",
-    "test:real-peer": "npm run test:real-peer --workspace=@johnhenry/browsermesh-transport && npm run test:real-peer --workspace=@johnhenry/browsermesh-apps && npm run test:real-peer --workspace=@johnhenry/browsermesh-core && npm run test:real-peer --workspace=@johnhenry/browsermesh-pod",
+    "test:real-peer": "npm run test:real-peer --workspace=@johnhenry/browsermesh-transport && npm run test:real-peer --workspace=@johnhenry/browsermesh-apps && npm run test:real-peer --workspace=@johnhenry/browsermesh-core && npm run test:real-peer --workspace=@johnhenry/browsermesh-pod && npm run test:real-peer --workspace=@johnhenry/browsermesh-objects",
     "test:browser": "playwright test --config tests/browser/playwright.config.mjs",
     "test:real-gpu": "npm run test:real-gpu --workspace=@johnhenry/browsermesh-apps",
     "test:real-firecracker": "npm run test:real-firecracker --prefix spikes/vm-pod-host",
@@ -43,7 +43,7 @@
   },
   "devDependencies": {
     "@changesets/cli": "^2.27.0",
-    "@johnhenry/wsh": "^0.46.0",
+    "@johnhenry/wsh": "^0.48.0",
     "@playwright/test": "1.65.1",
     "turbo": "^2.0.0"
   },

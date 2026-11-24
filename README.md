@@ -27,6 +27,7 @@ runtime — that sit on top of them.
 | [`@johnhenry/browsermesh-sync`](packages/browsermesh-sync) | State and file sync (delta sync, memory sync, transfer offers) |
 | [`@johnhenry/browsermesh-discovery`](packages/browsermesh-discovery) | Peer discovery |
 | [`@johnhenry/browsermesh-apps`](packages/browsermesh-apps) | App/agent runtime: marketplace, resources, consensus, payments, quotas, GPU, audit |
+| [`@johnhenry/browsermesh-objects`](packages/browsermesh-objects) | wsh's remote-object layer (values, events, handles, callbacks) over a protocol channel, authorised per root and per action |
 | [`@johnhenry/browsermesh-kernel`](packages/browsermesh-kernel) | Tenant/capability kernel: resource tables, byte streams, services, clock, tracing |
 | [`@johnhenry/browsermesh-meshctl`](packages/browsermesh-meshctl) | External CLI for the hosted-pods control surface -- `meshctl` is itself a pod (private, not yet published) |
 | [`@johnhenry/browsermesh-embed`](packages/browsermesh-embed) | Thin widget for embedding a browsermesh-pod-backed workspace on a page |

@@ -473,6 +473,138 @@ const bm = {
     return b64(await crypto.subtle.digest('SHA-256', bytes))
   },
 
+  // -- wsh's object layer (@johnhenry/browsermesh-objects) over the live WebRTC data channel --
+
+  obj: null,
+  /**
+   * Host side: expose `app` through a protocol service authorised by this page's own PeerRegistry (default deny).
+   * `limits` are the message channel's; `layer` is wsh's bounds (`maxQueuedEvents`, `maxEventBytes`, ...).
+   */
+  async objServe(limits = {}, layer = {}) {
+    const apps = await import('@johnhenry/browsermesh-apps')
+    const { exposeObjectsOnMesh } = await import('@johnhenry/browsermesh-objects')
+    const node = meshNode(bm.rtc)
+    node.registry = new apps.PeerRegistry({ localPodId: node.podId })
+    const svc = apps.attachService(node, undefined, apps.createMeshProtocolService(limits))
+    class Cart { constructor() { this.items = [1, 2, 3] } add(n) { this.items.push(n); return this.items.length } }
+    const sources = new Set()
+    const stubs = new Set()
+    const app = {
+      title: 'inbox',
+      secret: 'not for the wire',
+      counter: { value: 3, inc(n = 1) { app.counter.value += n; return app.counter.value } },
+      bytes: () => Uint8Array.from({ length: 200_000 }, (_, i) => (i * 31) % 251),
+      bus: { on: (type, fn) => sources.add(fn), off: (type, fn) => sources.delete(fn) },
+      cart: new Cart(),
+      subscribe(fn) { stubs.add(fn); return stubs.size },
+    }
+    const objects = exposeObjectsOnMesh(svc, {
+      roots: { app },
+      allow: {
+        get: ['app.title', 'app.counter.**', 'app.cart', 'app.cart.items.length'],
+        call: ['app.counter.inc', 'app.bytes', 'app.cart.add', 'app.subscribe(callback)'],
+        set: ['app.counter.value'],
+        on: ['app.bus@ping'],
+      },
+      handles: { app: {} },
+      limits: layer,
+      watch: node.registry.onAccessChange.bind(node.registry),
+    })
+    bm.obj = { node, registry: node.registry, svc, objects, app, sources, stubs, emitted: 0 }
+  },
+  objGrant(peer, scopes) { bm.obj.registry.grantCapabilities(peer, scopes) },
+  objRevoke(peer, scopes) { bm.obj.registry.revokeCapabilities(peer, scopes) },
+  /** Host side: emit `count` events, one per turn of the event loop, each with `pad` bytes of padding. */
+  async objEmit(count, pad = 0) {
+    const st = bm.obj
+    for (let i = 0; i < count; i++) {
+      st.emitted += 1
+      for (const fn of [...st.sources]) fn({ n: st.emitted, pad: 'x'.repeat(pad) })
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    }
+    return st.emitted
+  },
+  /** Call each stub the far side passed in; what they returned, by type (a one-way stub returns nothing). */
+  objFire(...args) { return [...bm.obj.stubs].map((stub) => typeof stub(...args)) },
+  objHostState() {
+    const st = bm.obj
+    return { sessions: st.objects.sessions(), listeners: st.sources.size, stubs: st.stubs.size, stats: st.objects.stats() }
+  },
+  /** Client side: attach the protocol service. */
+  async objClient(limits = {}) {
+    const apps = await import('@johnhenry/browsermesh-apps')
+    const svc = apps.attachService(meshNode(bm.rtc), undefined, apps.createMeshProtocolService(limits))
+    bm.obj = { svc, roots: null, wsh: await import('@johnhenry/wsh/objects'), events: [], dropped: 0, last: 0, got: [], closed: 0, gate: Promise.resolve(), openGate: null }
+  },
+  /** Open the objects of the host; `{ ok: true, peer }` or `{ error }`. `held` lets the test hold this page's reader. */
+  async objOpen() {
+    const st = bm.obj
+    const { openObjectsOnMesh } = await import('@johnhenry/browsermesh-objects')
+    try {
+      const channel = await st.svc.api.openProtocol(bm.rtc.remote, 'objects', { timeoutMs: 15000 })
+      const held = new Proxy(channel, {
+        get(target, key) {
+          if (key === 'onMessage') return (cb) => target.onMessage(async (message, ctx) => { await st.gate; return cb(message, ctx) })
+          return Reflect.get(target, key)
+        },
+      })
+      st.channel = channel
+      channel.onClose(() => { st.closed += 1 })
+      const opened = await openObjectsOnMesh(held)
+      st.roots = opened.roots
+      st.opened = opened
+      return { ok: true, peer: channel.peer, rootNames: Object.keys(opened.roots) }
+    } catch (e) { return { error: { code: e.code, reason: e.reason } } }
+  },
+  /** Run one named operation on the host's `app`; results are plain data, bytes as `{ bytes, digest }`. */
+  async objDo(op, ...args) {
+    const st = bm.obj
+    const { get, set, use, release, snapshot, on } = st.wsh
+    const app = st.roots.app
+    try {
+      switch (op) {
+        case 'title': return { value: await app.title }
+        case 'secret': return { value: await app.secret }
+        case 'inc': return { value: await app.counter.inc(...args) }
+        case 'set': await set(app.counter, 'value', args[0]); return { value: true }
+        case 'snapshot': return { value: await snapshot(app.counter, { depth: 2 }) }
+        case 'bytes': { // 200 KB, under wsh's maxValueBytes (256 KiB)
+          const res = await app.bytes()
+          return { value: { bytes: res.length, digest: b64(await crypto.subtle.digest('SHA-256', res)) } }
+        }
+        case 'subscribe': {
+          st.unsubscribe = await on(app.bus, 'ping', (data, info) => { st.events.push(data.args[0].n); st.dropped += info.dropped; st.last = data.args[0].n })
+          return { value: true }
+        }
+        case 'handle': {
+          const cart = await app.cart
+          const length = await use(cart).items.length
+          const added = await use(cart).add(9)
+          await release(cart)
+          return { value: { type: cart.constructor.name, length, added } }
+        }
+        case 'handleCall': { // through a handle obtained by a get
+          const cart = await app.cart
+          return { value: await use(cart).add(1) }
+        }
+        case 'callback': await app.subscribe((...a) => st.got.push(a)); return { value: true }
+        default: throw new Error(`unknown op ${op}`)
+      }
+    } catch (e) { return { error: { code: e.code, reason: e.reason, message: String(e.message).slice(0, 120) } } }
+  },
+  objHold() { const st = bm.obj; st.gate = new Promise((resolve) => { st.openGate = resolve }) },
+  objRelease() { bm.obj.openGate() },
+  objClientState() {
+    const st = bm.obj
+    return {
+      events: st.events.length, dropped: st.dropped, last: st.last, got: st.got, closed: st.closed,
+      received: st.events.length, peerStats: st.opened ? st.opened.peer.stats() : null,
+    }
+  },
+  async objExpectedDigest(size) {
+    return b64(await crypto.subtle.digest('SHA-256', Uint8Array.from({ length: size }, (_, i) => (i * 31) % 251)))
+  },
+
   // -- CRDT sync over the live WebRTC data channel --------------------------
 
   crdt: null,

@@ -138,6 +138,7 @@ wait_between "$DELAY_BETWEEN_BATCHES"
 # ============================================================================
 publish_batch "Runtime & Embed" \
   "@johnhenry/browsermesh-apps" \
+  "@johnhenry/browsermesh-objects" \
   "@johnhenry/browsermesh-embed"
 
 echo ""

@@ -53,7 +53,8 @@ table; they come from the READMEs, source headers and test directories.
 | `browsermesh-core` | implemented, with partial modules | identity managers and vault storage, keyring, capability tokens, group keys, ACL, trust: implemented (unit). `handshake.mjs`: partial (connection token is unsigned and the pod id is not checked against the key; mock transports). `hardening.mjs` and `peer.mjs`: marked experimental in source. `compat.mjs`: shim whose `BrowserTool#execute()` throws not-implemented by design. |
 | `browsermesh-pod` | implemented | pod, messaging and signing, discovery, host protocol, runtimes (worker_threads, permission-model), `WebSocketTransport` and BroadcastChannel transports (unit and real browser). `browser-host-driver`: partial (`exec` is deliberately not offered in the browser lane; `snapshot` and `restore` not implemented). |
 | `browsermesh-transport` | implemented, with partial modules | WebSocket, WebRTC (unit, real peer, real browser); wsh links (real wsh handshake over an in-process relay; not a browser); identity binding (duplex, real peer, real browser). WebTransport, relay client, wisp (mocks only). `channel-relay`, `gateway`, `cross-origin`, `streams` (unit). `NATTraversal` in `websocket.mjs`: placeholder values, partial. |
-| `browsermesh-apps` | implemented, with partial modules | registry, grant log, audit, mesh-rpc, mesh-fetch, message channel, protocol seam, relay host and backend, sync, cloud storage, key distribution, KV, escrow, pod-host service, placement, supervisor: implemented (mostly in process; a few over real peers). Partial: `mesh-bootstrap` (one real-peer test file), torrent (single-process fallback; real WebTorrent only under `test/real-torrent`), `peer-ipfs` (a local SHA-256 store, not IPFS), `peer-terminal` (no default shell), serverless executors (not an adversarial sandbox), GPU (real WebGPU only in a dedicated test), `mesh-dht` (no authentication), `compat.mjs`. `wsh-objects` (built in wsh, not here) runs over the protocol seam in `examples/19` and its test, an example-only dependency. |
+| `browsermesh-apps` | implemented, with partial modules | registry, grant log, audit, mesh-rpc, mesh-fetch, message channel, protocol seam, relay host and backend, sync, cloud storage, key distribution, KV, escrow, pod-host service, placement, supervisor: implemented (mostly in process; a few over real peers). Partial: `mesh-bootstrap` (one real-peer test file), torrent (single-process fallback; real WebTorrent only under `test/real-torrent`), `peer-ipfs` (a local SHA-256 store, not IPFS), `peer-terminal` (no default shell), serverless executors (not an adversarial sandbox), GPU (real WebGPU only in a dedicated test), `mesh-dht` (no authentication), `compat.mjs`. |
+| `browsermesh-objects` | implemented | wsh's remote-object layer (`@johnhenry/wsh/objects`, a peer dependency) over a protocol channel, authorised per root and per action for the channel's verified peer (values, events, handles, callbacks: unit over an in-memory bus, real WebRTC peers, and real browsers). Two authorisations apply to every operation: wsh's allow-lists, then the registry grant. Not a sandbox: a `call` runs the host application's function. |
 | `browsermesh-sync` | implemented, with partial modules | CRDT, delta sync, memory sync, file chunks, CIDv1, IndexedDB storage (unit, `fake-indexeddb`); CRDT convergence also over a real data channel in a browser. `collab` and `collab-bridge`: partial (marked experimental; stub document when Yjs is absent). |
 | `browsermesh-discovery` | partial | DHT has no iterative lookup (below); discovery strategies unsigned; naming, swarm, service-worker routing implemented (unit, unauthenticated); StealthAgent plain path documented as plaintext, encrypted/keyring path implemented; threshold key sharing is spec only (`docs/design/stealth-threshold.md`). |
 | `browsermesh-netway` | implemented | loopback, virtual network, policy, queue, sockets (byte-level backpressure), listener, router, service and fs backends, chaos wrapper (unit). `gateway-backend`: partial (mock wsh transport only). `backend.mjs`: abstract base. |
@@ -84,6 +85,7 @@ hand-written.
 | `browsermesh-kernel` | yes | `.` | yes | no | no |
 | `browsermesh-meshctl` | private | `.` | yes | no | no |
 | `browsermesh-netway` | yes | `.` | yes | no | no |
+| `browsermesh-objects` | yes | `.` | yes | yes | yes |
 | `browsermesh-pod` | yes | `.` `./node-runtimes` | yes | yes | yes |
 | `browsermesh-primitives` | yes | `.` | yes | no | yes |
 | `browsermesh-priority-mux` | yes | `.` | yes | no | no |
@@ -525,11 +527,19 @@ Package: `browsermesh-apps`.
   `authorize(meta, { peer })`, run before the open is answered. A stalled stream
   holds neither the link nor other requests on the channel (stream frames are
   notifications, whose link credit is returned at dispatch).
-- **Not built.** The remote-object layer lives in wsh (`@johnhenry/wsh/objects`,
-  not a dependency of any package here); it runs over the seam in
-  `examples/19-wsh-objects-over-protocol-channel.mjs` and
-  `test/wsh-objects-over-channel.test.mjs`, authorised per root through
-  `createRootAuthorizer` (`objects:<root>:<action>`, for the channel's verified peer).
+- **Remote objects.** The remote-object layer lives in wsh
+  (`@johnhenry/wsh/objects`); `@johnhenry/browsermesh-objects` runs it over the
+  seam (`exposeObjectsOnMesh`, `openObjectsOnMesh`; `examples/19`). Every
+  operation is judged by its own action through `createRootAuthorizer`
+  (`objects:<root>:<action>`: `get` for get, describe and snapshot; `call` for
+  call, construct and the callbacks passed to a call; `set`; `on` for a
+  subscription), for the channel's verified peer, after wsh's allow-lists have
+  said yes; an unknown operation is refused. A request is judged when it
+  arrives; an open subscription needs `on` and an open callback needs `call` at
+  every delivery, and a revoked or expired grant ends the session (at once when
+  the host passes `watch`). Events and callbacks leave through the channel's
+  credit, the layer's bounded queue drops and counts what a slow reader cannot
+  take, and a peer that keeps asking without reading is cut off.
 - **Verified.** `mesh-rpc`/`browserMeshFetch`: unit, and echo/404 routing over a
   real WebRTC data channel in two browsers (the harness node has no registry or
   identity, so authorization is not exercised there). Message channel and seam:
