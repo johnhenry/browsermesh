@@ -974,6 +974,9 @@ export class SharedWorkerRelayStrategy extends DiscoveryStrategy {
     const factory = this.#createWorkerFn ?? (() => {
       const blob = new Blob([WORKER_SCRIPT], { type: 'application/javascript' })
       const url = URL.createObjectURL(blob)
+      // The name is a rendezvous point: pages that pass the same name share one
+      // SharedWorker, so two releases with different names would never meet.
+      // It keeps its earlier value on purpose; supply `createWorkerFn` to use your own.
       const worker = new SharedWorker(url, 'clawser-mesh-relay')
       URL.revokeObjectURL(url)
       return worker

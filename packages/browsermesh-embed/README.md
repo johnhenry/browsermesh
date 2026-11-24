@@ -79,6 +79,11 @@ exact contract `sendMessage()` relies on.
 `ClawserEmbed` export is a deprecated alias of `BrowsermeshEmbed`, kept for
 callers migrating from an earlier naming.
 
+With no `containerId` the widget renders into `#browsermesh`. A page written
+for an earlier release, whose element is still `#clawser`, keeps working: when
+`#browsermesh` does not exist and `#clawser` does, that one is used (and
+`config.containerId` says so). An explicit `containerId` is never replaced.
+
 ## License
 
 MIT
