@@ -56,9 +56,45 @@ describe('EmbeddedPod', () => {
     assert.ok(pod instanceof Pod)
   })
 
+  test('without a containerId it looks for #browsermesh first, then the earlier default #clawser, and keeps the id it found', () => {
+    try {
+      let container = setupContainer('browsermesh')
+      let pod = new EmbeddedPod()
+      assert.equal(pod.config.containerId, 'browsermesh')
+      assert.ok(pod.mounted && container.shadowRoot)
+
+      // An existing deployment whose element is still #clawser keeps working.
+      container = setupContainer('clawser')
+      pod = new EmbeddedPod()
+      assert.equal(pod.config.containerId, 'clawser')
+      assert.ok(pod.mounted && container.shadowRoot)
+
+      // Both present: the new default wins.
+      const body = installDomStub()
+      const a = makeElement('div'); a.id = 'clawser'; body.appendChild(a)
+      const b = makeElement('div'); b.id = 'browsermesh'; body.appendChild(b)
+      pod = new EmbeddedPod()
+      assert.equal(pod.config.containerId, 'browsermesh')
+      assert.ok(b.shadowRoot && !a.shadowRoot)
+    } finally {
+      delete globalThis.document
+    }
+  })
+
+  test('an explicit containerId is never replaced by a fallback', () => {
+    try {
+      const container = setupContainer('clawser')
+      const pod = new EmbeddedPod({ containerId: 'somewhere-else' })
+      assert.equal(pod.config.containerId, 'somewhere-else')
+      assert.ok(!pod.mounted && !container.shadowRoot)
+    } finally {
+      delete globalThis.document
+    }
+  })
+
   test('applies default config when none is given', () => {
     const pod = new EmbeddedPod()
-    assert.equal(pod.config.containerId, 'clawser')
+    assert.equal(pod.config.containerId, 'browsermesh')
     assert.equal(pod.config.provider, null)
     assert.deepEqual(pod.config.tools, {})
   })

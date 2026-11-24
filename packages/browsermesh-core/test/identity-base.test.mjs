@@ -143,7 +143,12 @@ describe('IdentityManager', () => {
   it('constructor defaults to DEFAULT_IDENTITY', () => {
     const mgr = new IdentityManager();
     assert.equal(mgr.format, 'aieos');
-    assert.equal(mgr.displayName, 'Clawser');
+    assert.equal(mgr.displayName, 'BrowserMesh');
+    assert.equal(DEFAULT_IDENTITY.names.full, 'BrowserMesh Agent Runtime');
+  });
+
+  it('the default identity still answers to its earlier short names', () => {
+    assert.deepEqual(DEFAULT_IDENTITY.names.aliases, ['mesh', 'claw', 'C']);
   });
 
   it('load() detects format and stores identity', () => {
@@ -172,7 +177,7 @@ describe('IdentityManager', () => {
     mgr.load('custom');
     mgr.reset();
     assert.equal(mgr.format, 'aieos');
-    assert.equal(mgr.displayName, 'Clawser');
+    assert.equal(mgr.displayName, 'BrowserMesh');
   });
 
   it('toJSON() and fromJSON() round-trip', () => {

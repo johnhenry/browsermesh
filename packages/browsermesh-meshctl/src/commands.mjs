@@ -19,7 +19,8 @@
 import { readFile } from 'node:fs/promises'
 import { UsageError } from './output.mjs'
 import { validatePodSpec } from '@johnhenry/browsermesh-pod'
-import { selectAutoHost } from './auto-placement.mjs'
+import { PLACEMENT_BOUNDARY } from '@johnhenry/browsermesh-apps'
+import { selectAutoHost, selectPlannedHost } from './auto-placement.mjs'
 
 /** @param {*} value @returns {string[]} */
 function asArray(value) {
@@ -228,6 +229,21 @@ export async function cmdPodsSpawn(session, { positionals, flags }) {
     if (normalized.ok) spec = normalized.value
     if (!spec.lane) throw new UsageError('pods spawn auto: --lane is required to select a host (or give --kind so it can be inferred)')
     const refs = candidateHostRefs(session, flags)
+    if (flags.requester !== undefined || flags['min-boundary'] !== undefined) {
+      // A placement flag hands the choice to the placement planner.
+      if (flags.requester !== undefined && (typeof flags.requester !== 'string' || flags.requester === '')) {
+        throw new UsageError('pods spawn auto: --requester needs a pubKey')
+      }
+      const minBoundary = flags['min-boundary']
+      if (minBoundary !== undefined && !Object.values(PLACEMENT_BOUNDARY).includes(minBoundary)) {
+        throw new UsageError(`pods spawn auto: --min-boundary must be one of ${Object.values(PLACEMENT_BOUNDARY).join('|')}`)
+      }
+      const planned = await selectPlannedHost({
+        session, candidateRefs: refs, spec, requesterId: flags.requester, minBoundary,
+      })
+      const pod = await session.client.spawn(planned.podId, spec)
+      return { host: planned.podId, chosenVia: planned.via, placement: planned.placement, pod }
+    }
     const picked = await selectAutoHost({ session, candidateRefs: refs, lane: spec.lane })
     const pod = await session.client.spawn(picked.podId, spec)
     return { host: picked.podId, chosenVia: picked.via, pod }

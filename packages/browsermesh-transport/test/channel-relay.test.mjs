@@ -104,6 +104,12 @@ describe('ChannelRelay', () => {
     assert.equal(posted.length, 1);
     assert.equal(posted[0].text, 'hello relay');
     assert.equal(posted[0].channel, 'relay');
+    assert.equal(posted[0].sender, 'browsermesh', 'the display name of the default sender');
+  });
+
+  it('the BroadcastChannel name keeps its earlier default, because it is a rendezvous point between releases', () => {
+    assert.equal(relay.config.bcName, 'clawser-relay');
+    assert.equal(new ChannelRelay({ bcName: 'mine' }).config.bcName, 'mine');
   });
 
   it('sendMessage returns false when not running', () => {

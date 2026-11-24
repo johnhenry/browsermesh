@@ -673,20 +673,25 @@ state machine and its events. A runtime declares a `boundary`
 (`none`/`process`/`language`/`hardware`), and one that claims `lane:
 'isolate'` is refused unless the boundary is `language` or `hardware`.
 
-Two runtimes ship, from `@johnhenry/browsermesh-pod/node-runtimes` (the
+Three runtimes ship, from `@johnhenry/browsermesh-pod/node-runtimes` (the
 package root stays free of `node:` imports):
 
 | Runtime | Boundary | What it limits | What it does NOT stop |
 | --- | --- | --- | --- |
 | `createWorkerThreadsRuntime()` | `none` | heap (`resourceLimits`), environment (only what the podspec names), termination | everything else: the module can read and write any file, open any connection, start processes, and share the host's memory. `worker_threads` is not a security boundary |
 | `createPermissionProcessRuntime()` | `process` | the above, plus the Node permission model: read access to only the entry file and the hosted module, no write, no network, no child processes or workers | a determined hostile module: Node's own documentation calls the permission model a safeguard, not a sandbox. Same user and kernel as the host |
+| `createIsolatedVmRuntime()` | `language` | one V8 isolate per pod (the `isolated-vm` addon, an **optional** dependency): no `require`, `process`, filesystem, network, timers or `WebAssembly`; a heap limit and a per-call time limit enforced by the isolate, a breach disposing it and reporting `oom` or `timeout`; the module only from the catalog and importing nothing; only JSON strings and one log callback cross | it runs **in the host's process**: a V8 or addon memory-safety bug is a bug in the host, which can reach everything the host can. The heap limit is a guideline (2 to 3 times is possible). No cumulative CPU budget |
 
-Neither is the isolate lane: both are advertised as the `node` lane, and the
-placement planner in `@johnhenry/browsermesh-apps` only gives them work from
-requesters the operator trusts. A real isolate (`isolated-vm`, or `workerd`
-as in `spikes/isolate-pod-host`) implements the same `PodRuntime` interface;
-`pod-runtime.mjs` specifies it, and it is not in this repository because
-`isolated-vm` is a native dependency.
+The first two are advertised as the `node` lane, and the placement planner in
+`@johnhenry/browsermesh-apps` only gives them work from requesters the
+operator trusts. The isolate runtime claims `lane: 'isolate'`. `isolated-vm`
+is a native addon: an install without a compiler or a prebuilt binary for the
+platform still works, and `isolatedVmAvailability()` says whether the addon
+loaded (`createIsolatedVmRuntime()` throws an error with code
+`ERR_ISOLATED_VM_UNAVAILABLE` and the reason when it did not). It needs
+`isolated-vm` 7.x on Node 26 (prebuilt binaries ship for macOS arm64 and Linux
+x64/arm64); it did not need `--no-node-snapshot` on Node 26.10. A `workerd`
+runtime (`spikes/isolate-pod-host`) implements the same `PodRuntime` interface.
 
 ```js
 import { createRuntimeLaneDriver } from '@johnhenry/browsermesh-pod'

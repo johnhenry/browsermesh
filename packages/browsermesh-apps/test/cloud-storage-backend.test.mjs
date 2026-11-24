@@ -61,6 +61,27 @@ describe('CloudStorageBackend', () => {
     assert.throws(() => createCloudStorageBackend({}), /bucket is required/)
   })
 
+  it('a command message larger than maxMessageBytes is refused with an error and the connection is closed', async () => {
+    const backend = createCloudStorageBackend({ bucket: freshBucket(), maxMessageBytes: 4096 })
+    const socket = await backend.connect()
+    const window = socket.windowBytes
+    assert.ok(window > 0)
+    // Opens a command and never finishes it; the backend stops reading at its bound.
+    const writer = (async () => {
+      try {
+        await socket.write(new TextEncoder().encode(`{"op":"put","data":"${'A'.repeat(window)}`))
+        for (let i = 0; i < 64; i += 1) await socket.write(new TextEncoder().encode('A'.repeat(window)))
+      } catch { /* closed by the backend */ }
+    })()
+    const reply = await readJsonMessage(socket)
+    assert.equal(reply.eof, false)
+    assert.match(reply.value.error, /larger than 4096 bytes/)
+    await writer
+    // The next read sees the end of the stream: no further command was served.
+    const after = await readJsonMessage(socket)
+    assert.ok(after.eof === true || after.error)
+  })
+
   it('put then get round-trips a small object', async () => {
     const backend = createCloudStorageBackend({ bucket: freshBucket() })
     const socket = await backend.connect()

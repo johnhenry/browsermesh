@@ -1288,9 +1288,23 @@ requester holding `pod-host:status` or `pod-host:list` can read the others'
 pods. What it reads is limited: `env` values and `run.input` in a pod's
 `spec` are returned as `"[redacted]"` (the names stay) to every requester
 except the one that spawned that pod through this service; a pod the service
-did not spawn is redacted for everyone. Verbs on another requester's pod
-(`drain`, `exec`, `send`) are still allowed by the scope: separate resources
-are how tenants are kept apart.
+did not spawn is redacted for everyone.
+
+**A pod belongs to the requester that spawned it.** The verb on the resource is
+necessary but not sufficient: `send`, `exec`, `snapshot`, `restore` and `drain`
+on an existing pod also need the requester to have spawned it through this
+service, or an explicit grant on the pod itself, whose resource is
+`<resource>/<pod name>` (for example
+`registry.grantCapabilities(carol, ['pod-host/web:drain'])`; a grant of the
+verb on the resource alone does not delegate). A pod the service did not spawn
+(made directly on the driver, or before the service restarted: ownership is
+held in memory) has no owner and needs such a grant. A name the driver does
+not know still answers `ENOENT`. `status` of another's pod still works, with
+its `env` values and input redacted, and registers no interest in the pod's
+events (its log and lifecycle events go only to the owner and to requesters
+granted something on the pod). A refusal answers `EACCES`, emits
+`pod-host:denied` and writes a `placement_denied` record. Separate resources
+remain the way to keep tenants' scopes apart.
 
 `describe()` is **not** gated, and travels on its own `pod-host:describe`
 envelope rather than as a ninth verb: it returns only what the host would
@@ -1427,6 +1441,24 @@ number the caller schedules, so every rule is unit-tested against fake lane
 drivers (`InMemoryPodHostDriver`) without sleeping. They are additive:
 nothing calls them unless you do.
 
+**In the orchestrator.** `MeshOrchestrator#placePod(spec, { requesterId, policy })`
+and `meshctl_spawn` with a `constraints` object (and `meshctl pods spawn auto
+--requester <pubKey> --min-boundary <b>`) choose the host through
+`planPlacement()`. The requester's trust is read from the local trust graph
+(`PeerRegistry#getTrust()`): trusted only at or above `0.8` (configurable with
+`placement.trustThreshold`) or the local pod itself; no requester, no trust
+graph or no usable value is `untrusted`, which is placed only behind a
+`language` or `hardware` boundary that the HOST states in `describe()` (new
+`boundary` field; a host that does not state one counts as `none`). A podspec
+`budget` is refused unless `placement.budgetCheck` accepts it, the
+per-requester pod quota (`policy.perRequesterMaxPods`) is checked before any
+host is looked at, and each decision is audited (`placement_requested` with
+`phase: 'decision'` listing the requester, its trust, the chosen host and every
+rejection code, or `placement_denied`). `releasePlacement(host, name)` gives a
+drained pod's reservation back. Callers that pass no constraints
+(`spawnPod()`, `meshctl_spawn` and `meshctl pods spawn auto` as before) never
+reach the planner.
+
 ```js
 import { createHostPool, PLACEMENT_BOUNDARY } from '@johnhenry/browsermesh-apps'
 
@@ -1451,13 +1483,18 @@ hosts rank lower), an optional `preferHost`, then host id, so the answer does
 not depend on input order.
 
 **Isolation boundary.** A host states how strongly it separates a pod from
-the host: `none` (same process: `worker_threads`), `process` (a child process
-with permission flags), `language` (a V8 isolate in its own process),
-`hardware` (a microVM). Requesters are untrusted unless they say otherwise,
-and an untrusted requester is only placed behind `language` or `hardware`
+the host. Requesters are untrusted unless they say otherwise, and an
+untrusted requester is only placed behind `language` or `hardware`
 (`policy.minBoundary` raises the floor for everyone). This only refuses to
 place untrusted work where a host says there is no boundary; it does not
-create one.
+create one, and it cannot check the host's claim.
+
+| Boundary | What it is today | What it does not stop | Untrusted requesters |
+| --- | --- | --- | --- |
+| `none` | `worker_threads`: same process | everything | never placed |
+| `process` | a child process under Node's permission model | a hostile module (Node calls the model a safeguard, not a sandbox); same user and kernel | never placed |
+| `language` | a V8 isolate: `createIsolatedVmRuntime()` (in the host's own process) or `workerd` (in a process of its own) | a V8 bug. In the host's process that is a bug in the host itself; `workerd` confines it to the worker process | placed (a host operator who will not accept a V8 bug reaching the host process should require `hardware` through `policy.minBoundary`) |
+| `hardware` | a microVM (Firecracker); never run on a real host yet | a hypervisor or kernel bug, side channels | placed |
 
 **The host still decides.** A host's refusal (`EACCES`, `EBUSY`, ...) is final
 for that spawn. Only a transport-level failure (`ETIMEDOUT`) can move a spawn

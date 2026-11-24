@@ -10,8 +10,9 @@
  *   - `worker_threads`            same process, no boundary (`node-runtimes.mjs`)
  *   - Node permission-model child  separate process with fs/net/exec denied
  *                                  (`node-runtimes.mjs`); NOT a sandbox
- *   - `isolated-vm`                a V8 isolate (specified below, NOT built:
- *                                  it is a native dependency)
+ *   - `isolated-vm`                a V8 isolate in the host's process
+ *                                  (`isolate-runtime.mjs`; the addon is an
+ *                                  optional dependency)
  *   - `workerd`                    a V8 isolate in its own process (the
  *                                  `spikes/isolate-pod-host` Worker host
  *                                  speaks this protocol over HTTP instead)
@@ -58,18 +59,18 @@
  *
  * ## Specifying the isolate implementation against this interface
  *
- * An `isolated-vm` runtime (NOT in this repository: it is a native
- * dependency, which is the owner's decision to add) implements `start()` by
+ * `createIsolatedVmRuntime()` (`isolate-runtime.mjs`) implements `start()` by
  * creating one `ivm.Isolate({ memoryLimit: limits.memMib })` and one context,
  * compiling the module source (read by the host from `modulePath`; the
- * module may only `import` what the host provides as references),
- * and bridging `request` and `onLog` through `Reference`/`ExternalCopy`
- * callbacks; `terminate()` is `isolate.dispose()`; an out-of-memory
- * disposal is reported as `onExit({reason: 'oom'})`. It declares
- * `boundary: 'language'`, runs in a process of its own (the upstream README
- * itself says to), and so may declare `lane: 'isolate'`. A `workerd` runtime
- * is the same shape with a Worker per pod. Neither needs any change to the
- * driver, the pool or the service.
+ * module may import nothing) under a host-written wrapper, and bridging
+ * `request` and `onLog` as JSON strings and one string callback;
+ * `terminate()` is `isolate.dispose()`; an out-of-memory or time-limit
+ * disposal is reported as `onExit({reason: 'oom'|'timeout'})`. It declares
+ * `boundary: 'language'` and so may declare `lane: 'isolate'`; it runs in
+ * the host's own process, which the upstream README advises against for
+ * anything critical (see the security review). A `workerd` runtime is the
+ * same shape with a Worker per pod. Neither needs any change to the driver,
+ * the pool or the service.
  *
  * Zero dependencies and no `node:` imports: this module loads in a Worker, a
  * browser or a microVM guest. The Node implementations are in
@@ -368,7 +369,7 @@ export function createRuntimeLaneDriver({
     record.handle = null
     transition(record, POD_LIFECYCLE.GONE, info.reason)
     emit(createHostEvent(POD_HOST_EVENT_KIND.EXIT, {
-      name: record.name, lane, code: info.code ?? 1, reason: info.reason === 'exited' ? 'exited' : 'crashed', restartable: true,
+      name: record.name, lane, code: info.code ?? 1, reason: info.reason === 'exited' ? 'exited' : 'crashed', cause: info.reason, restartable: true,
     }))
   }
 }

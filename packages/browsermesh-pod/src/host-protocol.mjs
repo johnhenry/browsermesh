@@ -941,6 +941,9 @@ export class InMemoryPodHostDriver {
   /** @type {string} */
   #lane
 
+  /** @type {boolean} */
+  #acceptAnyLane
+
   /** @type {Set<string>} */
   #verbs
 
@@ -962,12 +965,17 @@ export class InMemoryPodHostDriver {
    * @param {(argv: string[], ctx: {name: string, timeoutMs?: number}) => Promise<{stdout: string, stderr: string, code: number}>} [opts.exec]
    *   Injectable exec implementation. Defaults to echoing the argv back as
    *   `stdout` with `code: 0`.
+   * @param {boolean} [opts.acceptAnyLane=false] - TEST OPTION. By default a
+   *   podspec whose lane is not this driver's lane is refused `ELANE`, as every
+   *   real lane driver does. Set this only in tests that spawn specs of other
+   *   lanes into a convenient driver.
    */
-  constructor({ lane = POD_LANE.NODE, verbs, exec } = {}) {
+  constructor({ lane = POD_LANE.NODE, verbs, exec, acceptAnyLane = false } = {}) {
     if (!POD_LANES.includes(lane)) {
       throw new Error(`InMemoryPodHostDriver: unknown lane '${lane}'`)
     }
     this.#lane = lane
+    this.#acceptAnyLane = acceptAnyLane === true
     const laneVerbs = POD_LANE_VERBS[lane]
     this.#verbs = new Set(verbs ? laneVerbs.filter((verb) => verbs.includes(verb)) : laneVerbs)
     this.#exec = exec || (async (argv) => ({ stdout: argv.join(' '), stderr: '', code: 0 }))
@@ -1007,6 +1015,9 @@ export class InMemoryPodHostDriver {
       throw new PodHostDriverError(POD_HOST_ERROR.EINVAL, validated.errors.join('; '), { errors: validated.errors })
     }
     const value = validated.value
+    if (!this.#acceptAnyLane && value.lane !== this.#lane) {
+      throw new PodHostDriverError(POD_HOST_ERROR.ELANE, `this host runs the '${this.#lane}' lane, not '${value.lane}'`, { lane: value.lane })
+    }
     const existing = this.#pods.get(value.name)
     if (existing && existing.state !== POD_LIFECYCLE.GONE) {
       throw new PodHostDriverError(POD_HOST_ERROR.EEXIST, `pod '${value.name}' already exists`, { name: value.name })

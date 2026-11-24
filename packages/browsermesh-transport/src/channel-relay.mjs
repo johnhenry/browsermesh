@@ -40,7 +40,10 @@ export class ChannelRelay {
    * @param {object} opts
    * @param {number} [opts.port=0] — virtual port (for documentation/config)
    * @param {string} [opts.path='/webhook'] — webhook path
-   * @param {string} [opts.bcName='clawser-relay'] — BroadcastChannel name
+   * @param {string} [opts.bcName='clawser-relay'] — BroadcastChannel name.
+   *   Deliberately NOT renamed: a BroadcastChannel name is a rendezvous point,
+   *   so two pages running different releases with different defaults would
+   *   no longer hear each other. Pass `bcName` to use a name of your own.
    */
   constructor(opts = {}) {
     this.config = {
@@ -171,7 +174,7 @@ export class ChannelRelay {
     const msg = {
       text,
       channel: 'relay',
-      sender: opts.sender || 'clawser',
+      sender: opts.sender || 'browsermesh',
       timestamp: Date.now(),
     };
 

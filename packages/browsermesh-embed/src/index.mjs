@@ -12,6 +12,18 @@ import { buildSkeleton, setStatus, appendEntry, setInputDisabled } from './dom.m
 // ── EmbeddedPod ────────────────────────────────────────────────
 
 /**
+ * The element id used when no `containerId` is configured: `browsermesh`, or
+ * the earlier default `clawser` when that element exists and `#browsermesh`
+ * does not (a page written for an earlier release keeps working).
+ * @returns {string}
+ */
+function defaultContainerId() {
+  const lookup = globalThis.document?.getElementById?.bind(globalThis.document)
+  if (lookup && !lookup('browsermesh') && lookup('clawser')) return 'clawser'
+  return 'browsermesh'
+}
+
+/**
  * Embeddable agent-backed workspace pod.
  * Provides a minimal API for integrating an agent into external web apps.
  * Extends Pod for identity, discovery, and peer messaging.
@@ -44,7 +56,7 @@ export class EmbeddedPod extends Pod {
   constructor(config = {}) {
     super()
     this.#config = {
-      containerId: config.containerId || 'clawser',
+      containerId: config.containerId || defaultContainerId(),
       provider: config.provider || null,
       model: config.model || null,
       tools: config.tools || {},

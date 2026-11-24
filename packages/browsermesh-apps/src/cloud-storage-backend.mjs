@@ -169,7 +169,7 @@
  */
 
 import { createLazyRequire } from './internal/lazy-node-require.mjs'
-import { readJsonMessage } from './internal/json-message.mjs'
+import { readJsonMessage, DEFAULT_MAX_MESSAGE_BYTES } from './internal/json-message.mjs'
 
 import { IndexedDBChunkStore, IndexedDBSyncStorage, TRANSFER_DEFAULTS } from '@johnhenry/browsermesh-sync'
 import { LWWMap } from '@johnhenry/browsermesh-primitives'
@@ -337,6 +337,7 @@ function resolveCloudStorageBackendClass() {
   class CloudStorageBackend extends Backend {
   /** @type {string} */
   #bucket
+  #maxMessageBytes
 
   /** @type {import('@johnhenry/browsermesh-sync').IndexedDBChunkStore} */
   #chunkStore
@@ -387,10 +388,14 @@ function resolveCloudStorageBackendClass() {
    * @param {import('@johnhenry/browsermesh-sync').IndexedDBSyncStorage} [opts.manifestStorage]
    * @param {import('@johnhenry/browsermesh-sync').IndexedDBSyncStorage} [opts.keyStorage]
    * @param {string} [opts.nodeId] - Defaults to a random UUID.
+   * @param {number} [opts.maxMessageBytes] - Largest command message the
+   *   backend reassembles from window-sized pieces (default 16 MiB); a longer one
+   *   is refused and the connection closed.
    * @param {Function} [opts.onLog]
    */
-  constructor({ bucket, dbName, chunkStore, manifestStorage, keyStorage, nodeId, onLog } = {}) {
+  constructor({ bucket, dbName, chunkStore, manifestStorage, keyStorage, nodeId, maxMessageBytes, onLog } = {}) {
     super()
+    this.#maxMessageBytes = maxMessageBytes ?? DEFAULT_MAX_MESSAGE_BYTES
     if (!bucket || typeof bucket !== 'string') {
       throw new Error('CloudStorageBackend: bucket is required')
     }
@@ -442,9 +447,15 @@ function resolveCloudStorageBackendClass() {
     const encoder = new TextEncoder()
 
     while (true) {
-      const msg = await readJsonMessage(socket)
+      const msg = await readJsonMessage(socket, { maxBytes: this.#maxMessageBytes })
       if (msg.eof) break
 
+      if (msg.tooLarge) {
+        // The stream is mid-message: answer once and close rather than read the rest as commands.
+        await socket.write(encoder.encode(JSON.stringify({ error: msg.error.message }))).catch(() => {})
+        await socket.close().catch(() => {})
+        break
+      }
       if (msg.error) {
         await socket.write(encoder.encode(JSON.stringify({ error: 'Invalid JSON' })))
         continue

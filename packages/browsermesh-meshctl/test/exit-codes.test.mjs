@@ -68,15 +68,28 @@ describe('exit code mapping', () => {
     // Spawning the same name twice hits EEXIST, which has no dedicated
     // exit code in the design doc -- it should fall through to GENERIC.
     const first = await runCli(
-      ['pods', 'spawn', host, '--name', 'dup', '--kind', 'command', '--ref', '/bin/sh'],
+      ['pods', 'spawn', host, '--name', 'dup', '--lane', 'node', '--kind', 'command', '--ref', '/bin/sh'],
       { session: fixture.session },
     )
     assert.equal(first.code, 0)
     const { code, stderr } = await runCli(
-      ['pods', 'spawn', host, '--name', 'dup', '--kind', 'command', '--ref', '/bin/sh'],
+      ['pods', 'spawn', host, '--name', 'dup', '--lane', 'node', '--kind', 'command', '--ref', '/bin/sh'],
       { session: fixture.session },
     )
     assert.equal(code, 1)
     assert.equal(JSON.parse(stderr).error.code, 'EEXIST')
+  })
+
+  it('a podspec for another lane than the host runs is ELANE (exit 5), not placed on it anyway', async () => {
+    const fixture = await buildLoopbackFixture({ timeoutMs: 2000 })
+    cleanups.push(fixture.cleanup)
+    const host = fixture.session.resolveHost('node-host').podId
+    // `--kind command` with no --lane means the microvm lane; a node host does not run it.
+    const { code, stderr } = await runCli(
+      ['pods', 'spawn', host, '--name', 'wrong-lane', '--kind', 'command', '--ref', '/bin/sh'],
+      { session: fixture.session },
+    )
+    assert.equal(code, 5)
+    assert.equal(JSON.parse(stderr).error.code, 'ELANE')
   })
 })

@@ -69,6 +69,9 @@ const podHostWorker :Workerd.Worker = (
     # the CONTROL_TOKEN environment variable when workerd starts. Not
     # exercised against a real workerd by this spike's tests.
     (name = "CONTROL_TOKEN", fromEnvironment = "CONTROL_TOKEN"),
+    # Where this process listens, set by `node src/serve.mjs`: a Worker told it
+    # listens beyond loopback serves nothing but /health unless CONTROL_TOKEN is set.
+    (name = "LISTEN_ADDRESS", fromEnvironment = "LISTEN_ADDRESS"),
   ],
 );
 

@@ -32,6 +32,7 @@
  */
 
 import { POD_HOST_ERROR, validatePodSpec } from '@johnhenry/browsermesh-pod'
+import { controlAuthProblem } from './listen-guard.mjs'
 
 const POD_ROUTE = /^\/pods\/([^/]+)(?:\/(boot|status|send|exec|snapshot|restore))?$/
 
@@ -119,6 +120,11 @@ export async function handlePodHostRequest(request, env) {
   if (request.method === 'GET' && url.pathname === '/health') {
     return Response.json({ status: 'ok' })
   }
+
+  // Told it listens beyond loopback (`LISTEN_ADDRESS`, set by `serve.mjs` or the
+  // operator's config) without a token: serve nothing but /health.
+  const problem = controlAuthProblem({ address: env.LISTEN_ADDRESS, token: env.CONTROL_TOKEN })
+  if (problem) return errorResponse(POD_HOST_ERROR.EACCES, problem, 503)
 
   // The control plane spawns, messages and drains pods: when a CONTROL_TOKEN
   // is configured (a secret binding), every other route requires it.

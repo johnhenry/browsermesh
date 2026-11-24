@@ -813,8 +813,11 @@ export class FsServiceBackend extends Backend {
   /**
    * @param opfsRoot - OPFS root directory handle. If not provided,
    *   connect() will attempt to get it via navigator.storage.getDirectory().
+   * @param opts.maxMessageBytes - Largest command message reassembled from
+   *   window-sized pieces (default 16 MiB); a longer one is answered with an
+   *   error and the connection is closed.
    */
-  constructor(opfsRoot?: FileSystemDirectoryHandle);
+  constructor(opfsRoot?: FileSystemDirectoryHandle, opts?: { maxMessageBytes?: number });
 
   /**
    * Connect to the filesystem service.

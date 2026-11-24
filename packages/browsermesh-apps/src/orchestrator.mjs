@@ -20,6 +20,8 @@ import {
   POD_HOST_ERROR,
   PodHostDriverError,
 } from '@johnhenry/browsermesh-pod'
+import { HostHealth, PlacementLedger } from './pod-placement.mjs'
+import { decidePlacement } from './pod-placement-wiring.mjs'
 
 // A real browser environment (the host application's tool layer) may already
 // have defined a real, richer `globalThis.BrowserTool` -- honored first, as
@@ -283,6 +285,8 @@ export class MeshOrchestrator {
   #supervisor = null
   /** @type {Promise<object>|null} In-flight lazy `createPodSupervisor()` import/construction. */
   #supervisorPromise = null
+  /** @type {{policy: object, trustThreshold: number|undefined, budgetCheck: Function|undefined, health: HostHealth, ledger: PlacementLedger, now: () => number}} Planner state for `placePod()`. */
+  #placement
   /** @type {Map<string, object>} podId -> peer info */
   #knownPeers = new Map()
   /** @type {Map<string, object>} name -> { podId, port } */
@@ -311,9 +315,16 @@ export class MeshOrchestrator {
    *   (`pod-host-service.mjs`) used by `spawnPod()`/`snapshotPod()`/
    *   `restorePod()`/`listHostedPods()`. Lazily built from `peerNode` on
    *   first use when omitted.
+   * @param {object} [opts.placement]         - Planner settings for `placePod()`
+   *   (nothing here changes `spawnPod()` or `meshctl_spawn` without constraints):
+   *   `policy` (`PlacementPolicy`: `minBoundary`, `perRequesterMaxPods`, ...),
+   *   `trustThreshold` (trust value at or above which a requester is trusted,
+   *   default 0.8), `budgetCheck` (`({requesterId, budget, spec}) => boolean |
+   *   {allowed, reason}`; a podspec with a `budget` is refused when absent),
+   *   `health` (`HostHealth`), `now`.
    * @param {Function} [opts.onLog]           - Logging callback
    */
-  constructor({ peerNode, serviceAdvertiser, serviceBrowser, router, runtimeRegistry, remoteSessionBroker, resourceRegistry, auditRecorder, peerRegistry, podHostClient, onLog }) {
+  constructor({ peerNode, serviceAdvertiser, serviceBrowser, router, runtimeRegistry, remoteSessionBroker, resourceRegistry, auditRecorder, peerRegistry, podHostClient, placement, onLog }) {
     if (!peerNode) {
       throw new Error('peerNode is required')
     }
@@ -327,6 +338,14 @@ export class MeshOrchestrator {
     this.#auditRecorder = auditRecorder ?? null
     this.#peerRegistry = peerRegistry ?? null
     this.#podHostClient = podHostClient ?? null
+    this.#placement = {
+      policy: { ...(placement?.policy ?? {}) },
+      trustThreshold: placement?.trustThreshold,
+      budgetCheck: placement?.budgetCheck,
+      health: placement?.health ?? new HostHealth(),
+      ledger: new PlacementLedger(),
+      now: placement?.now ?? Date.now,
+    }
     this.#onLog = onLog ?? null
   }
 
@@ -430,6 +449,87 @@ export class MeshOrchestrator {
   }
 
   /**
+   * Choose a host for `spec` with the placement planner (`planPlacement()`),
+   * then spawn on it (`spawnPod()`). The requester's trust is read from the
+   * local trust graph and is `untrusted` unless it is a usable value at or
+   * above the threshold (`pod-placement-wiring.mjs`): an untrusted requester
+   * is only placed behind a `language` or `hardware` boundary the HOST states
+   * in its `describe()`. A podspec `budget` and the per-requester pod quota
+   * are checked before any host is considered. The decision is audited
+   * (`placement_requested` with `phase: 'decision'`, or `placement_denied`),
+   * then `spawnPod()` writes its own records. The host still decides: its
+   * refusal is final for this spawn.
+   *
+   * `spawnPod()` and `meshctl_spawn` without constraints are unchanged and
+   * never come through here.
+   *
+   * @param {object} spec - A podspec.
+   * @param {object} [opts]
+   * @param {string} [opts.requesterId] - Whose pod this is (a pubKey); none means untrusted.
+   * @param {object} [opts.policy] - Merged over the orchestrator's `placement.policy`.
+   * @param {string[]} [opts.hostIds] - Consider only these hosts.
+   * @returns {Promise<{hostPodId: string, status: object, decision: object}>}
+   * @throws {PodHostDriverError} `EACCES` (no host may take it, quota, budget),
+   *   `EBUSY` (no host has room right now), `ENOENT` (no hosts), `EINVAL`.
+   */
+  async placePod(spec, { requesterId, policy, hostIds } = {}) {
+    const state = this.#placement
+    const now = state.now()
+    const known = (await this.listPodHosts())
+      .filter((h) => !hostIds || hostIds.includes(h.podId))
+      .map((h) => ({ ...h, health: state.health.state(h.podId, now) }))
+    const mergedPolicy = { ...state.policy, ...(policy ?? {}) }
+    const decision = decidePlacement({
+      spec,
+      hosts: known,
+      requesterId,
+      registry: this.#peerRegistry ?? this.#peerNode?.registry,
+      localPodId: this.localPodId,
+      trustThreshold: state.trustThreshold,
+      policy: mergedPolicy,
+      usage: state.ledger.usage(),
+      requesterUsage: state.ledger.requesterUsage(),
+      budgetCheck: state.budgetCheck,
+    })
+    if (!decision.plan.ok) {
+      await this.recordPlacement(PLACEMENT_AUDIT.DENIED, { actor: 'operator', ...decision.audit })
+      throw decision.error
+    }
+    await this.recordPlacement(PLACEMENT_AUDIT.REQUESTED, { actor: 'operator', ...decision.audit })
+
+    const hostPodId = decision.plan.host.id
+    let status
+    try {
+      status = await this.spawnPod(hostPodId, spec)
+    } catch (err) {
+      // Only a transport-level failure says anything about the host's health.
+      if (err?.code === POD_HOST_ERROR.ETIMEDOUT) state.health.recordFailure(hostPodId, state.now())
+      throw err
+    }
+    state.health.recordSuccess(hostPodId, state.now())
+    const limits = {
+      vcpus: spec.limits?.vcpus ?? mergedPolicy.defaultLimits?.vcpus ?? 1,
+      memMib: spec.limits?.memMib ?? mergedPolicy.defaultLimits?.memMib ?? 128,
+    }
+    try {
+      state.ledger.reserve({ hostId: hostPodId, name: status?.name ?? spec.name, requesterId: decision.requester.id, limits })
+    } catch {
+      // Already reserved under this name on this host: the host would have refused the spawn.
+    }
+    return { hostPodId, status, decision: decision.audit }
+  }
+
+  /**
+   * Give back what `placePod()` reserved for a pod that has been drained or
+   * has exited (the per-requester quota and host capacity it counted against).
+   * @param {string} hostPodId
+   * @param {string} name
+   */
+  releasePlacement(hostPodId, name) {
+    this.#placement.ledger.release(hostPodId, name)
+  }
+
+  /**
    * Snapshot a hosted pod. A snapshotted pod has left the host's live set
    * (§5.3: the VMM is killed), so this records `placement_evicted`.
    *
@@ -520,6 +620,7 @@ export class MeshOrchestrator {
         resource: podHost.resource || 'pod-host',
         capabilities: [...(peer.capabilities || [])],
         hostedBy: peer.metadata?.hostedBy || null,
+        boundary: typeof podHost.boundary === 'string' ? podHost.boundary : null,
       })
     }
     return hosts
@@ -1948,18 +2049,44 @@ export class MeshctlSpawnTool extends BrowserTool {
         env: { type: 'object', description: 'Environment variables (string values)' },
         budget: { type: 'object', description: 'Budget: credits, currency' },
         restart: { type: 'object', description: 'Restart policy: policy (never|on-failure|always), maxRestarts, backoffMs' },
+        constraints: {
+          type: 'object',
+          description: "Optional. When present the placement planner chooses (or checks) the host: {requester: pubKey of whose pod this is (its trust is read from the local trust graph; none or unknown means untrusted, which is only placed behind a 'language' or 'hardware' boundary the host states), minBoundary: 'none'|'process'|'language'|'hardware', maxPodsPerRequester: number}",
+        },
       },
       required: ['name', 'run'],
     }
   }
   get permission() { return 'network' }
 
-  async execute({ host, name, lane, run, limits, caps, env, budget, restart } = {}) {
+  async execute({ host, name, lane, run, limits, caps, env, budget, restart, constraints } = {}) {
     const validated = validatePodSpec(buildPodSpec({ name, lane, run, limits, caps, env, budget, restart }))
     if (!validated.ok) {
       return { success: false, output: '', error: `Invalid podspec: ${validated.errors.join('; ')}` }
     }
     const spec = validated.value
+
+    if (constraints !== undefined && constraints !== null) {
+      // The planner path: nothing here runs for a caller that passes no constraints.
+      const policy = {}
+      if (constraints.minBoundary !== undefined) policy.minBoundary = constraints.minBoundary
+      if (constraints.maxPodsPerRequester !== undefined) policy.perRequesterMaxPods = constraints.maxPodsPerRequester
+      try {
+        const placed = await this.#orchestrator.placePod(spec, {
+          requesterId: constraints.requester,
+          policy,
+          hostIds: host && host !== 'auto' ? [host] : undefined,
+        })
+        return {
+          success: true,
+          output: `placement planner chose host ${placed.hostPodId} (requester ${placed.decision.requesterId ?? 'none'} is ${placed.decision.trust})\nspawned '${placed.status.name}' on ${placed.hostPodId} (lane '${placed.status.lane}'): state=${placed.status.state}\n${JSON.stringify(placed.status)}`,
+        }
+      } catch (err) {
+        const driverError = PodHostDriverError.from(err)
+        const planRefusal = driverError.details?.plan !== undefined
+        return { success: false, output: '', error: planRefusal ? `placement refused: ${driverError.message}` : formatPodHostError(err, { host, verb: 'spawn' }) }
+      }
+    }
 
     let targetHost = host && host !== 'auto' ? host : null
     let note = ''
