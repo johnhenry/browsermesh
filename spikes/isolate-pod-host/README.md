@@ -209,9 +209,14 @@ comments, since it never depended on wrangler or cf at runtime.
 reads it from `process.env` in `cloudflare.config.ts`; on a deployed Worker
 use a secret): every route except `GET /health` then requires
 `Authorization: Bearer <token>`, and `createIsolatePodDriver({ token })` sends
-it. Without a token the routes are unauthenticated, as before, so keep that
-setup to loopback. This is exercised in `test/routes.test.mjs` against the
-route table; it has not been run against a real workerd.
+it. Without a token the routes are unauthenticated, so that setup is loopback
+only: `node src/serve.mjs [--address host:port]` starts `workerd` and refuses
+to start on any address that is not loopback unless `CONTROL_TOKEN` is set
+(and tells the Worker where it listens, as `LISTEN_ADDRESS`, so a Worker that
+finds itself beyond loopback without a token serves only `/health`). This is
+exercised in `test/routes.test.mjs` and `test/listen-guard.test.mjs` against
+the route table and the launcher's command; it has not been run against a real
+workerd.
 
 ## Measured numbers
 

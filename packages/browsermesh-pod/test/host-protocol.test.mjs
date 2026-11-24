@@ -600,6 +600,24 @@ describe('InMemoryPodHostDriver', () => {
     assert.throws(() => new InMemoryPodHostDriver({ lane: 'gvisor' }), /unknown lane/)
   })
 
+  it('refuses a podspec for another lane (ELANE) and creates nothing, unless a test option says otherwise', async () => {
+    const strict = new InMemoryPodHostDriver({ lane: POD_LANE.NODE })
+    // No lane in the podspec: it is defaulted from run.kind (command -> microvm), not from this host.
+    await assert.rejects(
+      () => strict.spawn({ name: 'a', run: { kind: 'command', ref: '/bin/sh' } }),
+      (err) => err.code === POD_HOST_ERROR.ELANE,
+    )
+    await assert.rejects(
+      () => strict.spawn({ name: 'b', lane: POD_LANE.ISOLATE, run: { kind: 'skill', ref: 's' } }),
+      (err) => err.code === POD_HOST_ERROR.ELANE,
+    )
+    assert.deepEqual(await strict.list(), [])
+    assert.equal((await strict.spawn({ name: 'c', lane: POD_LANE.NODE, run: { kind: 'command', ref: '/bin/sh' } })).lane, 'node')
+
+    const lenient = new InMemoryPodHostDriver({ lane: POD_LANE.NODE, acceptAnyLane: true })
+    assert.equal((await lenient.spawn({ name: 'a', run: { kind: 'command', ref: '/bin/sh' } })).state, POD_LIFECYCLE.REGISTERED)
+  })
+
   it('narrows, but never widens, the lane verb set', () => {
     const narrowed = new InMemoryPodHostDriver({ lane: POD_LANE.NODE, verbs: ['spawn', 'list'] })
     assert.deepEqual(narrowed.capabilities().verbs, ['spawn', 'list'])
