@@ -583,6 +583,55 @@ envelope's own `from` field, which a remote peer could set to anything.
 `test/real-peer/wire-envelope.test.mjs` runs all three over a real
 `RTCPeerConnection` pair (`npm run test:real-peer`).
 
+## Message channel: `createMeshChannelService`
+
+`mesh-rpc` is HTTP-shaped (`{ method, path, headers, body }` in, a status out,
+a JSON body of at most 1 MiB) and stays exactly as it is. A second service,
+`createMeshChannelService()` (`mesh-channel.mjs`, also `@johnhenry/browsermesh-apps/mesh-channel`),
+sits beside it on its own envelope type for protocols that need a message
+layer. Over one link per peer it gives both sides:
+
+- requests in both directions (ids are per direction), `notify`, and
+  `ctx.progress(value)` per request;
+- cancel per request: the callee's handler gets `ctx.signal`; the caller's
+  late results are dropped;
+- native `Uint8Array` values anywhere in a message (a small self-contained
+  codec; base64 only carries chunks inside the JSON envelope and is not part
+  of the API);
+- a negotiated maximum message size, enforced from a message's first chunk
+  (its announced length), before anything is assembled, and locally before
+  anything is sent;
+- credit-based flow control in bytes: a sender may have at most the receiver's
+  `window` of unconsumed bytes in flight, so a slow reader bounds a sender's
+  memory (and a reader that stops stops the sender);
+- `maxInflight` requests per peer, a `close()` that rejects every pending
+  request, and the caller's verified identity (`ctx.peer`, the key the session
+  is bound to; never a field of the message) in every handler.
+
+```js
+const a = attachService(nodeA, undefined, createMeshChannelService())
+const b = attachService(nodeB, undefined, createMeshChannelService({
+  // Runs the moment the link exists, before any request can arrive on it.
+  onLink(link) {
+    link.onRequest('read', async ({ path }, { peer, signal, progress }) => {
+      // authorise `peer` yourself, e.g. ctx.registry.checkAccess(peer, ...)
+      await progress({ chunk: new Uint8Array(4) })
+      return { data: new Uint8Array(10) }
+    })
+  },
+}))
+const link = await a.api.open(nodeB.podId)
+const { data } = await link.request('read', { path: 'x' }, { signal, onProgress })
+```
+
+Like `mesh-rpc`, it does not authorise anything itself. Compatibility: the
+first thing sent to a peer is one `hello`; a peer that does not run the
+service ignores it and `open()` rejects with `MeshChannelError`
+(`code -32000`, `reason 'unsupported'`) after `handshakeTimeoutMs`; pass
+`peerSupports(peer)` to refuse without sending even that. See
+`examples/17-mesh-channel.mjs` and the module comment in `mesh-channel.mjs`
+for the wire frames, the memory model and the error codes.
+
 ## `fetch()`/`WebSocket`-shaped mesh access: `browserMeshFetch` and `BrowserMeshWebSocket`
 
 Two web-standard-API-shaped wrappers over a mesh connection, so existing
