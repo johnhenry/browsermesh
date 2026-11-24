@@ -197,9 +197,10 @@ Package: `browsermesh-apps` (`MeshRelayHost`, `createMeshRelayBackend`).
 - **Authenticated / authorized.** A connection is accepted only if
   `PeerRegistry.checkAccess(peerKey, 'mesh-relay:<service>', 'connect')` allows
   it (default deny). It **ends** when that stops being true: on a registry access
-  change (revocation, peer removal, permission update, `notifyAccessChange`), on
-  `host.recheck()`, and on an interval (`recheckIntervalMs`, default 30000, `0`
-  disables; this is how expiry is noticed). `hideService()` and `detach()` end
+  change (revocation, peer removal, permission update, a grant that expired,
+  `notifyAccessChange`), on `host.recheck()`, and on an interval
+  (`recheckIntervalMs`, default 30000, `0` disables; a backstop now that expiry is
+  announced). `hideService()` and `detach()` end
   the matching connections; a connect that finishes after any of these is not
   acknowledged. Both directions stop at once and the peer receives a `close`
   with a `reason` (`socket.closeReason` on the client).
@@ -214,10 +215,20 @@ Package: `browsermesh-apps` (`MeshRelayHost`, `createMeshRelayBackend`).
   (`enableRelayHost`).
 - **Not protected.** Relayed bytes travel as base64 in JSON envelopes and are
   readable by any peer that forwards them; there is no end-to-end encryption.
-  An open connection is not re-checked per packet. Sessions accepted by
-  `createMeshWebSocketService` follow the application's `onConnection` hook
-  (which rejects every inbound open if none is registered) and are not
-  re-checked.
+  An open connection is not re-checked per packet.
+- **Long-lived holders of a grant.** Anything that stays open after a
+  `checkAccess()` follows the registry's access-change events (revocation,
+  removal, permission update, an expired grant) instead of waiting for its next
+  use: `createMeshWebSocketService` sessions are checked again (`accessResource`
+  or the `onConnection` hook, closed with 4403 `access revoked`);
+  open protocol channels (`createMeshProtocolService`) are closed; swarm members
+  admitted through the join gate are removed; a default-authorised wsh link
+  (`createMeshNode({ wsh })`) is closed (`watchWshAccess`); torrent serving
+  decides again after a rate-limit wait. Per-operation checks (rpc, files, kv,
+  chunk replication, escrow, terminal, orchestrator, compute) hold nothing open.
+  A custom `authorize` hook on a wsh link, or on the torrent service, is the
+  caller's to enforce. A roster entry given an `expires` directly on an injected
+  `MeshACL` is not tracked (call `notifyAccessChange`).
 - **Older peers.** An older client sends no window: it is never sent credit
   frames and cannot be paused; it is held to the byte caps and gets a `close`
   frame when a cap or a revocation ends its connection.
@@ -248,8 +259,11 @@ Package: `browsermesh-apps` (`ServerSharing`, `createProxyHandler`).
   Defaults: path 2048 characters, request body 1 MiB, response 8 MiB (refused,
   not truncated), 30 s, 32 headers / 8 KiB. All are options.
 - **Not protected.** Confidentiality against peers that forward the request or
-  response. `createProxyHandler()` does not check who calls it; that belongs to
-  whatever serves the site.
+  response.
+- **`createProxyHandler()`** answers 403 to every request unless it is given a
+  `checkAccess` (called as `checkAccess(fromPubKey, resource, 'request')`, resource
+  default `serverless-proxy:<host>`) or `public: true`; a caller that names no key
+  is never allowed, and a throw denies.
 - **Verified.** Unit, against real loopback upstream servers
   (`server-sharing-target.test.mjs`, `peer-routing.test.mjs`). Never in a
   browser.
@@ -291,7 +305,13 @@ Package: `browsermesh-apps`.
   unit and in-memory duplex only; never over real WebRTC or in a browser.
 - **Registry.** `PeerRegistry.checkAccess` is default deny (`not_in_roster`,
   `scope_denied`, `entry_expired`, `capability_revoked`); the only bypass is the
-  local owner. `grant-log` replicates signed grant records (Ed25519,
+  local owner. Scopes are matched segment by segment, for any number of segments,
+  by one matcher (`matchScope` in `browsermesh-primitives`) shared by the registry's
+  default ACL and `MeshACL`; before, the default ACL looked at two segments only,
+  so three-segment scopes such as `mesh-relay:<svc>:connect` matched only through
+  `*:*`, and the shared matcher ignored every segment past the third. A grant
+  with `expiresAt` is announced like a revocation (`onAccessChange`, kind
+  `expired`) by one timer per registry, for the nearest expiry. `grant-log` replicates signed grant records (Ed25519,
   self-verifying pod ids, authorization replayed deterministically; `at` is
   caller-supplied, revoking an admin is not retroactive). The audit chain
   (hash-linked, signed per entry) is off unless `enableAudit`. Unit only.

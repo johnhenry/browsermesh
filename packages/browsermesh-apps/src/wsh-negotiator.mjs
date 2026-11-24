@@ -51,6 +51,29 @@ export function createWshAuthorizer(registry, { resource = WSH_LINK_RESOURCE, ac
 }
 
 /**
+ * Close the live link of a peer whose permission to link ends. `createWshAuthorizer` decides at login;
+ * this keeps deciding for as long as the link is up: when the registry announces an access change for a
+ * peer (a revocation, a removal, a permission update, or a grant that expired) and the registry no longer
+ * allows that peer to link, its link is closed and not redialled.
+ *
+ * @param {object} opts
+ * @param {import('./peer-registry.mjs').PeerRegistry} opts.registry
+ * @param {{ isConnected: (podId: string) => boolean, disconnect: (podId: string) => void }} opts.links - a `WshPeerLinks`
+ * @param {string} [opts.resource='mesh:link']
+ * @param {string} [opts.action='connect']
+ * @param {boolean} [opts.requireKnownPeer=false] - as for `createWshAuthorizer`
+ * @returns {() => void} stop watching
+ */
+export function watchWshAccess({ registry, links, resource = WSH_LINK_RESOURCE, action = WSH_LINK_ACTION, requireKnownPeer = false }) {
+  if (!registry || typeof registry.onAccessChange !== 'function') throw new TypeError('watchWshAccess: a PeerRegistry (with onAccessChange) is required')
+  if (!links || typeof links.disconnect !== 'function' || typeof links.isConnected !== 'function') throw new TypeError('watchWshAccess: a WshPeerLinks is required')
+  const authorize = createWshAuthorizer(registry, { resource, action, requireKnownPeer })
+  return registry.onAccessChange(({ pubKey } = {}) => {
+    if (typeof pubKey === 'string' && links.isConnected(pubKey) && !authorize({ podId: pubKey })) links.disconnect(pubKey)
+  })
+}
+
+/**
  * `'wsh'` adapter factory for `MeshTransportNegotiator`.
  *
  * @param {{ link: (podId: string) => object }} links - a `WshPeerLinks`

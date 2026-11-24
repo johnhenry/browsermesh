@@ -310,7 +310,7 @@ import { PeerNode } from './peer-node.mjs'
 import { PeerRegistry } from './peer-registry.mjs'
 import { MeshSignalingChannel } from './signaling.mjs'
 import { createWebRTCTransportFactory } from './webrtc-negotiator.mjs'
-import { createWshAuthorizer, attachWshLinks } from './wsh-negotiator.mjs'
+import { createWshAuthorizer, attachWshLinks, watchWshAccess } from './wsh-negotiator.mjs'
 import { createMeshSync } from './mesh-sync.mjs'
 import { MeshRelayHost } from './mesh-relay-host.mjs'
 import { attachService } from './mesh-service.mjs'
@@ -1076,7 +1076,10 @@ export async function createMeshNode(options = {}) {
       ...hubOptions,
     })
     node.wsh = attachWshLinks({ node, links, negotiator: transportNegotiator, onLog })
-    node.on('shutdown', () => { links.close().catch(() => {}) })
+    // The default authorizer is the registry's: a live link ends when the registry stops allowing it
+    // (a revocation, a removal, a grant that expired). A custom `authorize` is the caller's to enforce.
+    const stopWatching = authorize ? () => {} : watchWshAccess({ registry, links })
+    node.on('shutdown', () => { stopWatching(); links.close().catch(() => {}) })
     if (listen && !skipBoot) await links.listen()
   }
 

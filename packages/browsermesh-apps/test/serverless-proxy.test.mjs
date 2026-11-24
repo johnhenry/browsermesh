@@ -75,8 +75,73 @@ describe('createProxyHandler', () => {
     assert.throws(() => createProxyHandler({ targetOrigin: 'not a url' }))
   })
 
+  describe('who may use it', () => {
+    const request = { path: '/hello', method: 'GET' }
+
+    it('denies every request by default: without checkAccess (or public: true) nothing is fetched', async () => {
+      let fetched = 0
+      const counting = http.createServer((req, res) => { fetched++; res.end('x') })
+      await new Promise((r) => counting.listen(0, '127.0.0.1', r))
+      try {
+        const handler = createProxyHandler({ targetOrigin: `http://127.0.0.1:${counting.address().port}` })
+        for (const fromPubKey of [undefined, 'peer-a']) {
+          const res = await handler({ ...request, fromPubKey })
+          assert.equal(res.status, 403)
+          assert.equal(res.body, 'Forbidden')
+        }
+        assert.equal(fetched, 0)
+      } finally { await new Promise((r) => counting.close(r)) }
+    })
+
+    it('asks checkAccess about the caller (the key of the session the request came on) and the target, and fetches only when allowed', async () => {
+      const asked = []
+      const allowed = new Set(['peer-ok'])
+      const handler = createProxyHandler({
+        targetOrigin: origin,
+        checkAccess: (key, resource, action) => { asked.push({ key, resource, action }); return { allowed: allowed.has(key) } },
+      })
+      const ok = await handler({ ...request, fromPubKey: 'peer-ok' })
+      assert.equal(ok.status, 200)
+      assert.equal(dec.decode(ok.body), 'hello from origin')
+      const denied = await handler({ ...request, fromPubKey: 'peer-no' })
+      assert.equal(denied.status, 403)
+      const anonymous = await handler(request)
+      assert.equal(anonymous.status, 403)
+      assert.equal(asked[0].key, 'peer-ok')
+      assert.equal(asked[0].action, 'request')
+      assert.equal(asked[0].resource, `serverless-proxy:${encodeURIComponent(new URL(origin).host)}`)
+    })
+
+    it('never asks on behalf of a caller that named nobody', async () => {
+      let asked = 0
+      const handler = createProxyHandler({ targetOrigin: origin, checkAccess: () => { asked++; return { allowed: true } } })
+      for (const fromPubKey of [undefined, '', 5, {}]) assert.equal((await handler({ ...request, fromPubKey })).status, 403)
+      assert.equal(asked, 0)
+    })
+
+    it('a checkAccess that throws, or answers anything but allowed: true, denies', async () => {
+      for (const checkAccess of [() => { throw new Error('boom') }, async () => ({ allowed: true }), () => true, () => ({ allowed: 'yes' }), () => undefined]) {
+        const handler = createProxyHandler({ targetOrigin: origin, checkAccess })
+        assert.equal((await handler({ ...request, fromPubKey: 'peer' })).status, 403, String(checkAccess))
+      }
+    })
+
+    it('the resource can be named, and public: true opens it to every caller', async () => {
+      const seen = []
+      const named = createProxyHandler({ targetOrigin: origin, resource: 'site:docs', checkAccess: (k, r) => { seen.push(r); return { allowed: true } } })
+      assert.equal((await named({ ...request, fromPubKey: 'p' })).status, 200)
+      assert.deepEqual(seen, ['site:docs'])
+      const open = createProxyHandler({ targetOrigin: origin, public: true })
+      assert.equal((await open(request)).status, 200)
+    })
+
+    it('rejects a checkAccess that is not a function', () => {
+      assert.throws(() => createProxyHandler({ targetOrigin: origin, checkAccess: true }), /checkAccess must be a function/)
+    })
+  })
+
   it('proxies a GET request and returns the target\'s status/body/content-type', async () => {
-    const handler = createProxyHandler({ targetOrigin: origin })
+    const handler = createProxyHandler({ public: true, targetOrigin: origin })
     const res = await handler({ path: '/hello', method: 'GET' })
     assert.equal(res.status, 200)
     assert.equal(dec.decode(res.body), 'hello from origin')
@@ -84,37 +149,37 @@ describe('createProxyHandler', () => {
   })
 
   it('strips set-cookie from the proxied response (never forwarded)', async () => {
-    const handler = createProxyHandler({ targetOrigin: origin })
+    const handler = createProxyHandler({ public: true, targetOrigin: origin })
     const res = await handler({ path: '/hello', method: 'GET' })
     assert.equal(res.headers['set-cookie'], undefined)
   })
 
   it('forwards the request method', async () => {
-    const handler = createProxyHandler({ targetOrigin: origin })
+    const handler = createProxyHandler({ public: true, targetOrigin: origin })
     const res = await handler({ path: '/echo-method', method: 'PUT', headers: {}, body: undefined })
     assert.equal(dec.decode(res.body), 'PUT')
   })
 
   it('forwards a POST body to the target', async () => {
-    const handler = createProxyHandler({ targetOrigin: origin })
+    const handler = createProxyHandler({ public: true, targetOrigin: origin })
     const res = await handler({ path: '/echo-body', method: 'POST', body: 'the request body' })
     assert.equal(dec.decode(res.body), 'the request body')
   })
 
   it('forwards a custom request header, minus hop-by-hop ones', async () => {
-    const handler = createProxyHandler({ targetOrigin: origin })
+    const handler = createProxyHandler({ public: true, targetOrigin: origin })
     const res = await handler({ path: '/echo-header', method: 'GET', headers: { 'x-custom': 'passed-through' } })
     assert.equal(dec.decode(res.body), 'passed-through')
   })
 
   it('passes through a real 404 unchanged when spaFallback is false', async () => {
-    const handler = createProxyHandler({ targetOrigin: origin, spaFallback: false })
+    const handler = createProxyHandler({ public: true, targetOrigin: origin, spaFallback: false })
     const res = await handler({ path: '/does-not-exist', method: 'GET' })
     assert.equal(res.status, 404)
   })
 
   it('spaFallback:true serves /index.html on a 404', async () => {
-    const handler = createProxyHandler({ targetOrigin: origin, spaFallback: true })
+    const handler = createProxyHandler({ public: true, targetOrigin: origin, spaFallback: true })
     const res = await handler({ path: '/some/client/route', method: 'GET' })
     assert.equal(res.status, 200)
     assert.equal(dec.decode(res.body), '<html>spa shell</html>')
@@ -126,7 +191,7 @@ describe('createProxyHandler', () => {
     await new Promise((r) => second.listen(0, '127.0.0.1', r))
     const o = second.address().port
     try {
-      const handler = createProxyHandler({ targetOrigin: origin })
+      const handler = createProxyHandler({ public: true, targetOrigin: origin })
       const paths = [
         `//127.0.0.1:${o}/x`, `@127.0.0.1:${o}/x`, `127.0.0.1:${o}/x`, `http://127.0.0.1:${o}/x`,
         `/\\127.0.0.1:${o}/x`, `\\\\127.0.0.1:${o}/x`, '/x\r\ny', '/x\u0000', '/a b', 5, {},
@@ -152,7 +217,7 @@ describe('createProxyHandler', () => {
     })
     await new Promise((r) => redirecting.listen(0, '127.0.0.1', r))
     try {
-      const handler = createProxyHandler({ targetOrigin: `http://127.0.0.1:${redirecting.address().port}` })
+      const handler = createProxyHandler({ public: true, targetOrigin: `http://127.0.0.1:${redirecting.address().port}` })
       const res = await handler({ path: '/go', method: 'GET' })
       assert.equal(res.status, 302)
       assert.deepEqual(seen, [])
@@ -166,7 +231,7 @@ describe('createProxyHandler', () => {
     const big = http.createServer((req, res) => { res.writeHead(200); res.write(Buffer.alloc(64 * 1024)); res.end(Buffer.alloc(64 * 1024)) })
     await new Promise((r) => big.listen(0, '127.0.0.1', r))
     try {
-      const handler = createProxyHandler({ targetOrigin: `http://127.0.0.1:${big.address().port}`, maxResponseBytes: 1024 })
+      const handler = createProxyHandler({ public: true, targetOrigin: `http://127.0.0.1:${big.address().port}`, maxResponseBytes: 1024 })
       const res = await handler({ path: '/', method: 'GET' })
       assert.equal(res.status, 502)
     } finally {
@@ -175,7 +240,7 @@ describe('createProxyHandler', () => {
   })
 
   it('returns a clean 502 (never throws) when the target is unreachable', async () => {
-    const handler = createProxyHandler({ targetOrigin: 'http://127.0.0.1:1' }) // port 1: nothing listens, connection refused
+    const handler = createProxyHandler({ public: true, targetOrigin: 'http://127.0.0.1:1' }) // port 1: nothing listens, connection refused
     const res = await handler({ path: '/', method: 'GET' })
     assert.equal(res.status, 502)
   })
