@@ -516,9 +516,39 @@ Package: `browsermesh-discovery`.
   `key` (`deriveStealthKey`: HKDF-SHA-256 then AES-256-GCM, agent id as AAD) or a
   `keyring` (key ids with rotation, sequence and issue-time replay refusal,
   optional `maxAgeMs` default unset, seal budget 2^32) the shards are encrypted
-  (off by default). Not done: signed shards, anonymous DHT keys, multi-loss
-  parity; any group-key holder can read and forge state. Threshold key sharing is
-  design only (`design/stealth-threshold.md`, issue #230).
+  (off by default). **Signed shards and anonymous keys** (opt-in; give the agent
+  an `identity`, optionally a `lookupNonce`):
+  - every stored shard is signed (Ed25519) over the agent, the key it lives under,
+    its index, the write's sequence number, its content and the nonce; every
+    shard read through `hideSigned()` / `reconstituteSigned()` or the encrypted
+    methods is verified, and one that does not verify (changed, moved to another
+    key, signed by someone else, or an older write mixed into a newer one) is
+    refused and counted (`stats.shardBadSignature`, `shardStale`). An **unsigned**
+    shard (an older writer) is refused too unless `allowUnsigned: true`
+    (`stats.shardUnsigned`). An agent with an identity cannot use the
+    synchronous `hide()` / `reconstitute()` / `isViable()` (they throw
+    `async-required`) so it never writes or reads unsigned by accident; agents
+    without an identity are unchanged. Signatures do not stop someone
+    overwriting a key: the DHT still accepts a `store` from anyone, so a
+    forged overwrite makes the shard unusable (refused, counted) rather than
+    accepted.
+  - with a `lookupNonce` (at least 16 base64url characters; derive it from the
+    group secret with `deriveStealthLookupNonce(secret, agentId, epoch)` so every
+    member can find the shards, or keep a random one wherever the agent's
+    custodian keeps its keys) the DHT keys are `hex(SHA-256(agentId, nonce,
+    index))` and the stored records hold no agent id, shard id or public key. A DHT
+    observer who does not know the nonce cannot link a key to the agent or the
+    shards of one agent to each other **by key**. It can still see that records
+    exist, their sizes and timing, and fields shared by one write (`seq`,
+    `checksum` style values), so a determined observer can group them; the data
+    itself is plaintext unless `hideEncrypted()` is used. Whoever holds the nonce
+    can find (not read) the shards; rotating it (`epoch`) moves the shards.
+  - not protected: the content of `hideSigned()` shards (plaintext slices),
+    that something is stored, availability against overwrites, and a group-key
+    holder reading or forging encrypted state (the sender is a label, not a
+    signature, on that path). Multi-loss parity is not done; threshold key
+    sharing is design only (`design/stealth-threshold.md`, issue #230 and its
+    follow-up).
 - **Verified.** Unit, with in-process nodes and a no-op send function. Never over
   a network or in a browser.
 

@@ -30,6 +30,16 @@
  * type as AES-GCM associated data. Peers without the key get a quiet,
  * counted failure from `tryReconstituteEncrypted()`.
  *
+ * Signed shards and anonymous keys (opt-in, with an `identity`): every stored shard is
+ * signed with the agent's Ed25519 identity over the agent, the DHT key it lives
+ * under, its index, the write's sequence number, its content and the lookup nonce,
+ * and every shard read is verified before use (`hideSigned()` / `reconstituteSigned()`,
+ * and `hideEncrypted()` / `reconstituteEncrypted()` do the same): a shard that does not
+ * verify, is unsigned (unless `allowUnsigned`), or belongs to an older write is refused
+ * and counted. With a `lookupNonce` the DHT keys are hex(SHA-256(agentId, nonce, index)) and the
+ * records carry no agent id or key, so a DHT observer cannot name the agent from a key or a
+ * record. NOT done: threshold sharing of the key (docs/design/stealth-threshold.md).
+ *
  * What it hides, and from whom: the CONTENT of the state from whoever holds
  * the DHT shards (shard-holding nodes and relays). It does NOT hide that an
  * agent exists (keys are `stealth:<agentId>:shard:<i>`), how large its state
@@ -96,6 +106,45 @@ export async function deriveStealthKey(groupSecret, groupId) {
     false,
     ['encrypt', 'decrypt'],
   )
+}
+
+/**
+ * The secret nonce that makes an agent's DHT keys unguessable (`lookupNonce`
+ * of `StealthAgent`), derived from the group secret so every member who holds
+ * it can find the shards without anything extra being stored (HKDF-SHA-256,
+ * `agentId` and `epoch` in the salt/info). Change `epoch` to move an agent's shards
+ * to new keys (for example when a member leaves). Anyone who holds the group
+ * secret can compute it; anyone who does not cannot.
+ *
+ * @param {Uint8Array|string} groupSecret - At least 16 bytes of shared secret
+ * @param {string} agentId
+ * @param {number} [epoch=0]
+ * @returns {Promise<string>} base64url, 22 characters (16 bytes)
+ */
+export async function deriveStealthLookupNonce(groupSecret, agentId, epoch = 0) {
+  if (!agentId || typeof agentId !== 'string') throw new Error('agentId is required and must be a non-empty string')
+  if (!Number.isSafeInteger(epoch) || epoch < 0) throw new Error('epoch must be a non-negative integer')
+  const raw = typeof groupSecret === 'string' ? new TextEncoder().encode(groupSecret) : groupSecret
+  if (!(raw instanceof Uint8Array) || raw.length < 16) throw new Error('groupSecret must be at least 16 bytes')
+  const base = await crypto.subtle.importKey('raw', raw, 'HKDF', false, ['deriveBits'])
+  const bits = await crypto.subtle.deriveBits(
+    {
+      name: 'HKDF',
+      hash: 'SHA-256',
+      salt: new TextEncoder().encode('browsermesh-stealth/lookup-nonce/1'),
+      info: new TextEncoder().encode(`${epoch}\0${agentId}`),
+    },
+    base,
+    128,
+  )
+  return toBase64Url(new Uint8Array(bits))
+}
+
+const LOOKUP_NONCE_RE = /^[A-Za-z0-9_-]{16,128}$/
+const SHARD_DOMAIN = 'browsermesh-stealth-shard/1'
+const hex = (bytes) => Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
+async function sha256Hex(text) {
+  return hex(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))))
 }
 
 /**
@@ -477,6 +526,16 @@ export class ShardDistributor {
   }
 
   /**
+   * Split state into shards without storing them (the signed path stores its own records).
+   * @param {string} agentId
+   * @param {string} stateBlob
+   * @returns {StateShard[]}
+   */
+  split(agentId, stateBlob) {
+    return this.#splitState(agentId, stateBlob, this.#threshold, this.#totalShards)
+  }
+
+  /**
    * Distribute agent state as shards into the DHT.
    * @param {string} agentId - Agent identifier
    * @param {string} stateBlob - State data to shard
@@ -751,7 +810,24 @@ export class StealthAgent {
   #stats = {
     opened: 0, notEncrypted: 0, noKey: 0, unknownKey: 0, tampered: 0,
     replayed: 0, stale: 0, malformed: 0, unavailable: 0,
+    shardUnsigned: 0, shardUnsignedAccepted: 0, shardBadSignature: 0, shardStale: 0, shardMalformed: 0,
   }
+
+  /** @type {{ podId: string, rawPublicKey: () => Promise<Uint8Array>, sign: (data: Uint8Array) => Promise<Uint8Array> }|null} */
+  #identity = null
+
+  #allowUnsigned = false
+
+  /** @type {Uint8Array[]} raw public keys whose shard signatures are accepted besides this agent's own */
+  #trustedKeys = []
+
+  /** @type {string|null} */
+  #lookupNonce = null
+
+  #shardSeq = 0
+
+  /** @type {Map<string, CryptoKey>} */
+  #verifyKeys = new Map()
 
   /**
    * @param {object} opts
@@ -760,11 +836,29 @@ export class StealthAgent {
    * @param {number} [opts.threshold=3] - Minimum shards for recovery
    * @param {number} [opts.totalShards=5] - Total shards to create
    * @param {CryptoKey} [opts.key] - AES-GCM key (see `deriveStealthKey`); enables `hideEncrypted()` / `reconstituteEncrypted()`
+   * @param {object} [opts.identity] - The agent's identity (a `PodIdentity`, or `{ podId, rawPublicKey(), sign(bytes) }`). With it the agent signs every shard it stores and verifies every shard it reads (`hideSigned()` / `reconstituteSigned()`, and `hideEncrypted()` / `reconstituteEncrypted()` do the same). Such an agent's synchronous `hide()` / `reconstitute()` / `isViable()` throw `async-required` rather than silently write or read unsigned shards.
+   * @param {boolean} [opts.allowUnsigned=false] - With an identity: also accept a shard that carries no signature (written by an older peer). Off by default: an unsigned shard is refused and counted (`stats.shardUnsigned`). Accepted ones are counted in `stats.shardUnsignedAccepted`.
+   * @param {Uint8Array[]} [opts.trustedKeys] - Raw Ed25519 public keys, besides the agent's own, whose shard signatures are accepted (for example another replica of the same agent).
+   * @param {string} [opts.lookupNonce] - A secret nonce (at least 16 base64url characters; see `deriveStealthLookupNonce`). With it, DHT keys are `hex(SHA-256(agentId, nonce, index))`, which do not name the agent, and the stored records carry no agent id. Needs `identity`. Whoever should be able to find the shards must hold the nonce.
    */
-  constructor({ agentId, dhtNode, threshold = 3, totalShards = 5, key = null, keyring = null, maxAgeMs }) {
+  constructor({ agentId, dhtNode, threshold = 3, totalShards = 5, key = null, keyring = null, maxAgeMs, identity = null, allowUnsigned = false, trustedKeys = [], lookupNonce = null }) {
     if (!agentId || typeof agentId !== 'string') {
       throw new Error('agentId is required and must be a non-empty string')
     }
+    if (lookupNonce !== null && (typeof lookupNonce !== 'string' || !LOOKUP_NONCE_RE.test(lookupNonce))) {
+      throw new StealthError('bad-argument', 'lookupNonce must be at least 16 base64url characters (see deriveStealthLookupNonce)')
+    }
+    if (lookupNonce !== null && !identity) throw new StealthError('bad-argument', 'lookupNonce needs an identity: anonymous keys are used on the signed path')
+    if (identity && (typeof identity.sign !== 'function' || typeof identity.rawPublicKey !== 'function')) {
+      throw new StealthError('bad-argument', 'identity must provide rawPublicKey() and sign(bytes) (a PodIdentity)')
+    }
+    if (!Array.isArray(trustedKeys) || !trustedKeys.every((k) => k instanceof Uint8Array && k.length === 32)) {
+      throw new StealthError('bad-argument', 'trustedKeys must be raw 32-byte Ed25519 public keys')
+    }
+    this.#identity = identity
+    this.#allowUnsigned = allowUnsigned === true
+    this.#trustedKeys = trustedKeys.map((k) => new Uint8Array(k))
+    this.#lookupNonce = lookupNonce
     this.#key = key
     this.#keyring = keyring
     this.#maxAgeMs = maxAgeMs
@@ -783,6 +877,16 @@ export class StealthAgent {
    * @returns {object} Manifest with shard keys and metadata
    */
   hide(stateBlob) {
+    this.#requireUnsignedAgent()
+    return this.#hideUnsigned(stateBlob)
+  }
+
+  /** An agent with an identity signs and verifies: the synchronous paths cannot, so they refuse. */
+  #requireUnsignedAgent() {
+    if (this.#identity) throw new StealthError('async-required', 'this agent has an identity and signs its shards: use hideSigned() / reconstituteSigned() / isRecoverable() (or the encrypted variants)')
+  }
+
+  #hideUnsigned(stateBlob) {
     const shards = this.#distributor.distribute(this.#agentId, stateBlob)
 
     this.#manifest = {
@@ -808,15 +912,184 @@ export class StealthAgent {
       const seq = Math.max(this.#seq + 1, Date.now())
       const sealed = await sealStealthMessage(stateBlob, { keyring: this.#keyring, sender: this.#agentId, type: 'state', seq })
       this.#seq = seq
-      this.hide(sealed)
+      await this.#store(sealed)
       this.#manifest = { ...this.#manifest, encrypted: true, keyId: sealed.split('.')[1], seq }
       return this.#manifest
     }
     if (!this.#key) throw new StealthError('no-key', 'hideEncrypted requires a key or keyring (see deriveStealthKey / StealthKeyring)')
     const sealed = await encryptStealthState(stateBlob, this.#key, this.#agentId)
-    this.hide(sealed)
+    await this.#store(sealed)
     this.#manifest = { ...this.#manifest, encrypted: true }
     return this.#manifest
+  }
+
+  /** Store a string as shards: signed (and possibly anonymous) with an identity, as before without. */
+  async #store(blob) {
+    if (this.#identity) return this.#hideSignedNow(blob)
+    return this.#hideUnsigned(blob)
+  }
+
+  /** Read the stored string back: signature-verified with an identity, as before without. */
+  async #load() {
+    if (this.#identity) return this.#reconstituteSignedNow()
+    return this.#reconstituteUnsigned()
+  }
+
+  // -- signed shards (and agent-anonymous DHT keys) ---------------------------
+
+  /** The DHT keys of this agent's shards: `stealth:<agentId>:shard:<i>`, or with a lookup nonce `hex(SHA-256(agentId, nonce, i))`. */
+  async #shardKeys() {
+    const keys = []
+    for (let i = 0; i < this.#totalShards; i++) {
+      keys.push(this.#lookupNonce === null
+        ? `stealth:${this.#agentId}:shard:${i}`
+        : await sha256Hex(`browsermesh-stealth/lookup/1\0${this.#agentId}\0${this.#lookupNonce}\0${i}`))
+    }
+    return keys
+  }
+
+  /** The exact text a shard signature covers: the agent, the key it lives under, its place and write, its content and the lookup nonce. */
+  async #signedText({ key, i, seq, threshold, total, checksum, data }) {
+    return `${SHARD_DOMAIN}\nagent:${this.#agentId}\nkey:${key}\nindex:${i}\nseq:${seq}\nthreshold:${threshold}\ntotal:${total}\nchecksum:${checksum}\nnonce:${this.#lookupNonce ?? ''}\ndata:${await sha256Hex(data)}`
+  }
+
+  #requireIdentity() {
+    if (!this.#identity) throw new StealthError('no-identity', 'signed shards need an identity (see the identity option)')
+  }
+
+  /**
+   * Like `hide()`, but every shard is signed with the agent's identity, and with a `lookupNonce` stored
+   * under keys that do not name the agent. Requires `identity`. The shards are still plaintext slices of
+   * `stateBlob` (use `hideEncrypted()` to seal them as well).
+   * @param {string} stateBlob
+   * @returns {Promise<object>} Manifest (`signed: true`, `shardKeys`, `anonymous`, `seq`)
+   */
+  async hideSigned(stateBlob) {
+    this.#requireIdentity()
+    return this.#hideSignedNow(stateBlob)
+  }
+
+  async #hideSignedNow(stateBlob) {
+    if (/[\r\n]/.test(this.#agentId)) throw new StealthError('bad-argument', 'agentId must not contain line breaks when shards are signed')
+    const shards = this.#distributor.split(this.#agentId, stateBlob)
+    const keys = await this.#shardKeys()
+    const seq = Math.max(this.#shardSeq + 1, Date.now())
+    const anonymous = this.#lookupNonce !== null
+    const records = []
+    for (let i = 0; i < shards.length; i++) {
+      const j = shards[i].toJSON()
+      const text = await this.#signedText({ key: keys[i], i, seq, threshold: j.threshold, total: j.total, checksum: j.checksum, data: j.data })
+      const sig = toBase64Url(new Uint8Array(await this.#identity.sign(new TextEncoder().encode(text))))
+      // An anonymous record names neither the agent nor the shard: only what the reader needs.
+      records.push(anonymous
+        ? { v: 2, i, data: j.data, checksum: j.checksum, seq, sig }
+        : { ...j, v: 2, i, seq, sig })
+    }
+    // Stored only once every signature exists, so a failure leaves no half-written set.
+    for (let i = 0; i < records.length; i++) this.#dhtNode.store(keys[i], records[i])
+    this.#shardSeq = seq
+    this.#manifest = {
+      agentId: this.#agentId,
+      threshold: this.#threshold,
+      totalShards: this.#totalShards,
+      ...(anonymous ? {} : { shardIds: shards.map((s) => s.shardId) }),
+      shardKeys: keys,
+      hiddenAt: Date.now(),
+      signed: true,
+      anonymous,
+      seq,
+    }
+    return this.#manifest
+  }
+
+  async #verifyKey(raw) {
+    const id = toBase64Url(raw)
+    let key = this.#verifyKeys.get(id)
+    if (!key) {
+      key = await crypto.subtle.importKey('raw', raw, { name: 'Ed25519' }, false, ['verify'])
+      this.#verifyKeys.set(id, key)
+    }
+    return key
+  }
+
+  /** Collect the stored shards, refuse (and count) every one that does not verify, and return the newest complete set. */
+  async #collectSigned() {
+    const keys = await this.#shardKeys()
+    const own = new Uint8Array(await this.#identity.rawPublicKey())
+    const signers = [own, ...this.#trustedKeys]
+    const bySeq = new Map() // seq -> StateShard[]
+    for (let i = 0; i < keys.length; i++) {
+      const rec = this.#dhtNode.get(keys[i])
+      if (rec === undefined || rec === null) continue
+      if (typeof rec !== 'object') { this.#stats.shardMalformed++; continue }
+      if (typeof rec.sig !== 'string') {
+        // Written by an older peer: no signature at all.
+        if (!this.#allowUnsigned) { this.#stats.shardUnsigned++; continue }
+        try {
+          const shard = StateShard.fromJSON(rec)
+          if (!shard.verify()) throw new Error('checksum')
+          this.#stats.shardUnsignedAccepted++
+          const list = bySeq.get(0) ?? bySeq.set(0, []).get(0)
+          list.push(new StateShard({ shardId: `${this.#agentId}:shard:${i}`, agentId: this.#agentId, data: shard.data, threshold: shard.threshold, total: shard.total, checksum: shard.checksum }))
+        } catch { this.#stats.shardMalformed++ }
+        continue
+      }
+      const { data, checksum, seq } = rec
+      if (rec.i !== i || typeof data !== 'string' || !Number.isSafeInteger(checksum) || !Number.isSafeInteger(seq)) { this.#stats.shardBadSignature++; continue }
+      let sigBytes
+      try { sigBytes = fromBase64Url(rec.sig) } catch { this.#stats.shardMalformed++; continue }
+      // threshold and total are this agent's own configuration, not whatever the record says.
+      const bytes = new TextEncoder().encode(await this.#signedText({ key: keys[i], i, seq, threshold: this.#threshold, total: this.#totalShards, checksum, data }))
+      let ok = false
+      for (const raw of signers) {
+        try { if (await crypto.subtle.verify('Ed25519', await this.#verifyKey(raw), sigBytes, bytes)) { ok = true; break } } catch { /* try the next */ }
+      }
+      if (!ok) { this.#stats.shardBadSignature++; continue }
+      const list = bySeq.get(seq) ?? bySeq.set(seq, []).get(seq)
+      list.push(new StateShard({ shardId: `${this.#agentId}:shard:${i}`, agentId: this.#agentId, data, threshold: this.#threshold, total: this.#totalShards, checksum }))
+    }
+    // The newest write that has enough valid shards; shards of any other write are not mixed in.
+    const seqs = [...bySeq.keys()].sort((a, b) => b - a)
+    for (const s of seqs) {
+      if (bySeq.get(s).length >= this.#threshold) {
+        for (const other of seqs) if (other !== s) this.#stats.shardStale += bySeq.get(other).length
+        return bySeq.get(s)
+      }
+    }
+    return []
+  }
+
+  async #reconstituteSignedNow() {
+    const shards = await this.#collectSigned()
+    if (shards.length < this.#threshold) throw new StealthError('unavailable', `only ${shards.length} of the ${this.#threshold} shards needed are valid`)
+    try { return this.#collector.reconstruct(shards) } catch (e) { throw new StealthError('unavailable', e.message) }
+  }
+
+  /**
+   * Reconstitute state stored by `hideSigned()`: every shard's signature (and the key it was stored
+   * under) is verified, shards that do not verify are refused and counted (`stats.shardBadSignature`,
+   * `shardUnsigned`, `shardStale`), and the newest complete write is used. Rejects with
+   * `StealthError` `unavailable` when too few valid shards remain.
+   * @returns {Promise<string>}
+   */
+  async reconstituteSigned() {
+    this.#requireIdentity()
+    return this.#reconstituteSignedNow()
+  }
+
+  /** Like `reconstituteSigned()` but resolves `{ ok: true, state }` or `{ ok: false, reason }` instead of rejecting. */
+  async tryReconstituteSigned() {
+    this.#requireIdentity()
+    try { return { ok: true, state: await this.#reconstituteSignedNow() } } catch (e) {
+      if (e instanceof StealthError) { this.#stats.unavailable++; return { ok: false, reason: e.code } }
+      throw e
+    }
+  }
+
+  /** With an identity: whether enough valid, verified shards exist (the async form of `isViable()`). */
+  async isRecoverable() {
+    this.#requireIdentity()
+    return (await this.#collectSigned()).length >= this.#threshold
   }
 
   /**
@@ -830,7 +1103,7 @@ export class StealthAgent {
    */
   async reconstituteEncrypted() {
     if (!this.#key && !this.#keyring) throw new StealthError('no-key', 'reconstituteEncrypted requires a key or keyring (see deriveStealthKey / StealthKeyring)')
-    return this.#open(this.reconstitute())
+    return this.#open(await this.#load())
   }
 
   async #open(raw) {
@@ -861,7 +1134,7 @@ export class StealthAgent {
    */
   async tryReconstituteEncrypted() {
     let raw
-    try { raw = this.reconstitute() } catch { this.#stats.unavailable++; return { ok: false, reason: 'unavailable' } }
+    try { raw = await this.#load() } catch { this.#stats.unavailable++; return { ok: false, reason: 'unavailable' } }
     try {
       const state = await this.#open(raw)
       this.#stats.opened++
@@ -882,6 +1155,11 @@ export class StealthAgent {
    * @returns {string} Reconstructed state blob
    */
   reconstitute() {
+    this.#requireUnsignedAgent()
+    return this.#reconstituteUnsigned()
+  }
+
+  #reconstituteUnsigned() {
     const shards = this.#collector.collect(this.#agentId, this.#totalShards)
     return this.#collector.reconstruct(shards)
   }
@@ -891,6 +1169,7 @@ export class StealthAgent {
    * @returns {boolean}
    */
   isViable() {
+    this.#requireUnsignedAgent()
     const count = this.#collector.probe(this.#agentId, this.#totalShards)
     return count >= this.#threshold
   }
