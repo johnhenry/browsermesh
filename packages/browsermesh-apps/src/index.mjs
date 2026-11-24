@@ -48,6 +48,7 @@ export * from './manifest-sync.mjs';
 export * from './chunk-replication.mjs';
 export * from './mesh-rpc.mjs';
 export * from './mesh-channel.mjs';
+export * from './protocol-channel.mjs';
 export * from './mesh-keepalive.mjs';
 export * from './mesh-fetch.mjs';
 export * from './mesh-websocket.mjs';
