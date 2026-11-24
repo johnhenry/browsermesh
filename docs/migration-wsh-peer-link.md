@@ -20,7 +20,7 @@ program can notice, and how to adopt it.
   is otherwise unchanged and is still not constructed by this repository: the
   link layer authenticates with the pod's own key and has no key store to sync.
 - `@johnhenry/wsh` is an **optional peer dependency** of
-  `browsermesh-transport` (`^0.45.0`). Nothing installs or loads it for you
+  `browsermesh-transport` (`>=0.45.0 <1.0.0`; tested on 0.45.0 to 0.48.0). Nothing installs or loads it for you
   unless you use a wsh link.
 - The shared pod `TransportAdapter` conformance helper
   (`browsermesh-pod/test/helpers/transport-conformance.mjs`, not published) has
@@ -37,7 +37,7 @@ a peer that does not have it; that is the point.
 
 ## Adopting it
 
-1. `npm install @johnhenry/wsh` (`^0.45.0`).
+1. `npm install @johnhenry/wsh` (`>=0.45.0 <1.0.0`; tested on 0.45.0 to 0.48.0).
 2. Run, or be given, a **pipe relay** both pods can reach. It is wsh's
    `createPipeRelay` from `@johnhenry/wsh/pipe-relay` behind a WebSocket
    upgrade at `<base>/r/<id>` (`?role=host` for the waiting side). The mesh's own
