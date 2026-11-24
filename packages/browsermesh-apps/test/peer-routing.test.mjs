@@ -680,7 +680,9 @@ describe('createMeshRoutingService: multi-hop forwarding closes the real capabil
     const { on: carolOn } = attachService(nodeC, undefined, createMeshRoutingService({}));
     carolOn('mesh-routing:message', (envelope) => carolMessages.push(envelope));
 
-    const { api: aliceApi } = attachService(nodeA, undefined, createMeshRoutingService({}));
+    // (Sealing is off for alice: this test is about forwarding, and alice would otherwise wait for carol's key
+    // statement, which carol has no route back to send.)
+    const { api: aliceApi } = attachService(nodeA, undefined, createMeshRoutingService({ sealing: false }));
     // Alice has no direct transport link to Carol -- only a route entry
     // saying "reach Carol via Bob".
     aliceApi.addRoute(carol.podId, bob.podId, 2);

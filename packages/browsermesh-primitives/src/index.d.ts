@@ -512,5 +512,26 @@ export declare function paddedLength(length: number, opts?: { buckets?: number[]
 export declare function padTo(bytes: Uint8Array, opts?: { buckets?: number[] }): Uint8Array;
 export declare function unpad(padded: Uint8Array): Uint8Array;
 
+// Key agreement keys bound to pod ids, and sealing to them
+
+export declare class KeyAgreementError extends Error {
+  code: 'malformed' | 'unsupported-version' | 'pod-id-mismatch' | 'bad-signature' | 'not-yet-valid' | 'expired' | 'invalid-lifetime' | 'lifetime-too-long' | 'wrong-identity' | 'identity-retired' | 'unknown-key' | 'open-failed' | 'too-large' | 'bad-argument' | 'unsupported';
+}
+export declare const KEY_STATEMENT_VERSION: 1;
+export declare const MAX_STATEMENT_LIFETIME_MS: number;
+export declare const DEFAULT_STATEMENT_LIFETIME_MS: number;
+export declare const DEFAULT_MAX_SEALED_BYTES: number;
+export interface AgreementKeyPair { privateKey: CryptoKey; publicKeyRaw: Uint8Array }
+export interface KeyStatement { v: 1; podId: string; pk: string; ka: string; kid: string; notBefore: number; notAfter: number; sig: string }
+export interface VerifiedKeyStatement { podId: string; pk: Uint8Array; ka: Uint8Array; kid: string; notBefore: number; notAfter: number }
+export interface SealedBox { v: 1; kid: string; epk: string; iv: string; ct: string }
+export declare function supportsKeyAgreement(): Promise<boolean>;
+export declare function generateAgreementKeyPair(): Promise<AgreementKeyPair>;
+export declare function keyIdOf(ka: Uint8Array): Promise<string>;
+export declare function createKeyStatement(identity: { podId: string; sign(data: Uint8Array): Promise<Uint8Array> | Uint8Array; rawPublicKey(): Promise<Uint8Array> }, agreement: { publicKeyRaw: Uint8Array }, opts?: { now?: number; lifetimeMs?: number }): Promise<KeyStatement>;
+export declare function verifyKeyStatement(statement: unknown, opts?: { now?: number; skewMs?: number; expectedPodId?: string; revocations?: { isRevoked(identityKey: Uint8Array, serial: Uint8Array | null): boolean | Promise<boolean> } }): Promise<VerifiedKeyStatement>;
+export declare function sealToStatement(verified: { ka: Uint8Array; kid: string }, opts: { aad: Uint8Array; plaintext: Uint8Array; maxBytes?: number }): Promise<SealedBox>;
+export declare function openSealed(sealed: unknown, opts: { privateKeys: Map<string, AgreementKeyPair> | ((kid: string) => AgreementKeyPair | undefined); aad: Uint8Array; maxBytes?: number }): Promise<Uint8Array>;
+
 /** Parse a case-sensitive mesh:// or *.mesh.local address. */
 export declare function parseMeshRequest(url: string): { podId: string; path: string } | null;

@@ -98,9 +98,11 @@ async function setup({ bobService = false, alice: aliceOpts = {}, carol: carolOp
   const nodeA = mesh[alice.podId];
   const nodeB = mesh[bob.podId];
   const nodeC = mesh[carol.podId];
-  const a = attachService(nodeA, undefined, createMeshRoutingService(aliceOpts));
-  const c = attachService(nodeC, undefined, createMeshRoutingService(carolOpts));
-  const b = bobService ? attachService(nodeB, undefined, createMeshRoutingService(bobOpts)) : null;
+  // This file is about the signed, readable envelope: end-to-end sealing (and the key requests it makes) is
+  // off here and has its own file, peer-routing-sealed.test.mjs.
+  const a = attachService(nodeA, undefined, createMeshRoutingService({ sealing: false, ...aliceOpts }));
+  const c = attachService(nodeC, undefined, createMeshRoutingService({ sealing: false, ...carolOpts }));
+  const b = bobService ? attachService(nodeB, undefined, createMeshRoutingService({ sealing: false, ...bobOpts })) : null;
   b?.api.addDirectPeer(carol.podId);
   a.api.addRoute(carol.podId, bob.podId, 2);
   return { alice, bob, carol, nodeA, nodeB, nodeC, a, b, c };

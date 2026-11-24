@@ -49,7 +49,7 @@ table; they come from the READMEs, source headers and test directories.
 
 | Package | Status | Notes |
 | --- | --- | --- |
-| `browsermesh-primitives` | implemented | identity, session certificates, wire format, CRDTs, ACL, capability scopes, trust graph, padding. Unit tests; identity also in a real browser. Trust edges are unsigned. Session certificates are not wired into the handshake or any transport. |
+| `browsermesh-primitives` | implemented | identity, session certificates, signed key-agreement statements and sealing (X25519, HKDF, AES-GCM), wire format, CRDTs, ACL, capability scopes, trust graph, padding. Unit tests; identity and sealing also in a real browser. Trust edges are unsigned. Session certificates are not wired into the handshake or any transport. |
 | `browsermesh-core` | implemented, with partial modules | identity managers and vault storage, keyring, capability tokens, group keys, ACL, trust: implemented (unit). `handshake.mjs`: partial (connection token is unsigned and the pod id is not checked against the key; mock transports). `hardening.mjs` and `peer.mjs`: marked experimental in source. `compat.mjs`: shim whose `BrowserTool#execute()` throws not-implemented by design. |
 | `browsermesh-pod` | implemented | pod, messaging and signing, discovery, host protocol, runtimes (worker_threads, permission-model), `WebSocketTransport` and BroadcastChannel transports (unit and real browser). `browser-host-driver`: partial (`exec` is deliberately not offered in the browser lane; `snapshot` and `restore` not implemented). |
 | `browsermesh-transport` | implemented, with partial modules | WebSocket, WebRTC (unit, real peer, real browser); wsh links (real wsh handshake over an in-process relay; not a browser); identity binding (duplex, real peer, real browser). WebTransport, relay client, wisp (mocks only). `channel-relay`, `gateway`, `cross-origin`, `streams` (unit). `NATTraversal` in `websocket.mjs`: placeholder values, partial. |
@@ -297,17 +297,105 @@ not signed: `path` is a diagnostic hint, bounded to 32 entries and used for
 nothing, and `ttl` is clamped to the router's own `maxTTL`. A hop forwards
 only for a peer it has a link with (`hasActiveSession`). After this, **a hop
 cannot forge or alter a routed message's content, origin or recipient. It can
-still drop, delay, reorder and read it: confidentiality across hops is not
-provided.** Per-hop sealing exists where a link is a wsh link; end-to-end
-sealing across hops is not built, and the options are written down in
-[`design/routed-confidentiality.md`](design/routed-confidentiality.md). Default:
-signed, and unsigned envelopes from older peers are refused unless
+still drop, delay and reorder it, and, unless the message is sealed (next
+paragraph), read it.** Per-hop sealing exists where a link is a wsh link.
+Default: signed, and unsigned envelopes from older peers are refused unless
 `allowUnsigned: true` (then delivered with `authenticated: false`, their `from`
 only a claim). Replay state at the recipient is in memory and bounded like the
 pod's. Not covered: other services that wrap a requester inside an envelope the
 forwarder sends (`mesh-relay`, `mesh-rpc` and the like) still name the original
 requester only as the forwarder says, and nothing marks which links on a path
 were sealed.
+
+**End-to-end sealing of routed messages** (on by default for a node that can
+sign and whose runtime has X25519; `sealing: false` turns it off). A message
+to a pod whose current key statement this pod holds is sealed to that pod:
+
+- *Key statement.* A pod id is a hash, so an encryption key has to be bound to
+  it by a signature. A statement is `{ podId, pk, ka, kid, notBefore, notAfter,
+  sig }`: an X25519 key `ka` signed by the Ed25519 key `pk` whose hash is
+  `podId`. A receiver checks the hash, the signature, the dates (at most 24 h,
+  default 2 h, 30 s of skew before `notBefore`, none after `notAfter`) and that
+  the identity has not been retired in the revocation store the session
+  certificates use (`sealingOptions.revocations`; a store that cannot answer
+  counts as revoked), before it caches it. A pod makes a new key and statement
+  after an hour (lazily, at next use) and deletes a private key when its
+  statement expires.
+- *Where statements travel.* On the direct link, when a peer is added with
+  `addDirectPeer()` (`mesh-routing-keys` envelope, answered once); on demand
+  through a routed request (`ensureKey(podId)`, `{ $mesh: 'key-request' }` and
+  `{ $mesh: 'key-statement' }`, signed like any routed message; a request goes
+  out at most once a minute per pod).
+- *Seal if the destination can.* When sealing is on and the destination's
+  statement is not cached, `route()` does not send the message yet. It starts
+  the fetch above, queues the message (at most 16 per destination, option
+  `maxQueuedPerDestination`; the overflow is dropped as `sealed-unavailable`
+  and is never sent readable) and waits at most `sealingOptions.keyWaitMs`
+  (default 2 s). If a valid statement arrives the message is sealed and sent.
+  If none arrives, the destination is treated as not supporting sealing for
+  `negativeCacheMs` (default 60 s, so later messages are not each delayed), the
+  message goes out as the signed readable envelope, and the sender's service
+  emits `mesh-routing:sealed-fallback` (`{ from, to, reason }`) for each message
+  sent that way; the delivery reports `sealed: false`. A message to a pod
+  that has been asked again after the negative cache ran out waits again. The
+  wait does not delay `requireSealed` sends, which fail at once when no
+  statement is cached.
+- *The seal.* Ephemeral-static X25519: a fresh key pair per message, HKDF-SHA-256
+  (salt: ephemeral key and `ka`) to an AES-256-GCM key, a random 12-byte nonce;
+  the associated data is `["browsermesh/routed-seal/v1", from, to, id]`. The
+  signed payload becomes `{ kind: 'mesh-routed/v1', id, message: null, sealed:
+  { v, kid, epk, iv, ct } }` and the originator signs that as before, so the
+  signature covers the ciphertext and the session counter and hops verify
+  origin without reading content. Replay protection at the recipient is
+  unchanged. A message may be at most 64 KiB sealed (`sealed-too-large`
+  otherwise, never sent readable instead).
+- *Delivery.* The message event carries `sealed: true | false` next to
+  `authenticated`.
+- *Negotiation.* There is no flag to turn on in a message: a pod that
+  publishes a statement can open sealed messages, and a pod that has not
+  published one (or whose statement does not arrive in time) is sent the
+  readable envelope it understands. `requireSealed:
+  true` on the service, or on a single `route()`, refuses to send what cannot
+  be sealed with the statements already cached (it does not wait; call
+  `await api.ensureKey(podId)` first to fetch one) (`SealedUnavailableError`, code `E_SEALED_UNAVAILABLE`, and a
+  `drop` event, reason `sealed-unavailable`); as a service option it also
+  refuses, as destination, a readable envelope (`drop`, reason `unsealed`).
+  Other drops: `bad-seal`, `sealed-unsupported`, `sealed-too-large`.
+
+Protected for a sealed envelope: **confidentiality and integrity of the content
+against every hop and against anyone who can read the links**, and the
+originator, recipient, id and counter are bound to the ciphertext (a box cannot
+be moved to another message or sent under another name). Still visible to hops:
+the originator, the recipient, the message id, the size (to within the AEAD
+overhead), the timing and the path. Hops can still **drop, delay and reorder**.
+**A hop that suppresses key statements (drops the request or the answer) can
+still force the readable fallback**: the sender waits `keyWaitMs`, then sends
+the message readable to that same hop. The fallback is visible to the sender
+(`mesh-routing:sealed-fallback`) and to the receiver (`sealed: false`), not
+prevented. `requireSealed` is the control against it: the send is refused with
+`SealedUnavailableError`, and a destination with `requireSealed` refuses a
+readable envelope. A statement that has been learned (from the direct link, or
+from an earlier answer) is used until it expires, so suppression only matters
+before the first statement and after expiry or rotation.
+
+Forward secrecy, exactly: the sender's ephemeral key is discarded, so
+compromising the sender later reveals nothing it sealed. The recipient's agreement
+key is not ephemeral: whoever obtains it (and a recording of the traffic) opens
+everything sealed to it until it was deleted, which is at most one statement
+lifetime after rotation. There is no per-message forward secrecy against the
+recipient and no post-compromise recovery beyond rotation. A statement is
+authentic only as far as the identity key is: nothing here detects a compromised
+identity key, and a retired identity is refused only where the revocation
+reached.
+
+Older peers: an apps 0.19.0 hop verifies a sealed envelope (its kind and
+signature are unchanged), rebuilds the top level from the signed fields,
+finds `message: null`, and forwards it with the signature; the destination
+opens it. An older destination is never sealed to (it publishes no
+statement). A sealed envelope that an older destination somehow received would
+be delivered with `message: null`, which is why a sender seals only to a pod
+that published a statement. The design and the options not taken are in
+[`design/routed-confidentiality.md`](design/routed-confidentiality.md).
 
 Design and threat model for wsh: [`design/wsh-peer-link.md`](design/wsh-peer-link.md).
 Adopting it: [`migration-wsh-peer-link.md`](migration-wsh-peer-link.md). Usage:
@@ -596,6 +684,7 @@ twice (two pods, one identity), resource exhaustion beyond configured limits.
 | WebRTC identity binding | yes | yes (fake peer connections) | yes (`createMeshNode`, node-datachannel) | yes: a real `RTCPeerConnection` in Chromium and Firefox (WebKit does not open a data channel in the local run), including a signalling server that swaps the descriptions | |
 | wsh link | yes | in-process pipe relay, real wsh sessions | | | browser, real relay |
 | WebTransport, wisp, relay client | mocks | | | | real servers |
+| Routed sealing (key statements, seal and open) | yes (each rule broken once: plaintext at the hop, header, statement signature, expiry, downgrade, replay) | fake buses | yes: three real WebRTC peers, key fetched through the hop (node-datachannel) | yes: X25519, HKDF, AES-GCM and Ed25519 in Chromium, Firefox and WebKit, across two pages | an older release as the hop (a literal copy of its forwarding step is tested, not the release); revocation reaching a sender in a real network; timing and size leakage |
 | Relay | yes | in-memory services | yes | | browser |
 | Shared servers | yes (real loopback upstreams) | | | | browser |
 | mesh-rpc / `browserMeshFetch` | yes | JSON-boundary network | | echo and 404 over a data channel | with a registry and identity in a browser |
