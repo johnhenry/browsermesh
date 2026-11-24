@@ -1,0 +1,52 @@
+{
+  "name": "@johnhenry/browsermesh-mcp",
+  "version": "0.0.0",
+  "description": "A page's WebMCP tools (or any tool list) served over a browsermesh protocol channel, and a client for them, with per-tool grants and the approval kept with the page",
+  "type": "module",
+  "main": "./src/index.mjs",
+  "types": "./src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "import": "./src/index.mjs"
+    }
+  },
+  "files": [
+    "src",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "test:real-peer": "node --test --test-concurrency=1 test/real-peer/*.test.mjs"
+  },
+  "keywords": [
+    "mcp",
+    "webmcp",
+    "browsermesh",
+    "p2p",
+    "tools"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/johnhenry/browsermesh",
+    "directory": "packages/browsermesh-mcp"
+  },
+  "homepage": "https://opensource.johnhenry.me/browsermesh/",
+  "peerDependencies": {
+    "@johnhenry/browsermesh-apps": ">=0.21.0 <1.0.0",
+    "@johnhenry/wsh": ">=0.48.0 <1.0.0"
+  },
+  "devDependencies": {
+    "@johnhenry/browsermesh-apps": "^0.21.0",
+    "@johnhenry/browsermesh-core": "^0.13.0",
+    "@johnhenry/browsermesh-discovery": "^0.4.0",
+    "@johnhenry/browsermesh-primitives": "^0.5.0",
+    "@johnhenry/wsh": "^0.48.0",
+    "node-datachannel": "^0.33.4"
+  },
+  "engines": {
+    "node": ">=26.0.0"
+  }
+}

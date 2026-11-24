@@ -78,6 +78,9 @@ export async function buildImportMap() {
   imports['@johnhenry/wsh/objects'] = '/harness/wsh-objects.mjs'
   // The examples are written for Node and import `node:assert/strict`.
   imports['node:assert/strict'] = '/harness/assert-shim.mjs'
+  // The one third-party dependency a package under test needs in the page: wsh's browser-safe page entry
+  // (the WebMCP bridge), served from the installed package's source, nothing else of it.
+  imports['@johnhenry/wsh/page'] = '/vendor/wsh/page-host.mjs'
   return { imports }
 }
 

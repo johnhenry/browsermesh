@@ -12,7 +12,7 @@ Contents: [how to read it](#how-to-read-it) ·
 [identity](#identity) · [pod messages](#pod-messages) ·
 [peer links by transport](#peer-links-by-transport) · [relay](#relay-mesh-relay) ·
 [shared servers](#shared-servers) · [mesh-rpc, message channel, protocol seam](#mesh-rpc-the-message-channel-and-the-protocol-seam) ·
-[sync](#sync) · [discovery and StealthAgent](#discovery-and-stealthagent) ·
+[MCP across the mesh](#mcp-across-the-mesh) · [sync](#sync) · [discovery and StealthAgent](#discovery-and-stealthagent) ·
 [hosted pods](#hosted-pods-per-lane) · [what is verified how](#what-is-verified-how)
 
 ## How to read it
@@ -60,6 +60,7 @@ table; they come from the READMEs, source headers and test directories.
 | `browsermesh-netway` | implemented | loopback, virtual network, policy, queue, sockets (byte-level backpressure), listener, router, service and fs backends, chaos wrapper (unit). `gateway-backend`: implemented, tested against a mock wsh client and against a real wsh server host and a real in-memory host (`test/gateway-real-wsh.test.mjs`); HOST_UNREACHABLE, TIMEOUT and CLOSED are mock-tested only. `backend.mjs`: abstract base. |
 | `browsermesh-kernel` | implemented | in-process microkernel with capability checks and resource tables; unit tests per module. No cryptography; isolation is by capability and ownership checks, not process boundaries. |
 | `browsermesh-priority-mux` | implemented | sender-side priority scheduler and framer (fake adapter tests). No authentication or encryption. The reassembler has no limit on pending messages. |
+| `browsermesh-mcp` | implemented | a page's WebMCP tools (or an explicit list) as the protocol `mcp` on the protocol seam, and a client for it; per-tool grants, approval kept with the serving page, bounds. In-memory bus (unit), real peers over WebRTC (Node) and two real browsers; threat model [below](#mcp-across-the-mesh). Depends on wsh's WebMCP bridge (peer dependency) through one adapter file. |
 | `browsermesh-embed` | partial | widget wrapper tested against a DOM stub only. |
 | `browsermesh-meshctl` | partial | loopback mode exercised through all eight verbs; the real-mesh path is wired, not exercised end to end; `--relay` is not load-bearing. |
 | `spikes/*` | spikes | `vm-pod-host` (Firecracker driver: never booted a VM), `isolate-pod-host`, `browser-pod-host`, `browser-extension-host`; see [hosted pods](#hosted-pods-per-lane). |
@@ -83,6 +84,7 @@ hand-written.
 | `browsermesh-discovery` | yes | `.` | yes | no | no |
 | `browsermesh-embed` | yes | `.` | yes | no | no |
 | `browsermesh-kernel` | yes | `.` | yes | no | no |
+| `browsermesh-mcp` | yes | `.` | yes | yes | yes |
 | `browsermesh-meshctl` | private | `.` | yes | no | no |
 | `browsermesh-netway` | yes | `.` | yes | no | no |
 | `browsermesh-objects` | yes | `.` | yes | yes | yes |
@@ -573,6 +575,68 @@ Package: `browsermesh-apps`.
   self-verifying pod ids, authorization replayed deterministically; `at` is
   caller-supplied, revoking an admin is not retroactive). The audit chain
   (hash-linked, signed per entry) is off unless `enableAudit`. Unit only.
+
+## MCP across the mesh
+
+Package: `browsermesh-mcp` (`serveMcpOnMesh`, `openMcpOnMesh`). Design:
+[`design/mcp-over-mesh.md`](design/mcp-over-mesh.md). A page's WebMCP tools, or an
+explicit list, are served as the protocol `mcp` on the protocol seam; another pod
+lists and calls them. Plain MCP JSON-RPC rides the channel; the tool bridge is
+wsh's (`@johnhenry/wsh/page`, a peer dependency), behind one adapter file.
+
+Threat model, by what an attacker is and wants:
+
+- **A peer that has no grant** (or a link that was never authorised): wants to
+  see or run the page's tools. Opening needs `protocol:mcp:open` (default deny; an
+  unserved name and a denied one look the same). A peer with only the open scope
+  sees an empty list. A tool is listed to a peer only with `mcp:<tool>:list` and
+  callable only with `mcp:<tool>:call`; both are asked of the node's registry on
+  every request, so a revocation or an expiry applies to the very next call, and
+  revoking the open scope closes the channel at once. A tool the peer may not call
+  and a tool that does not exist get the same answer, so probing learns nothing;
+  probes are counted against the per-minute bound. Tool names that cannot sit in a
+  scope (`:` or `*`, a leading `_`, `.` or `-`) are never granted and never served.
+- **A peer that has a grant and wants more than the person at the page agreed
+  to.** A grant lets a peer *ask*; it is not an approval. A tool that is not marked
+  read-only is asked about before it runs, by the **serving page's** prompt
+  (`approve`: never, consequential (default), always), showing the caller's verified
+  pod id and the input as text. The prompt, its timeout and its outcome are on the
+  serving side only; the caller cannot answer, see or influence it, and a cancel
+  closes the question. With no prompt and no document, what needs approval is
+  denied. `approve: 'never'` is the page's explicit choice.
+- **A caller that lies about who it is.** The caller is the channel's verified
+  peer (the key the session is bound to), never a message field; params that claim
+  another identity are ignored. How strong that key is depends on the link (see
+  [peer links](#peer-links-by-transport)).
+- **A tool (or a third party whose text it returns) that attacks the caller.** A
+  result is data: delivered as text, labelled untrusted in the result (`_meta`) and
+  by the client (`untrusted: true`), and no tool can unset the label. Nothing in
+  this layer parses, renders or evaluates it; what the caller's own software does
+  with the text (a model reading it as instructions) is out of this layer's reach,
+  and is why the label exists.
+- **A caller that wants to exhaust the page.** Bounded by name: tools listed
+  (`maxTools` 64), schema bytes (16 KiB), input bytes (64 KiB), result bytes
+  (256 KiB, refused not truncated), calls in flight (4) and per minute (30) per
+  session, a call timeout (120 s) after which the tool's `signal` aborts; below
+  them the channel's own message, window and in-flight bounds. Cancelling a call, or
+  closing the channel, aborts the tool's `signal`.
+- **A caller that wants the page to act as a client.** Not possible: the server
+  never sends a request, and the client registers no request handler, so sampling,
+  roots and elicitation are answered -32601. No resources and no prompts are
+  offered; `initialize` advertises `tools` only.
+- **Not protected.** A tool does what its `execute` does with the serving user's
+  session: the allow-list, the grants and the prompt narrow who can start it and when,
+  not what it does. A grant is per tool, not per argument. The label does not stop a
+  caller from believing a hostile result. The channel is as confidential as its link
+  (DTLS on WebRTC; nothing extra here). A grant change is not pushed to a connected
+  caller; its next `tools/list` or call reflects it.
+- **Verified.** Unit (in-memory bus; each rule above has a test that fails when the
+  rule is broken); two real Node peers over real WebRTC
+  (`packages/browsermesh-mcp/test/real-peer`); two real browser contexts over a real
+  data channel in Chromium, Firefox and WebKit (`tests/browser/mcp-over-mesh.spec.mjs`:
+  default deny and per-tool grants, revocation, the page's prompt, a hostile result as
+  inert text, cancel reaching the tool, list-changed). The default DOM prompt of wsh's
+  bridge is not exercised there (the harness answers with its own `prompt`).
 
 ## Sync
 
