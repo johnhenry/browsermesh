@@ -80,7 +80,10 @@ function dropsOf(on) {
     for (const w of waiting.filter((x) => reasons.length >= x.n)) w.resolve();
   });
   /** Resolves once `n` drops were announced (verification is asynchronous crypto: a count of turns would not do). */
-  reasons.waitFor = (n) => (reasons.length >= n ? Promise.resolve() : new Promise((resolve) => waiting.push({ n, resolve })));
+  Object.defineProperty(reasons, 'waitFor', {
+    enumerable: false,
+    value: (n) => (reasons.length >= n ? Promise.resolve() : new Promise((resolve) => waiting.push({ n, resolve }))),
+  });
   return reasons;
 }
 /** Let queued microtasks and I/O callbacks run: proof that something did NOT happen, not a wait for it. */
