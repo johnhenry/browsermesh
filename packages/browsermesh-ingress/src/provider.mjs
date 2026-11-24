@@ -178,18 +178,15 @@ async function buildRequest(head, ac, claimBody, maxBytes, counters) {
   if (head.body) {
     if (head.method === 'GET' || head.method === 'HEAD') throw new IngressError(400, 'body-on-get', 'a body on a method that has none')
     const reader = await claimBody(head.rid, ac.signal)
-    let seen = 0
-    // The body is counted as the handler reads it; one that outgrows the cap errors the handler's read and stops the sender.
-    body = reader.toReadableStream().pipeThrough(new TransformStream({
-      transform(chunk, controller) {
-        seen += chunk.byteLength
-        counters.requestBytes += chunk.byteLength
-        if (seen > maxBytes) { controller.error(new IngressError(413, 'body-too-large', 'the request body is larger than this provider takes')); return }
-        controller.enqueue(chunk)
-      },
-    }))
+    // Read whole, bounded: a handler gets an ordinary Request body. (A ReadableStream as a Request body is not
+    // supported by every browser, and a page is the usual provider.) One that outgrows the cap stops the sender.
+    try { body = await reader.bytes({ maxBytes }) } catch (e) {
+      if (e?.reason === 'stream-too-large') throw new IngressError(413, 'body-too-large', 'the request body is larger than this provider takes')
+      throw e
+    }
+    counters.requestBytes += body.byteLength
   }
-  return new Request(`http://${head.host}${head.target}`, { method: head.method, headers, body, duplex: 'half', signal: ac.signal, redirect: 'manual' })
+  return new Request(`http://${head.host}${head.target}`, { method: head.method, headers, body, signal: ac.signal, redirect: 'manual' })
 }
 
 async function collect(stream, max, signal) {

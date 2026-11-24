@@ -10,6 +10,8 @@
   opened and authorised, and how the remote-object layer is mounted on it.
 - [`design/wsh-peer-link.md`](design/wsh-peer-link.md) and [`migration-wsh-peer-link.md`](migration-wsh-peer-link.md): a mesh
   link carried on a sealed wsh session, and how to adopt it.
+- [`design/http-ingress.md`](design/http-ingress.md): real HTTP in, a mesh pod answers (`@johnhenry/browsermesh-ingress`):
+  the API, the wire (protocol `http` v1), pinning, the defaults, and what is not built.
 - [`design/routed-confidentiality.md`](design/routed-confidentiality.md): sealing of messages routed through other peers.
 - [`design/stealth-threshold.md`](design/stealth-threshold.md): threshold key sharing for StealthAgent (spec only).
 - [`hosted-pods.md`](hosted-pods.md), [`design/hosted-pods-firecracker.md`](design/hosted-pods-firecracker.md),

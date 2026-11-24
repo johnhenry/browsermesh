@@ -78,10 +78,11 @@ copy it. They relate in two honest ways:
   site that already exists can therefore be offered over `http` without being rewritten, and gains streaming,
   cancellation, limits and the `protocol:http:open` grant.
 - **Fallback (ingress, opt-in).** With `rpc: api` (a `createMeshRpcService` api on the site's envelope type) the
-  ingress will, only when the provider does not serve the `http` protocol (`unknown-protocol`, never on a refusal),
-  make one buffered request through mesh-rpc. It is off by default because the legacy service has no
-  default-deny: it answers any peer, so using it is the operator's explicit choice. Bodies are capped by the same
-  limits; the answer is pinned to the pod the request went to by mesh-rpc itself.
+  ingress will, only when the provider does not serve the `http` protocol (`unknown-protocol`, or a pod that runs no
+  protocol channel and never answers the open; never on a refusal), make one buffered request through mesh-rpc, and
+  remember for a minute that the provider is of that kind. It is off by default because the legacy service has no
+  default-deny: it answers any peer, so using it is the operator's explicit choice. Bodies, headers and the response
+  policy are the same as on the `http` path; the answer is pinned to the pod the request went to by mesh-rpc itself.
 
 `ServerSharing` is the opposite direction and is not touched.
 
@@ -161,8 +162,10 @@ A mapping can opt out of the response policy explicitly, per mapping, in `resolv
   over a second protocol (`http-ws`), with the same pin, per-connection byte and idle limits, and an explicit
   `Origin` policy; none of that exists yet.
 - Routed (multi-hop) delivery, as above.
-- Streaming request bodies to the provider while the client is still sending: the ingress reads the (capped) body
-  first, so a slow client holds no provider resources; the body then crosses as a stream.
+- Streaming request bodies end to end while the client is still sending: the ingress reads the (capped) body first, so
+  a slow client holds no provider resources; the body then crosses as a stream, and the provider reads it whole (also
+  capped) before the handler runs, because a `ReadableStream` is not accepted as a `Request` body by every browser and a
+  page is the usual provider. Response bodies do stream.
 - Per-root authorisation on the provider (`http:<root>:<action>`): one grant, `protocol:http:open`, plus `allowFrom`.
 - TLS: terminate it in front (a reverse proxy or a platform). The Node listener speaks plaintext HTTP/1.1.
 

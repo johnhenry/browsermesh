@@ -1,6 +1,6 @@
 # Agent playbook
 
-npm workspaces monorepo, 13 packages under `packages/`, Node >= 26,
+npm workspaces monorepo, 15 packages under `packages/`, Node >= 26,
 `node:test` throughout, orchestrated with Turborepo. No build step — every
 package ships plain ESM source (`main`/`exports` point directly at
 `src/index.mjs`).
@@ -33,6 +33,7 @@ Higher-level packages that sit on top of those:
 | [`@johnhenry/browsermesh-meshctl`](packages/browsermesh-meshctl) | External CLI for the hosted-pods control surface (`meshctl`, itself a pod); private, not yet published |
 | [`@johnhenry/browsermesh-embed`](packages/browsermesh-embed) | Thin widget for embedding a browsermesh-pod-backed workspace on a page |
 | [`@johnhenry/browsermesh-mcp`](packages/browsermesh-mcp) | A page's WebMCP tools over a protocol channel (peer-depends on wsh and apps) |
+| [`@johnhenry/browsermesh-ingress`](packages/browsermesh-ingress) | Real HTTP in, a mesh pod answers: request forwarder and CLI (peer-depends on apps) |
 
 Packages version independently (see `RELEASING.md`); the root
 `package.json` version is only the release marker.

@@ -726,6 +726,37 @@ const bm = {
     return { likes: bm.crdt.getState('likes'), settings: bm.crdt.getState('settings') }
   },
 
+  // -- a page that answers HTTP: serveHttpOnMesh over the live data channel ---
+
+  ingress: null,
+  /** Serve a `(Request) => Response` handler to the data channel's other end (the ingress, in Node). Nothing is granted yet. */
+  async ingressServe() {
+    const apps = await import('@johnhenry/browsermesh-apps')
+    const { serveHttpOnMesh } = await import('@johnhenry/browsermesh-ingress')
+    const node = meshNode(bm.rtc)
+    node.registry = new apps.PeerRegistry({ localPodId: node.podId })
+    const svc = apps.attachService(node, undefined, apps.createMeshProtocolService())
+    const st = { node, svc, seen: [], aborted: 0, stopped: 0 }
+    st.served = serveHttpOnMesh(svc, async (request, { peer, signal }) => {
+      const url = new URL(request.url)
+      st.seen.push({ method: request.method, path: url.pathname + url.search, peer, host: url.host, headers: [...request.headers.keys()].sort() })
+      if (url.pathname === '/echo') return new Response(`${request.method}:${await request.text()}`, { headers: { 'content-type': 'text/plain' } })
+      if (url.pathname === '/big') return new Response(Uint8Array.from({ length: 600_000 }, (_, i) => (i * 31) % 251), { headers: { 'content-type': 'application/octet-stream' } })
+      if (url.pathname === '/hostile') {
+        return new Response('x', { headers: [['set-cookie', 'sid=1'], ['content-security-policy', 'default-src *'], ['cache-control', 'public'], ['content-type', 'text/html']] })
+      }
+      if (url.pathname === '/redirect') return new Response(null, { status: 302, headers: { location: 'http://169.254.169.254/' } })
+      if (url.pathname === '/hang') return new Promise((_resolve, reject) => { signal.addEventListener('abort', () => { st.aborted += 1; reject(signal.reason) }) })
+      return new Response('<h1>served by a page</h1>', { headers: { 'content-type': 'text/html' } })
+    }, { allowFrom: [bm.rtc.remote] })
+    bm.ingress = st
+  },
+  ingressGrant(scopes) { bm.ingress.node.registry.grantCapabilities(bm.rtc.remote, scopes) },
+  ingressRevoke(scopes) { bm.ingress.node.registry.revokeCapabilities(bm.rtc.remote, scopes) },
+  ingressState() { return { seen: bm.ingress.seen, aborted: bm.ingress.aborted, served: bm.ingress.served.stats() } },
+  /** Stop serving and let go of the data channel, once the far end has closed its channel. */
+  ingressStop() { bm.ingress.served.stop(); bm.ingress.svc.teardown(); bm.rtcUnregister() },
+
   // -- examples, unmodified, in the page ------------------------------------
 
   async runExample(file) {
