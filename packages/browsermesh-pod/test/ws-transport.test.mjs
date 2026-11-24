@@ -220,6 +220,10 @@ describe('WebSocketTransport — broadcast fan-out', () => {
     await wait(20)
     assert.equal(aliceReceived.length, 2)
     assert.ok(alice.knownPeers.has('bob') && alice.knownPeers.has('carol'))
+    // A message arriving from a peer only hints that it exists; discovery
+    // confirms it once its signed hello verifies.
+    alice.confirmPeer('bob')
+    alice.confirmPeer('carol')
 
     const bobReceived = []
     const carolReceived = []
@@ -249,6 +253,7 @@ describe('WebSocketTransport — broadcast fan-out', () => {
     alice.onMessage(() => {})
     bob.send({ type: 'pod:hello', podId: 'bob', to: 'alice' })
     await wait(20)
+    alice.confirmPeer('bob')
 
     const received = []
     bob.onMessage((msg) => received.push(msg))
@@ -257,6 +262,104 @@ describe('WebSocketTransport — broadcast fan-out', () => {
 
     assert.equal(received.length, 1)
     assert.equal(received[0].payload, 'everyone')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// What the server says about peers is a hint, not membership
+// ---------------------------------------------------------------------------
+
+describe('WebSocketTransport — peers the server names are hints', { timeout: 5000 }, () => {
+  async function pair() {
+    const net = createFakeWebSocketNetwork()
+    net.registerServer('ws://relay.test', net.createRelayServer())
+    const signaling = net.createSignalingServer()
+    net.registerServer('ws://signaling.test', signaling)
+    const mk = (podId) => track(new WebSocketTransport({
+      url: 'ws://relay.test', podId, WebSocket: net.FakeWebSocket, peersFromSignaling: true, signalingUrl: 'ws://signaling.test',
+    }))
+    return { net, signaling, mk }
+  }
+  const collect = (t) => { const got = []; t.onMessage((m) => got.push(m)); return got }
+
+  it('a hello reaches a hinted peer, a broadcast message does not', async () => {
+    const { signaling, mk } = await pair()
+    const alice = mk('alice')
+    alice.onMessage(() => {})
+    await alice.open()
+    const ghost = mk('ghost')
+    const got = collect(ghost)
+    await ghost.open()
+    signaling.pushTo('alice', { type: 'peer-joined', podId: 'ghost' })
+    await wait(20)
+    assert.ok(alice.knownPeers.has('ghost'))
+    assert.ok(!alice.verifiedPeers.has('ghost'))
+
+    alice.send({ type: 'pod:message', from: 'alice', to: '*', payload: 'private' })
+    alice.send({ type: 'pod:hello', podId: 'alice' })
+    await wait(20)
+    assert.deepEqual(got.map((m) => m.type), ['pod:hello'])
+  })
+
+  it('a confirmed peer receives broadcasts; a forgotten one stops', async () => {
+    const { signaling, mk } = await pair()
+    const alice = mk('alice')
+    alice.onMessage(() => {})
+    await alice.open()
+    const bob = mk('bob')
+    const got = collect(bob)
+    await bob.open()
+    signaling.pushTo('alice', { type: 'peer-joined', podId: 'bob' })
+    await wait(20)
+
+    alice.confirmPeer('bob')
+    assert.ok(alice.verifiedPeers.has('bob'))
+    alice.send({ type: 'pod:message', from: 'alice', to: '*', payload: 1 })
+    alice.forgetPeer('bob')
+    alice.send({ type: 'pod:message', from: 'alice', to: '*', payload: 2 })
+    await wait(20)
+    assert.deepEqual(got.map((m) => m.payload), [1])
+    assert.ok(!alice.knownPeers.has('bob'))
+  })
+
+  it('a message sent to a named peer is sent to it, hinted or not', async () => {
+    const { mk } = await pair()
+    const alice = mk('alice')
+    alice.onMessage(() => {})
+    await alice.open()
+    const bob = mk('bob')
+    const got = collect(bob)
+    await bob.open()
+    alice.send({ type: 'pod:message', from: 'alice', to: 'bob', payload: 'direct' })
+    await wait(20)
+    assert.equal(got.length, 1)
+  })
+
+  it('a pod does not broadcast to a peer the relay names until that peer\'s signed hello verified', async () => {
+    const { signaling, mk } = await pair()
+    const aliceId = await PodIdentity.generate()
+    const alice = new Pod()
+    await alice.boot({ identity: aliceId, transport: mk(aliceId.podId), discoveryTimeout: 5 })
+    const ghost = mk('ghost')
+    const ghostGot = collect(ghost)
+    await ghost.open()
+    signaling.pushTo(aliceId.podId, { type: 'peer-joined', podId: 'ghost' })
+
+    const bobId = await PodIdentity.generate()
+    const bob = new Pod()
+    await bob.boot({ identity: bobId, transport: mk(bobId.podId), discoveryTimeout: 5 })
+    await new Promise((resolve) => { if (alice.peers.has(bobId.podId)) resolve(); else alice.on('peer:found', (p) => { if (p.podId === bobId.podId) resolve() }) })
+    const bobGot = new Promise((resolve) => bob.on('message', resolve))
+
+    await alice.broadcast('for peers that proved themselves')
+    const msg = await bobGot
+    assert.equal(msg.payload, 'for peers that proved themselves')
+    await wait(20)
+    assert.deepEqual(ghostGot.filter((m) => m.type === 'pod:message'), [])
+    assert.ok(!alice.peers.has('ghost'))
+
+    await alice.shutdown({ silent: true })
+    await bob.shutdown({ silent: true })
   })
 })
 

@@ -61,7 +61,9 @@ export class WshPodTransport {
       l.on('peer-up', (e) => this.#fire('peer-up', e)),
       l.on('peer-down', (e) => {
         this.#fire('peer-down', e);
-        if (this.#goodbyeOnDown && this.#handler && !this.#closed) this.#deliver({ type: POD_GOODBYE, podId: e.podId, from: e.podId, ts: Date.now(), synthetic: true });
+        // The link itself went down, so the goodbye is attributed to that link's identity (`peerId`):
+        // a pod honours it as the peer's own, which it would not for an unsigned goodbye read off the wire.
+        if (this.#goodbyeOnDown && this.#handler && !this.#closed) this.#deliver({ type: POD_GOODBYE, podId: e.podId, from: e.podId, ts: Date.now(), synthetic: true }, { peerId: e.podId });
       }),
       l.on('refused', (e) => this.#fire('refused', e)),
       l.on('error', (e) => this.#fire('error', e)),

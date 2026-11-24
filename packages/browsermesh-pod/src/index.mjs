@@ -11,8 +11,8 @@ export {
   createRpcRequest, createRpcResponse,
 } from './messages.mjs'
 export {
-  MessageSigner, ReplayGuard, ReplayWindow, verifyMessage, signedBytes,
-  SIGNED_FIELDS, SIGNATURE_DOMAIN, REPLAY_WINDOW, DROP_REASONS,
+  MessageSigner, ReplayGuard, ReplayWindow, verifyMessage, admitDiscovery, signedBytes,
+  DISCOVERY_TYPES, SIGNED_FIELDS, SIGNATURE_DOMAIN, REPLAY_WINDOW, DROP_REASONS,
 } from './signed-message.mjs'
 export { InjectedPod } from './injected-pod.mjs'
 export { installPodRuntime, createRuntime, createClient, createServer } from './runtime.mjs'
