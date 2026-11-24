@@ -73,8 +73,17 @@ await roots.app.title
 `npm run example:19` runs it, and `packages/browsermesh-objects/README.md` lists what each operation needs, how revocation
 and bounds behave, and what an older peer does.
 
-MCP across the mesh (a page's WebMCP tools reachable from another browser over a protocol channel): not described here
-yet. That change had not landed when this page was written and nothing on this page claims it exists.
+**MCP across the mesh** (a page's WebMCP tools reachable from another browser over a protocol channel, no wsh relay) is
+`@johnhenry/browsermesh-mcp`: `serveMcpOnMesh`, `openMcpOnMesh` and `MeshMcpTransport`, on the protocol `mcp`. A peer
+needs `protocol:mcp:open` to open it and `mcp:<tool>:list` / `mcp:<tool>:call` per tool (the same strings as a wsh
+key's `mcp:TOOL`, with the action spelled out; `mcp:*:list` and `mcp:*:call` are every tool). Approval of a call stays
+with the serving page. Design: [`design/mcp-over-mesh.md`](design/mcp-over-mesh.md); what it protects:
+[`security.md`](security.md).
+
+**wsh services on a pod** (`WshServices`, in `browsermesh-transport`): a stock wsh client may use a pod's objects and MCP
+tools. It is off by default, serves objects and MCP only (never exec, pty, files, the gateway or any endpoint), is opt-in
+per pod, and is permitted only by the pod's registry grants for the connecting key's pod id (not by wsh key options).
+The grants are the same scopes as above. Design: [`design/wsh-services-on-a-pod.md`](design/wsh-services-on-a-pod.md).
 
 ## What is deliberately not shared
 

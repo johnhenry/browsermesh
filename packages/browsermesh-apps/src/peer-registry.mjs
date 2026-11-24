@@ -58,7 +58,7 @@ function grantRefusal(scope) {
   } else if (parts[0] === 'mcp') {
     if (parts.length < 2 || parts.length > 3) return 'mcp:TOOL[:call]'
     if (parts[1] !== '*' && !SCOPE_NAME_RE.test(parts[1])) return 'mcp: names a tool'
-    if (parts.length === 3 && parts[2] !== 'call' && parts[2] !== '*') return 'mcp:TOOL[:call]'
+    if (parts.length === 3 && parts[2] !== 'call' && parts[2] !== 'list' && parts[2] !== '*') return 'mcp:TOOL[:call|list]'
   }
   return null
 }

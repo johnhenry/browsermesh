@@ -31,7 +31,7 @@ describe('grantCapabilities refuses a malformed objects: or mcp: entry', () => {
   const accepted = [
     'objects:window', 'objects:window:get', 'objects:window:call', 'objects:window:set', 'objects:window:on',
     'objects:*', 'objects:*:get', 'objects:window:*', 'objects:$app:get', 'objects:docs.v2:get',
-    'mcp:echo', 'mcp:*', 'mcp:echo:call', 'mcp:*:call',
+    'mcp:echo', 'mcp:*', 'mcp:echo:call', 'mcp:*:call', 'mcp:echo:list', 'mcp:*:list',
     // other namespaces are the registry's own, unchanged
     'files:read', 'protocol:objects:open', 'protocol:*:open', 'mesh-relay:chat:connect', 'a::b', '*',
   ];

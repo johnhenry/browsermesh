@@ -21,7 +21,8 @@ registry is run against wsh's vectors for the shared forms by
 | `objects:ROOT:get` / `call` / `set` / `on` | the same string | `checkAccess(peer, 'objects:ROOT', 'get')` etc. | `describe` and `snapshot` are `get`; `construct` and a call that carries callbacks are `call`; a subscription is `on` (`browsermesh-objects` `actionFor`) |
 | `objects:*`, `objects:*:get` | the same string | | `*` is every root, in both |
 | `objects:ROOT:*` | `objects:ROOT:*` | | **mesh only**: wsh refuses it (`bad-capability`); write `objects:ROOT` for a wsh key |
-| `mcp:TOOL` | `mcp:TOOL` (also written `mcp:TOOL:call`) | `checkAccess(peer, 'mcp:TOOL', 'call')` | `mcp:*` is every tool, in both |
+| `mcp:TOOL` | `mcp:TOOL` (spelled `mcp:TOOL:call` and `mcp:TOOL:list` by `@johnhenry/browsermesh-mcp`, plus `protocol:mcp:open`) | `checkAccess(peer, 'mcp:TOOL', 'call')` (`'list'` to see the tool) | `mcp:*` is every tool, in both. `WshServices` (transport) admits a wsh client to objects and MCP by these same registry scopes, not by key options |
+| `objects:ROOT[:OP]` over a wsh client | the same strings | as above | `WshServices` and `@johnhenry/browsermesh-objects` use the same scopes; `wshObjectActionFor` (transport) and `actionFor` (objects) are kept equal by a parity test |
 | `rpc:NAME` | `protocol:NAME:open` | `checkAccess(peer, 'protocol:NAME', 'open')` | opening a protocol channel. `rpc:` is not a mesh namespace |
 | `rpc:*` | none | | wsh has no wildcard for rpc. Do not translate the mesh's `protocol:*:open` into it |
 | `expires="2030-01-01T00:00:00Z"` | `grantCapabilities(peer, scopes, { expiresAt })` (ms) | | both refuse at the instant (`now >= expires`); a grant that expires is announced like a revocation (`onAccessChange`) |
