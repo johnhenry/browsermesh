@@ -18,8 +18,18 @@ import {
   REPLAY_WINDOW, SIGNATURE_DOMAIN,
 } from '../src/signed-message.mjs'
 
-const tick = () => new Promise((resolve) => setImmediate(resolve))
-const settle = async () => { for (let i = 0; i < 20; i++) await tick() }
+/**
+ * Resolve once `pod` has decided `n` incoming messages (delivered or dropped).
+ * Verification is asynchronous crypto, so the test waits for the pod's own
+ * outcome events rather than for a number of event-loop turns.
+ */
+const decided = (pod, n) => new Promise((resolve) => {
+  const count = () => pod.got.length + Object.values(pod.dropped).reduce((sum, v) => sum + v, 0)
+  const check = () => { if (count() >= n) resolve() }
+  pod.on('message', check)
+  pod.on('message:dropped', check)
+  check()
+})
 
 /** An untrusted relay between pods. */
 class Hub {
@@ -89,7 +99,7 @@ describe('message authenticity', () => {
     const a = await boot(hub)
     const b = await boot(hub)
     await a.send(b.podId, { text: 'hi' })
-    await settle()
+    await decided(b, 1)
     assert.equal(b.got.length, 1)
     assert.equal(b.got[0].from, a.podId)
     assert.equal(b.got[0].authenticated, true)
@@ -103,7 +113,7 @@ describe('message authenticity', () => {
     const c = await boot(hub)
     hub.rewrite = (msg) => [{ ...msg, from: c.podId, source: c.podId, relaySource: c.podId }]
     await a.send(b.podId, 'from a, relabelled as c')
-    await settle()
+    await decided(b, 1)
     assert.equal(b.got.length, 0)
     assert.equal(b.dropped['sender-mismatch'], 1)
   })
@@ -122,7 +132,7 @@ describe('message authenticity', () => {
     // Signed correctly by the relay's key but with a's pod id swapped in afterwards.
     const own = await new MessageSigner(mallory).sign(createMessage({ from: mallory.podId, to: b.podId, payload: 'x' }))
     hub.inject(b.podId, { ...own, from: a.podId })
-    await settle()
+    await decided(b, 3)
     assert.equal(b.got.length, 0)
     assert.equal(b.dropped.unsigned, 1)
     assert.equal(b.dropped['sender-mismatch'], 2)
@@ -134,7 +144,7 @@ describe('message authenticity', () => {
     const b = await boot(hub)
     hub.rewrite = (msg) => [msg, msg, msg]
     await a.send(b.podId, 'once')
-    await settle()
+    await decided(b, 3)
     assert.equal(b.got.length, 1)
     assert.equal(b.dropped.replay, 2)
   })
@@ -145,7 +155,7 @@ describe('message authenticity', () => {
     const b = await boot(hub)
     hub.rewrite = (msg) => [{ ...msg, payload: 'something else' }]
     await a.send(b.podId, 'original')
-    await settle()
+    await decided(b, 1)
     assert.equal(b.got.length, 0)
     assert.equal(b.dropped['bad-signature'], 1)
   })
@@ -160,7 +170,7 @@ describe('message authenticity', () => {
     hub.inject(b.podId, forC)
     // And re-addresses it.
     hub.inject(b.podId, { ...forC, to: b.podId })
-    await settle()
+    await decided(b, 1)
     assert.equal(b.got.length, 0)
     assert.equal(b.dropped['bad-signature'], 1)
   })
@@ -171,7 +181,7 @@ describe('message authenticity', () => {
     const b = await boot(hub)
     const m = await new MessageSigner(a.identity).sign(createMessage({ from: a.podId, to: b.podId, payload: { method: 'x' } }))
     hub.inject(b.podId, { ...m, type: 'pod:rpc-request', method: 'x', params: null, requestId: 'r1' })
-    await settle()
+    await decided(b, 1)
     assert.equal(b.got.length, 0)
     assert.equal(b.dropped['bad-signature'], 1)
   })
@@ -187,7 +197,7 @@ describe('message authenticity', () => {
       hub.inject(target.podId, createRpcResponse({ from: old.podId, to: target.podId, requestId: 'r', result: 1 }))
       hub.inject(target.podId, createRpcRequest({ from: old.podId, to: target.podId, method: 'doThing', requestId: 'r' }))
     }
-    await settle()
+    await Promise.all([decided(strict, 3), decided(lax, 3)])
     assert.equal(strict.got.length, 0)
     assert.equal(strict.dropped.unsigned, 2)
     assert.equal(strict.dropped['unsigned-rpc'], 1)
@@ -203,15 +213,16 @@ describe('message authenticity', () => {
     const old = await PodIdentity.generate()
     hub.inject(b.podId, createMessage({ from: old.podId, to: b.podId, payload: 'hello' }))
     hub.inject(b.podId, createRpcRequest({ from: old.podId, to: b.podId, method: 'm', requestId: 'r' }))
-    await settle()
+    await decided(b, 2)
     assert.equal(b.got.length, 1)
     assert.equal(b.got[0].authenticated, false)
     assert.equal(b.dropped['unsigned-rpc'], 1)
     // ...and allowUnsigned: false turns that off.
     const strict = await boot(hub, { podOpts: { allowUnsigned: false } })
     hub.inject(strict.podId, createMessage({ from: old.podId, to: strict.podId, payload: 'hello' }))
-    await settle()
+    await decided(strict, 1)
     assert.equal(strict.got.length, 0)
+    assert.equal(strict.dropped.unsigned, 1)
   })
 
   it('same-origin pods still talk to each other, signed, over the real in-process transport', async () => {
@@ -226,7 +237,7 @@ describe('message authenticity', () => {
     const b = await mk()
     await a.send(b.podId, 'x')
     await a.broadcast('y')
-    await settle()
+    await decided(b, 2)
     assert.deepEqual(b.got.map((m) => m.payload), ['x', 'y'])
     assert.ok(b.got.every((m) => m.authenticated && m.from === a.podId))
   })
@@ -245,7 +256,7 @@ describe('message authenticity', () => {
     await c.boot({ transport: linkTransport, globalThis: { addEventListener() {}, removeEventListener() {} }, discoveryTimeout: 1, handshakeTimeout: 1 })
     link.onMessage(createMessage({ from: 'peer-1', to: c.podId, payload: 'ok' }), { peerId: 'peer-1' })
     link.onMessage(createMessage({ from: 'peer-2', to: c.podId, payload: 'lie' }), { peerId: 'peer-1' })
-    await settle()
+    await decided(c, 2)
     assert.deepEqual(c.got.map((m) => [m.from, m.payload, m.authenticated]), [['peer-1', 'ok', true]])
     assert.equal(c.dropped['sender-mismatch'], 1)
   })
@@ -256,7 +267,7 @@ describe('message authenticity', () => {
     const b = await boot(hub)
     hub.rewrite = (msg) => [{ ...msg, admin: true, source: 'x' }]
     await a.send(b.podId, 'p')
-    await settle()
+    await decided(b, 1)
     assert.equal(b.got.length, 1)
     assert.equal(b.got[0].admin, undefined)
     assert.equal(b.got[0].source, undefined)
@@ -267,7 +278,7 @@ describe('message authenticity', () => {
     const off = await boot(hub, { podOpts: { sign: false } })
     const lax = await boot(hub, { podOpts: { allowUnsigned: true } })
     await off.send(lax.podId, 'plain')
-    await settle()
+    await decided(lax, 1)
     assert.equal(lax.got.length, 1)
     assert.equal(lax.got[0].authenticated, false)
   })
@@ -281,7 +292,7 @@ describe('message authenticity', () => {
     hub.rewrite = (msg) => { seen.push(msg); return [msg] }
     const b = await boot(hub)
     await Promise.all([a.send(b.podId, 1), a.send(b.podId, 2), a.send(b.podId, 3)])
-    await settle()
+    await decided(b, 3)
     const mine = seen.filter((m) => m.type === 'pod:message' && m.from === a.podId)
     // Numbers are assigned in call order; signing may finish out of order, which the window tolerates.
     assert.deepEqual(mine.map((m) => m.seq).sort(), [1, 2, 3])
