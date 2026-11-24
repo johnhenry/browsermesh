@@ -1,3 +1,5 @@
+import { openSSHPublicKeyFromRaw, authorizedKeysLine } from './ssh-keys.mjs';
+
 /**
  * Encode a Uint8Array as a base64url string (no padding).
  *
@@ -158,6 +160,31 @@ export class PodIdentity {
       this.#rawPublicKey = new Uint8Array(await crypto.subtle.exportKey('raw', this.keyPair.publicKey));
     }
     return new Uint8Array(this.#rawPublicKey);
+  }
+
+  /**
+   * This identity's public key as an OpenSSH public key line (`ssh-ed25519 AAAA...`). The PUBLIC key only.
+   * Nothing calls this by default: using the same key in both worlds is a decision, see
+   * docs/security.md, "One key in both worlds".
+   *
+   * @param {{ comment?: string }} [opts]
+   * @returns {Promise<string>}
+   */
+  async toOpenSSHPublicKey(opts) {
+    return openSSHPublicKeyFromRaw(await this.rawPublicKey(), opts);
+  }
+
+  /**
+   * A wsh / OpenSSH `authorized_keys` line for this identity's public key, with `capabilities="..."` (required, even
+   * empty) and an optional `expires="..."`. Refuses characters that could end an option or the line. Listing a key that
+   * lives in a browser in a machine's authorized_keys lets whoever holds that browser profile reach the machine: read
+   * docs/security.md, "One key in both worlds", before you use it. Nothing calls this by default.
+   *
+   * @param {{ capabilities: string[], expires?: Date|number|string, comment?: string }} opts
+   * @returns {Promise<string>}
+   */
+  async toAuthorizedKeysLine({ capabilities, expires, comment } = {}) {
+    return authorizedKeysLine({ rawPublicKey: await this.rawPublicKey(), capabilities, expires, comment });
   }
 
   /**
