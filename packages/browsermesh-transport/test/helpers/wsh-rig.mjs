@@ -1,7 +1,8 @@
 // Shared fixtures for the wsh link tests: an in-process pipe relay that can
 // record and tamper with every byte it copies, and a few pod/hub builders.
 import { PodIdentity } from '@johnhenry/browsermesh-primitives';
-import { createInProcessPipeRelay, WshPeerLinks } from '../../src/index.mjs';
+import { WshPeerLinks } from '../../src/index.mjs';
+import { createInProcessPipeRelay } from '../../src/wsh-in-process.mjs';
 
 export const RELAY = 'wss://relay.invalid';
 

@@ -149,15 +149,17 @@ export async function resolveCredential(identity) {
 let clientModule = null;
 let hostModule = null;
 
-async function loadWsh(entry) {
+// Literal specifiers on purpose: a bundler can only split (and a browser can only
+// resolve) an import() whose specifier it can read.
+async function loadWsh(load) {
   try {
-    return await import(entry);
+    return await load();
   } catch (cause) {
     throw new WshLinkError('WSH_UNAVAILABLE', `the wsh transport needs @johnhenry/wsh: install it (npm install @johnhenry/wsh). ${cause?.message ?? ''}`.trim(), { cause });
   }
 }
-const loadClient = () => (clientModule ??= loadWsh('@johnhenry/wsh'));
-const loadHost = () => (hostModule ??= loadWsh('@johnhenry/wsh/memory'));
+const loadClient = () => (clientModule ??= loadWsh(() => import('@johnhenry/wsh')));
+const loadHost = () => (hostModule ??= loadWsh(() => import('@johnhenry/wsh/memory')));
 
 function pipeUrl(relay, id, role) {
   const u = new URL(relay);
