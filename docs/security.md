@@ -53,7 +53,7 @@ table; they come from the READMEs, source headers and test directories.
 | `browsermesh-core` | implemented, with partial modules | identity managers and vault storage, keyring, capability tokens, group keys, ACL, trust: implemented (unit). `handshake.mjs`: partial (connection token is unsigned and the pod id is not checked against the key; mock transports). `hardening.mjs` and `peer.mjs`: marked experimental in source. `compat.mjs`: shim whose `BrowserTool#execute()` throws not-implemented by design. |
 | `browsermesh-pod` | implemented | pod, messaging and signing, discovery, host protocol, runtimes (worker_threads, permission-model), `WebSocketTransport` and BroadcastChannel transports (unit and real browser). `browser-host-driver`: partial (`exec` is deliberately not offered in the browser lane; `snapshot` and `restore` not implemented). |
 | `browsermesh-transport` | implemented, with partial modules | WebSocket, WebRTC (unit, real peer, real browser); wsh links (real wsh handshake over an in-process relay; not a browser); identity binding (duplex, real peer, real browser). WebTransport, relay client, wisp (mocks only). `channel-relay`, `gateway`, `cross-origin`, `streams` (unit). `NATTraversal` in `websocket.mjs`: placeholder values, partial. |
-| `browsermesh-apps` | implemented, with partial modules | registry, grant log, audit, mesh-rpc, mesh-fetch, message channel, protocol seam, relay host and backend, sync, cloud storage, key distribution, KV, escrow, pod-host service, placement, supervisor: implemented (mostly in process; a few over real peers). Partial: `mesh-bootstrap` (one real-peer test file), torrent (single-process fallback; real WebTorrent only under `test/real-torrent`), `peer-ipfs` (a local SHA-256 store, not IPFS), `peer-terminal` (no default shell), serverless executors (not an adversarial sandbox), GPU (real WebGPU only in a dedicated test), `mesh-dht` (no authentication), `compat.mjs`. Spec only: `wsh-objects` over the protocol seam. |
+| `browsermesh-apps` | implemented, with partial modules | registry, grant log, audit, mesh-rpc, mesh-fetch, message channel, protocol seam, relay host and backend, sync, cloud storage, key distribution, KV, escrow, pod-host service, placement, supervisor: implemented (mostly in process; a few over real peers). Partial: `mesh-bootstrap` (one real-peer test file), torrent (single-process fallback; real WebTorrent only under `test/real-torrent`), `peer-ipfs` (a local SHA-256 store, not IPFS), `peer-terminal` (no default shell), serverless executors (not an adversarial sandbox), GPU (real WebGPU only in a dedicated test), `mesh-dht` (no authentication), `compat.mjs`. `wsh-objects` (built in wsh, not here) runs over the protocol seam in `examples/19` and its test, an example-only dependency. |
 | `browsermesh-sync` | implemented, with partial modules | CRDT, delta sync, memory sync, file chunks, CIDv1, IndexedDB storage (unit, `fake-indexeddb`); CRDT convergence also over a real data channel in a browser. `collab` and `collab-bridge`: partial (marked experimental; stub document when Yjs is absent). |
 | `browsermesh-discovery` | partial | DHT has no iterative lookup (below); discovery strategies unsigned; naming, swarm, service-worker routing implemented (unit, unauthenticated); StealthAgent plain path documented as plaintext, encrypted/keyring path implemented; threshold key sharing is spec only (`docs/design/stealth-threshold.md`). |
 | `browsermesh-netway` | implemented | loopback, virtual network, policy, queue, sockets (byte-level backpressure), listener, router, service and fs backends, chaos wrapper (unit). `gateway-backend`: partial (mock wsh transport only). `backend.mjs`: abstract base. |
@@ -413,13 +413,21 @@ Package: `browsermesh-apps`.
 - **Options and defaults.** None of these is attached by `createMeshNode()`; each
   is opt-in (`services` / `attachService`). Channel names match
   `/^[a-z0-9][a-z0-9._-]{0,63}$/`.
-- **Not built.** The remote-object layer over the seam (wsh-objects), streams
-  larger than one message, a capability advertisement in discovery, per-root
-  authorization helpers.
+- **Not built.** Streams larger than one message, a capability advertisement in
+  discovery, per-root authorization helpers. The remote-object layer lives in wsh
+  (`@johnhenry/wsh/objects`, not a dependency of any package here); it runs over
+  the seam in `examples/19-wsh-objects-over-protocol-channel.mjs` and
+  `test/wsh-objects-over-channel.test.mjs`, with the per-root scope
+  `objects:<root>:<action>` asked of the registry for the channel's verified peer.
 - **Verified.** `mesh-rpc`/`browserMeshFetch`: unit, and echo/404 routing over a
   real WebRTC data channel in two browsers (the harness node has no registry or
   identity, so authorization is not exercised there). Message channel and seam:
-  unit and in-memory duplex only; never over real WebRTC or in a browser.
+  unit and in-memory duplex, and over a real WebRTC data channel in two
+  browsers (`tests/browser/protocol-channel.spec.mjs`: default deny, the open
+  scope, the verified peer seen by handlers, a 900 KB binary result chunked
+  across messages, progress, notifications, cancel, revocation closing the
+  channel at once, and a reader that stops reading holding the sender at one
+  window).
 - **Identifiers.** An id that matches a response to a request (rpc, proxy,
   dispatch, join, submit, witness, chunk, escrow, hosted-pod verbs) or names a
   connection (`mesh-websocket`, `mesh-relay`, wire streams) is 128 random bits
@@ -537,7 +545,7 @@ twice (two pods, one identity), resource exhaustion beyond configured limits.
 | Relay | yes | in-memory services | yes | | browser |
 | Shared servers | yes (real loopback upstreams) | | | | browser |
 | mesh-rpc / `browserMeshFetch` | yes | JSON-boundary network | | echo and 404 over a data channel | with a registry and identity in a browser |
-| Message channel, protocol seam | yes | in-memory duplex | | | real WebRTC, browser |
+| Message channel, protocol seam | yes | in-memory duplex | | yes (two browsers, real WebRTC) | |
 | Sync | yes | | | CRDT convergence over a data channel | file transfer over a real link |
 | Discovery, DHT, StealthAgent | yes | | | | any network |
 | Hosted pods | yes (fakes) | | | | real microVM, Firecracker host, `workerd`; `isolated-vm` against a real V8 exploit |

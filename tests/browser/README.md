@@ -62,6 +62,12 @@ Locally you may point Playwright at a browser you already have with
   Passes in Chromium and Firefox; WebKit does not open a data channel in the local run (it also fails
   `webrtc.spec.mjs` there).
 - mesh-rpc / `browserMeshFetch` and CRDT convergence over the real data channel.
+- The message channel and the protocol seam (`createMeshProtocolService`) over the real data channel
+  (`protocol-channel.spec.mjs`, #272): default deny and the `protocol:<name>:open` scope, the verified peer
+  handlers see (the session's, not a message field), requests with a 900 KB binary result chunked across
+  messages, progress, notifications, cancel (the callee's handler sees its `AbortSignal`), revocation closing
+  the channel at once and a later grant reopening it, and credit-based flow control (a reader that stops
+  reading holds the sender at one window; catching up delivers every message).
 - Examples 01, 02 and 05 unmodified in a page (their own transports stay
   simulated).
 - The packages load and run under the strict policy above.
