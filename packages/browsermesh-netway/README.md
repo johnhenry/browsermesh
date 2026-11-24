@@ -7,7 +7,7 @@ Virtual networking layer with BSD-socket-like abstractions for browser environme
 
 ## Why this exists
 
-Browsers give code no raw sockets and no uniform way to say "this piece of code may only reach the loopback backend, not the open internet." Every mesh-adjacent package that wants to move bytes between execution contexts -- in-memory for tests, proxied through a real `wsh` gateway for actual TCP/UDP/DNS, or intentionally denied by policy -- ends up needing the same `connect`/`listen`/`accept`/`read`/`write` shape and the same capability check in front of it. `browsermesh-netway` exists so that shape is written once: `VirtualNetwork` gives every backend (loopback, gateway-proxied, service-registry-routed, chaos-wrapped) the identical `StreamSocket`/`DatagramSocket`/`Listener` surface, and `PolicyEngine`/`ScopedNetwork` let a caller hand out a network view that's restricted to specific capabilities (`LOOPBACK`, `NET`, `DNS`, `RAW`) without the restricted code ever seeing the difference. It has zero dependencies on the rest of this monorepo -- nothing about "sockets with capability policy" requires identity, CRDTs, or a mesh transport to exist first.
+Browsers give code no raw sockets and no uniform way to say "this piece of code may only reach the loopback backend, not the open internet." Every mesh-adjacent package that wants to move bytes between execution contexts -- in-memory for tests, proxied through a real `wsh` gateway for actual TCP/UDP/DNS, or intentionally denied by policy -- ends up needing the same `connect`/`listen`/`accept`/`read`/`write` shape and the same capability check in front of it. `browsermesh-netway` exists so that shape is written once: `VirtualNetwork` gives every backend (loopback, gateway-proxied, service-registry-routed, chaos-wrapped) the identical `StreamSocket`/`DatagramSocket`/`Listener` surface, and `PolicyEngine`/`ScopedNetwork` let a caller hand out a network view that's restricted to specific capabilities (`TCP_CONNECT`, `TCP_LISTEN`, `UDP_SEND`, `UDP_BIND`, `DNS_RESOLVE`, `LOOPBACK`, or `ALL`) without the restricted code ever seeing the difference. It has zero dependencies on the rest of this monorepo -- nothing about "sockets with capability policy" requires identity, CRDTs, or a mesh transport to exist first.
 
 ## Used by
 
@@ -63,7 +63,7 @@ await net.close();
 ### Constants & Errors
 
 - `DEFAULTS` -- default configuration values
-- `CAPABILITY` -- capability tags (`LOOPBACK`, `NET`, `DNS`, `RAW`)
+- `CAPABILITY` -- capability tags (`TCP_CONNECT` = `tcp:connect`, `TCP_LISTEN`, `UDP_SEND`, `UDP_BIND`, `DNS_RESOLVE`, `LOOPBACK`, `ALL` = `*`)
 - `GATEWAY_ERROR` -- gateway error codes
 - `NetwayError` -- base error class
 - `ConnectionRefusedError`, `PolicyDeniedError`, `AddressInUseError`, `QueueFullError`, `UnknownSchemeError`, `SocketClosedError`, `OperationTimeoutError`
