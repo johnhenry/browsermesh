@@ -11,6 +11,7 @@
     "test": "turbo run test --concurrency=4",
     "test:real-peer": "npm run test:real-peer --workspace=@johnhenry/browsermesh-transport && npm run test:real-peer --workspace=@johnhenry/browsermesh-apps",
     "test:real-gpu": "npm run test:real-gpu --workspace=@johnhenry/browsermesh-apps",
+    "test:real-firecracker": "npm run test:real-firecracker --prefix spikes/vm-pod-host",
     "changeset": "changeset",
     "version-packages": "changeset version",
     "release": "changeset publish",

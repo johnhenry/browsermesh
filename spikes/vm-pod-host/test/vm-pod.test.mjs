@@ -267,6 +267,72 @@ describe('VmPod state machine', () => {
     })
   })
 
+  describe('jailed (chroot) paths', () => {
+    const ROOT = '/srv/jailer/firecracker/demo/root'
+    const jailed = (overrides = {}) => makePod({
+      jail: { root: ROOT, uid: 100003, gid: 100003 },
+      kernelImage: '/boot/vmlinux',
+      rootfs: undefined,
+      rootfsBase: '/vm/base/alpine.ext4',
+      vmmArgv: ['jailer', '--id', 'demo', '--daemonize'],
+      signalingUrl: 'wss://signal.example.com/ws',
+      ...overrides,
+    })
+
+    it('stages the kernel and a private rootfs inside the jail after the VMM starts, before the network', async () => {
+      const pod = jailed()
+      await pod.boot()
+      const argvs = pod.plannedCommands.map((c) => c.argv)
+      assert.deepEqual(argvs[0], ['jailer', '--id', 'demo', '--daemonize'])
+      assert.deepEqual(argvs.slice(1, 6).map((a) => a[0]), ['cp', 'cp', 'chown', 'chmod', 'chmod'])
+      assert.equal(argvs[6][0], 'ip', 'network setup follows staging')
+      assert.ok(!argvs.some((a) => a[0] === 'mkdir'), 'no stray directory outside the jail is created')
+    })
+
+    it('gives Firecracker paths as the jail sees them, and the guest its address and signaling URL', async () => {
+      const pod = jailed()
+      await pod.boot()
+      const call = (api) => pod.plannedApiCalls.find((c) => c.api === api).args
+      assert.equal(call('putBootSource').kernel_image_path, 'vmlinux')
+      assert.equal(call('putBootSource').boot_args.includes('ip=10.200.0.2::10.200.0.1:255.255.255.252::eth0:off'), true)
+      assert.match(call('putBootSource').boot_args, /signaling_url=wss:\/\/signal\.example\.com\/ws$/)
+      assert.equal(call('putDrive')[1].path_on_host, 'rootfs.ext4')
+      assert.equal(call('putVsock').uds_path, 'v.sock')
+    })
+
+    it('the host reaches the vsock socket and the snapshot files under the jail root', async () => {
+      const pod = jailed()
+      assert.equal(pod.vsockUdsPath, `${ROOT}/v.sock`)
+      assert.equal(pod.snapshotVmStatePath, `${ROOT}/vmstate`)
+      assert.equal(pod.snapshotMemPath, `${ROOT}/mem`)
+      await pod.boot()
+      pod.markRegistered('g')
+      await pod.pause()
+      await pod.snapshot()
+      assert.deepEqual(pod.plannedApiCalls.find((c) => c.api === 'createSnapshot').args, {
+        snapshot_path: 'vmstate', mem_file_path: 'mem', snapshot_type: 'Full',
+      })
+    })
+
+    it('restore unlinks the stale socket by its host path and loads the snapshot by its jail path', async () => {
+      const pod = jailed()
+      await pod.boot()
+      pod.markRegistered('g')
+      await pod.pause()
+      await pod.snapshot()
+      pod.plannedCommands.length = 0
+      await pod.restore()
+      assert.ok(pod.plannedCommands.some((c) => c.argv.join(' ') === `rm -f ${ROOT}/v.sock`))
+      assert.deepEqual(pod.plannedApiCalls.find((c) => c.api === 'loadSnapshot').args.mem_backend, {
+        backend_type: 'File', backend_path: 'mem',
+      })
+    })
+
+    it('refuses a root identity for the jail', () => {
+      assert.throws(() => jailed({ jail: { root: ROOT, uid: 0, gid: 1 } }), /uid/)
+    })
+  })
+
   describe('host commands fail closed', () => {
     it('does not configure or start the VM when installing the network rules fails', async () => {
       const apiCalls = []

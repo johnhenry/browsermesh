@@ -221,10 +221,10 @@ export function createVmPodDriver(vmPodHost, opts = {}) {
 
       const spawnOpts = {
         kernelImage,
-        // The catalog entry is a shared, read-only base; each pod boots its
-        // own copy, so one pod's writes are never another pod's disk.
+        // The catalog entry is a shared base; the host stages a private copy
+        // for each pod inside its jail, so one pod's writes are never
+        // another pod's disk.
         rootfsBase,
-        rootfs: `${runDir}/${name}/rootfs.ext4`,
         tap: { hostDevName: tapDeviceName(name) },
         vsock: { guestCid, udsPath: `${runDir}/${name}.vsock` },
         ...(network === undefined ? {} : { network }),
