@@ -21,6 +21,7 @@ import assert from 'node:assert/strict'
 import { PeerRegistry } from '../src/peer-registry.mjs'
 import { attachService } from '../src/mesh-service.mjs'
 import { createMeshWebSocketService, BrowserMeshWebSocket } from '../src/mesh-websocket.mjs'
+import { fakeClock } from './helpers/fake-clock.mjs'
 import {
   IdentityWallet,
   MeshIdentityManager,
@@ -505,6 +506,118 @@ describe('mesh-websocket: addEventListener/removeEventListener', () => {
 // ---------------------------------------------------------------------------
 // Invalid URL
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Accepted sessions end when the permission that admitted them ends
+// ---------------------------------------------------------------------------
+
+describe('mesh-websocket: an accepted session closes when its grant ends', () => {
+  const GRANT = 'mesh-websocket:chat:connect'
+
+  /** Bob accepts connections from alice under a grant, with an injected clock. */
+  async function accepting(serviceOpts) {
+    const alice = await createPeer('alice')
+    const bob = await createPeer('bob')
+    const clock = fakeClock()
+    bob.registry = new PeerRegistry({
+      localPodId: bob.podId,
+      peerManager: new MeshPeerManager({}),
+      trustGraph: new TrustGraph(),
+      acl: new MeshACL({ owner: bob.podId }),
+      clock,
+    })
+    const { nodeA, nodeB } = wireNodes(alice, bob)
+    const sessions = []
+    const events = []
+    const bobService = attachService(nodeB, undefined, createMeshWebSocketService({
+      onIncomingConnection: (session) => sessions.push(session),
+      ...serviceOpts,
+    }))
+    bobService.on('mesh-websocket:connection-revoked', (e) => events.push(e))
+    return { alice, bob, clock, nodeA, nodeB, sessions, events, bobService }
+  }
+
+  it('requires the grant to accept, and closes the session (both ends) when the grant is revoked', async () => {
+    const t = await accepting({ accessResource: 'mesh-websocket:chat' })
+    // No grant: refused.
+    const refused = new BrowserMeshWebSocket(`mesh://${t.bob.podId}/chat`, { peerNode: t.nodeA })
+    assert.equal((await waitForEvent(refused, 'close')).code, 4403)
+
+    t.bob.registry.grantCapabilities(t.alice.podId, [GRANT])
+    const client = new BrowserMeshWebSocket(`mesh://${t.bob.podId}/chat`, { peerNode: t.nodeA })
+    await waitForEvent(client, 'open')
+    assert.equal(t.sessions.length, 1)
+
+    const clientClosed = waitForEvent(client, 'close')
+    t.bob.registry.revokeCapabilities(t.alice.podId, [GRANT])
+    const close = await clientClosed
+    await waitFor(() => t.sessions[0].readyState === BrowserMeshWebSocket.CLOSED, 500, 'server session closed')
+    assert.equal(close.code, 4403)
+    assert.equal(close.reason, 'access revoked')
+    assert.deepEqual(t.events.map((e) => e.from), [t.alice.podId])
+  })
+
+  it('closes the session when the grant expires, with no further traffic and no wall-clock time', async () => {
+    const t = await accepting({ accessResource: 'mesh-websocket:chat' })
+    t.bob.registry.grantCapabilities(t.alice.podId, [GRANT], { expiresAt: t.clock.now() + 60_000 })
+    const client = new BrowserMeshWebSocket(`mesh://${t.bob.podId}/chat`, { peerNode: t.nodeA })
+    await waitForEvent(client, 'open')
+    t.clock.advance(59_999)
+    assert.equal(t.sessions[0].readyState, BrowserMeshWebSocket.OPEN)
+    const clientClosed = waitForEvent(client, 'close')
+    t.clock.advance(1)
+    assert.equal((await clientClosed).reason, 'access revoked')
+    await waitFor(() => t.sessions[0].readyState === BrowserMeshWebSocket.CLOSED, 500, 'server session closed')
+  })
+
+  it('leaves the sessions of other peers, and sessions the change did not affect, alone', async () => {
+    const t = await accepting({ accessResource: 'mesh-websocket:chat' })
+    t.bob.registry.grantCapabilities(t.alice.podId, [GRANT, 'mesh-websocket:other:connect'])
+    const client = new BrowserMeshWebSocket(`mesh://${t.bob.podId}/chat`, { peerNode: t.nodeA })
+    await waitForEvent(client, 'open')
+    t.bob.registry.revokeCapabilities(t.alice.podId, ['mesh-websocket:other:connect'])
+    t.bob.registry.grantCapabilities('somebody-else', [GRANT], { expiresAt: t.clock.now() + 1 })
+    t.clock.advance(1)
+    assert.equal(t.sessions[0].readyState, BrowserMeshWebSocket.OPEN)
+  })
+
+  it('without accessResource the accept hook is asked again when that peer\'s access changes, and a refusal closes the session', async () => {
+    let allowed = true
+    const t = await accepting({ onConnection: () => allowed })
+    const client = new BrowserMeshWebSocket(`mesh://${t.bob.podId}/chat`, { peerNode: t.nodeA })
+    await waitForEvent(client, 'open')
+    // A change for somebody else does not close it; the hook says no, but it is not asked.
+    allowed = false
+    t.bob.registry.notifyAccessChange('somebody-else')
+    await new Promise((r) => setImmediate(r))
+    assert.equal(t.sessions[0].readyState, BrowserMeshWebSocket.OPEN)
+    const clientClosed = waitForEvent(client, 'close')
+    t.bob.registry.notifyAccessChange(t.alice.podId)
+    assert.equal((await clientClosed).reason, 'access revoked')
+  })
+
+  it('recheckOnAccessChange: false keeps the old behaviour (the hook is not asked again)', async () => {
+    let asked = 0
+    const t = await accepting({ onConnection: () => { asked++; return true }, recheckOnAccessChange: false })
+    const client = new BrowserMeshWebSocket(`mesh://${t.bob.podId}/chat`, { peerNode: t.nodeA })
+    await waitForEvent(client, 'open')
+    t.bob.registry.notifyAccessChange(t.alice.podId)
+    await new Promise((r) => setImmediate(r))
+    assert.equal(asked, 1)
+    assert.equal(t.sessions[0].readyState, BrowserMeshWebSocket.OPEN)
+  })
+
+  it('stops listening to the registry when the service is torn down', async () => {
+    let asked = 0
+    const t = await accepting({ onConnection: () => { asked++; return true } })
+    const client = new BrowserMeshWebSocket(`mesh://${t.bob.podId}/chat`, { peerNode: t.nodeA })
+    await waitForEvent(client, 'open')
+    t.bobService.teardown()
+    t.bob.registry.notifyAccessChange(t.alice.podId)
+    await new Promise((r) => setImmediate(r))
+    assert.equal(asked, 1)
+  })
+})
 
 describe('mesh-websocket: constructor validation', () => {
   it('throws for a non-mesh URL', async () => {

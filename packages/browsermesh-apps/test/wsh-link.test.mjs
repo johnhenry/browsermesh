@@ -16,7 +16,8 @@ import assert from 'node:assert/strict'
 import { createMeshNode } from '../src/mesh-bootstrap.mjs'
 import { createMeshRpcService } from '../src/mesh-rpc.mjs'
 import { createMeshRelayBackend } from '../src/mesh-relay-backend.mjs'
-import { createWshAuthorizer } from '../src/wsh-negotiator.mjs'
+import { createWshAuthorizer, watchWshAccess } from '../src/wsh-negotiator.mjs'
+import { fakeClock } from './helpers/fake-clock.mjs'
 import { PeerNode } from '../src/peer-node.mjs'
 import { PeerRegistry } from '../src/peer-registry.mjs'
 import { ManualStrategy } from '@johnhenry/browsermesh-discovery'
@@ -96,7 +97,63 @@ describe('createWshAuthorizer', () => {
   })
 })
 
+describe('watchWshAccess', () => {
+  const registryWith = (clock) => new PeerRegistry({ localPodId: 'local-pod', peerManager: new MeshPeerManager({}), trustGraph: new TrustGraph(), acl: new MeshACL({ owner: 'local-pod' }), clock })
+  /** Just enough of a `WshPeerLinks`: who is linked, and a record of who was disconnected. */
+  const fakeLinks = (...linked) => {
+    const live = new Set(linked)
+    return { live, disconnected: [], isConnected: (id) => live.has(id), disconnect(id) { live.delete(id); this.disconnected.push(id) } }
+  }
+
+  it('closes the live link of a peer whose mesh:link:connect is revoked, and leaves the others', () => {
+    const registry = registryWith()
+    registry.grantCapabilities('x', ['mesh:link:connect'])
+    registry.grantCapabilities('y', ['mesh:link:connect'])
+    const links = fakeLinks('x', 'y')
+    watchWshAccess({ registry, links })
+    registry.revokeCapabilities('x', ['mesh:link:connect'])
+    assert.deepEqual(links.disconnected, ['x'])
+    registry.grantCapabilities('z', ['something:else'])
+    assert.deepEqual(links.disconnected, ['x'])
+  })
+
+  it('closes the link when the grant expires', () => {
+    const clock = fakeClock()
+    const registry = registryWith(clock)
+    registry.grantCapabilities('x', ['mesh:link:connect'], { expiresAt: clock.now() + 5000 })
+    const links = fakeLinks('x')
+    watchWshAccess({ registry, links })
+    clock.advance(4999)
+    assert.deepEqual(links.disconnected, [])
+    clock.advance(1)
+    assert.deepEqual(links.disconnected, ['x'])
+  })
+
+  it('stops watching when told to', () => {
+    const registry = registryWith()
+    registry.grantCapabilities('x', ['mesh:link:connect'])
+    const links = fakeLinks('x')
+    const stop = watchWshAccess({ registry, links })
+    stop()
+    registry.revokeCapabilities('x', ['mesh:link:connect'])
+    assert.deepEqual(links.disconnected, [])
+  })
+})
+
 describe('mesh nodes over a wsh link', () => {
+  it('revoking mesh:link:connect closes the live link, and the node is told its transport closed', async () => {
+    const { alice, bob } = await pair()
+    bob.registry.grantCapabilities(alice.podId, ['mesh:link:connect'])
+    await alice.connectToPeer(bob.podId, { wsh: bob.podId })
+    await waitFor(() => bob.hasActiveSession(alice.podId))
+    const closed = []
+    bob.on('peer:transport-close', (e) => closed.push(e.pubKey))
+    bob.registry.revokeCapabilities(alice.podId, ['mesh:link:connect'])
+    await waitFor(() => !bob.wsh.links.isConnected(alice.podId), 4000, "bob's wsh link to alice closed")
+    await waitFor(() => closed.includes(alice.podId), 4000, 'the node was told the transport closed')
+    assert.equal(bob.wsh.links.isConnected(alice.podId), false)
+  })
+
   it('connectToPeer links the nodes; both sides get a session under the authenticated key', async () => {
     const { alice, bob } = await pair()
     bob.registry.grantCapabilities(alice.podId, ['mesh:link:connect'])

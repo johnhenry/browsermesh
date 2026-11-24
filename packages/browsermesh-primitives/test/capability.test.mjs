@@ -96,6 +96,38 @@ describe('matchScope', () => {
     assert.equal(matchScope('mesh', 'mesh:crdt:write'), true);
     assert.equal(matchScope('mesh:crdt', 'mesh:crdt:write'), true);
   });
+
+  // Segment by segment, for any number of segments: nothing past the third is ignored.
+  const TABLE = [
+    // [granted, required, covers]
+    ['a:b:c:d', 'a:b:c:d', true],
+    ['a:b:c:d', 'a:b:c:e', false],
+    ['a:b:c:d', 'a:b:c', false],
+    ['a:b:c:*', 'a:b:c:anything', true],
+    ['a:b:*:d', 'a:b:x:d', true],
+    ['a:b:*:d', 'a:b:x:e', false],
+    ['a:*:c:d', 'a:b:c:d', true],
+    ['*:b:c:d', 'z:b:c:d', true],
+    ['a:b:c', 'a:b:c:d', true], // a shorter grant covers what is beneath it
+    ['a:b', 'a:b:c:d:e', true],
+    ['a:b:c:d:e', 'a:b:c:d:f', false],
+    ['*', 'a:b:c:d:e', true],
+    ['a:b:c', 'a:b:x:d', false],
+    // two- and three-segment behaviour is unchanged
+    ['chat:*', 'chat:read', true],
+    ['chat:read', 'chat:write', false],
+    ['*:*', 'files:read', true],
+    ['mesh-relay:svc:connect', 'mesh-relay:svc:connect', true],
+    ['mesh-relay:svc:connect', 'mesh-relay:other:connect', false],
+    ['mesh-relay:*:connect', 'mesh-relay:svc:connect', true],
+    ['mesh-relay:*:connect', 'mesh-relay:svc:disconnect', false],
+    ['mesh:link:connect', 'mesh:link:connect', true],
+  ];
+  for (const [granted, required, covers] of TABLE) {
+    it(`${granted} ${covers ? 'covers' : 'does not cover'} ${required}`, () => {
+      assert.equal(matchScope(granted, required), covers);
+    });
+  }
 });
 
 describe('CapabilityToken', () => {

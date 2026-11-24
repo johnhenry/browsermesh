@@ -743,7 +743,13 @@ export function createTorrentService({
 
           let bucket = buckets.get(fromPubKey)
           if (!bucket) buckets.set(fromPubKey, (bucket = createByteBucket({ rate: maxBytesPerPeerPerSec, now, sleep })))
-          await bucket.take(bytes.length)
+          // The budget may have made this wait. Permission is decided again once it is over, so a requester
+          // whose permission ended while it waited is not sent the piece.
+          const waited = await bucket.take(bytes.length)
+          if (waited && !(await mayServe(fromPubKey, requestFor('chunk', allowedBy, held.get(allowedBy), msg.cid)))) {
+            ctx.emit('torrent:request-denied', { from: fromPubKey, kind: 'chunk', cid: msg.cid })
+            return await notFound()
+          }
 
           let sent = true
           // Piece data rides the bulk lane so it cannot starve control traffic

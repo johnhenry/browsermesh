@@ -427,6 +427,21 @@ export function createSwarmService(opts = {}) {
       /** @type {Map<string, {resolve: Function, reject: Function, timer: ReturnType<typeof setTimeout>}>} */
       const pendingJoinRequests = new Map()
 
+      // A member admitted through the join gate holds that grant: when the registry says its access changed
+      // (revoked, removed, updated, or the grant expired) the gate is asked again and a member that would no
+      // longer be admitted is removed from the swarm (a member the operator added with `join()` is not touched).
+      /** @type {Set<string>} */
+      const admittedByGate = new Set()
+      const unsubscribeAccess = typeof ctx.registry?.onAccessChange === 'function'
+        ? ctx.registry.onAccessChange(({ pubKey } = {}) => {
+          if (!admittedByGate.has(pubKey)) return
+          if (ctx.registry.checkAccess(pubKey, accessResource, 'join')?.allowed === true) return
+          admittedByGate.delete(pubKey)
+          ensureCoordinatorLeave(pubKey) // the same path as a member that says it is leaving: one coordinator.leave(), one 'swarm:member-left'
+          ctx.emit('swarm:member-revoked', { podId: pubKey })
+        })
+        : () => {}
+
       async function handleJoinRequest(fromPubKey, msg) {
         const access = ctx.registry.checkAccess(fromPubKey, accessResource, 'join')
         if (!access.allowed) {
@@ -441,6 +456,7 @@ export function createSwarmService(opts = {}) {
           }).catch((err) => log('mesh-swarm:join-response-send-failed', { to: fromPubKey, error: err?.message || String(err) }))
           return
         }
+        admittedByGate.add(fromPubKey)
         swim.addMember(fromPubKey) // cascades: swim.onJoin -> coordinator.join() + ctx.emit('swarm:member-joined')
         ctx.emit('swarm:join-request-granted', { from: fromPubKey })
         await ctx.sendTo(fromPubKey, membershipEnvelopeType, {
@@ -667,6 +683,7 @@ export function createSwarmService(opts = {}) {
           unsubscribeSwim()
           unsubscribeHeartbeat()
           unsubscribeMembership()
+          unsubscribeAccess()
           unsubscribeTask()
           for (const pending of pendingJoinRequests.values()) {
             clearTimeout(pending.timer)

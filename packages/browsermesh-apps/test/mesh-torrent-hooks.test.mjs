@@ -587,6 +587,33 @@ describe('createTorrentService: authorize', () => {
     assert.deepEqual(chunkCalls.map((c) => c.req.chunkCid).sort(), [...bobHandle.api.getManifest(info.magnetURI).chunkCids].sort())
   })
 
+  it('a piece that waited for the rate limit is served only if the requester is still allowed once the wait is over', async () => {
+    let allowed = true
+    let clock = 0
+    const waiting = []
+    // The second piece has to wait for the byte budget; the wait is held open by the test.
+    const sleep = (ms) => new Promise((resolve) => { waiting.push(() => { clock += ms; resolve() }) })
+    const ctxs = await pair({ authorize: () => allowed, maxBytesPerPeerPerSec: 4, sleep, now: () => clock })
+    const info = await ctxs.aliceHandle.api.seed(new TextEncoder().encode('0123456789ab'), { name: 'secret.txt' })
+    const m = ctxs.aliceHandle.api.getManifest(info.magnetURI)
+    const box = recordInbox(ctxs.nodeB)
+
+    // The first piece is within the budget and is served at once.
+    const first = await rawRequest(ctxs.nodeB, box, ctxs.alice.podId, { kind: 'chunk-request', cid: m.chunkCids[0] })
+    assert.ok(first.data, 'served')
+
+    // The second waits. While it waits the permission ends.
+    const requestId = 'raw-waiting'
+    await ctxs.nodeB.sendTo(ctxs.alice.podId, { type: 'mesh-torrent', requestId, kind: 'chunk-request', cid: m.chunkCids[1] })
+    await waitFor(() => waiting.length === 1, 1000, 'the second piece is waiting for budget')
+    allowed = false
+    waiting.shift()()
+    await waitFor(() => box.some((e) => e.msg.requestId === requestId), 1000, 'reply to the waiting request')
+    const reply = box.find((e) => e.msg.requestId === requestId).msg
+    assert.equal(reply.error, 'not-found')
+    assert.equal(reply.data, undefined)
+  })
+
   it('supports an async authorize, and can gate per requester', async () => {
     let allowedRequester = null
     const { aliceHandle, bobHandle, alice, bob } = await pair({

@@ -87,14 +87,49 @@ function bodyForFetch(body, method) {
  * @param {object} opts
  * @param {string} opts.targetOrigin - e.g. `'https://api.example.com'`. `path` is resolved against this via `new URL(path, targetOrigin)`.
  * @param {boolean} [opts.spaFallback=false] - on a 404 from the target, retry `/index.html` under `targetOrigin` and serve that instead (client-side-routed SPA convention, matching `actually-serverless`'s own proxy handler).
- * @returns {(req: {path: string, method?: string, headers?: object, body?: *}) => Promise<{status: number, headers: object, body: Uint8Array|string}>}
- *   Never returns `null` -- see module doc comment.
+ * @param {(pubKey: string, resource: string, action: string) => {allowed: boolean, reason?: string}} [opts.checkAccess] -
+ *   Who may use the proxy: called as `checkAccess(req.fromPubKey, resource, 'request')`, like `ServerSharing` does
+ *   with the registry. Required unless `opts.public` is true: **with neither, every request is answered 403**
+ *   and nothing is fetched. A synchronous answer with `allowed: true` allows; anything else, a throw included, denies.
+ * @param {string} [opts.resource] - ACL resource checked (default `serverless-proxy:<host of targetOrigin>`).
+ * @param {boolean} [opts.public=false] - skip the check: any caller may use the proxy.
+ * @returns {(req: {fromPubKey?: string, path: string, method?: string, headers?: object, body?: *}) => Promise<{status: number, headers: object, body: Uint8Array|string}>}
+ *   Never returns `null` -- see module doc comment. `req.fromPubKey` is the identity of the requesting peer,
+ *   taken from the session the request arrived on (the serverless router passes it).
  */
-export function createProxyHandler({ targetOrigin, spaFallback = false, maxResponseBytes = PROXY_LIMITS_DEFAULTS.maxResponseBytes, requestTimeoutMs = PROXY_LIMITS_DEFAULTS.requestTimeoutMs } = {}) {
+export function createProxyHandler({
+  targetOrigin,
+  spaFallback = false,
+  maxResponseBytes = PROXY_LIMITS_DEFAULTS.maxResponseBytes,
+  requestTimeoutMs = PROXY_LIMITS_DEFAULTS.requestTimeoutMs,
+  checkAccess,
+  resource,
+  public: isPublic = false,
+} = {}) {
   if (!targetOrigin || typeof targetOrigin !== 'string') {
     throw new Error('createProxyHandler: opts.targetOrigin is required and must be a string')
   }
+  if (checkAccess !== undefined && typeof checkAccess !== 'function') {
+    throw new TypeError('createProxyHandler: opts.checkAccess must be a function (pubKey, resource, action) => { allowed }')
+  }
   const origin = new URL(targetOrigin) // throws synchronously on an invalid URL -- fail at construction, not on first request
+  const gateResource = resource || `serverless-proxy:${encodeURIComponent(origin.host)}`
+
+  /**
+   * Who may use this proxy: `checkAccess(fromPubKey, resource, 'request')` must answer `{ allowed: true }`
+   * for the key of the session the request arrived on (never a field of the request). With neither
+   * `checkAccess` nor `public: true` nobody may, so a proxy is never an open door by omission.
+   */
+  function mayRequest(fromPubKey) {
+    if (isPublic) return true
+    if (typeof checkAccess !== 'function') return false
+    if (typeof fromPubKey !== 'string' || fromPubKey === '') return false
+    try {
+      return checkAccess(fromPubKey, gateResource, 'request')?.allowed === true
+    } catch {
+      return false
+    }
+  }
 
   /**
    * Read a response body as bytes, never holding more than `maxResponseBytes`.
@@ -131,7 +166,10 @@ export function createProxyHandler({ targetOrigin, spaFallback = false, maxRespo
   // request cannot leave the target origin.
   const fetchOptions = (init) => ({ ...init, redirect: 'manual', signal: AbortSignal.timeout(requestTimeoutMs) })
 
-  return async function handleProxy({ path = '/', method = 'GET', headers = {}, body } = {}) {
+  return async function handleProxy({ fromPubKey, path = '/', method = 'GET', headers = {}, body } = {}) {
+    if (!mayRequest(fromPubKey)) {
+      return { status: 403, headers: { 'content-type': 'text/plain' }, body: 'Forbidden' }
+    }
     const resolved = resolveTarget(origin.origin, path)
     if (!resolved.ok) {
       return { status: 400, headers: { 'content-type': 'text/plain' }, body: `Bad Request: ${resolved.reason}` }
