@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.0
+
+### Minor Changes
+
+- aaa4903: `StealthAgent` gains an opt-in `keyring` option (`StealthKeyring`): sealed state uses a v2 envelope with a key id (so keys rotate with overlap), a sequence number and issue time (older state is refused as replayed, `maxAgeMs` refuses stale state), and the agent id and message type as AES-GCM associated data, with a per-key message budget. New `sealStealthMessage` / `openStealthMessage` / `StealthError`, `tryReconstituteEncrypted()` (a quiet, counted failure for peers without the key, plaintext or foreign state) and `stats`. The single-`key` v1 path and the plaintext `hide()` / `reconstitute()` are unchanged. The README now states what StealthAgent hides and from whom; threshold key sharing is documented as a design only.
+
+### Patch Changes
+
+- 15d5f74: File headers, comments, log tags, READMEs and examples no longer carry the name of the private monorepo this code was extracted from. No behaviour change, with these naming additions: `BrowsermeshEmbed` is the primary export of `@johnhenry/browsermesh-embed` and `ClawserEmbed` stays as a deprecated alias; the debug switch is now the `browsermesh_debug` localStorage key and the `[browsermesh:silent-catch]` console prefix, and the old `clawser_debug` key still works as a deprecated alias.
+
 ## 0.2.1
 
 ### Patch Changes

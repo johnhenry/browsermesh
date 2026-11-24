@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.17.0
+
+### Minor Changes
+
+- 9eb5b87: `PaymentRouter.attachEscrowManager(manager, { delegateWire: true })` hands an inbound `ESCROW_CREATE` to the conditional `EscrowManager` (the sending pod is the payer and is debited through the manager's ledger) instead of only recording it in the router's wire book. Off by default: without the option nothing changes. The manager needs a per-pod ledger (`MultiPartyCreditLedger`, or a `mutateLedger` hook).
+- b98cac2: Add `createMeshChannelService()` (`mesh-channel.mjs`, also exported as `@johnhenry/browsermesh-apps/mesh-channel`): a message-oriented duplex channel beside `mesh-rpc` with requests in both directions, notifications, per-request progress and cancel, native `Uint8Array` values, a negotiated maximum message size enforced before a message is assembled, byte-based credit flow control, bounded in-flight requests per peer, close semantics that reject pending requests, and the caller's verified identity handed to every handler. It is negotiated with a version handshake; a peer that does not run it is never sent more than one `hello` and `open()` rejects cleanly. `mesh-rpc` is unchanged apart from its request ids, which now carry a random component (same string shape, one extra colon-separated field).
+- a4afff2: Add the pure placement logic for hosted pods: `planPlacement()` (lane, verb, health, isolation boundary, capability and admission-limit matching, requester quota, ranking), `HostHealth` (per-host circuit breaker), `PlacementLedger`, and `createHostPool()` (spawn, drain, drain-a-host with make-before-break re-placement, restart decisions) over any `PodHostDriver`. The restart policy and backoff curve the pod supervisor already used are now shared as `decideRestart()` / `restartDelayMs()` / `policyWantsRestart()`; the supervisor's behaviour is unchanged. All additive: nothing uses the new exports unless called.
+- 56b364d: Add the protocol-channel seam (`protocol-channel.mjs`, also `@johnhenry/browsermesh-apps/protocol-channel`): a documented duplex interface for layered protocols (`send`, `onMessage`, `request` with cancel and progress, `notify`, `onRequest`, `onNotification`, `onClose`, `peer`, `maxMessageBytes`), opened by name with `openProtocol` / `serveProtocol` over a mesh-channel link. Opening is authorised per protocol through `PeerRegistry.checkAccess` with the scope `protocol:<name>:open` (default deny, registry wildcards), re-checked on every use; `listProtocols` discovers what a peer will let you open. `createProtocolHost` works over any mesh-channel link, including a bare in-memory duplex. Nothing is served or authorised unless configured.
+- 171ba28: Relayed connections end with the permission that allowed them, and hold a bounded amount of memory.
+
+  `@johnhenry/browsermesh-apps`:
+
+  - `MeshRelayHost` closes a peer's open connections, in both directions and with a reason, when the registry announces an access change (new `PeerRegistry#onAccessChange()` / `notifyAccessChange()`, fired by `revokeCapabilities()`, `removePeer()` and `updatePermissions()`), on `recheck()`, and every `recheckIntervalMs` (default 30000, `0` disables). `hideService()` and `detach()` close the matching connections; a connect that completes after `detach()`, a hidden service or a revocation is not acknowledged and its socket is closed.
+  - Byte credit per connection (`highWaterBytes` 262144, `lowWaterBytes` 65536), a cap on unconsumed bytes per connection (`maxBufferedBytesPerConnection` 1048576) and per peer (`maxBufferedBytesPerPeer` 4194304), `maxConnectionsPerPeer` 16 and `maxFrameBytes` 65536, all options of `MeshRelayHost` (and, for the first four, `createMeshRelayBackend()`); `createMeshNode({ relayHostOptions })` passes them on. `host.stats()` / `backend.stats()` report buffered and in-flight bytes. A close sent for any of these reasons carries a `reason`, shown to the client as `socket.closeReason`.
+  - Wire additions, all optional fields or new frames an older peer ignores: `window` on `connect` and `ok`, `credit` frames (sent only to a peer that advertised a window), `reason` on `close`. An older peer is held to the byte caps and is never paused.
+  - `createMeshNode()` option `relayHostOptions`.
+
+  `@johnhenry/browsermesh-netway`:
+
+  - `StreamSocket#close(reason)` records why a socket was closed: the reason is readable as `closeReason` on both endpoints (the first reason given is kept) and is carried by `SocketClosedError#reason` on writes that fail afterwards. `close()` without a reason behaves as before. (Byte-level backpressure for `StreamSocket` is described in its own changeset.)
+
+- a1411f9: `ServerSharing` and `createProxyHandler()` build the upstream request target from parsed parts and keep it on the configured origin.
+
+  - The target is the configured origin plus a path and query from the peer. The path must begin with a single `/` and may not contain a scheme, authority, backslash, whitespace, control character or fragment; the resolved origin must equal the configured one, otherwise the request is refused (400) and nothing is sent.
+  - Peer requests to `ServerSharing` must pass `registry.checkAccess(peerKey, 'server-share:<name>', 'request')`, with `peerKey` the key of the session the message arrived on. New option `registry` (on `ServerSharing` and `createMeshRoutingService()`). Without a registry, peer requests are refused (403); a `handleRequest(request)` call with no second argument is an in-process call and is unchanged. Grant with `registry.grantCapabilities(peer, ['server-share:<name>:request'])`.
+  - Methods, request headers, header count and size, request body size, response size and request time are bounded, with options (`allowedMethods`, `allowedRequestHeaders`, `maxRequestBodyBytes`, `maxResponseBytes`, `maxHeaderCount`, `maxHeaderBytes`, `requestTimeoutMs`) and defaults listed in the README. `Host`, hop-by-hop headers, `Cookie` and `Authorization` are not taken from a peer; `expose(port, name, { headers })` sets headers the sharer chooses to send. Share names may not contain `:` or `*`.
+  - Redirects from the upstream are not followed; the 3xx response is returned as it is. A response larger than the bound is refused (502), never truncated.
+  - A proxy response is accepted only from the peer the request was sent to.
+
+  Behaviour change to note: a host that used `createMeshRoutingService({ fetchFn })` without a registry now refuses every peer request until it passes `registry` and grants the scope.
+
+- e39a071: Pod hosts that can spawn pods but have no shell (the isolate and browser lanes) are now visible to placement scoring. `listComputeCandidates(constraints, { includeSpawnHosts: true })` and `selectComputeTarget({ includeSpawnHosts: true })` also return them, as `spawn` + `runtime:<lane>` descriptors that never carry `compute`; without the option nothing changes, so shell execution is still only ever routed to hosts with a shell. `pickAutoHost()` uses the option.
+- a81ccac: Wire the sealed wsh peer link through the peer layer (#273).
+
+  - `createMeshNode({ wsh: { relays, ... } })` opts a node in (off unless given). The node's own identity is the wsh identity, a peer may link to it only if the registry grants `mesh:link:connect` (override with `wsh.authorize`), and `node.connectToPeer(podId, { wsh: podId })` reaches a peer. The listening side's inbound link is adopted as a `PeerNode` session under the pod id derived from the key wsh authenticated, so `fromPubKey` is that key and mesh-rpc, mesh-sync, mesh-relay and every other service run over it unchanged. `wsh.require: true` makes wsh the only transport `connectToPeer()` uses; a failed wsh link is then a failed connect.
+  - New exports: `createWshAuthorizer(registry)`, `createWshAdapterFactory(links)`, `attachWshLinks({ node, links, negotiator })`, `WSH_LINK_RESOURCE`, `WSH_LINK_ACTION`.
+  - `PeerNode.connectToPeer()` rethrows a negotiation failure when its negotiator was told to require a transport (`MeshTransportNegotiator` `require`), instead of falling through to a session with no transport. Without `require` nothing changes.
+  - `MeshTransportNegotiator` gains a `required` getter (the transport type it was told to require, or `null`); `createHardenedNegotiator()` forwards it.
+
+### Patch Changes
+
+- b07934f: The JSON request/response sockets (`CloudStorageBackend` / `CloudStorage`, and netway's `FsServiceBackend`) no longer assume one `read()` is one message. A socket with a receive window hands a write larger than the window to its reader in window-sized pieces, so these readers now reassemble a message across pieces before parsing it; objects and files over 256 KiB round-trip again.
+- df78ee0: The pod host service returns a pod's `env` values and `run.input` only to the requester that spawned it. Other requesters allowed to `status` or `list` the pod still see its name, state, module, limits, labels and the env variable names, with the values and the input replaced by `"[redacted]"`; a pod the service did not spawn is redacted for everyone. Existing clients that spawn a pod and read it back are unaffected.
+- 15d5f74: File headers, comments, log tags, READMEs and examples no longer carry the name of the private monorepo this code was extracted from. No behaviour change, with these naming additions: `BrowsermeshEmbed` is the primary export of `@johnhenry/browsermesh-embed` and `ClawserEmbed` stays as a deprecated alias; the debug switch is now the `browsermesh_debug` localStorage key and the `[browsermesh:silent-catch]` console prefix, and the old `clawser_debug` key still works as a deprecated alias.
+- 4dbd20c: `TorrentManager` now reads a finished download with `file.stream()` (falling back to `file.arrayBuffer()`, and to the callback `file.getBuffer()` for a 1.x client) instead of calling `getBuffer()` unconditionally, which WebTorrent 2.x removed and which left `download()` hanging. A failed or timed-out download rejects and is removed from the client, and `onProgress` is attached before the transfer can start.
+
+  Downloads are now bounded in memory: `download(magnet, { maxBytes })` rejects a file larger than `maxBytes` (default `TORRENT_DEFAULTS.maxDownloadBytes`, 256 MiB; pass `Infinity` to lift it). An application that downloads larger files through the real-WebTorrent path must pass `maxBytes`.
+
 ## 0.16.0
 
 ### Minor Changes

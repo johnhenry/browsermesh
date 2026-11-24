@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.6.0
+
+### Minor Changes
+
+- 404e5be: Optional identity binding for WebRTC connections. Pass `identity` (a `PodIdentity`) to `WebRTCPeerConnection` or `WebRTCMeshManager` and each side proves possession of its pod key, on the control data channel, over a transcript of both pod ids and the DTLS fingerprints of both session descriptions. The proof's key must hash to the pod id claimed in signalling. The connection is `connected` and accepts application messages only after the peer's proof verifies; a failing proof closes the connection and is reported through `onError()` (`bindingFailure`). A peer that sends no proof is closed after `bindingTimeoutMs` (default 10000) unless `requirePeerBinding: false`. New exports from `identity-binding.mjs`: `extractDtlsFingerprints`, `bindingTranscript`, `createBindingProof`, `verifyBindingProof`.
+
+  Nothing changes without `identity`. An older peer receiving the proof sees one extra `mesh:bind` JSON message on the control channel. Verified with an in-memory duplex and fixed vectors, not over a real browser `RTCPeerConnection` (issue #270).
+
+- ee77776: Add a wsh peer-link transport: a mesh link carried on a sealed, key-authenticated wsh session (#273).
+
+  `WshPeerLinks` makes a pod reachable (a wsh host waiting at the pod's own rendezvous id on a wsh pipe relay) and reaches other pods (a wsh client that pins the host key to the pod id it meant to reach, logs in with the pod's Ed25519 key, seals the session, and opens one named endpoint). The pod id a peer claims must be the hash of the key wsh authenticated, so the sender of every message on a link is that key and never a field of the message. The host decides who may link through an `authorize` callback (default: nobody) and grants the key only the mesh endpoint. Frames are length prefixed with a maximum enforced on the header, sends honour the endpoint's flow control through a bounded queue, a lost link is redialled with backoff, and when two pods dial each other at once exactly one link survives (the one the lower pod id initiated).
+
+  - New: `WshPeerLinks`, `WshLink` (a per-peer transport shaped like the other mesh transports), `WshPodTransport` (a `Pod` `TransportAdapter`), `createWshTransportFactory`, `createInProcessPipeRelay` (for tests and examples; the `@johnhenry/browsermesh-transport/wsh-in-process` subpath, kept out of the main entry so browser bundles do not follow it into wsh's Node-only relay listener), `encodeFrame` / `FrameDecoder`, `WshLinkError`, and the pod id / wsh fingerprint conversions.
+  - `'wsh'` is added to `TRANSPORT_TYPES`. It is not in any default preference order: nothing changes for code that does not ask for it. `MeshTransportNegotiator` takes a `require` option (constructor, or third argument of `negotiate()`): only that adapter is tried and its failure is the failure, so `require: 'wsh'` never falls back to an unsealed transport. `TransportFactory.create('wsh', { links, peerPodId })` returns an unconnected link.
+  - `MeshWshBridge` converts with the same two functions (no behaviour change for valid input; malformed input now throws a `TypeError`).
+  - `@johnhenry/wsh` (`^0.45.0`) is an optional peer dependency, imported lazily on first use.
+
+  A peer that has no wsh transport is unaffected: it never sees a wsh dial, and two pods without `require` can still link over any other transport they share.
+
+- a81ccac: Wire the sealed wsh peer link through the peer layer (#273).
+
+  - `createMeshNode({ wsh: { relays, ... } })` opts a node in (off unless given). The node's own identity is the wsh identity, a peer may link to it only if the registry grants `mesh:link:connect` (override with `wsh.authorize`), and `node.connectToPeer(podId, { wsh: podId })` reaches a peer. The listening side's inbound link is adopted as a `PeerNode` session under the pod id derived from the key wsh authenticated, so `fromPubKey` is that key and mesh-rpc, mesh-sync, mesh-relay and every other service run over it unchanged. `wsh.require: true` makes wsh the only transport `connectToPeer()` uses; a failed wsh link is then a failed connect.
+  - New exports: `createWshAuthorizer(registry)`, `createWshAdapterFactory(links)`, `attachWshLinks({ node, links, negotiator })`, `WSH_LINK_RESOURCE`, `WSH_LINK_ACTION`.
+  - `PeerNode.connectToPeer()` rethrows a negotiation failure when its negotiator was told to require a transport (`MeshTransportNegotiator` `require`), instead of falling through to a session with no transport. Without `require` nothing changes.
+  - `MeshTransportNegotiator` gains a `required` getter (the transport type it was told to require, or `null`); `createHardenedNegotiator()` forwards it.
+
+### Patch Changes
+
+- 0504296: When a WebRTC connection fails and no ICE servers are configured, log a one-time note explaining that only host candidates were tried and how to supply `iceServers` (or opt in to `PUBLIC_STUN_SERVERS`). The README now documents why no third-party STUN server is used by default. The default itself (no ICE servers) is unchanged.
+- 15d5f74: File headers, comments, log tags, READMEs and examples no longer carry the name of the private monorepo this code was extracted from. No behaviour change, with these naming additions: `BrowsermeshEmbed` is the primary export of `@johnhenry/browsermesh-embed` and `ClawserEmbed` stays as a deprecated alias; the debug switch is now the `browsermesh_debug` localStorage key and the `[browsermesh:silent-catch]` console prefix, and the old `clawser_debug` key still works as a deprecated alias.
+
 ## 0.5.1
 
 ### Patch Changes
