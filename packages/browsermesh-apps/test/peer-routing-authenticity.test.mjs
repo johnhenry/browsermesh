@@ -74,7 +74,13 @@ function next(on, event) {
 /** Collect the `reason` of every drop. */
 function dropsOf(on) {
   const reasons = [];
-  on('mesh-routing:drop', (d) => reasons.push(d.reason));
+  const waiting = [];
+  on('mesh-routing:drop', (d) => {
+    reasons.push(d.reason);
+    for (const w of waiting.filter((x) => reasons.length >= x.n)) w.resolve();
+  });
+  /** Resolves once `n` drops were announced (verification is asynchronous crypto: a count of turns would not do). */
+  reasons.waitFor = (n) => (reasons.length >= n ? Promise.resolve() : new Promise((resolve) => waiting.push({ n, resolve })));
   return reasons;
 }
 /** Let queued microtasks and I/O callbacks run: proof that something did NOT happen, not a wait for it. */
@@ -130,7 +136,7 @@ describe('routed envelopes are signed by the originator', () => {
       from: w.alice.podId, to: w.carol.podId, payload: { kind: 'mesh-routed/v1', id: 'x', message: 'forged' },
     }));
     w.nodeB.inject(w.carol.podId, { type: 'mesh-routing', from: w.alice.podId, to: w.carol.podId, ttl: 5, message: 'forged', path: [w.alice.podId], id: 'x', signed });
-    await settle();
+    await reasons.waitFor(2);
     assert.deepEqual(delivered, []);
     assert.deepEqual(reasons.sort(), ['sender-mismatch', 'unsigned']);
   });
@@ -153,7 +159,7 @@ describe('routed envelopes are signed by the originator', () => {
     const reorigin = structuredClone(env)
     reorigin.signed.from = w.bob.podId
     w.nodeB.inject(w.carol.podId, reorigin);
-    await settle();
+    await reasons.waitFor(3);
     assert.deepEqual(delivered, []);
     assert.deepEqual(reasons.sort(), ['bad-signature', 'sender-mismatch', 'wrong-recipient']);
 
@@ -176,7 +182,7 @@ describe('routed envelopes are signed by the originator', () => {
     w.nodeB.inject(w.carol.podId, env);
     w.nodeB.inject(w.carol.podId, env);
     w.nodeB.inject(w.carol.podId, env);
-    await settle();
+    await reasons.waitFor(2);
     assert.equal(delivered.length, 1);
     assert.deepEqual(reasons, ['replay', 'replay']);
   });
@@ -202,7 +208,7 @@ describe('routed envelopes are signed by the originator', () => {
     };
     sent.push(tamper((e) => e)); // unsigned
     w.nodeA.inject(w.bob.podId, sent[0]);
-    await settle();
+    await reasons.waitFor(1);
     assert.equal(forwarded.length, 1, 'only the genuine one was forwarded');
     assert.deepEqual(reasons, ['unsigned']);
     assert.equal(delivered.length, 1);
@@ -216,6 +222,7 @@ describe('routed envelopes are signed by the originator', () => {
     // The session with alice is gone by the time the data is handled.
     w.nodeB.refuse.add(w.alice.podId);
     w.a.api.route(w.carol.podId, { n: 1 });
+    await reasons.waitFor(1);
     await settle();
     assert.deepEqual(reasons, ['no-link']);
     assert.deepEqual(delivered, []);
