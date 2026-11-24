@@ -78,7 +78,7 @@ export const CSP = (nonce) => [
   `script-src 'self' 'nonce-${nonce}'`,
   "connect-src 'self'",
   "style-src 'none'",
-  "img-src 'none'",
+  "img-src data:", // the page declares an empty data: favicon so browsers do not request /favicon.ico
   "base-uri 'none'",
   "form-action 'none'",
   "frame-ancestors 'none'",
