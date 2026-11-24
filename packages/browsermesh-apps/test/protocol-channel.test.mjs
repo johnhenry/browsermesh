@@ -7,6 +7,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { network } from './helpers/rpc-network.mjs'
+import { fakeClock } from './helpers/fake-clock.mjs'
 import { makeCounter, serveCounter, counterClient, runCounterScenario, memoryChannelPair } from './helpers/counter-protocol.mjs'
 import { attachService } from '../src/mesh-service.mjs'
 import { PeerRegistry } from '../src/peer-registry.mjs'
@@ -121,7 +122,7 @@ test('the open scope is `protocol:<name>:open`, and names cannot smuggle scope s
   } finally { teardown() }
 })
 
-test('revoking the scope closes an open channel on its next use', async () => {
+test('revoking the scope closes an open channel (and it cannot be used afterwards)', async () => {
   const { alice, bob, regB, a, b, teardown } = await meshPair()
   try {
     const counter = makeCounter(), served = deferred()
@@ -133,11 +134,51 @@ test('revoking the scope closes an open channel on its next use', async () => {
     const server = await served.promise
     const closed = deferred(); server.onClose(() => closed.resolve())
     regB.revokeCapabilities(alice.podId, ['protocol:counter:open'])
-    await assert.rejects(c.get('value'), { code: ChannelErrorCode.UNAUTHORIZED })
+    await assert.rejects(c.get('value'))
     await closed.promise
     assert.deepEqual(b.api.openProtocols(alice.podId), [])
     await assert.rejects(a.api.openProtocol(bob.podId, 'counter'), { code: ChannelErrorCode.UNAUTHORIZED })
   } finally { teardown() }
+})
+
+test('an idle open channel is closed the moment its scope is revoked or expires, not on its next use', async () => {
+  const clock = fakeClock()
+  const [alice, bob, eve] = await network()
+  const regB = new PeerRegistry({ localPodId: bob.podId, peerManager: new MeshPeerManager({}), trustGraph: new TrustGraph(), acl: new MeshACL({ owner: bob.podId }), clock })
+  bob.registry = regB
+  registryFor(alice)
+  const a = attachService(alice, undefined, createMeshProtocolService())
+  const b = attachService(bob, undefined, createMeshProtocolService())
+  try {
+    const served = []
+    b.api.serveProtocol('counter', ch => { serveCounter(ch, makeCounter()); served.push(ch) })
+    regB.grantCapabilities(alice.podId, ['protocol:counter:open'])
+    regB.grantCapabilities(eve.podId, ['protocol:counter:open'])
+    await a.api.openProtocol(bob.podId, 'counter')
+    await flush()
+    assert.equal(served.length, 1)
+    assert.deepEqual(b.api.openProtocols(alice.podId), ['counter'])
+
+    // Somebody else's grant ending does not touch alice's channel.
+    regB.revokeCapabilities(eve.podId, ['protocol:counter:open'])
+    await flush()
+    assert.deepEqual(b.api.openProtocols(alice.podId), ['counter'])
+
+    // Alice's own revocation closes it without alice sending anything.
+    regB.revokeCapabilities(alice.podId, ['protocol:counter:open'])
+    await flush()
+    assert.deepEqual(b.api.openProtocols(alice.podId), [])
+    assert.equal(served[0].closed, true)
+
+    // And so does expiry.
+    regB.grantCapabilities(alice.podId, ['protocol:counter:open'], { expiresAt: clock.now() + 1000 })
+    await a.api.openProtocol(bob.podId, 'counter')
+    await flush()
+    assert.deepEqual(b.api.openProtocols(alice.podId), ['counter'])
+    clock.advance(1000)
+    await flush()
+    assert.deepEqual(b.api.openProtocols(alice.podId), [])
+  } finally { a.teardown(); b.teardown() }
 })
 
 test('a registry-less node authorises nothing, and an authorize hook can replace the registry', async () => {

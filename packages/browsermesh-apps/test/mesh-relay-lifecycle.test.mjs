@@ -16,6 +16,7 @@ import { describe, it, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 
 import { PeerRegistry } from '../src/peer-registry.mjs'
+import { fakeClock } from './helpers/fake-clock.mjs'
 import { MeshRelayHost } from '../src/mesh-relay-host.mjs'
 import { createMeshRelayBackend } from '../src/mesh-relay-backend.mjs'
 import { RELAY_FLOW_DEFAULTS } from '../src/internal/relay-flow.mjs'
@@ -138,6 +139,33 @@ describe('relayed connections end with the permission that allowed them', () => 
     await assert.rejects(() => socket.write(enc('x')), { name: 'SocketClosedError' })
     await assert.rejects(() => svc.sockets[0].write(enc('x')), { name: 'SocketClosedError' })
     assert.equal(svc.received, receivedAtRevoke)
+  })
+
+  it('a grant that expires ends the connection like a revocation, without waiting for the periodic re-check', async () => {
+    const clock = fakeClock()
+    const expiring = new PeerRegistry({
+      localPodId: ALICE, peerManager: new MeshPeerManager({}), trustGraph: new TrustGraph(), acl: new MeshACL({ owner: ALICE }), clock,
+    })
+    const bus2 = createBus()
+    const expiringHost = new MeshRelayHost({ node: bus2.node(ALICE), network, registry: expiring, flow: { recheckIntervalMs: 0 } })
+    expiringHost.exposeService('svc', 'mem://localhost:9100')
+    expiring.grantCapabilities(BOB, [SCOPE], { expiresAt: clock.now() + 1000 })
+    const expiringBackend = createMeshRelayBackend({ node: bus2.node(BOB), relayPeerPubKey: ALICE })
+    try {
+      const socket = await expiringBackend.connect('svc')
+      await socket.write(enc('hello'))
+      await settle()
+      clock.advance(999)
+      assert.equal(expiringHost.stats().connections, 1)
+      clock.advance(1)
+      await settle()
+      assert.equal(expiringHost.stats().connections, 0)
+      assert.equal(await socket.read(), null)
+      assert.match(socket.closeReason, /access/)
+    } finally {
+      await expiringBackend.close()
+      await expiringHost.detach()
+    }
   })
 
   it('a revoked connection is also closed on the host side when later frames still arrive', async () => {

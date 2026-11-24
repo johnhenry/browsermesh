@@ -30,8 +30,15 @@
  * The relay server only forwards point-to-point (`relay{target, envelope}`
  * -> `relayed{source, envelope}`); it has no broadcast/room concept. So a
  * broadcast send (`msg.to` absent or `'*'`, e.g. discovery `hello`/`goodbye`)
- * is fanned out point-to-point to every peer id this transport currently
- * knows about (see `knownPeers`).
+ * is fanned out point-to-point.
+ *
+ * The server's list of who is connected (`peers`, `peer-joined`, `peer-left`)
+ * and the `source` it stamps on a relayed frame are written by the server, so
+ * they are HINTS of whom to greet, never membership. The transport keeps the
+ * two apart: a hinted peer is sent a `pod:hello` (that is what a hint is for),
+ * and only a peer that discovery has confirmed (`confirmPeer`, called once the
+ * peer's signed hello or ack verified) is sent any other broadcast. A relay
+ * that names a pod therefore does not make it a recipient of broadcasts.
  */
 
 const DEFAULT_RECONNECT = { baseMs: 250, maxMs: 10000, maxAttempts: Infinity }
@@ -56,7 +63,8 @@ export class WebSocketTransport {
   #handler = null
   #ready = false
   #closed = true
-  #knownPeers = new Set()
+  #hintedPeers = new Set()
+  #verifiedPeers = new Set()
   #peerJoinedHandlers = new Set()
 
   #primaryReconnect = { attempts: 0, timer: null }
@@ -105,8 +113,33 @@ export class WebSocketTransport {
   /** @returns {boolean} true once the primary connection is registered */
   get ready() { return this.#ready }
 
-  /** @returns {Set<string>} podIds this transport has seen (via relay/signal senders or signaling peers) */
-  get knownPeers() { return new Set(this.#knownPeers) }
+  /**
+   * Pod ids the server (or a relayed frame's `source`) has named, plus the confirmed ones.
+   * These are hints: do not treat membership of this set as proof that a peer exists.
+   * @returns {Set<string>}
+   */
+  get knownPeers() { return new Set([...this.#hintedPeers, ...this.#verifiedPeers]) }
+
+  /** @returns {Set<string>} pod ids confirmed by discovery (their signed hello or ack verified): the recipients of broadcasts */
+  get verifiedPeers() { return new Set(this.#verifiedPeers) }
+
+  /**
+   * Record that discovery verified this peer. From now on a broadcast reaches it.
+   * @param {string} podId
+   */
+  confirmPeer(podId) {
+    if (typeof podId === 'string' && podId && podId !== this.#podId) this.#verifiedPeers.add(podId)
+  }
+
+  /**
+   * Forget a peer (it said goodbye): it stops receiving broadcasts, and a later
+   * announcement of it by the server is greeted again.
+   * @param {string} podId
+   */
+  forgetPeer(podId) {
+    this.#verifiedPeers.delete(podId)
+    this.#hintedPeers.delete(podId)
+  }
 
   /**
    * @param {(msg: object) => void} handler
@@ -164,7 +197,12 @@ export class WebSocketTransport {
       this.#sendEnvelope(to, msg)
       return
     }
-    for (const peerId of this.#knownPeers) {
+    // A hello goes to everyone the server named (that is how peers are found);
+    // anything else only to peers that proved themselves.
+    const recipients = msg.type === 'pod:hello'
+      ? new Set([...this.#hintedPeers, ...this.#verifiedPeers])
+      : this.#verifiedPeers
+    for (const peerId of recipients) {
       this.#sendEnvelope(peerId, msg)
     }
   }
@@ -354,7 +392,7 @@ export class WebSocketTransport {
     switch (data.type) {
       case 'relayed':
       case 'signal': {
-        if (data.source) this.#knownPeers.add(data.source)
+        if (data.source) this.#hintedPeers.add(data.source)
         this.#deliver(data.source, data.envelope)
         return
       }
@@ -385,7 +423,8 @@ export class WebSocketTransport {
         return true
       }
       case 'peer-left': {
-        if (data.podId) this.#knownPeers.delete(data.podId)
+        // Only the hint goes: whether a pod has left is for its own goodbye to say.
+        if (data.podId) this.#hintedPeers.delete(data.podId)
         return true
       }
       default:
@@ -394,8 +433,8 @@ export class WebSocketTransport {
   }
 
   #learnPeer(id) {
-    if (!id || id === this.#podId || this.#knownPeers.has(id)) return
-    this.#knownPeers.add(id)
+    if (!id || id === this.#podId || this.#hintedPeers.has(id)) return
+    this.#hintedPeers.add(id)
     for (const handler of this.#peerJoinedHandlers) {
       try { handler(id) } catch { /* a handler error must not break frame handling */ }
     }

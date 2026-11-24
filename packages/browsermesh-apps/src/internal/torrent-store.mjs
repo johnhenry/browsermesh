@@ -126,14 +126,17 @@ export function createByteBucket({ rate, now = Date.now, sleep = (ms) => new Pro
   let tokens = rate
   let last = now()
   return {
+    /** Wait for `bytes` of budget. Resolves `true` when it had to wait, `false` when the budget was there. */
     async take(bytes) {
-      if (unlimited) return
+      if (unlimited) return false
       const need = Math.min(bytes, rate)
+      let waited = false
       for (;;) {
         const t = now()
         tokens = Math.min(rate, tokens + ((t - last) / 1000) * rate)
         last = t
-        if (tokens >= need) { tokens -= need; return }
+        if (tokens >= need) { tokens -= need; return waited }
+        waited = true
         await sleep(Math.ceil(((need - tokens) / rate) * 1000))
       }
     },

@@ -117,7 +117,7 @@ test('teardown aborts handlers, rejects pending and future calls, and is idempot
   finish.resolve();await tick()
 })
 
-test('request ids carry a random component, so two services on one node never reuse an id', async () => {
+test('request ids are random, so two services on one node never reuse an id', async () => {
   const [alice, bob] = await network(), seen = []
   bob.onIncomingData((_from, text) => { const msg = JSON.parse(text); if (msg.kind === 'rpc-request') seen.push(msg.requestId) })
   const b = attachService(bob, undefined, createMeshRpcService({ onRequest: async () => ({ body: 1 }) }))
@@ -130,6 +130,7 @@ test('request ids carry a random component, so two services on one node never re
     }
     assert.equal(seen.length, 2)
     assert.notEqual(seen[0], seen[1])
-    for (const id of seen) assert.match(id, new RegExp(`^${alice.podId}:\\d+:[0-9a-f]{16}:1$`))
+    // Ids are 128 random bits from the platform CSPRNG: not a clock reading or a counter.
+    for (const id of seen) assert.match(id, /^[0-9a-f]{32}$/)
   } finally { b.teardown() }
 })

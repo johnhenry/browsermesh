@@ -170,6 +170,7 @@
 
 import { createLazyRequire } from './internal/lazy-node-require.mjs'
 import { readJsonMessage, DEFAULT_MAX_MESSAGE_BYTES } from './internal/json-message.mjs'
+import { randomUUID } from './internal/secure-id.mjs'
 
 import { IndexedDBChunkStore, IndexedDBSyncStorage, TRANSFER_DEFAULTS } from '@johnhenry/browsermesh-sync'
 import { LWWMap } from '@johnhenry/browsermesh-primitives'
@@ -410,7 +411,7 @@ function resolveCloudStorageBackendClass() {
     // MeshSyncEngine.
     this.#keyStorage = keyStorage || new IndexedDBSyncStorage({ dbName: `${prefix}-keys` })
 
-    this.#nodeId = nodeId || (crypto.randomUUID ? crypto.randomUUID() : `node-${Math.random().toString(36).slice(2)}`)
+    this.#nodeId = nodeId || randomUUID()
     this.#onLog = onLog || (() => {})
   }
 

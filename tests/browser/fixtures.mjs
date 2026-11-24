@@ -28,7 +28,7 @@ export const test = base.extend({
     const problems = []
     const extra = []
     const pages = []
-    const open = async (origin, { isolated = false, probe = false } = {}) => {
+    const open = async (origin, { isolated = false, probe = false, query = {} } = {}) => {
       let ctx = context
       if (isolated) {
         // WebKit hides host candidates behind mDNS names (`<uuid>.local`) unless
@@ -45,7 +45,8 @@ export const test = base.extend({
           if (msg.type() === 'error') problems.push(`console.error: ${msg.text()}`)
         })
       }
-      await page.goto(`${origin.origin}/${probe ? '?probe' : ''}`)
+      const search = new URLSearchParams(query).toString()
+      await page.goto(`${origin.origin}/${probe ? '?probe' : search ? `?${search}` : ''}`)
       await page.waitForFunction(() => window.bmReady === true)
       return page
     }
@@ -74,7 +75,7 @@ const isWebKit = (browser) => browser.browserType().name() === 'webkit'
  * plain loopback/LAN addresses. Nothing is captured or sent; the stream only
  * has to be live while the connection is negotiated. A no-op elsewhere.
  */
-async function exposeHostCandidates(page) {
+export async function exposeHostCandidates(page) {
   if (page.context().browser().browserType().name() !== 'webkit') return
   await page.evaluate(async () => {
     window.bmCapture = await navigator.mediaDevices.getUserMedia({ audio: true })

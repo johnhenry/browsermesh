@@ -222,6 +222,7 @@
  */
 
 import { createLazyRequire } from './internal/lazy-node-require.mjs'
+import { randomRequestId } from './internal/secure-id.mjs'
 
 const DEFAULT_SWIM_ENVELOPE_TYPE = 'swarm-swim'
 const DEFAULT_HEARTBEAT_ENVELOPE_TYPE = 'swarm-heartbeat'
@@ -422,10 +423,24 @@ export function createSwarmService(opts = {}) {
       // Membership admission control (SWARM_JOIN/SWARM_LEAVE) -- see
       // module doc comment's "SWARM_JOIN / SWARM_LEAVE" section.
       // -----------------------------------------------------------------
-      let joinReqSeq = 0
-      const nextJoinRequestId = () => `${localPodId}:${Date.now()}:${++joinReqSeq}`
-      /** @type {Map<string, {resolve: Function, reject: Function, timer: ReturnType<typeof setTimeout>}>} */
+      const nextJoinRequestId = randomRequestId
+      /** @type {Map<string, {peer: string, resolve: Function, reject: Function, timer: ReturnType<typeof setTimeout>}>} */
       const pendingJoinRequests = new Map()
+
+      // A member admitted through the join gate holds that grant: when the registry says its access changed
+      // (revoked, removed, updated, or the grant expired) the gate is asked again and a member that would no
+      // longer be admitted is removed from the swarm (a member the operator added with `join()` is not touched).
+      /** @type {Set<string>} */
+      const admittedByGate = new Set()
+      const unsubscribeAccess = typeof ctx.registry?.onAccessChange === 'function'
+        ? ctx.registry.onAccessChange(({ pubKey } = {}) => {
+          if (!admittedByGate.has(pubKey)) return
+          if (ctx.registry.checkAccess(pubKey, accessResource, 'join')?.allowed === true) return
+          admittedByGate.delete(pubKey)
+          ensureCoordinatorLeave(pubKey) // the same path as a member that says it is leaving: one coordinator.leave(), one 'swarm:member-left'
+          ctx.emit('swarm:member-revoked', { podId: pubKey })
+        })
+        : () => {}
 
       async function handleJoinRequest(fromPubKey, msg) {
         const access = ctx.registry.checkAccess(fromPubKey, accessResource, 'join')
@@ -441,6 +456,7 @@ export function createSwarmService(opts = {}) {
           }).catch((err) => log('mesh-swarm:join-response-send-failed', { to: fromPubKey, error: err?.message || String(err) }))
           return
         }
+        admittedByGate.add(fromPubKey)
         swim.addMember(fromPubKey) // cascades: swim.onJoin -> coordinator.join() + ctx.emit('swarm:member-joined')
         ctx.emit('swarm:join-request-granted', { from: fromPubKey })
         await ctx.sendTo(fromPubKey, membershipEnvelopeType, {
@@ -448,9 +464,10 @@ export function createSwarmService(opts = {}) {
         }).catch((err) => log('mesh-swarm:join-response-send-failed', { to: fromPubKey, error: err?.message || String(err) }))
       }
 
-      function handleJoinResponse(msg) {
+      function handleJoinResponse(fromPubKey, msg) {
         const pending = pendingJoinRequests.get(msg.requestId)
         if (!pending) return
+        if (pending.peer !== fromPubKey) return // only the peer the request went to can answer it
         pendingJoinRequests.delete(msg.requestId)
         clearTimeout(pending.timer)
         pending.resolve({ ok: !!msg.ok, reason: msg.reason })
@@ -474,7 +491,7 @@ export function createSwarmService(opts = {}) {
             log('mesh-swarm:join-request-handling-failed', { from: fromPubKey, error: err?.message || String(err) })
           })
         } else if (msg.kind === 'join-response') {
-          handleJoinResponse(msg)
+          handleJoinResponse(fromPubKey, msg)
         } else if (msg.kind === 'leave') {
           handleLeave(fromPubKey)
         }
@@ -487,7 +504,7 @@ export function createSwarmService(opts = {}) {
             pendingJoinRequests.delete(requestId)
             reject(new Error(`mesh-swarm: join request to ${targetPodId} timed out after ${timeoutMs}ms`))
           }, timeoutMs)
-          pendingJoinRequests.set(requestId, { resolve, reject, timer })
+          pendingJoinRequests.set(requestId, { peer: targetPodId, resolve, reject, timer })
         })
         try {
           await ctx.sendTo(targetPodId, membershipEnvelopeType, { kind: 'join-request', requestId, meshType: SWARM_JOIN })
@@ -536,9 +553,8 @@ export function createSwarmService(opts = {}) {
         return task
       }
 
-      let taskReqSeq = 0
-      const nextTaskRequestId = () => `${localPodId}:${Date.now()}:${++taskReqSeq}`
-      /** @type {Map<string, {resolve: Function, reject: Function, timer: ReturnType<typeof setTimeout>}>} */
+      const nextTaskRequestId = randomRequestId
+      /** @type {Map<string, {peer: string, resolve: Function, reject: Function, timer: ReturnType<typeof setTimeout>}>} */
       const pendingSubmitRequests = new Map()
 
       async function handleSubmitRequest(fromPubKey, msg) {
@@ -564,9 +580,10 @@ export function createSwarmService(opts = {}) {
         })
       }
 
-      function handleSubmitResponse(msg) {
+      function handleSubmitResponse(fromPubKey, msg) {
         const pending = pendingSubmitRequests.get(msg.requestId)
         if (!pending) return
+        if (pending.peer !== fromPubKey) return // only the peer the request went to can answer it
         pendingSubmitRequests.delete(msg.requestId)
         clearTimeout(pending.timer)
         if (msg.error) {
@@ -590,7 +607,7 @@ export function createSwarmService(opts = {}) {
             log('mesh-swarm:submit-request-handling-failed', { from: fromPubKey, error: err?.message || String(err) })
           })
         } else if (msg.kind === 'submit-response') {
-          handleSubmitResponse(msg)
+          handleSubmitResponse(fromPubKey, msg)
         }
       })
 
@@ -601,7 +618,7 @@ export function createSwarmService(opts = {}) {
             pendingSubmitRequests.delete(requestId)
             reject(new Error(`mesh-swarm: submit-task request to ${targetPodId} timed out after ${timeoutMs}ms`))
           }, timeoutMs)
-          pendingSubmitRequests.set(requestId, { resolve, reject, timer })
+          pendingSubmitRequests.set(requestId, { peer: targetPodId, resolve, reject, timer })
         })
         try {
           await ctx.sendTo(targetPodId, taskEnvelopeType, { kind: 'submit-request', requestId, description, strategy, input, swarmId })
@@ -667,6 +684,7 @@ export function createSwarmService(opts = {}) {
           unsubscribeSwim()
           unsubscribeHeartbeat()
           unsubscribeMembership()
+          unsubscribeAccess()
           unsubscribeTask()
           for (const pending of pendingJoinRequests.values()) {
             clearTimeout(pending.timer)

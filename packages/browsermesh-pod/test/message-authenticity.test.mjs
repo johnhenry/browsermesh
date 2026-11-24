@@ -295,7 +295,10 @@ describe('message authenticity', () => {
     await decided(b, 3)
     const mine = seen.filter((m) => m.type === 'pod:message' && m.from === a.podId)
     // Numbers are assigned in call order; signing may finish out of order, which the window tolerates.
-    assert.deepEqual(mine.map((m) => m.seq).sort(), [1, 2, 3])
+    // (The hello and ack a pod signs share the session's counter, so the first message is not seq 1.)
+    const seqs = mine.map((m) => m.seq).sort((x, y) => x - y)
+    assert.equal(seqs.length, 3)
+    assert.deepEqual(seqs.map((s) => s - seqs[0]), [0, 1, 2])
     assert.equal(new Set(mine.map((m) => m.sid)).size, 1)
     assert.equal(b.got.length, 3)
   })

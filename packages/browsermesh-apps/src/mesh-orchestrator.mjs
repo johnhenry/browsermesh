@@ -129,6 +129,7 @@
  */
 
 import { MeshOrchestrator } from './orchestrator.mjs'
+import { randomRequestId } from './internal/secure-id.mjs'
 
 /** Shared envelope `type` for both orchestrator request/response directions (tagged by `kind`), mirroring `mesh-compute.mjs`'s `'mesh-compute'` shape. */
 const DEFAULT_ORCHESTRATOR_ENVELOPE_TYPE = 'mesh-orchestrator'
@@ -197,10 +198,9 @@ export function createOrchestratorService({
       })
 
       // -- Outbound dispatch: real request/response wire protocol -----------
-      let reqSeq = 0
-      const nextRequestId = () => `${peerNode.podId}:${Date.now()}:${++reqSeq}`
+      const nextRequestId = randomRequestId
 
-      /** @type {Map<string, {resolve: Function, reject: Function, timer: ReturnType<typeof setTimeout>}>} */
+      /** @type {Map<string, {peer: string, resolve: Function, reject: Function, timer: ReturnType<typeof setTimeout>}>} */
       const pendingDispatches = new Map()
 
       function dispatch(podId, action, args) {
@@ -210,7 +210,7 @@ export function createOrchestratorService({
             pendingDispatches.delete(requestId)
             reject(new Error(`mesh-orchestrator: ${action} on ${podId} timed out after ${dispatchTimeoutMs}ms`))
           }, dispatchTimeoutMs)
-          pendingDispatches.set(requestId, { resolve, reject, timer })
+          pendingDispatches.set(requestId, { peer: podId, resolve, reject, timer })
         })
 
         ctx.sendTo(podId, envelopeType, { kind: 'orchestrator-request', requestId, action, args }).catch((err) => {
@@ -269,9 +269,11 @@ export function createOrchestratorService({
         ctx.emit('orchestrator:request-served', { from: fromPubKey, requestId, action, ok: !response.error })
       }
 
-      function handleOrchestratorResponse(msg) {
+      function handleOrchestratorResponse(fromPubKey, msg) {
         const pending = pendingDispatches.get(msg.requestId)
         if (!pending) return // no longer waiting (already timed out, or not ours) -- ignore
+        // Only the peer the request went to can answer it (the id alone proves nothing).
+        if (pending.peer !== fromPubKey) return
         pendingDispatches.delete(msg.requestId)
         clearTimeout(pending.timer)
         if (msg.error) {
@@ -288,7 +290,7 @@ export function createOrchestratorService({
             log('mesh-orchestrator:request-handling-failed', { from: fromPubKey, requestId: msg.requestId, error: err?.message || String(err) })
           })
         } else if (msg.kind === 'orchestrator-response') {
-          handleOrchestratorResponse(msg)
+          handleOrchestratorResponse(fromPubKey, msg)
         }
       })
 

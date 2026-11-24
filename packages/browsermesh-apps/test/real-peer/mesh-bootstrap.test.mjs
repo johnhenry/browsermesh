@@ -180,6 +180,13 @@ describeIfReal('mesh-bootstrap: two real PeerNodes over real WebRTC', () => {
       assert.ok(alicesConnToBob.isOpen, "alice's WebRTCPeerConnection reports open")
       assert.ok(bobsConnToAlice.isOpen, "bob's WebRTCPeerConnection reports open")
 
+      // -- Identity binding is on by default: each side proved its pod key over the DTLS fingerprints
+      // of the descriptions it applied (real SDP from libdatachannel here), and the connection is
+      // not usable until it had.
+      await waitFor(() => alicesConnToBob.bound && bobsConnToAlice.bound, 10_000, 'both sides to verify the other\'s identity proof')
+      assert.equal(alicesConnToBob.bindingFailure, null)
+      assert.equal(bobsConnToAlice.bindingFailure, null)
+
       // -- Real bytes, both directions ---------------------------------------
       // Alice -> Bob via PeerNode's own public API (sendTo / onIncomingData),
       // proving the composition root -- not just the raw WebRTCMeshManager --

@@ -52,6 +52,7 @@
 
 import { createLazyRequire } from './internal/lazy-node-require.mjs'
 import { decodeWireData } from './internal/wire-envelope.mjs'
+import { randomUUID } from './internal/secure-id.mjs'
 import { CreditReceiver, CreditSender, resolveFlowOptions } from './internal/relay-flow.mjs'
 
 /** Default `envelope.type` used to route relay payloads on the shared `onIncomingData()` bus. */
@@ -201,7 +202,7 @@ function resolveMeshRelayBackendClass() {
       throw new Error('MeshRelayBackend.connect: host (service name) is required')
     }
 
-    const connId = crypto.randomUUID()
+    const connId = randomUUID()
     const pending = new Promise((resolve, reject) => {
       this.#pending.set(connId, { resolve, reject, service: host })
     })

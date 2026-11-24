@@ -1,0 +1,10 @@
+---
+'@johnhenry/browsermesh-apps': minor
+'@johnhenry/browsermesh-transport': minor
+---
+
+`createMeshNode()` wires the node's identity into its WebRTC connections, so the identity binding proof runs by default: each side proves possession of its pod key over the DTLS fingerprints of the session descriptions it applied, and a signalling server that swaps the descriptions is detected and the connection closed. `requirePeerBinding` is true (nothing a peer sends is delivered before its proof verified). New options: `webrtcIdentityBinding` (default `true`; `false` turns it off), `webrtcAllowUnboundPeers` (default `false`; the named opt-out for interop with peers on transport older than 0.6.0) and `webrtcBindingTimeoutMs` (default 10000).
+
+A peer that sends no proof (transport older than 0.6.0) is closed after the binding timeout, with the reason `timeout`. The reason now reaches the application: the caller's `connectToPeer()` rejects with `... identity binding failed: timeout` as soon as the connection is closed (it used to wait out the open timeout and say only that the channel did not open), and `PeerNode` emits `peer:binding-failed` (`{ pubKey, transport, connectionId, reason }`) on both sides (new `PeerNode#reportBindingFailure`, new `onBindingFailure` option of `createWebRTCTransportFactory`). Transport: `WebRTCMeshManager#bindingPolicy` reports whether binding is enabled and how it is applied.
+
+Breaking default: connections between a node from this release and a peer on transport older than 0.6.0 no longer come up unless `webrtcAllowUnboundPeers: true` (or `webrtcIdentityBinding: false`). Peers on 0.6.0 or later already send and check the proof when given an identity, so two nodes from this release interoperate with no configuration. `@johnhenry/browsermesh-apps` now asks for `@johnhenry/browsermesh-transport` `>=0.6.0` as a peer. Verified on a real `RTCPeerConnection` in Chromium and Firefox (see `tests/browser/README.md`); no problem was found in how the DTLS fingerprints are read from real session descriptions.

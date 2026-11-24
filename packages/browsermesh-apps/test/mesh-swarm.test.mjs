@@ -27,6 +27,7 @@ import { createSwarmService } from '../src/mesh-swarm.mjs';
 import { attachService } from '../src/mesh-service.mjs';
 import { PeerRegistry } from '../src/peer-registry.mjs';
 import { createMeshNode } from '../src/mesh-bootstrap.mjs';
+import { fakeClock } from './helpers/fake-clock.mjs';
 import {
   IdentityWallet,
   MeshIdentityManager,
@@ -422,6 +423,53 @@ describe('createSwarmService: checkAccess()-gated peer-initiated join / submit-t
       await waitFor(() => apiB.listMembers().includes(alice.podId), 500, 'bob admitted alice into his swarm after granting swarm:join');
     } finally {
       teardownAll([handleA, handleB]);
+    }
+  });
+
+  it('a member admitted through the join gate is removed when that grant is revoked or expires, and only then', async () => {
+    const clock = fakeClock();
+    const alice = await createSwarmTestPeer('alice');
+    const carol = await createSwarmTestPeer('carol');
+    const bob = await createSwarmTestPeer('bob');
+    bob.registry = new PeerRegistry({
+      localPodId: bob.podId,
+      peerManager: new MeshPeerManager({}),
+      trustGraph: new TrustGraph(),
+      acl: new MeshACL({ owner: bob.podId }),
+      clock,
+    });
+    const mesh = wireFullMesh([alice, carol, bob]);
+    const { [alice.podId]: nodeA, [carol.podId]: nodeC, [bob.podId]: nodeB } = mesh;
+    const opts = { swimOptions: FAST_SWIM, heartbeatMs: 10_000 };
+    const handleA = attachService(nodeA, undefined, createSwarmService(opts));
+    const handleC = attachService(nodeC, undefined, createSwarmService(opts));
+    const handleB = attachService(nodeB, undefined, createSwarmService(opts));
+    try {
+      const left = [];
+      handleB.on('swarm:member-left', (e) => left.push(e.podId));
+      nodeB.registry.grantCapabilities(alice.podId, ['swarm:join'], { expiresAt: clock.now() + 1000 });
+      nodeB.registry.grantCapabilities(carol.podId, ['swarm:join']);
+      assert.equal((await handleA.api.requestJoin(bob.podId, 500)).ok, true);
+      assert.equal((await handleC.api.requestJoin(bob.podId, 500)).ok, true);
+      await waitFor(() => handleB.api.listMembers().includes(alice.podId) && handleB.api.listMembers().includes(carol.podId), 500, 'both admitted');
+
+      // Something unrelated changes: nobody is removed.
+      nodeB.registry.grantCapabilities('somebody-else', ['x:y']);
+      nodeB.registry.notifyAccessChange(carol.podId); // still allowed
+      assert.deepEqual(left, []);
+
+      // Alice's grant expires: she is removed, carol is not.
+      clock.advance(1000);
+      await waitFor(() => !handleB.api.listMembers().includes(alice.podId), 500, 'alice removed after her grant expired');
+      assert.deepEqual(left, [alice.podId]);
+      assert.ok(handleB.api.listMembers().includes(carol.podId));
+
+      // Carol's revocation removes her.
+      nodeB.registry.revokeCapabilities(carol.podId, ['swarm:join']);
+      await waitFor(() => !handleB.api.listMembers().includes(carol.podId), 500, 'carol removed after revocation');
+      assert.deepEqual(left.sort(), [alice.podId, carol.podId].sort());
+    } finally {
+      teardownAll([handleA, handleB, handleC]);
     }
   });
 

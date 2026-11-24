@@ -878,6 +878,9 @@ export class PeerNode {
    *     those that don't. See issue #110.
    *   - 'peer:transport-error' — same, for onError(). Payload:
    *     `{pubKey, sessionId, transport, error}`.
+   *   - 'peer:binding-failed' — a transport connection was closed because the
+   *     peer did not prove the identity it claimed.
+   *     Payload: `{pubKey, transport, connectionId, reason}`.
    *   - 'broadcast'       — fired after a `broadcast()` fan-out settles.
    *     Payload: `{sent, failed}` (see `broadcast()`).
    *   - 'boot'            — fired after successful boot
@@ -894,6 +897,19 @@ export class PeerNode {
       this.#listeners.set(event, new Set())
     }
     this.#listeners.get(event).add(cb)
+  }
+
+  /**
+   * Announce that a transport connection to a peer was closed because the peer did not prove the identity
+   * it claimed (event `peer:binding-failed`, payload `{ pubKey, transport, connectionId, reason }`). Called by
+   * the transport adapters (`webrtc-negotiator.mjs`); not for application code.
+   *
+   * @param {string} pubKey
+   * @param {{ transport: string, connectionId?: string, reason: string }} detail
+   */
+  reportBindingFailure(pubKey, { transport, connectionId, reason }) {
+    this.#onLog('peer-node:binding-failed', { pubKey, transport, connectionId, reason })
+    this.#emit('peer:binding-failed', { pubKey, transport, connectionId, reason })
   }
 
   /**

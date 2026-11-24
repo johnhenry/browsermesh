@@ -273,6 +273,24 @@ export function createProtocolHost({ authorize, onLog } = {}) {
     },
     /** Protocols currently open on a link. */
     openProtocols(link) { return [...stateOf(link).channels.keys()] },
+    /**
+     * Ask the authorise hook again about every channel `peer` has open on this side (the ones this host serves)
+     * and close those it no longer allows, without waiting for the peer's next message. Call it when the peer's
+     * access changed (`createMeshProtocolService` does, on the registry's access-change events).
+     * @returns {string[]} the names of the channels it closed
+     */
+    recheck(peer) {
+      const closed = []
+      for (const st of states.values()) {
+        if (st.link.peer !== peer) continue
+        for (const [name, ch] of [...st.channels]) {
+          if (ch.serving === false || allowed(peer, name)) continue
+          ch.close('authorization revoked')
+          closed.push(name)
+        }
+      }
+      return closed
+    },
     /** Close every open channel of `peer` (or one `name`), e.g. after a revocation. */
     closeProtocols(peer, name) {
       for (const st of states.values()) {
@@ -305,6 +323,11 @@ export function createMeshProtocolService({ authorize, ...channelOptions } = {})
         onLog: channelOptions.onLog,
       })
       const inner = createMeshChannelService({ ...channelOptions, onLink: link => { host.attach(link); channelOptions.onLink?.(link) } }).attach(peerNode, ctx)
+      // An open channel is a held grant: when the registry says a peer's access changed (revoked, removed,
+      // updated, or a grant expired) the channels that peer has open here are checked again at once.
+      const offAccess = registry && typeof registry.onAccessChange === 'function'
+        ? registry.onAccessChange(({ pubKey } = {}) => { host.recheck(pubKey) })
+        : () => {}
       return {
         api: {
           serveProtocol: host.serveProtocol,
@@ -320,7 +343,7 @@ export function createMeshProtocolService({ authorize, ...channelOptions } = {})
           closeProtocols: host.closeProtocols,
           channel: inner.api,
         },
-        teardown: inner.teardown,
+        teardown: async () => { offAccess(); await inner.teardown?.() },
       }
     },
   }

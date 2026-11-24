@@ -31,6 +31,9 @@ import { matchScope } from '@johnhenry/browsermesh-primitives'
  * while this file itself stays decoupled from `-core` at the module level,
  * matching the existing peerManager/trustGraph/acl DI pattern in this class.
  */
+/** The longest a platform timer can wait (a 32-bit signed millisecond count). */
+const MAX_TIMER_DELAY_MS = 2 ** 31 - 1
+
 let _localCapTokenSeq = 0
 class _DefaultCapabilityToken {
   constructor({ issuer, holder, resource, permissions, constraints = {}, parentId = null, createdAt, expiresAt = null }) {
@@ -104,6 +107,18 @@ export class PeerRegistry {
   /** @type {Set<Function>} */
   #accessListeners = new Set()
 
+  /** Clock for expiry: `{ now, setTimeout, clearTimeout }`. Injected in tests. */
+  #clock
+
+  /** The single timer armed for the nearest grant expiry, if any. */
+  #expiryTimer = null
+
+  /** The expiry (ms epoch) `#expiryTimer` is armed for. */
+  #expiryAt = null
+
+  /** Tokens whose expiry has been announced, so each is announced once. @type {WeakSet<object>} */
+  #announcedExpiry = new WeakSet()
+
   /** Validates/revokes tokens -- real `CapabilityValidator` when injected, a
    * duck-typed equivalent otherwise. @type {{ register: Function, revokeTree: Function }} */
   #capabilityValidator
@@ -130,8 +145,11 @@ export class PeerRegistry {
    *   `CapabilityToken`; pass `(opts) => new CapabilityToken(opts)` to use the
    *   real class.
    * @param {Function} [opts.onLog] - Logging callback (level, msg)
+   * @param {{ now: () => number, setTimeout: Function, clearTimeout: Function }} [opts.clock] -
+   *   The time source for grant expiry (`now()` in ms epoch, and a timer). Defaults to `Date.now` and the
+   *   platform timer (unref'd, so it never keeps a process alive). Tests inject their own.
    */
-  constructor({ localPodId, peerManager, trustGraph, acl, capabilityValidator, tokenFactory, onLog }) {
+  constructor({ localPodId, peerManager, trustGraph, acl, capabilityValidator, tokenFactory, onLog, clock }) {
     if (!localPodId || typeof localPodId !== 'string') {
       throw new Error('localPodId is required and must be a non-empty string')
     }
@@ -147,6 +165,11 @@ export class PeerRegistry {
     this.#acl = acl ?? this.#createDefaultACL()
     this.#capabilityValidator = capabilityValidator ?? this.#createDefaultCapabilityValidator()
     this.#tokenFactory = tokenFactory ?? ((tokenOpts) => new _DefaultCapabilityToken(tokenOpts))
+    this.#clock = clock ?? {
+      now: () => Date.now(),
+      setTimeout: (fn, ms) => globalThis.setTimeout(fn, ms),
+      clearTimeout: (handle) => globalThis.clearTimeout(handle),
+    }
   }
 
   // ── Peer CRUD ───────────────────────────────────────────────────────
@@ -197,6 +220,7 @@ export class PeerRegistry {
         if (!token.revoked) this.#capabilityValidator.revokeTree(token.id)
       }
       this.#capabilityTokens.delete(pubKey)
+      this.#scheduleExpiry()
     }
 
     if (existed) {
@@ -287,10 +311,11 @@ export class PeerRegistry {
       peerTokens = new Map()
       this.#capabilityTokens.set(pubKey, peerTokens)
     }
+    const now = this.#clock.now()
     for (const scope of scopes) {
       const current = peerTokens.get(scope)
       const currentLive = current && !current.revoked &&
-        !(typeof current.isExpired === 'function' && current.isExpired())
+        !(typeof current.isExpired === 'function' && current.isExpired(now))
       if (currentLive) continue
 
       const token = this.#tokenFactory({
@@ -303,6 +328,7 @@ export class PeerRegistry {
       this.#capabilityValidator.register(token)
       peerTokens.set(scope, token)
     }
+    this.#scheduleExpiry()
 
     this.#onLog(3, `PeerRegistry: granted ${scopes.join(', ')} to ${pubKey}`)
   }
@@ -349,6 +375,7 @@ export class PeerRegistry {
       }
     }
 
+    this.#scheduleExpiry()
     this.#onLog(3, `PeerRegistry: revoked ${scopes.join(', ')} from ${pubKey}`)
     this.#emitAccessChange(pubKey, 'revoked')
   }
@@ -397,9 +424,10 @@ export class PeerRegistry {
     const scope = `${resource}:${action}`
     const peerTokens = this.#capabilityTokens.get(pubKey)
     if (peerTokens) {
+      const now = this.#clock.now()
       for (const [grantedScope, token] of peerTokens) {
         if (!matchScope(grantedScope, scope)) continue
-        if (token.revoked || (typeof token.isExpired === 'function' && token.isExpired())) {
+        if (token.revoked || (typeof token.isExpired === 'function' && token.isExpired(now))) {
           return { allowed: false, reason: 'capability_revoked' }
         }
       }
@@ -539,6 +567,61 @@ export class PeerRegistry {
    */
   notifyAccessChange(pubKey) {
     this.#emitAccessChange(pubKey, 'changed')
+  }
+
+  /**
+   * Keep exactly one timer armed for the nearest expiry among the grants this registry issued, so that a
+   * grant that runs out is announced (`kind: 'expired'`) like one that is revoked. There is one timer for
+   * the registry, however many grants it holds; an expiry further away than a timer can wait is reached in steps.
+   */
+  #scheduleExpiry() {
+    let next = null
+    for (const tokens of this.#capabilityTokens.values()) {
+      for (const token of tokens.values()) {
+        if (token.revoked || this.#announcedExpiry.has(token)) continue
+        const at = token.expiresAt
+        if (typeof at !== 'number' || !Number.isFinite(at)) continue
+        if (next === null || at < next) next = at
+      }
+    }
+    if (next === this.#expiryAt && (next === null || this.#expiryTimer !== null)) return
+    if (this.#expiryTimer !== null) {
+      this.#clock.clearTimeout(this.#expiryTimer)
+      this.#expiryTimer = null
+    }
+    this.#expiryAt = next
+    if (next === null) return
+    const delay = Math.min(Math.max(next - this.#clock.now(), 0), MAX_TIMER_DELAY_MS)
+    const handle = this.#clock.setTimeout(() => this.#onExpiryTimer(), delay)
+    handle?.unref?.() // a pending expiry must not keep a process alive
+    this.#expiryTimer = handle
+  }
+
+  #onExpiryTimer() {
+    this.#expiryTimer = null
+    this.#expiryAt = null
+    const now = this.#clock.now()
+    const expired = new Set()
+    for (const [pubKey, tokens] of this.#capabilityTokens) {
+      for (const token of tokens.values()) {
+        if (token.revoked || this.#announcedExpiry.has(token)) continue
+        if (typeof token.expiresAt === 'number' && token.expiresAt <= now) {
+          this.#announcedExpiry.add(token)
+          expired.add(pubKey)
+        }
+      }
+    }
+    // Re-arm first: a listener that grants again must find the timer in a consistent state.
+    this.#scheduleExpiry()
+    for (const pubKey of expired) this.#emitAccessChange(pubKey, 'expired')
+  }
+
+  /** Release the expiry timer and drop the access-change listeners. */
+  dispose() {
+    if (this.#expiryTimer !== null) this.#clock.clearTimeout(this.#expiryTimer)
+    this.#expiryTimer = null
+    this.#expiryAt = null
+    this.#accessListeners.clear()
   }
 
   /** @param {string} pubKey @param {string} kind */
@@ -759,13 +842,7 @@ export class PeerRegistry {
     templates.set('collaborator', { name: 'collaborator', scopes: ['chat:*', 'files:read', 'files:write', 'compute:submit'] })
     templates.set('admin', { name: 'admin', scopes: ['*:*'] })
 
-    const matchScope = (pattern, scope) => {
-      if (pattern === '*:*') return true
-      const [pRes, pAct] = pattern.split(':')
-      const [sRes, sAct] = scope.split(':')
-      return (pRes === '*' || pRes === sRes) && (pAct === '*' || pAct === sAct)
-    }
-
+    // The same matcher `MeshACL` uses (segment by segment, any number of segments).
     return {
       addTemplate(name, scopes, description) {
         const t = { name, scopes: [...scopes], description }

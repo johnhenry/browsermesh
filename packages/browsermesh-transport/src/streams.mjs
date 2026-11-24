@@ -37,11 +37,11 @@ let _idCounter = 0;
 function generateStreamId() {
   // 16-byte ID: 8 random + 4 timestamp + 4 counter
   const id = new Uint8Array(16);
-  if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
-    crypto.getRandomValues(id);
-  } else {
-    for (let i = 0; i < 16; i++) id[i] = (Math.random() * 256) | 0;
+  if (typeof crypto === 'undefined' || typeof crypto.getRandomValues !== 'function') {
+    // No fallback to Math.random: a stream id an observer could predict is worse than no stream.
+    throw new Error('No secure random source (crypto.getRandomValues) is available: refusing to create a stream id');
   }
+  crypto.getRandomValues(id);
   const view = new DataView(id.buffer);
   view.setUint32(12, ++_idCounter, false);
   return id;

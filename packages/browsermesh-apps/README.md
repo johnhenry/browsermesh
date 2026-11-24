@@ -73,7 +73,7 @@ Extracted from a private monorepo (previously `packages/browsermesh-apps`), wher
 | peer-node-transport | `createPeerNodeTransport` |
 | peer-payments | `MultiPartyCreditLedger`, `WebLNProvider` |
 | peer-registry | `PeerRegistry` |
-| peer-routing | `MeshRouter`, `ServerSharing` |
+| peer-routing | `MeshRouter` (routed envelopes carry the originator's signature, verified by each hop and by the recipient), `ServerSharing` |
 | peer-services | `ServiceAdvertiser`, `ServiceBrowser` |
 | peer-terminal | `TerminalHost`, `TerminalClient` |
 | peer-timestamp | `TimestampAuthority`, `TimestampProof` |
@@ -186,6 +186,22 @@ const node = await createMeshNode({
 ```
 
 ### TURN server configuration
+
+**WebRTC identity binding is on by default.** `createMeshNode()` wires the node's
+identity into its WebRTC connections: each side proves possession of its pod key
+over the DTLS fingerprints of the session descriptions it applied, so a
+signalling server that swapped the descriptions is detected and the connection
+is closed, and nothing a peer sends is delivered before its proof verified. A
+peer on `@johnhenry/browsermesh-transport` older than 0.6.0 sends no proof: its
+connection is closed after `webrtcBindingTimeoutMs` (default 10 s) with the
+reason `timeout`. The caller's `connectToPeer()` rejects with
+`... identity binding failed: timeout`, and the node emits
+`peer:binding-failed` (`{ pubKey, transport, connectionId, reason }`) on either
+side. To interoperate with such peers anyway, pass
+`webrtcAllowUnboundPeers: true` (this node still proves itself; a peer that never
+proves itself is accepted and what it sends is unverified; a proof that is sent
+and does not verify still closes the connection). `webrtcIdentityBinding: false`
+turns it off entirely.
 
 By default, `createMeshNode()` gathers **no ICE servers at all** (no STUN,
 no TURN) -- host candidates only, which is enough for peers on the same LAN
@@ -404,8 +420,31 @@ What it enforces:
 
 `createProxyHandler()` (`serverless-proxy.mjs`) applies the same target rule,
 does not follow redirects and bounds the response (`maxResponseBytes`,
-`requestTimeoutMs`). It does not itself check who the caller is; that is done
-by whatever serves the site.
+`requestTimeoutMs`). It checks who the caller is, like `ServerSharing`:
+`createProxyHandler({ targetOrigin, checkAccess })` calls
+`checkAccess(req.fromPubKey, resource, 'request')` (resource defaults to
+`serverless-proxy:<host>`, or pass `resource`) and answers 403 unless it says
+`allowed: true`. With neither `checkAccess` nor `public: true`,
+`createProxyHandler()` throws; pass `public: true` for a proxy anyone may use.
+
+## Access control: scopes and grant lifetimes
+
+`PeerRegistry.checkAccess(pubKey, resource, action)` matches the scope
+`<resource>:<action>` against a peer's grants segment by segment, for any number
+of segments, with `*` standing for one segment (`mesh-relay:*:connect`,
+`protocol:counter:*`, `*:*`). The registry's built-in ACL and `MeshACL` use the
+same matcher (`matchScope` in `browsermesh-primitives`).
+
+A grant made with `grantCapabilities(peer, scopes, { expiresAt })` is announced
+when it runs out, as a revocation is: `registry.onAccessChange(({ pubKey, kind }) => ...)`
+gets `kind: 'expired'`. The registry keeps one timer for the nearest expiry (it
+is `unref`'d and can be released with `registry.dispose()`); pass
+`clock: { now, setTimeout, clearTimeout }` to drive it yourself.
+Everything that holds a grant open follows these events: relayed connections,
+`createMeshWebSocketService` sessions (`accessResource` / `accessAction`, or the
+`onConnection` hook asked again; `recheckOnAccessChange: false` turns that off),
+protocol channels, swarm members admitted by the join gate, and wsh links under
+the default authorizer (`watchWshAccess()`).
 
 ## CloudStorage bucket authorization and key distribution
 

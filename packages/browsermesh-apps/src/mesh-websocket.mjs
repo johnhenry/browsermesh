@@ -106,7 +106,21 @@
  * transport's, exactly mirroring `mesh-rpc.mjs`'s "authorization is
  * explicitly out of scope for this transport" stance. A caller that needs
  * ACL-gated WebSocket connections should implement that inside its own
- * `onConnection` (e.g. calling `ctx.registry.checkAccess()` itself).
+ * `onConnection` (e.g. calling `ctx.registry.checkAccess()` itself), or pass
+ * `accessResource` (and `accessAction`, default `'connect'`) to have the
+ * service check `registry.checkAccess(from, accessResource, accessAction)`
+ * itself, before `onConnection`.
+ *
+ * ACCEPTED SESSIONS DO NOT OUTLIVE THE DECISION THAT ADMITTED THEM: when the
+ * node's registry announces an access change for a peer (`onAccessChange`: a
+ * revocation, a removal, a permission update, or a grant that expired) the
+ * accept decision (the grant, then `onConnection`) is made again for each open
+ * session of that peer, and a session that would no longer be accepted is
+ * closed (code 4403, reason 'access revoked', event
+ * `mesh-websocket:connection-revoked`). `onConnection` is therefore called
+ * again for open sessions on such a change; pass `recheckOnAccessChange:
+ * false` (without `accessResource`) to keep the earlier behaviour of asking
+ * once.
  *
  * NO onConnection HANDLER REGISTERED: every inbound `ws-open` is REJECTED
  * (`ws-reject` with `reason: 'no onConnection handler registered'`),
@@ -230,6 +244,7 @@
 
 import { createLazyRequire } from './internal/lazy-node-require.mjs'
 import { decodeWireData } from './internal/wire-envelope.mjs'
+import { randomRequestId } from './internal/secure-id.mjs'
 
 /** Default `envelope.type` used to route mesh-websocket payloads on the shared `onIncomingData()` bus. */
 const DEFAULT_ENVELOPE_TYPE = 'mesh-websocket'
@@ -295,9 +310,9 @@ function invalidStateError(message) {
   return err
 }
 
-/** Monotonic-ish unique id for correlating a connection's envelopes, matching mesh-rpc.mjs's nextRequestId() shape. */
-function nextConnectionId(podId) {
-  return `${podId || 'local'}:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`
+/** Unguessable id correlating a connection's envelopes (the platform CSPRNG; there is no fallback). */
+function nextConnectionId() {
+  return randomRequestId()
 }
 
 // ---------------------------------------------------------------------------
@@ -439,6 +454,8 @@ export class BrowserMeshWebSocket {
       const data = decodeWireData(rawData)
       if (!data || typeof data !== 'object') return
       if (data.type !== this.#envelopeType || data.connectionId !== this.#connectionId) return
+      // The connection id is correlation data; the peer on the other end is the only one that may speak on it.
+      if (fromPubKey !== this.#remotePodId) return
       this.#handleEnvelope(fromPubKey, data)
     })
   }
@@ -637,6 +654,12 @@ function createAcceptedSession({ peerNode, envelopeType, connectionId, remotePod
  *   connection is rejected -- see module doc comment's "NO onConnection
  *   HANDLER REGISTERED" section. A thrown/rejected hook is treated as a
  *   rejection, never an unhandled rejection.
+ * @param {string} [opts.accessResource] - If set, an inbound connection also needs
+ *   `registry.checkAccess(from, accessResource, accessAction)` (default deny; the grant alone decides when
+ *   there is no `onConnection`), and open sessions are closed when that stops being true.
+ * @param {string} [opts.accessAction='connect']
+ * @param {boolean} [opts.recheckOnAccessChange=true] - Ask `onConnection` again for a peer's open sessions
+ *   when the registry announces an access change for that peer, and close those no longer accepted.
  * @param {(session: BrowserMeshWebSocket, info: {fromPubKey: string, path: string}) => void} [opts.onIncomingConnection]
  *   Called once per ACCEPTED inbound connection, with an already-`OPEN`
  *   `BrowserMeshWebSocket`-shaped handle for that session (same
@@ -648,6 +671,9 @@ function createAcceptedSession({ peerNode, envelopeType, connectionId, remotePod
 export function createMeshWebSocketService({
   onConnection,
   onIncomingConnection,
+  accessResource,
+  accessAction = 'connect',
+  recheckOnAccessChange = true,
   envelopeType = DEFAULT_ENVELOPE_TYPE,
   onLog,
 } = {}) {
@@ -657,6 +683,51 @@ export function createMeshWebSocketService({
     name: 'mesh-websocket',
 
     attach(peerNode, ctx) {
+      /**
+       * The accept decision: the registry grant when `accessResource` is set (default deny without a
+       * registry), then `onConnection` when there is one. With `accessResource` and no `onConnection`
+       * the grant alone decides. Used at open and again, for sessions that are open, when access changes.
+       * @returns {Promise<{ accepted: boolean, reason: string }>}
+       */
+      async function authorize(fromPubKey, path, connectionId) {
+        if (accessResource !== undefined) {
+          const allowed = typeof ctx.registry?.checkAccess === 'function'
+            && ctx.registry.checkAccess(fromPubKey, accessResource, accessAction)?.allowed === true
+          if (!allowed) return { accepted: false, reason: 'connection rejected' }
+        }
+        if (typeof onConnection === 'function') {
+          try {
+            return { accepted: !!(await onConnection(fromPubKey, path)), reason: 'connection rejected' }
+          } catch (err) {
+            log('mesh-websocket:onConnection-threw', { from: fromPubKey, connectionId, error: err?.message || String(err) })
+            return { accepted: false, reason: err?.message || 'onConnection threw' }
+          }
+        }
+        return accessResource !== undefined
+          ? { accepted: true, reason: '' }
+          : { accepted: false, reason: 'no onConnection handler registered' }
+      }
+
+      /** Open sessions by peer: what an access change has to look at. @type {Map<string, Set<{ session: BrowserMeshWebSocket, path: string, connectionId: string }>>} */
+      const open = new Map()
+
+      // A session is held on a decision made when it opened. When the registry says that peer's access
+      // changed (revoked, removed, updated, or a grant expired) the decision is made again, and a session
+      // that would no longer be accepted is closed.
+      const unsubscribeAccess = (accessResource !== undefined || recheckOnAccessChange) && typeof ctx.registry?.onAccessChange === 'function'
+        ? ctx.registry.onAccessChange(({ pubKey } = {}) => {
+          for (const entry of [...(open.get(pubKey) ?? [])]) {
+            authorize(pubKey, entry.path, entry.connectionId).then(({ accepted }) => {
+              if (accepted || entry.session.readyState !== OPEN) return
+              ctx.emit('mesh-websocket:connection-revoked', { from: pubKey, path: entry.path, connectionId: entry.connectionId })
+              entry.session.close(4403, 'access revoked')
+            }).catch((err) => {
+              log('mesh-websocket:recheck-failed', { from: pubKey, connectionId: entry.connectionId, error: err?.message || String(err) })
+            })
+          }
+        })
+        : () => {}
+
       const unsubscribe = ctx.onIncomingData(envelopeType, (fromPubKey, msg) => {
         if (!msg || msg.kind !== 'ws-open') return
         handleOpen(fromPubKey, msg).catch((err) => {
@@ -667,19 +738,7 @@ export function createMeshWebSocketService({
       /** @param {string} fromPubKey @param {object} msg */
       async function handleOpen(fromPubKey, msg) {
         const { connectionId, path } = msg
-        let accepted = false
-        let rejectReason = 'no onConnection handler registered'
-
-        if (typeof onConnection === 'function') {
-          try {
-            accepted = await onConnection(fromPubKey, path)
-            rejectReason = 'connection rejected'
-          } catch (err) {
-            log('mesh-websocket:onConnection-threw', { from: fromPubKey, connectionId, error: err?.message || String(err) })
-            accepted = false
-            rejectReason = err?.message || 'onConnection threw'
-          }
-        }
+        const { accepted, reason: rejectReason } = await authorize(fromPubKey, path, connectionId)
 
         if (!accepted) {
           ctx.emit('mesh-websocket:connection-rejected', { from: fromPubKey, path, connectionId, reason: rejectReason })
@@ -690,7 +749,12 @@ export function createMeshWebSocketService({
         }
 
         const session = createAcceptedSession({ peerNode, envelopeType, connectionId, remotePodId: fromPubKey, path })
+        const held = { session, path, connectionId }
+        if (!open.has(fromPubKey)) open.set(fromPubKey, new Set())
+        open.get(fromPubKey).add(held)
         session.addEventListener('close', (event) => {
+          open.get(fromPubKey)?.delete(held)
+          if (open.get(fromPubKey)?.size === 0) open.delete(fromPubKey)
           ctx.emit('mesh-websocket:connection-closed', { from: fromPubKey, path, connectionId, code: event.code, reason: event.reason })
         })
         ctx.emit('mesh-websocket:connection-opened', { from: fromPubKey, path, connectionId })
@@ -740,6 +804,7 @@ export function createMeshWebSocketService({
         api,
         teardown() {
           unsubscribe()
+          unsubscribeAccess()
         },
       }
     },

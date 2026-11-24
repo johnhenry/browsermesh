@@ -24,12 +24,38 @@ import {
 } from './messages.mjs'
 import { BroadcastChannelTransport, NullTransport } from './transport.mjs'
 import { TransportDiscovery, NullDiscovery } from './discovery.mjs'
-import { MessageSigner, ReplayGuard, verifyMessage, DROP_REASONS } from './signed-message.mjs'
+import { MessageSigner, ReplayGuard, verifyMessage, admitDiscovery, DROP_REASONS } from './signed-message.mjs'
 
 const POD_RUNTIME_KEY = Symbol.for('pod.runtime')
 const DEFAULT_HANDSHAKE_TIMEOUT = 1000
 const DEFAULT_DISCOVERY_TIMEOUT = 2000
 const DEFAULT_DISCOVERY_CHANNEL = 'pod-discovery'
+
+/**
+ * The windows a pod listens to (`boot({ window })`). `null` for a constraint means it was not given;
+ * with neither given nothing is accepted.
+ */
+function windowPolicyOf(cfg, kind, g) {
+  let origins = null
+  let sources = null
+  if (cfg?.origins !== undefined) {
+    if (!Array.isArray(cfg.origins) || cfg.origins.some((o) => typeof o !== 'string' || o === '*')) {
+      throw new TypeError('window.origins must be a list of exact origins ("*" is not one)')
+    }
+    origins = [...cfg.origins]
+  }
+  if (cfg?.sources !== undefined) {
+    if (!Array.isArray(cfg.sources)) throw new TypeError('window.sources must be a list of windows')
+    sources = [...cfg.sources]
+  }
+  if (cfg?.parent) {
+    // A dedicated worker's only sender is the page that created it, and its `event.source` is null.
+    const parent = kind === 'iframe' ? g.parent : kind === 'spawned' ? g.opener : kind === 'worker' ? null : undefined
+    sources = parent !== undefined ? [...(sources ?? []), parent] : (sources ?? [])
+  }
+  const sole = origins?.length === 1 && origins[0] !== 'null' ? origins[0] : '*'
+  return { origins, sources, targetOrigin: cfg?.targetOrigin ?? sole }
+}
 
 /** @typedef {'idle'|'booting'|'ready'|'shutdown'} PodState */
 /** @typedef {'autonomous'|'child'|'peer'|'controlled'|'hybrid'} PodRole */
@@ -49,6 +75,7 @@ export class Pod {
   #signer = null
   #guard = new ReplayGuard()
   #allowUnsigned = undefined
+  #windowPolicy = { origins: null, sources: null, targetOrigin: '*' }
   #trust = 'untrusted'
   #rx = Promise.resolve()
   #dropped = Object.fromEntries(DROP_REASONS.map((r) => [r, 0]))
@@ -103,11 +130,23 @@ export class Pod {
    * @param {boolean} [opts.sign=true] - Sign outgoing `pod:message`/`pod:rpc-*` messages with this pod's key.
    *   `send()` then returns a promise that settles once the message is on the transport.
    * @param {boolean} [opts.allowUnsigned] - Accept unsigned `pod:message` / `pod:rpc-response`
-   *   from older peers. Default: `true` when the transport reports `trust === 'same-origin'`
-   *   (BroadcastChannel, in-process) and for messages posted to the window; `false` for every
-   *   other transport (WebSocket relay, custom adapters). Unsigned `pod:rpc-request`s are never
-   *   accepted. A message that carries a signature must verify whatever this is set to.
+   *   and unsigned `pod:hello` / `pod:hello-ack` / `pod:goodbye` from older peers (a peer admitted
+   *   that way is listed with `authenticated: false`). Default: `true` when the transport reports
+   *   `trust === 'same-origin'` (BroadcastChannel, in-process) and for messages posted to the
+   *   window; `false` for every other transport (WebSocket relay, custom adapters). Unsigned
+   *   `pod:rpc-request`s are never accepted. A message that carries a signature must verify
+   *   whatever this is set to. A link that authenticates its peer (see `meta.peerId`) needs no
+   *   signature for discovery messages either.
    * @param {'same-origin'|'untrusted'} [opts.trust] - Overrides the transport's own `trust`.
+   * @param {object} [opts.window] - Which windows may post to this pod. **Default: none**: a
+   *   `message` event from any window is refused (`window-source`). A message is accepted only if it
+   *   matches every constraint given:
+   *   `sources` (exact Window objects, e.g. an iframe's `contentWindow`; `parent: true` adds the
+   *   embedding parent of an iframe or the opener of a spawned window) compared with `event.source`,
+   *   and `origins` (exact origins, `'null'` only if listed) compared with `event.origin`.
+   *   What an accepted window sends unsigned is delivered with `authenticated: false` (or refused
+   *   with `allowUnsigned: false`); a signature must verify either way. The hello to the parent is
+   *   posted to `targetOrigin` (default: the sole entry of `origins`, else `'*'`).
    * @param {{ maxSenders?: number, maxSessionsPerSender?: number }} [opts.replay] - Bounds of the replay window state.
    */
   async boot(opts = {}) {
@@ -127,6 +166,7 @@ export class Pod {
       this.#allowUnsigned = opts.allowUnsigned
       this.#guard = new ReplayGuard(opts.replay)
       this.#kind = detectPodKind(this.#g)
+      this.#windowPolicy = windowPolicyOf(opts.window, this.#kind, this.#g)
       this.#capabilities = detectCapabilities(this.#g)
       this.#g[POD_RUNTIME_KEY] = {
         podId: this.podId,
@@ -182,7 +222,8 @@ export class Pod {
       // No discovery adapter — close transport directly
       if (!opts.silent) {
         try {
-          this.#transport.send(createGoodbye({ podId: this.podId }))
+          const goodbye = createGoodbye({ podId: this.podId })
+          this.#transport.send(this.#signer ? await this.#signer.sign(goodbye) : goodbye)
         } catch { /* transport may already be closed */ }
       }
       await this.#transport.close()
@@ -309,6 +350,11 @@ export class Pod {
     this.#messageHandler = (event) => {
       const data = event.data
       if (!data || !data.type) return
+      if (!this.#windowAccepts(event)) {
+        // Only pod traffic is worth counting; any page's other messages pass through here.
+        if (typeof data.type === 'string' && data.type.startsWith('pod:')) this.#countDrop('window-source', data.type)
+        return
+      }
       this.#handleIncoming(data, 'window')
     }
     this.#g.addEventListener('message', this.#messageHandler)
@@ -324,11 +370,12 @@ export class Pod {
 
     if (!target || typeof target.postMessage !== 'function') return
 
-    const hello = createHello({
+    const unsigned = createHello({
       podId: this.podId,
       kind: this.#kind,
       capabilities: this.#capabilities,
     })
+    const hello = this.#signer ? await this.#signer.sign(unsigned) : unsigned
 
     return new Promise((resolve) => {
       const timer = setTimeout(() => resolve(), timeout)
@@ -336,15 +383,22 @@ export class Pod {
       const handler = (event) => {
         const data = event.data
         if (data?.type === POD_HELLO_ACK && data.targetPodId === this.podId) {
-          clearTimeout(timer)
-          this.#g.removeEventListener('message', handler)
-          this.#addPeer(data.podId, { kind: data.kind, role: 'parent' })
-          this.#role = 'child'
-          resolve()
+          // Only the configured parent window can answer for the parent (the pod's
+          // own message handler has already counted a refusal).
+          if (!this.#windowAccepts(event)) return
+          // The ack names the parent; it counts only if that parent proved it.
+          admitDiscovery(data, undefined, { guard: this.#guard, allowUnsigned: this.#allowUnsigned ?? true }).then((verdict) => {
+            if (!verdict.ok) return this.#countDrop(verdict.reason, data.type)
+            clearTimeout(timer)
+            this.#g.removeEventListener('message', handler)
+            this.#addPeer(verdict.podId, { kind: data.kind, role: 'parent', sid: verdict.sid, authenticated: verdict.authenticated })
+            this.#role = 'child'
+            resolve()
+          })
         }
       }
       this.#g.addEventListener('message', handler)
-      target.postMessage(hello, '*')
+      target.postMessage(hello, this.#windowPolicy.targetOrigin)
     })
   }
 
@@ -362,6 +416,8 @@ export class Pod {
       this.#transport = new NullTransport()
     }
 
+    this.#trust = opts.trust ?? opts.discovery?.trust ?? this.#transport?.trust ?? 'untrusted'
+
     // Use provided discovery or create one based on transport
     if (opts.discovery) {
       this.#discovery = opts.discovery
@@ -372,6 +428,9 @@ export class Pod {
         localKind: this.#kind,
         capabilities: this.#capabilities,
         timeout,
+        signer: this.#signer,
+        guard: this.#guard,
+        allowUnsigned: this.#allowUnsigned ?? this.#trust === 'same-origin',
       })
     } else {
       this.#discovery = new NullDiscovery()
@@ -379,12 +438,12 @@ export class Pod {
 
     // Wire discovery callbacks
     this.#discovery.onPeerDiscovered((info) => {
-      this.#addPeer(info.podId, { kind: info.kind })
+      this.#addPeer(info.podId, { kind: info.kind, sid: info.sid ?? null, authenticated: info.authenticated === true })
     })
     this.#discovery.onPeerLost((info) => {
-      this.#removePeer(info.podId)
+      this.#goodbye(info)
     })
-    this.#trust = opts.trust ?? opts.discovery?.trust ?? this.#transport?.trust ?? 'untrusted'
+    this.#discovery.onDropped?.((info) => this.#countDrop(info.reason, info.type))
     this.#discovery.onMessage((msg, meta) => {
       this.#handleIncoming(msg, 'transport', meta)
     })
@@ -412,25 +471,11 @@ export class Pod {
    */
   #handleIncoming(data, source = 'transport', meta) {
     switch (data.type) {
-      case POD_HELLO: {
-        if (data.podId !== this.podId) {
-          this.#addPeer(data.podId, { kind: data.kind })
-          if (this.#transport) {
-            this.#transport.send(
-              createHelloAck({ podId: this.podId, kind: this.#kind, targetPodId: data.podId })
-            )
-          }
-        }
-        break
-      }
-      case POD_HELLO_ACK: {
-        if (data.targetPodId === this.podId) {
-          this.#addPeer(data.podId, { kind: data.kind })
-        }
-        break
-      }
+      case POD_HELLO:
+      case POD_HELLO_ACK:
       case POD_GOODBYE: {
-        this.#removePeer(data.podId)
+        // Same queue as messages: verification is asynchronous.
+        this.#rx = this.#rx.then(() => this.#receiveDiscovery(data, source, meta)).catch(() => {})
         break
       }
       case POD_MESSAGE:
@@ -481,16 +526,80 @@ export class Pod {
     this._emit('message', delivered)
   }
 
+  /**
+   * A discovery message that reached the pod outside its discovery adapter
+   * (posted to the window). Same rules as `TransportDiscovery`: the pod a hello
+   * names must be the key that signed it, or the link must have said so.
+   */
+  async #receiveDiscovery(data, source, meta) {
+    if (this.#state === 'shutdown') return
+    if (data.type === POD_HELLO_ACK ? data.targetPodId !== this.podId
+      : (typeof data.to === 'string' && data.to !== '*' && data.to !== this.podId)) return
+    if (data.podId === this.podId) return
+    const allowUnsigned = this.#allowUnsigned ?? (source === 'window' || this.#trust === 'same-origin')
+    const verdict = await admitDiscovery(data, meta, { guard: this.#guard, allowUnsigned })
+    if (!verdict.ok) return this.#countDrop(verdict.reason, data.type)
+    if (this.#state === 'shutdown') return
+    const { podId, authenticated, sid } = verdict
+    switch (data.type) {
+      case POD_HELLO: {
+        this.#addPeer(podId, { kind: data.kind, sid, authenticated })
+        if (this.#transport) {
+          const ack = createHelloAck({ podId: this.podId, kind: this.#kind, targetPodId: podId })
+          this.#transport.send(this.#signer ? await this.#signer.sign(ack) : ack)
+        }
+        break
+      }
+      case POD_HELLO_ACK:
+        this.#addPeer(podId, { kind: data.kind, sid, authenticated })
+        break
+      case POD_GOODBYE:
+        this.#goodbye({ podId, sid, authenticated })
+        break
+    }
+  }
+
+  /** Whether a `message` event comes from a window this pod was told to listen to. */
+  #windowAccepts(event) {
+    const { origins, sources } = this.#windowPolicy
+    if (origins === null && sources === null) return false
+    if (origins !== null && !origins.includes(event.origin)) return false
+    if (sources !== null && !sources.includes(event.source ?? null)) return false
+    return true
+  }
+
+  #countDrop(reason, type) {
+    if (reason in this.#dropped) this.#dropped[reason]++
+    this._emit('message:dropped', { reason, type })
+  }
+
   #addPeer(podId, info) {
     if (podId === this.podId) return
     const isNew = !this.#peers.has(podId)
-    this.#peers.set(podId, { ...info, podId, lastSeen: Date.now() })
+    // A peer already known as the parent keeps that role when the same hello/ack is also seen on another path.
+    const role = this.#peers.get(podId)?.role
+    this.#peers.set(podId, { ...(role ? { role } : {}), ...info, podId, lastSeen: Date.now() })
     if (isNew) {
       this._emit('peer:found', { podId, ...info })
     }
   }
 
+  /**
+   * A goodbye removes the peer it names when it is as well attributed as the
+   * entry: an entry that a signature proved is not removed by an unsigned
+   * goodbye, and a goodbye left over from an earlier session of the same key
+   * does not remove the session that replaced it.
+   */
+  #goodbye({ podId, sid, authenticated }) {
+    const known = this.#peers.get(podId)
+    if (!known) return
+    if (known.authenticated && !authenticated) return
+    if (known.sid && sid && known.sid !== sid) return
+    this.#removePeer(podId)
+  }
+
   #removePeer(podId) {
+    this.#transport?.forgetPeer?.(podId)
     if (this.#peers.delete(podId)) {
       this._emit('peer:lost', { podId })
     }

@@ -109,6 +109,7 @@ await pod.boot({
   sign,               // boolean — sign outgoing messages with the pod key (default: true)
   allowUnsigned,      // boolean — accept unsigned pod:message / pod:rpc-response (default: per transport, see "Who sent this message?")
   trust,              // 'same-origin' | 'untrusted' — overrides the transport's own `trust`
+  window,             // { sources?, parent?, origins?, targetOrigin? } — which windows may post to this pod (default: none, see "Who may post to the window?")
 })
 ```
 
@@ -265,8 +266,74 @@ What this does and does not protect, end to end across several hops: a signed
 message gives integrity and origin authenticity that the forwarding peers
 cannot forge. It gives no confidentiality; a peer that forwards a message can
 read it. Encrypted transport is tracked in issue #273 and is not part of this
-change. `pod:hello`, `pod:hello-ack` and `pod:goodbye` announcements are not
-signed: they only affect the peer list and never the attribution of messages.
+change.
+
+**Discovery messages are attributable.** `pod:hello`, `pod:hello-ack` and
+`pod:goodbye` are signed with the same scheme and the same session counter as
+the messages above (the signed fields are `type`, `podId`, `kind`,
+`capabilities`, `to`, `targetPodId`, `ts`, `pk`, `sid` and `seq` as each type
+has them). A pod enters the peer list only when the key that signed its hello
+or ack is the pod id it names; the entry says `authenticated: true` and records
+the session id (`sid`). A goodbye is honoured only from the pod it names, only
+for the session that said hello, and an unsigned goodbye never removes an entry
+that a signature proved. A link that authenticates its peer (`meta.peerId`)
+stands in for the signature, and `WshPodTransport` hands the pod a goodbye
+under the link's identity when a link goes down.
+
+What a relay or signalling server says about who is connected (`peers`,
+`peer-joined`, `peer-left`, and the `source` of a relayed frame) is only a hint
+of whom to greet. `WebSocketTransport` sends a hello to a hinted pod but sends
+any other broadcast only to pods whose signed hello or ack verified
+(`transport.verifiedPeers`); a pod the relay invents never becomes a peer and
+never receives a broadcast.
+
+Older pods (0.2.0) send unsigned hellos. They are admitted by the same
+`allowUnsigned` rule as unsigned messages: by default only over a same-origin
+transport (and the window), listed with `authenticated: false`; **refused over
+a relay or a custom adapter** (counted as `unsigned`, event `message:dropped`
+with type `pod:hello`) unless `allowUnsigned: true`. A pod on 0.2.0 still
+accepts the signed hellos of this version (it ignores the extra fields). Two
+pods over a relay need this version on both sides, or `allowUnsigned: true` on
+the newer one. Same-origin `BroadcastChannel` keeps working signed or not; the
+trust there is the origin, and any script of the origin can announce or retire
+a pod.
+
+A signed hello proves that the key spoke at some time, not that it is online
+now: a relay can replay one from a session this pod has forgotten.
+
+### Who may post to the window?
+
+A page that can reach this pod's window (any frame, any opener, any page that
+holds a reference) can `postMessage` to it. The pod therefore listens to
+**no window by default**: a `message` event is refused (counted as
+`window-source`, event `message:dropped`) unless it comes from a window the pod
+was told about. Configure that with `boot({ window })`:
+
+```js
+await pod.boot({
+  window: {
+    parent: true,                          // the embedding parent (iframe) or the opener (spawned window)
+    sources: [iframe.contentWindow],       // exact Window objects, compared with event.source
+    origins: ['https://app.example'],      // exact origins, compared with event.origin ('null' only if listed)
+  },
+})
+```
+
+A message must match every constraint given. With none given nothing is
+accepted. What an accepted window sends is still checked as before: a signature
+must verify, and an unsigned message is delivered with `authenticated: false`
+(refused with `allowUnsigned: false`). The `window` option never makes an
+unsigned message trusted; it decides who is heard at all.
+
+The hello that a child posts to its parent goes to `window.targetOrigin`
+(default: the sole entry of `origins`, otherwise `'*'`), and only a configured
+parent window can answer it, so a child without `window: { parent: true }`
+never becomes `role: 'child'`.
+
+**Older behaviour:** before this option, any window could post to a pod and be
+heard (unsigned, by default). A page that relied on that now sets `window`.
+`bootHostedPod()` (the browser-lane child) sets `window: { parent: true }`: the
+driver that spawned it is its only sender.
 
 ## WebSocketTransport (relay-backed)
 

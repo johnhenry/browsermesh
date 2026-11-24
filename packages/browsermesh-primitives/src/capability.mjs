@@ -18,22 +18,26 @@ export function parseScope(scope) {
 
 /**
  * Check whether a granted scope matches a required scope.
- * Supports wildcard (`*`) matching at any level.
+ *
+ * Both are split on `:` and compared segment by segment, for any number of
+ * segments: a granted segment covers a required one if it is `*` or equal. A
+ * missing or empty segment counts as `*` (so a shorter grant covers what is
+ * beneath it, and at least three segments are always compared). A grant never
+ * covers a required scope that differs from it in a segment beyond the third.
  *
  * @param {string} granted - The scope that was granted
  * @param {string} required - The scope being checked against
  * @returns {boolean} True if granted covers required
  */
 export function matchScope(granted, required) {
-  const g = parseScope(granted);
-  const r = parseScope(required);
-
-  const matches = (grantedPart, requiredPart) =>
-    grantedPart === '*' || grantedPart === requiredPart;
-
-  return matches(g.namespace, r.namespace) &&
-    matches(g.resource, r.resource) &&
-    matches(g.action, r.action);
+  const g = granted.split(':');
+  const r = required.split(':');
+  const length = Math.max(g.length, r.length, 3);
+  for (let i = 0; i < length; i++) {
+    const grantedPart = g[i] || '*';
+    if (grantedPart !== '*' && grantedPart !== (r[i] || '*')) return false;
+  }
+  return true;
 }
 
 /**

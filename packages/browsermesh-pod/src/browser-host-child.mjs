@@ -91,6 +91,9 @@ export async function bootHostedPod({
   await pod.boot({
     globalThis: g,
     discoveryChannel: channel,
+    // The driver that spawned this page is the one window allowed to post to it
+    // (`driver.send()`); a message from any other window is refused.
+    window: { parent: true },
     ...(handshakeTimeout === undefined ? {} : { handshakeTimeout }),
     ...(discoveryTimeout === undefined ? {} : { discoveryTimeout }),
   })
