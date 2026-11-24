@@ -683,8 +683,8 @@ describe('createEscrowService: ctx.emit() bridges EscrowManager events', () => {
     on('escrow:expired', (c) => expired.push(c))
 
     const contract = await api.create({ payerPodId: host.podId, payeePodId: 'someone', amount: 10, timeoutMs: 1 })
-    await new Promise((r) => setTimeout(r, 20))
-    const count = await api.checkExpired()
+    // Time is passed in: nothing waits for a 1 ms timeout to elapse.
+    const count = await api.checkExpired(Date.now() + 60_000)
     assert.equal(count, 1)
     assert.equal(expired.length, 1)
     assert.equal(expired[0].id, contract.id)

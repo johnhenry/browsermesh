@@ -343,14 +343,18 @@ export class DhtNode {
   /** @type {Function} */
   #sendFn
 
+  /** @type {() => number} */
+  #now
+
   /**
    * @param {object} opts
    * @param {string} opts.localId - This node's identifier
    * @param {RoutingTable} [opts.routingTable] - Routing table instance
    * @param {Map} [opts.store] - Local key-value store
    * @param {Function} [opts.sendFn] - Function to send messages: (targetId, msg) => {}
+   * @param {() => number} [opts.now] - Clock in ms (default `Date.now`); stored values expire against it
    */
-  constructor({ localId, routingTable, store, sendFn }) {
+  constructor({ localId, routingTable, store, sendFn, now }) {
     if (!localId || typeof localId !== 'string') {
       throw new Error('localId is required and must be a non-empty string')
     }
@@ -358,6 +362,7 @@ export class DhtNode {
     this.#routingTable = routingTable ?? new RoutingTable(localId)
     this.#store = store ?? new Map()
     this.#sendFn = sendFn ?? (() => {})
+    this.#now = typeof now === 'function' ? now : () => Date.now()
   }
 
   /** @returns {string} */
@@ -398,7 +403,7 @@ export class DhtNode {
     const entry = this.#store.get(key)
     if (entry) {
       // Check TTL
-      if (entry.ttl > 0 && Date.now() > entry.storedAt + entry.ttl) {
+      if (entry.ttl > 0 && this.#now() > entry.storedAt + entry.ttl) {
         this.#store.delete(key)
       } else {
         return { found: true, value: entry.value }
@@ -414,7 +419,7 @@ export class DhtNode {
    * @param {number} [ttl=0] - Time-to-live in ms (0 = no expiry)
    */
   store(key, value, ttl = 0) {
-    this.#store.set(key, { value, ttl, storedAt: Date.now() })
+    this.#store.set(key, { value, ttl, storedAt: this.#now() })
 
     // Replicate to closest nodes
     const closest = this.#routingTable.findClosest(key)
@@ -437,7 +442,7 @@ export class DhtNode {
    */
   handleMessage(fromId, msg) {
     // Always add sender to routing table
-    this.#routingTable.addContact({ podId: fromId, lastSeen: Date.now() })
+    this.#routingTable.addContact({ podId: fromId, lastSeen: this.#now() })
 
     switch (msg.type) {
       case DHT_PING:
@@ -462,7 +467,7 @@ export class DhtNode {
           this.#store.set(msg.key, {
             value: msg.value,
             ttl: msg.ttl ?? 0,
-            storedAt: Date.now(),
+            storedAt: this.#now(),
           })
         }
         return { type: DHT_STORE, from: this.#localId, stored: true }
@@ -480,7 +485,7 @@ export class DhtNode {
   get(key) {
     const entry = this.#store.get(key)
     if (!entry) return undefined
-    if (entry.ttl > 0 && Date.now() > entry.storedAt + entry.ttl) {
+    if (entry.ttl > 0 && this.#now() > entry.storedAt + entry.ttl) {
       this.#store.delete(key)
       return undefined
     }
@@ -495,7 +500,7 @@ export class DhtNode {
    */
   bootstrap(seedContacts) {
     for (const contact of seedContacts) {
-      this.#routingTable.addContact({ ...contact, lastSeen: Date.now() })
+      this.#routingTable.addContact({ ...contact, lastSeen: this.#now() })
     }
     return this.findNode(this.#localId)
   }
