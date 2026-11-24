@@ -24,6 +24,20 @@
  * key, signed shards and agent-anonymous DHT keys are NOT done (see the issue).
  * The plain synchronous `hide()` / `reconstitute()` are unchanged and plaintext.
  *
+ * With a `StealthKeyring` (`keyring` option) the sealed state uses the v2
+ * envelope: key id (so keys rotate), sequence number and issue time (so an
+ * older state is refused as replayed), all authenticated with the sender and
+ * type as AES-GCM associated data. Peers without the key get a quiet,
+ * counted failure from `tryReconstituteEncrypted()`.
+ *
+ * What it hides, and from whom: the CONTENT of the state from whoever holds
+ * the DHT shards (shard-holding nodes and relays). It does NOT hide that an
+ * agent exists (keys are `stealth:<agentId>:shard:<i>`), how large its state
+ * is, when it is written or read, or who reads it (traffic analysis). Every
+ * holder of the group key can read and forge state: the sender in the
+ * associated data is a label, not a signature. Threshold sharing of the key is
+ * a design only (docs/design/stealth-threshold.md), not built.
+ *
  * StateShard represents one fragment.
  * ShardDistributor scatters shards across DHT nodes.
  * ShardCollector retrieves and reconstructs state from DHT.
@@ -125,6 +139,199 @@ export async function decryptStealthState(payload, key, agentId) {
     bytes.slice(IV_BYTES),
   )
   return new TextDecoder().decode(pt)
+}
+
+// ---------------------------------------------------------------------------
+// Keyed, versioned, replay-bounded sealing (v2 envelope)
+// ---------------------------------------------------------------------------
+
+/**
+ * Error for every sealing/opening refusal; `code` says why:
+ * `not-encrypted | malformed | unknown-key | tampered | replayed | stale |
+ * key-exhausted | no-key | bad-argument`.
+ */
+export class StealthError extends Error {
+  constructor(code, message) {
+    super(message)
+    this.name = 'StealthError'
+    this.code = code
+  }
+}
+
+const V2_PREFIX = 'v2.'
+const V2_DOMAIN = 'browsermesh-stealth/v2'
+const KEY_ID_RE = /^[A-Za-z0-9_-]{1,64}$/
+const DEFAULT_MAX_SEALS_PER_KEY = 2 ** 32 // NIST SP 800-38D bound for random 96-bit IVs
+
+/**
+ * A set of AES-256-GCM keys identified by id, one of them current. Sealing
+ * uses the current key and writes its id into the envelope; opening picks the
+ * key by that id, so keys can rotate: add the new key, make it current, keep
+ * the old one until nothing sealed under it matters, then `remove` it.
+ * Each key counts its seals and refuses past `maxSealsPerKey` (random 96-bit
+ * IVs are only safe for a bounded number of messages per key).
+ */
+export class StealthKeyring {
+  #keys = new Map()
+  #current = null
+  #groupId = null
+  #max
+
+  /** @param {{ maxSealsPerKey?: number, groupId?: string }} [opts] */
+  constructor({ maxSealsPerKey = DEFAULT_MAX_SEALS_PER_KEY, groupId = null } = {}) {
+    if (!Number.isInteger(maxSealsPerKey) || maxSealsPerKey < 1) throw new StealthError('bad-argument', 'maxSealsPerKey must be a positive integer')
+    this.#max = maxSealsPerKey
+    this.#groupId = groupId
+  }
+
+  /**
+   * Build a keyring from group secrets (HKDF per `deriveStealthKey`).
+   *
+   * @param {string} groupId
+   * @param {{ id: string, secret: Uint8Array|string }[]} entries
+   * @param {string} [currentId] - Defaults to the last entry
+   * @param {{ maxSealsPerKey?: number }} [opts]
+   * @returns {Promise<StealthKeyring>}
+   */
+  static async fromGroupSecrets(groupId, entries, currentId, opts = {}) {
+    if (!Array.isArray(entries) || entries.length === 0) throw new StealthError('bad-argument', 'at least one key is required')
+    const kr = new StealthKeyring({ ...opts, groupId })
+    for (const e of entries) await kr.add(e.id, e.secret, { makeCurrent: false })
+    kr.setCurrent(currentId ?? entries[entries.length - 1].id)
+    return kr
+  }
+
+  /** Derive and add a key from a group secret. */
+  async add(id, secret, { groupId = this.#groupId, makeCurrent = false } = {}) {
+    if (!groupId) throw new StealthError('bad-argument', 'groupId is required to derive a key')
+    return this.addKey(id, await deriveStealthKey(secret, groupId), { makeCurrent })
+  }
+
+  /** Add an existing AES-GCM `CryptoKey` under `id`. */
+  addKey(id, key, { makeCurrent = false } = {}) {
+    if (typeof id !== 'string' || !KEY_ID_RE.test(id)) throw new StealthError('bad-argument', 'key id must be 1-64 characters of A-Z a-z 0-9 _ -')
+    this.#keys.set(id, { key, seals: 0 })
+    if (makeCurrent || this.#current === null) this.#current = id
+    return this
+  }
+
+  setCurrent(id) {
+    if (!this.#keys.has(id)) throw new StealthError('unknown-key', `no key ${id}`)
+    this.#current = id
+  }
+
+  /** Drop a key. The current key cannot be removed: make another current first. */
+  remove(id) {
+    if (id === this.#current) throw new StealthError('bad-argument', 'cannot remove the current key')
+    return this.#keys.delete(id)
+  }
+
+  has(id) { return this.#keys.has(id) }
+  get currentId() { return this.#current }
+  get ids() { return [...this.#keys.keys()] }
+
+  /** @private used by sealStealthMessage */
+  _useCurrent() {
+    const e = this.#keys.get(this.#current)
+    if (!e) throw new StealthError('no-key', 'the keyring has no key')
+    if (e.seals >= this.#max) throw new StealthError('key-exhausted', `key ${this.#current} reached its message budget; rotate it`)
+    e.seals++
+    return { id: this.#current, key: e.key }
+  }
+
+  /** @private used by openStealthMessage */
+  _get(id) { return this.#keys.get(id)?.key ?? null }
+}
+
+function u32(n) { return new Uint8Array([(n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255]) }
+function u64(n) { const b = new Uint8Array(8); new DataView(b.buffer).setBigUint64(0, BigInt(n)); return b }
+
+/** Associated data: length-prefixed domain, type, sender, key id, then seq and issuedAt. */
+function v2Aad(type, sender, keyId, seq, issuedAt) {
+  const te = new TextEncoder()
+  const parts = [V2_DOMAIN, type, sender, keyId].map((s) => te.encode(s))
+  const out = []
+  for (const p of parts) out.push(u32(p.length), p)
+  out.push(u64(seq), u64(issuedAt))
+  const n = out.reduce((a, p) => a + p.length, 0)
+  const buf = new Uint8Array(n)
+  let o = 0
+  for (const p of out) { buf.set(p, o); o += p.length }
+  return buf
+}
+
+/**
+ * Seal a message for a group that shares a keyring: AES-256-GCM, a fresh
+ * random 96-bit nonce per message, the key id, sequence number and issue time
+ * carried in the envelope and authenticated together with the sender and
+ * message type as associated data. Envelope:
+ * `v2.<keyId>.<seq>.<issuedAt>.<base64url(iv || ciphertext+tag)>`.
+ *
+ * The associated data binds the sender and type as LABELS: every group member
+ * holds the key and can seal under any sender name. It is not a signature.
+ *
+ * @param {string} plaintext
+ * @param {{ keyring: StealthKeyring, sender: string, type: string, seq?: number, issuedAt?: number }} opts
+ * @returns {Promise<string>}
+ */
+export async function sealStealthMessage(plaintext, { keyring, sender, type, seq, issuedAt }) {
+  if (!keyring || typeof keyring._useCurrent !== 'function') throw new StealthError('no-key', 'a keyring is required')
+  if (!sender || typeof sender !== 'string' || !type || typeof type !== 'string') throw new StealthError('bad-argument', 'sender and type are required strings')
+  const now = Date.now()
+  seq = seq ?? now
+  issuedAt = issuedAt ?? now
+  if (!Number.isSafeInteger(seq) || seq < 0 || !Number.isSafeInteger(issuedAt) || issuedAt < 0) throw new StealthError('bad-argument', 'seq and issuedAt must be non-negative integers')
+  const { id, key } = keyring._useCurrent()
+  const iv = crypto.getRandomValues(new Uint8Array(IV_BYTES))
+  const ct = new Uint8Array(await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv, additionalData: v2Aad(type, sender, id, seq, issuedAt) },
+    key,
+    new TextEncoder().encode(plaintext),
+  ))
+  const body = new Uint8Array(IV_BYTES + ct.length)
+  body.set(iv, 0)
+  body.set(ct, IV_BYTES)
+  return `${V2_PREFIX}${id}.${seq}.${issuedAt}.${toBase64Url(body)}`
+}
+
+/**
+ * Open a v2 envelope. Refusals throw `StealthError`: `not-encrypted` (not a v2
+ * envelope), `malformed`, `unknown-key` (key id not in the keyring),
+ * `tampered` (wrong key, or any change to the ciphertext, sender, type, key id,
+ * seq or issue time), then, after authentication, `replayed` (`seq <
+ * minSeq`) and `stale` (`now - issuedAt > maxAgeMs`).
+ *
+ * @param {string} payload
+ * @param {{ keyring: StealthKeyring, sender: string, type: string, minSeq?: number, maxAgeMs?: number, now?: number }} opts
+ * @returns {Promise<{ plaintext: string, keyId: string, seq: number, issuedAt: number }>}
+ */
+export async function openStealthMessage(payload, { keyring, sender, type, minSeq, maxAgeMs, now }) {
+  if (typeof payload !== 'string' || !payload.startsWith(V2_PREFIX)) throw new StealthError('not-encrypted', 'not a v2 stealth envelope')
+  const parts = payload.split('.')
+  if (parts.length !== 5 || !KEY_ID_RE.test(parts[1]) || !/^\d{1,16}$/.test(parts[2]) || !/^\d{1,16}$/.test(parts[3])) {
+    throw new StealthError('malformed', 'malformed stealth envelope')
+  }
+  const [, keyId, seqS, issuedS, bodyS] = parts
+  const seq = Number(seqS)
+  const issuedAt = Number(issuedS)
+  const key = keyring?._get?.(keyId)
+  if (!key) throw new StealthError('unknown-key', `no key ${keyId}`)
+  let bytes
+  try { bytes = fromBase64Url(bodyS) } catch { throw new StealthError('malformed', 'malformed stealth envelope') }
+  if (bytes.length <= IV_BYTES) throw new StealthError('malformed', 'truncated stealth envelope')
+  let pt
+  try {
+    pt = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: bytes.slice(0, IV_BYTES), additionalData: v2Aad(type, sender, keyId, seq, issuedAt) },
+      key,
+      bytes.slice(IV_BYTES),
+    )
+  } catch {
+    throw new StealthError('tampered', 'authentication failed')
+  }
+  if (minSeq !== undefined && seq < minSeq) throw new StealthError('replayed', 'older than the newest state already seen')
+  if (maxAgeMs !== undefined && (now ?? Date.now()) - issuedAt > maxAgeMs) throw new StealthError('stale', 'older than the allowed age')
+  return { plaintext: new TextDecoder().decode(pt), keyId, seq, issuedAt }
 }
 
 // ---------------------------------------------------------------------------
@@ -530,6 +737,22 @@ export class StealthAgent {
   /** @type {CryptoKey|null} */
   #key = null
 
+  /** @type {StealthKeyring|null} */
+  #keyring = null
+
+  #maxAgeMs
+
+  /** Newest sequence number this agent has written. */
+  #seq = 0
+
+  /** Newest sequence number this agent has accepted from the DHT. */
+  #highestSeen = 0
+
+  #stats = {
+    opened: 0, notEncrypted: 0, noKey: 0, unknownKey: 0, tampered: 0,
+    replayed: 0, stale: 0, malformed: 0, unavailable: 0,
+  }
+
   /**
    * @param {object} opts
    * @param {string} opts.agentId - Agent identifier
@@ -538,11 +761,13 @@ export class StealthAgent {
    * @param {number} [opts.totalShards=5] - Total shards to create
    * @param {CryptoKey} [opts.key] - AES-GCM key (see `deriveStealthKey`); enables `hideEncrypted()` / `reconstituteEncrypted()`
    */
-  constructor({ agentId, dhtNode, threshold = 3, totalShards = 5, key = null }) {
+  constructor({ agentId, dhtNode, threshold = 3, totalShards = 5, key = null, keyring = null, maxAgeMs }) {
     if (!agentId || typeof agentId !== 'string') {
       throw new Error('agentId is required and must be a non-empty string')
     }
     this.#key = key
+    this.#keyring = keyring
+    this.#maxAgeMs = maxAgeMs
     this.#agentId = agentId
     this.#dhtNode = dhtNode
     this.#threshold = threshold
@@ -578,7 +803,16 @@ export class StealthAgent {
    * @returns {Promise<object>} Manifest (`encrypted: true`)
    */
   async hideEncrypted(stateBlob) {
-    if (!this.#key) throw new Error('hideEncrypted requires a key (see deriveStealthKey)')
+    if (this.#keyring) {
+      // v2 envelope: key id, sequence number and issue time, authenticated with sender and type
+      const seq = Math.max(this.#seq + 1, Date.now())
+      const sealed = await sealStealthMessage(stateBlob, { keyring: this.#keyring, sender: this.#agentId, type: 'state', seq })
+      this.#seq = seq
+      this.hide(sealed)
+      this.#manifest = { ...this.#manifest, encrypted: true, keyId: sealed.split('.')[1], seq }
+      return this.#manifest
+    }
+    if (!this.#key) throw new StealthError('no-key', 'hideEncrypted requires a key or keyring (see deriveStealthKey / StealthKeyring)')
     const sealed = await encryptStealthState(stateBlob, this.#key, this.#agentId)
     this.hide(sealed)
     this.#manifest = { ...this.#manifest, encrypted: true }
@@ -586,14 +820,62 @@ export class StealthAgent {
   }
 
   /**
-   * Reconstitute and decrypt state stored by `hideEncrypted()`. Rejects when
-   * the key is wrong or the shards were altered. Requires the `key` option.
+   * Reconstitute and decrypt state stored by `hideEncrypted()`. Rejects with
+   * a `StealthError` (`code`: no-key, not-encrypted, unknown-key, tampered,
+   * replayed, stale, malformed) when the state cannot be trusted. With a
+   * keyring, state older than the newest this agent wrote or accepted is
+   * refused as `replayed`. Use `tryReconstituteEncrypted()` where failures are
+   * routine.
    * @returns {Promise<string>}
    */
   async reconstituteEncrypted() {
-    if (!this.#key) throw new Error('reconstituteEncrypted requires a key (see deriveStealthKey)')
-    return decryptStealthState(this.reconstitute(), this.#key, this.#agentId)
+    if (!this.#key && !this.#keyring) throw new StealthError('no-key', 'reconstituteEncrypted requires a key or keyring (see deriveStealthKey / StealthKeyring)')
+    return this.#open(this.reconstitute())
   }
+
+  async #open(raw) {
+    if (raw.startsWith(V2_PREFIX)) {
+      if (!this.#keyring) throw new StealthError('no-key', 'state is sealed under a keyring; this agent has none')
+      const r = await openStealthMessage(raw, {
+        keyring: this.#keyring, sender: this.#agentId, type: 'state',
+        minSeq: Math.max(this.#highestSeen, this.#seq), maxAgeMs: this.#maxAgeMs,
+      })
+      this.#highestSeen = Math.max(this.#highestSeen, r.seq)
+      return r.plaintext
+    }
+    if (raw.startsWith(ENC_PREFIX)) {
+      if (!this.#key) throw new StealthError('no-key', 'state is sealed under a single key; this agent has none')
+      try { return await decryptStealthState(raw, this.#key, this.#agentId) } catch { throw new StealthError('tampered', 'authentication failed') }
+    }
+    throw new StealthError('not-encrypted', 'the stored state is not encrypted')
+  }
+
+  /**
+   * Like `reconstituteEncrypted()` but never throws for an untrusted or
+   * unreadable state: it resolves `{ ok: true, state }` or
+   * `{ ok: false, reason }` and counts the outcome in `stats`. A peer without
+   * the key, or looking at plaintext or foreign state, gets a quiet `false`.
+   * Reasons: unavailable (too few shards), no-key, not-encrypted, unknown-key,
+   * tampered, replayed, stale, malformed.
+   * @returns {Promise<{ ok: true, state: string } | { ok: false, reason: string }>}
+   */
+  async tryReconstituteEncrypted() {
+    let raw
+    try { raw = this.reconstitute() } catch { this.#stats.unavailable++; return { ok: false, reason: 'unavailable' } }
+    try {
+      const state = await this.#open(raw)
+      this.#stats.opened++
+      return { ok: true, state }
+    } catch (err) {
+      const code = err instanceof StealthError ? err.code : 'malformed'
+      const slot = { 'no-key': 'noKey', 'not-encrypted': 'notEncrypted', 'unknown-key': 'unknownKey' }[code] ?? code
+      this.#stats[slot in this.#stats ? slot : 'malformed']++
+      return { ok: false, reason: slot in this.#stats ? code : 'malformed' }
+    }
+  }
+
+  /** Counters for `tryReconstituteEncrypted()` outcomes (the throwing variant does not count). @returns {object} */
+  get stats() { return { ...this.#stats } }
 
   /**
    * Reconstitute the agent's state from DHT shards.

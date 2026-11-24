@@ -61,6 +61,33 @@ parses it (`@johnhenry/browsermesh-apps`' `ctx.onIncomingData()` does). A custom
 `WebRTCTransport.send(data, { channel })` takes `'control'` (default) or
 `'bulk'` and falls back to control when the bulk channel is not open.
 
+## ICE servers: none by default, and why
+
+`DEFAULT_ICE_SERVERS` is empty. With no STUN or TURN server a peer gathers
+host candidates only, which is enough for two devices on the same network and
+contacts nobody. A public STUN server learns the peer's public IP address, and
+that it is about to pair with someone, on every connection attempt; a library
+should not make that choice for an application, so it is opt-in.
+
+Peers on different networks (behind NAT) usually need a STUN server, and
+restrictive NATs need TURN. Supply your own:
+
+```js
+const mesh = new WebRTCMeshManager({
+  localPodId,
+  iceServers: [
+    { urls: 'stun:stun.example.com:3478' },
+    { urls: 'turn:turn.example.com:3478', username, credential },
+  ],
+});
+```
+
+If you accept the disclosure, `PUBLIC_STUN_SERVERS` is a ready-made public
+list (`iceServers: [...PUBLIC_STUN_SERVERS]`). An explicit `iceServers: []`
+is honoured as "none". When a connection with no ICE servers fails, a note
+explaining the above is logged once per process (through `onLog` if given,
+otherwise `console.warn`).
+
 ## TURN-only pods: `iceTransportPolicy`
 
 By default a pod that has configured a TURN server still gathers host and
