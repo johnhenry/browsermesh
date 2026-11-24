@@ -10,7 +10,8 @@
   "scripts": {
     "test": "turbo run test --concurrency=4",
     "test:real-peer": "npm run test:real-peer --workspace=@johnhenry/browsermesh-transport && npm run test:real-peer --workspace=@johnhenry/browsermesh-apps",
-    "test:real-gpu": "npm run test:real-gpu --workspace=@johnhenry/browsermesh-apps",
+    "test:browser": "playwright test --config tests/browser/playwright.config.mjs",
+    "test:real-gpu":"npm run test:real-gpu --workspace=@johnhenry/browsermesh-apps",
     "changeset": "changeset",
     "version-packages": "changeset version",
     "release": "changeset publish",
@@ -37,6 +38,7 @@
   },
   "devDependencies": {
     "@changesets/cli": "^2.27.0",
+    "@playwright/test": "1.65.1",
     "turbo": "^2.0.0"
   },
   "engines": {
