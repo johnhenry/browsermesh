@@ -35,6 +35,9 @@ Locally you may point Playwright at a browser you already have with
 
 ## Verified in a real browser
 
+(How this fits with what is verified elsewhere, layer by layer:
+[`docs/security.md`](../../docs/security.md#what-is-verified-how).)
+
 - Ed25519 identity: generate, sign, verify across two browsers (WebCrypto).
 - Pod discovery and messaging over BroadcastChannel, and invisibility across
   two origins.
