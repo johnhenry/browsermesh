@@ -108,13 +108,14 @@ describeIfReal('sealed routed messages: alice -- bob -- carol over real WebRTC',
 
   it('fetches the destination\'s key statement through the hop, seals to it, and the hop forwards what it cannot read', async () => {
     const { alice, carol } = nodes
-    const statement = await svc.alice.api.ensureKey(carol.podId, { timeoutMs: 15_000 })
-    assert.equal(statement.podId, carol.podId, 'the statement is the destination\'s, verified against its pod id')
-
+    // Alice holds no statement for carol: the first message waits for it (fetched through bob over the real
+    // channels) and is then sent sealed.
+    assert.equal(svc.alice.api.getKeyStatement(carol.podId), null)
     const got = []
     svc.carol.on('mesh-routing:message', (m) => got.push(m))
     svc.alice.api.route(carol.podId, { text: SECRET })
     await waitFor(() => got.length === 1, 15_000, 'carol to receive the sealed message through bob')
+    assert.equal(svc.alice.api.getKeyStatement(carol.podId).podId, carol.podId, 'the statement is the destination\'s, verified against its pod id')
 
     assert.deepEqual(got[0].message, { text: SECRET })
     assert.equal(got[0].sealed, true)

@@ -66,7 +66,12 @@ const settle = async () => { for (let i = 0; i < 30; i++) await new Promise((r) 
 /** alice -> bob (a hop) -> carol. Everyone shares one injected clock. */
 async function world({ alice: aOpts = {}, bob: bOpts = {}, carol: cOpts = {}, bobService = true } = {}) {
   const clock = { t: NOW }
-  const sealing = { now: () => clock.t }
+  // No real timers: the bounded waits are scheduled here and run by `fire()`. `waits` records their lengths.
+  const timers = []
+  const waits = []
+  const schedule = (fn, ms) => { const t = { fn, live: true }; timers.push(t); waits.push(ms); return () => { t.live = false } }
+  const fire = () => { for (const t of timers.splice(0)) if (t.live) t.fn() }
+  const sealing = { now: () => clock.t, schedule }
   const [alice, bob, carol] = await Promise.all([peerOf('alice'), peerOf('bob'), peerOf('carol')])
   const mesh = wire([alice, bob, carol], [[alice.podId, bob.podId], [bob.podId, carol.podId]])
   const nodeA = mesh[alice.podId]; const nodeB = mesh[bob.podId]; const nodeC = mesh[carol.podId]
@@ -78,7 +83,7 @@ async function world({ alice: aOpts = {}, bob: bOpts = {}, carol: cOpts = {}, bo
   b?.api.addRoute(alice.podId, alice.podId, 1) // forwards towards alice without a direct-peer handshake
   a.api.addRoute(carol.podId, bob.podId, 2)
   c.api.addRoute(alice.podId, bob.podId, 2)
-  return { clock, alice, bob, carol, nodeA, nodeB, nodeC, a, b, c }
+  return { clock, fire, waits, alice, bob, carol, nodeA, nodeB, nodeC, a, b, c }
 }
 
 /** alice learns carol's key statement out of band. */
@@ -119,14 +124,111 @@ describe('a sealed routed message', () => {
     assert.equal(typeof routed.id, 'string')
   })
 
-  it('without a key statement for the destination the message goes signed but readable, and says so', async () => {
-    const w = await world()
+  it('a destination that publishes no key statement is sent the signed readable envelope after a bounded wait, and says so', async () => {
+    const w = await world({ carol: { sealing: false } })
+    const fallbacks = []
+    w.a.on('mesh-routing:sealed-fallback', (f) => fallbacks.push(f))
     const got = next(w.c.on, 'mesh-routing:message')
     w.a.api.route(w.carol.podId, { text: SECRET })
+    await settle()
+    assert.equal(w.nodeB.inbox.length, 1, 'only the key request has left; the message waits')
+    assert.deepEqual(w.waits.slice(0, 1), [2000], 'the wait is the default 2 s')
+    w.fire() // the wait runs out
     const msg = await got
     assert.equal(msg.sealed, false)
     assert.equal(msg.authenticated, true)
     assert.ok(JSON.stringify(w.nodeB.inbox).includes('launch code'), 'an unsealed message is readable by the hop')
+    assert.deepEqual(fallbacks.map((f) => [f.to, f.reason]), [[w.carol.podId, 'timeout']])
+  })
+
+  it('the first message to a destination that can seal is sealed: the hop never sees it, with no statement known beforehand', async () => {
+    const w = await world()
+    const fallbacks = []
+    w.a.on('mesh-routing:sealed-fallback', (f) => fallbacks.push(f))
+    const got = next(w.c.on, 'mesh-routing:message')
+    w.a.api.route(w.carol.podId, { text: SECRET })
+    const msg = await got // no timer fired: the statement arrived through the hop
+    assert.deepEqual(msg.message, { text: SECRET })
+    assert.equal(msg.sealed, true)
+    await settle()
+    assert.ok(!JSON.stringify(w.nodeB.inbox).includes('launch code'), 'nothing the hop received holds the message')
+    assert.deepEqual(fallbacks, [])
+  })
+
+  it('messages that wait for a statement are all sent once it arrives, all sealed', async () => {
+    const w = await world()
+    const got = []
+    w.c.on('mesh-routing:message', (m) => got.push(m))
+    for (let i = 0; i < 5; i++) w.a.api.route(w.carol.podId, { n: i, text: SECRET })
+    while (got.length < 5) await new Promise((r) => setImmediate(r))
+    assert.deepEqual(got.map((m) => m.message.n).sort(), [0, 1, 2, 3, 4], 'all five arrive (signing and opening are asynchronous, so arrival order is not promised)')
+    assert.ok(got.every((m) => m.sealed === true))
+    assert.ok(!JSON.stringify(w.nodeB.inbox).includes('launch code'))
+  })
+
+  it('a destination that gave no statement is not waited for again for a while (negative cache), then asked again', async () => {
+    const w = await world({ carol: { sealing: false } })
+    const got = []
+    w.c.on('mesh-routing:message', (m) => got.push(m))
+    w.a.api.route(w.carol.podId, { n: 1 })
+    await settle()
+    w.fire()
+    while (got.length < 1) await new Promise((r) => setImmediate(r))
+    const waitsAfterFirst = w.waits.length
+    // Later messages go at once: no new wait is scheduled, nothing is queued.
+    w.a.api.route(w.carol.podId, { n: 2 })
+    while (got.length < 2) await new Promise((r) => setImmediate(r))
+    assert.equal(w.waits.length, waitsAfterFirst, 'the second message was not delayed')
+    assert.deepEqual(got.map((m) => m.sealed), [false, false])
+    // After the negative cache has run out (injected clock) the next message waits again.
+    w.clock.t += 61_000
+    w.a.api.route(w.carol.podId, { n: 3 })
+    await settle()
+    assert.ok(w.waits.length > waitsAfterFirst, 'it waited again')
+    w.fire()
+    while (got.length < 3) await new Promise((r) => setImmediate(r))
+  })
+
+  it('the queue per destination is bounded: the overflow is dropped, never sent readable', async () => {
+    const w = await world({ carol: { sealing: false }, alice: { sealingOptions: { maxQueuedPerDestination: 3 } } })
+    const reasons = dropsOf(w.a.on)
+    const results = []
+    for (let i = 0; i < 5; i++) results.push(w.a.api.route(w.carol.podId, { n: i, text: SECRET }))
+    assert.deepEqual(results.map((r) => r.success), [true, true, true, false, false])
+    assert.deepEqual([...reasons], ['sealed-unavailable', 'sealed-unavailable'])
+    const got = []
+    w.c.on('mesh-routing:message', (m) => got.push(m))
+    await settle()
+    w.fire()
+    while (got.length < 3) await new Promise((r) => setImmediate(r))
+    await settle()
+    assert.deepEqual(got.map((m) => m.message.n).sort(), [0, 1, 2])
+  })
+
+  it('a hop that withholds key statements forces the readable fallback; requireSealed refuses instead', async () => {
+    const w = await world({ bobService: false })
+    // Bob drops every routed envelope: the key request never reaches carol.
+    const fallbacks = []
+    w.a.on('mesh-routing:sealed-fallback', (f) => fallbacks.push(f))
+    const heard = []
+    w.nodeB.onIncomingData((from, d) => { if (d?.type === 'mesh-routing') heard.push(d) })
+    w.a.api.route(w.carol.podId, { text: SECRET })
+    await settle()
+    w.fire()
+    await settle()
+    assert.deepEqual(fallbacks.map((f) => f.reason), ['timeout'], 'the sender is told it fell back')
+    assert.ok(JSON.stringify(heard).includes('launch code'), 'the fallback is readable by that hop')
+    assert.throws(() => w.a.api.route(w.carol.podId, { text: SECRET }, { requireSealed: true }), SealedUnavailableError)
+  })
+
+  it('never readable while a statement is obtainable: a message queued behind a fetch is sealed when it arrives', async () => {
+    const w = await world()
+    const got = next(w.c.on, 'mesh-routing:message')
+    w.a.api.route(w.carol.podId, { text: SECRET })
+    // The wait has not been fired; the statement comes through the hop.
+    const msg = await got
+    assert.equal(msg.sealed, true)
+    assert.equal(w.waits.length > 0, true)
   })
 
   it('a replayed sealed envelope is refused', async () => {
@@ -217,9 +319,12 @@ describe('key statements', () => {
     const swapped = { ...real, ka: (await createKeyStatement(other, otherKey, { now: NOW })).ka }
     await assert.rejects(w.a.api.learnKeyStatement(swapped), { code: 'bad-signature' })
     assert.equal(w.a.api.getKeyStatement(w.carol.podId), null)
+    // Nothing forged was kept: the message waits for, and is sealed to, carol's own statement.
     const got = next(w.c.on, 'mesh-routing:message')
     w.a.api.route(w.carol.podId, { text: SECRET })
-    assert.equal((await got).sealed, false)
+    const msg = await got
+    assert.equal(msg.sealed, true)
+    assert.deepEqual(w.a.api.getKeyStatement(w.carol.podId), real)
   })
 
   it('an expired statement is refused when learned and stops being used when it expires', async () => {
@@ -304,16 +409,16 @@ describe('negotiation and downgrade', () => {
   })
 
   it('requireSealed also covers what a node accepts: a readable envelope for it is refused', async () => {
-    const w = await world({ carol: { requireSealed: true } })
+    const w = await world({ alice: { sealing: false }, carol: { requireSealed: true } })
     const reasons = dropsOf(w.c.on)
     const delivered = []
     w.c.on('mesh-routing:message', (m) => delivered.push(m))
-    w.a.api.route(w.carol.podId, { text: SECRET }) // alice has no key for carol: sent readable
+    w.a.api.route(w.carol.podId, { text: SECRET }) // alice cannot seal (an earlier release, say): sent readable
     await reasons.waitFor(1)
     assert.deepEqual(reasons, ['unsealed'])
     assert.deepEqual(delivered, [])
     // A hop is not the destination: requireSealed does not stop it forwarding what is not for it.
-    const w2 = await world({ bob: { requireSealed: true } })
+    const w2 = await world({ alice: { sealing: false }, bob: { requireSealed: true } })
     const got = next(w2.c.on, 'mesh-routing:message')
     w2.a.api.route(w2.carol.podId, { n: 1 })
     assert.equal((await got).sealed, false)
@@ -376,6 +481,8 @@ describe('older peers', () => {
     const w = await world({ carol: { sealing: false } })
     const got = next(w.c.on, 'mesh-routing:message')
     w.a.api.route(w.carol.podId, { text: SECRET })
+    await settle()
+    w.fire()
     const msg = await got
     assert.deepEqual(msg.message, { text: SECRET })
     assert.equal(msg.sealed, false)

@@ -324,10 +324,22 @@ to a pod whose current key statement this pod holds is sealed to that pod:
 - *Where statements travel.* On the direct link, when a peer is added with
   `addDirectPeer()` (`mesh-routing-keys` envelope, answered once); on demand
   through a routed request (`ensureKey(podId)`, `{ $mesh: 'key-request' }` and
-  `{ $mesh: 'key-statement' }`, signed like any routed message). The first
-  message to a pod whose statement is not known yet goes readable and starts a
-  fetch (at most once a minute per pod); `await api.ensureKey(podId)` first
-  to avoid that.
+  `{ $mesh: 'key-statement' }`, signed like any routed message; a request goes
+  out at most once a minute per pod).
+- *Seal if the destination can.* When sealing is on and the destination's
+  statement is not cached, `route()` does not send the message yet. It starts
+  the fetch above, queues the message (at most 16 per destination, option
+  `maxQueuedPerDestination`; the overflow is dropped as `sealed-unavailable`
+  and is never sent readable) and waits at most `sealingOptions.keyWaitMs`
+  (default 2 s). If a valid statement arrives the message is sealed and sent.
+  If none arrives, the destination is treated as not supporting sealing for
+  `negativeCacheMs` (default 60 s, so later messages are not each delayed), the
+  message goes out as the signed readable envelope, and the sender's service
+  emits `mesh-routing:sealed-fallback` (`{ from, to, reason }`) for each message
+  sent that way; the delivery reports `sealed: false`. A message to a pod
+  that has been asked again after the negative cache ran out waits again. The
+  wait does not delay `requireSealed` sends, which fail at once when no
+  statement is cached.
 - *The seal.* Ephemeral-static X25519: a fresh key pair per message, HKDF-SHA-256
   (salt: ephemeral key and `ka`) to an AES-256-GCM key, a random 12-byte nonce;
   the associated data is `["browsermesh/routed-seal/v1", from, to, id]`. The
@@ -341,9 +353,11 @@ to a pod whose current key statement this pod holds is sealed to that pod:
   `authenticated`.
 - *Negotiation.* There is no flag to turn on in a message: a pod that
   publishes a statement can open sealed messages, and a pod that has not
-  published one is sent the readable envelope it understands. `requireSealed:
+  published one (or whose statement does not arrive in time) is sent the
+  readable envelope it understands. `requireSealed:
   true` on the service, or on a single `route()`, refuses to send what cannot
-  be sealed (`SealedUnavailableError`, code `E_SEALED_UNAVAILABLE`, and a
+  be sealed with the statements already cached (it does not wait; call
+  `await api.ensureKey(podId)` first to fetch one) (`SealedUnavailableError`, code `E_SEALED_UNAVAILABLE`, and a
   `drop` event, reason `sealed-unavailable`); as a service option it also
   refuses, as destination, a readable envelope (`drop`, reason `unsealed`).
   Other drops: `bad-seal`, `sealed-unsupported`, `sealed-too-large`.
@@ -354,9 +368,15 @@ originator, recipient, id and counter are bound to the ciphertext (a box cannot
 be moved to another message or sent under another name). Still visible to hops:
 the originator, the recipient, the message id, the size (to within the AEAD
 overhead), the timing and the path. Hops can still **drop, delay and reorder**.
-A hop can also keep a statement from arriving, which makes a
-sender without `requireSealed` send readable: the downgrade is visible
-(`sealed: false`) and refused with `requireSealed`, not prevented.
+**A hop that suppresses key statements (drops the request or the answer) can
+still force the readable fallback**: the sender waits `keyWaitMs`, then sends
+the message readable to that same hop. The fallback is visible to the sender
+(`mesh-routing:sealed-fallback`) and to the receiver (`sealed: false`), not
+prevented. `requireSealed` is the control against it: the send is refused with
+`SealedUnavailableError`, and a destination with `requireSealed` refuses a
+readable envelope. A statement that has been learned (from the direct link, or
+from an earlier answer) is used until it expires, so suppression only matters
+before the first statement and after expiry or rotation.
 
 Forward secrecy, exactly: the sender's ephemeral key is discarded, so
 compromising the sender later reveals nothing it sealed. The recipient's agreement

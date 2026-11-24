@@ -34,10 +34,19 @@ as written. What is protected today, stated precisely:
 - **Envelope**: `kind` stays `mesh-routed/v1`; the signed payload carries
   `sealed` and `message: null`. Hops that predate this verify and forward it
   unchanged.
-- **Not decided above, now decided**: a message to a pod with no known
-  statement is sent readable (and starts a fetch), flagged `sealed: false` at
-  delivery, unless `requireSealed` is set, which refuses it with a named error
-  and a `drop` event. Algorithms are fixed (no negotiation): a pod that
+- **Not decided above, now decided**: seal if the destination can. A message
+  to a pod with no cached statement is queued (at most 16 per destination;
+  overflow is dropped, never sent readable) while the statement is fetched
+  (the direct link's, or a routed request, at most one request a minute per
+  pod) for at most `keyWaitMs` (default 2 s). With a statement it is sealed.
+  Without one the pod is treated as not sealing for `negativeCacheMs` (60 s),
+  the message is sent as the signed readable envelope, the sender is told
+  (`sealed-fallback`) and delivery reports `sealed: false`. A hop that
+  suppresses statements can force that fallback; `requireSealed` (which does
+  not wait: it refuses at once with a named error and a `drop` event when no
+  statement is cached) is the control. The first message is not leaked by
+  default, at the price of up to `keyWaitMs` of delay once per destination
+  that does not answer. Algorithms are fixed (no negotiation): a pod that
   publishes a statement supports them. The application sees `sealed: true |
   false` beside `authenticated`.
 - **Not built**: forward secrecy against the recipient's key, post-compromise

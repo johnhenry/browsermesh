@@ -670,9 +670,7 @@ describe('createMeshRoutingService: multi-hop forwarding closes the real capabil
 
     const bobForwards = [];
     const { api: bobApi, on: bobOn } = attachService(nodeB, undefined, createMeshRoutingService({}));
-    // (The service also asks for the destination's key statement the first time it is sent something: those
-    // control requests are forwarded too and are not what this test counts.)
-    bobOn('mesh-routing:forward', (envelope) => { if (envelope.message?.$mesh === undefined) bobForwards.push(envelope) });
+    bobOn('mesh-routing:forward', (envelope) => bobForwards.push(envelope));
     // Bob knows Carol directly; this is the routing-table knowledge that
     // makes Bob able to relay onward, entirely separate from transport
     // reachability (which wireRestrictedMesh already grants for B<->C).
@@ -682,7 +680,9 @@ describe('createMeshRoutingService: multi-hop forwarding closes the real capabil
     const { on: carolOn } = attachService(nodeC, undefined, createMeshRoutingService({}));
     carolOn('mesh-routing:message', (envelope) => carolMessages.push(envelope));
 
-    const { api: aliceApi } = attachService(nodeA, undefined, createMeshRoutingService({}));
+    // (Sealing is off for alice: this test is about forwarding, and alice would otherwise wait for carol's key
+    // statement, which carol has no route back to send.)
+    const { api: aliceApi } = attachService(nodeA, undefined, createMeshRoutingService({ sealing: false }));
     // Alice has no direct transport link to Carol -- only a route entry
     // saying "reach Carol via Bob".
     aliceApi.addRoute(carol.podId, bob.podId, 2);

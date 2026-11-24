@@ -93,6 +93,12 @@ function plausibleBox(box, maxBytes) {
     && typeof box.ct === 'string' && box.ct.length <= Math.ceil(((maxBytes + 16) * 4) / 3) + 4
 }
 
+/** Defaults for waiting on a destination's key statement before sending (see `fetchKey`). */
+const DEFAULT_KEY_WAIT_MS = 2000
+const DEFAULT_NEGATIVE_CACHE_MS = 60_000
+const DEFAULT_MAX_QUEUED = 16
+const MAX_NEGATIVE_ENTRIES = 1024
+
 /** The longest `path` a delivered or forwarded envelope keeps (a diagnostic hint, bounded). */
 const MAX_PATH_ENTRIES = 32
 
@@ -186,6 +192,20 @@ export class MeshRouter {
   /** @type {((podId: string) => void)|null} */
   #onKeyWanted
 
+  /** @type {((podId: string, opts: { timeoutMs: number }) => Promise<unknown>)|null} */
+  #fetchKey
+  /** @type {(fn: () => void, ms: number) => (() => void)} */
+  #schedule
+  /** @type {() => number} */
+  #now
+  #keyWaitMs
+  #negativeCacheMs
+  #maxQueued
+  /** podId -> messages waiting for that pod's key statement */
+  #pending = new Map()
+  /** podId -> time until which it is treated as not sealing */
+  #negative = new Map()
+
   /**
    * @param {object} opts
    * @param {string} opts.localPodId    - This pod's identifier
@@ -212,8 +232,18 @@ export class MeshRouter {
    *   (`unsealed`). A hop still forwards what is not for it. `route()` can ask for the sending half per call.
    * @param {(podId: string) => void} [opts.onKeyWanted] - Called when a message goes out readable for want of the
    *   destination's key statement, so the caller can fetch it for next time.
+   * @param {(podId: string, opts: { timeoutMs: number }) => Promise<unknown>} [opts.fetchKey] - Gets a destination's key
+   *   statement (it has to end up in `sealing`). With it, a message to a pod whose statement is not known waits for it
+   *   (queued) for at most `keyWaitMs`, then is sealed; if none arrives it goes out readable and
+   *   `sealed-fallback` is emitted. Without it, such a message goes out readable at once.
+   * @param {(fn: () => void, ms: number) => (() => void)} [opts.schedule] - Timer: runs `fn` after `ms` and returns a cancel function.
+   * @param {() => number} [opts.now] - Clock for the negative cache (default `Date.now`).
+   * @param {number} [opts.keyWaitMs=2000] - Longest wait for a key statement.
+   * @param {number} [opts.negativeCacheMs=60000] - How long a pod that sent none is treated as not sealing.
+   * @param {number} [opts.maxQueuedPerDestination=16] - Messages that may wait for one destination; more are dropped
+   *   (`sealed-unavailable`), never sent readable.
    */
-  constructor({ localPodId, forwardFn, maxTTL, routeCacheMs, onLog, signer, allowUnsigned, isLinked, replay, sealing, requireSealed, onKeyWanted }) {
+  constructor({ localPodId, forwardFn, maxTTL, routeCacheMs, onLog, signer, allowUnsigned, isLinked, replay, sealing, requireSealed, onKeyWanted, fetchKey, schedule, now, keyWaitMs, negativeCacheMs, maxQueuedPerDestination }) {
     if (!localPodId || typeof localPodId !== 'string') {
       throw new Error('localPodId is required and must be a non-empty string')
     }
@@ -229,6 +259,16 @@ export class MeshRouter {
     this.#sealing = signer && sealing ? sealing : null
     this.#requireSealed = requireSealed === true
     this.#onKeyWanted = typeof onKeyWanted === 'function' ? onKeyWanted : null
+    this.#fetchKey = typeof fetchKey === 'function' ? fetchKey : null
+    this.#schedule = typeof schedule === 'function' ? schedule : (fn, ms) => {
+      const t = setTimeout(fn, ms)
+      t.unref?.()
+      return () => clearTimeout(t)
+    }
+    this.#now = typeof now === 'function' ? now : Date.now
+    this.#keyWaitMs = keyWaitMs ?? DEFAULT_KEY_WAIT_MS
+    this.#negativeCacheMs = negativeCacheMs ?? DEFAULT_NEGATIVE_CACHE_MS
+    this.#maxQueued = maxQueuedPerDestination ?? DEFAULT_MAX_QUEUED
   }
 
   // ── Routing ───────────────────────────────────────────────────────
@@ -246,7 +286,7 @@ export class MeshRouter {
    *   destination; otherwise throw `SealedUnavailableError` (and emit `drop`, reason `sealed-unavailable`).
    * @returns {{ success: boolean, hops?: number, path?: string[] }}
    */
-  route(targetPodId, message, { requireSealed } = {}) {
+  route(targetPodId, message, { requireSealed, waitForKey = true } = {}) {
     const mustSeal = requireSealed ?? this.#requireSealed
     const hasKey = !!this.#sealing?.lookup(targetPodId)
     if (mustSeal && !hasKey) {
@@ -254,7 +294,6 @@ export class MeshRouter {
       this.#onKeyWanted?.(targetPodId)
       throw new SealedUnavailableError(targetPodId)
     }
-    if (!hasKey && this.#sealing) this.#onKeyWanted?.(targetPodId)
     // Build envelope with TTL
     const envelope = {
       from: this.#localPodId,
@@ -264,25 +303,80 @@ export class MeshRouter {
       path: [this.#localPodId],
     }
 
-    // 1. Direct peer?
-    if (this.#directPeers.has(targetPodId)) {
-      this.#originate(targetPodId, envelope, false)
-      return { success: true, hops: 1, path: [this.#localPodId, targetPodId] }
+    const hop = this.#nextHopFor(targetPodId)
+    if (!hop) return { success: false } // 3. No route
+    const result = { success: true, hops: hop.hops, path: [this.#localPodId, hop.nextHop] }
+
+    // Sealed when the destination's statement is known; readable only when sealing is off here or the
+    // caller is itself a key request.
+    if (hasKey || !this.#sealing || !this.#fetchKey || waitForKey === false) {
+      if (!hasKey && this.#sealing && waitForKey !== false) this.#onKeyWanted?.(targetPodId)
+      this.#originate(hop.nextHop, envelope, hop.announce)
+      return result
     }
 
-    // 2. Known route? (check expiry)
+    // The statement is not known: get it first (seal if the destination can), within a bounded wait.
+    const until = this.#negative.get(targetPodId)
+    if (until !== undefined && this.#now() < until) {
+      // Asked recently and nothing came: treated as not supporting sealing for a while, so this one is not delayed.
+      this.#emit('sealed-fallback', { from: this.#localPodId, to: targetPodId, reason: 'no-statement-recently' })
+      this.#originate(hop.nextHop, envelope, hop.announce)
+      return result
+    }
+    const pending = this.#pending.get(targetPodId)
+    if (pending) {
+      if (pending.length >= this.#maxQueued) {
+        this.#drop('sealed-unavailable', envelope, 'too many messages waiting for the destination\'s key statement')
+        return { success: false, reason: 'sealed-unavailable' }
+      }
+      pending.push(envelope)
+      return result
+    }
+    const queue = [envelope]
+    this.#pending.set(targetPodId, queue)
+    this.#awaitKey(targetPodId, queue)
+    return result
+  }
+
+  /** Where a message for `targetPodId` goes next: a direct peer, or the known route; null with neither. */
+  #nextHopFor(targetPodId) {
+    if (this.#directPeers.has(targetPodId)) return { nextHop: targetPodId, hops: 1, announce: false }
     const route = this.#routeTable.get(targetPodId)
-    if (route && route.expiresAt > Date.now()) {
-      this.#originate(route.nextHop, envelope, true)
-      return { success: true, hops: route.hops, path: [this.#localPodId, route.nextHop] }
-    }
-    // Clean up expired route
-    if (route && route.expiresAt <= Date.now()) {
-      this.#routeTable.delete(targetPodId)
-    }
+    if (route && route.expiresAt > Date.now()) return { nextHop: route.nextHop, hops: route.hops, announce: true }
+    if (route) this.#routeTable.delete(targetPodId) // expired
+    return null
+  }
 
-    // 3. No route
-    return { success: false }
+  /**
+   * Wait (bounded, by the injected scheduler) for the destination's key statement while its messages queue.
+   * With a statement: they are all sent, sealed. Without: the destination is remembered as not sealing for
+   * `negativeCacheMs` and they go out as the signed readable envelope, each announced as `sealed-fallback`.
+   */
+  #awaitKey(targetPodId, queue) {
+    let settled = false
+    let cancel = () => {}
+    const finish = (reason) => {
+      if (settled) return
+      settled = true
+      cancel()
+      this.#pending.delete(targetPodId)
+      const ok = !reason && !!this.#sealing.lookup(targetPodId)
+      if (!ok) {
+        this.#negative.delete(targetPodId)
+        this.#negative.set(targetPodId, this.#now() + this.#negativeCacheMs)
+        while (this.#negative.size > MAX_NEGATIVE_ENTRIES) this.#negative.delete(this.#negative.keys().next().value)
+      }
+      for (const envelope of queue) {
+        const hop = this.#nextHopFor(targetPodId)
+        if (!hop) { this.#drop('no-route', envelope); continue }
+        if (!ok) this.#emit('sealed-fallback', { from: this.#localPodId, to: targetPodId, reason: reason ?? 'no-statement' })
+        this.#originate(hop.nextHop, envelope, hop.announce)
+      }
+    }
+    cancel = this.#schedule(() => finish('timeout'), this.#keyWaitMs) ?? cancel
+    Promise.resolve()
+      .then(() => this.#fetchKey(targetPodId, { timeoutMs: this.#keyWaitMs }))
+      .then(() => finish(), () => finish('unavailable'))
   }
 
   /**
@@ -1154,6 +1248,12 @@ export function createMeshRoutingService(opts = {}) {
       const keyWaiters = new Map()
       const lastAsked = new Map()
       const clockNow = sealingOptions.now ?? Date.now
+      /** Timer for the bounded waits: `sealingOptions.schedule(fn, ms)` returning a cancel function (tests inject one). */
+      const schedule = sealingOptions.schedule ?? ((fn, ms) => {
+        const t = setTimeout(fn, ms)
+        t.unref?.()
+        return () => clearTimeout(t)
+      })
       const learnStatement = async (statement) => {
         const learned = await keys.learn(statement)
         ctx.emit('mesh-routing:key-learned', learned)
@@ -1171,13 +1271,16 @@ export function createMeshRoutingService(opts = {}) {
         allowUnsigned,
         sealing: keys,
         requireSealed,
-        // A message went out readable for want of the destination's statement: ask for it, once a minute at most.
-        onKeyWanted: (podId) => {
-          const t = clockNow()
-          if (!keys || (lastAsked.get(podId) ?? -Infinity) + 60_000 > t) return
-          lastAsked.set(podId, t)
-          api.ensureKey(podId, { timeoutMs: 10_000 }).catch(() => {})
-        },
+        // A message could not go out sealed for want of the destination's statement: ask for it for next time
+        // (`ensureKey` sends a request at most once a minute per pod).
+        onKeyWanted: (podId) => { if (keys) api.ensureKey(podId, { timeoutMs: 10_000 }).catch(() => {}) },
+        // A message to a pod whose statement is not known waits (bounded) for it: the direct link's statement, or a routed request.
+        fetchKey: keys ? (podId, { timeoutMs }) => api.ensureKey(podId, { timeoutMs }) : undefined,
+        schedule,
+        now: clockNow,
+        keyWaitMs: sealingOptions.keyWaitMs,
+        negativeCacheMs: sealingOptions.negativeCacheMs,
+        maxQueuedPerDestination: sealingOptions.maxQueuedPerDestination,
         // An envelope arrives over some peer's session; a hop forwards only for a peer it still has one with.
         isLinked: typeof peerNode.hasActiveSession === 'function' ? (id) => peerNode.hasActiveSession(id) : undefined,
         forwardFn: (nextHop, envelope) => {
@@ -1203,7 +1306,7 @@ export function createMeshRoutingService(opts = {}) {
           if (!keys) return
           if (control === 'key-request') {
             keys.statement().then((statement) => {
-              if (statement) router.route(envelope.from, { $mesh: 'key-statement', statement }, { requireSealed: false })
+              if (statement) router.route(envelope.from, { $mesh: 'key-statement', statement }, { requireSealed: false, waitForKey: false })
             }).catch(() => {})
           } else if (control === 'key-statement') {
             learnStatement(envelope.message.statement).catch((err) => {
@@ -1221,6 +1324,9 @@ export function createMeshRoutingService(opts = {}) {
       router.on('message', onRouterMessage)
       router.on('forward', onRouterForward)
       router.on('drop', onRouterDrop)
+      // A message that waited for the destination's key statement and then went out readable (see `sealed-fallback`).
+      const onRouterFallback = (info) => ctx.emit('mesh-routing:sealed-fallback', info)
+      router.on('sealed-fallback', onRouterFallback)
       router.on('route:add', onRouterRouteAdd)
       router.on('route:remove', onRouterRouteRemove)
 
@@ -1258,17 +1364,23 @@ export function createMeshRoutingService(opts = {}) {
           if (known) return Promise.resolve(known)
           if (!keys) return Promise.reject(new Error('sealing is off'))
           return new Promise((resolve, reject) => {
-            const waiter = { resolve: (s) => { clearTimeout(timer); resolve(s) } }
-            const timer = setTimeout(() => {
-              keyWaiters.set(podId, (keyWaiters.get(podId) ?? []).filter((w) => w !== waiter))
+            let cancel = () => {}
+            const waiter = { resolve: (s) => { cancel(); resolve(s) } }
+            const forget = () => keyWaiters.set(podId, (keyWaiters.get(podId) ?? []).filter((w) => w !== waiter))
+            cancel = schedule(() => {
+              forget()
               reject(new Error(`no key statement from ${podId} within ${timeoutMs}ms`))
             }, timeoutMs)
-            timer.unref?.()
             keyWaiters.set(podId, [...(keyWaiters.get(podId) ?? []), waiter])
+            // A request goes out at most once a minute per pod; a caller inside that minute waits for the answer
+            // (or the statement the pod's direct link hands over) without sending another.
+            const t = clockNow()
+            if ((lastAsked.get(podId) ?? -Infinity) + 60_000 > t) return
+            lastAsked.set(podId, t)
             try {
-              const sent = router.route(podId, { $mesh: 'key-request' }, { requireSealed: false })
-              if (!sent.success) { clearTimeout(timer); keyWaiters.delete(podId); reject(new Error(`no route to ${podId}`)) }
-            } catch (err) { clearTimeout(timer); reject(err) }
+              const sent = router.route(podId, { $mesh: 'key-request' }, { requireSealed: false, waitForKey: false })
+              if (!sent.success) { cancel(); forget(); reject(new Error(`no route to ${podId}`)) }
+            } catch (err) { cancel(); forget(); reject(err) }
           })
         },
         addRoute: (targetPodId, nextHop, hops, ttl) => router.addRoute(targetPodId, nextHop, hops, ttl),
@@ -1414,6 +1526,7 @@ export function createMeshRoutingService(opts = {}) {
           router.off('message', onRouterMessage)
           router.off('forward', onRouterForward)
           router.off('drop', onRouterDrop)
+          router.off('sealed-fallback', onRouterFallback)
           router.off('route:add', onRouterRouteAdd)
           router.off('route:remove', onRouterRouteRemove)
           unsubscribeRouting()
