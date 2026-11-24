@@ -85,8 +85,32 @@ async function readRoster(env) {
 }
 
 /**
+ * Does an `Authorization` header carry exactly `Bearer <token>`? Both sides
+ * are hashed first and the digests compared without an early exit, so the
+ * comparison time does not depend on how much of the token was right.
+ *
+ * @param {string|null} header
+ * @param {string} token
+ * @returns {Promise<boolean>}
+ */
+async function bearerMatches(header, token) {
+  const prefix = 'Bearer '
+  if (typeof header !== 'string' || !header.startsWith(prefix)) return false
+  const encoder = new TextEncoder()
+  const [given, wanted] = await Promise.all([
+    crypto.subtle.digest('SHA-256', encoder.encode(header.slice(prefix.length))),
+    crypto.subtle.digest('SHA-256', encoder.encode(token)),
+  ])
+  const a = new Uint8Array(given)
+  const b = new Uint8Array(wanted)
+  let difference = 0
+  for (let i = 0; i < a.length; i += 1) difference |= a[i] ^ b[i]
+  return difference === 0
+}
+
+/**
  * @param {Request} request
- * @param {{POD: object}} env
+ * @param {{POD: object, CONTROL_TOKEN?: string}} env
  * @returns {Promise<Response>}
  */
 export async function handlePodHostRequest(request, env) {
@@ -94,6 +118,14 @@ export async function handlePodHostRequest(request, env) {
 
   if (request.method === 'GET' && url.pathname === '/health') {
     return Response.json({ status: 'ok' })
+  }
+
+  // The control plane spawns, messages and drains pods: when a CONTROL_TOKEN
+  // is configured (a secret binding), every other route requires it.
+  if (typeof env.CONTROL_TOKEN === 'string' && env.CONTROL_TOKEN.length > 0) {
+    if (!(await bearerMatches(request.headers.get('authorization'), env.CONTROL_TOKEN))) {
+      return errorResponse(POD_HOST_ERROR.EACCES, 'a valid control token is required', 401)
+    }
   }
 
   // -- list ------------------------------------------------------------

@@ -24,7 +24,14 @@ import { Pod, EventEmitterTransport, NullDiscovery } from '../../../packages/bro
 import { VmPod } from './vm-pod.mjs'
 import { FirecrackerClient } from './firecracker-client.mjs'
 import { connectToGuest } from './vsock-bridge.mjs'
-import { buildJailerArgv, jailerApiSocketPath } from './jailer.mjs'
+import { buildJailerArgv, jailerApiSocketPath, jailerPidFilePath, jailerRootPath } from './jailer.mjs'
+import { cgroupsFor } from './vm-config.mjs'
+
+/** What the jailer accepts as a VM id (and therefore what a VM name must match). */
+const JAILER_ID_PATTERN = /^[0-9A-Za-z-]{1,64}$/
+
+/** Base of the per-VM uid/gid range the jailer drops each VMM to (base + vsock CID). */
+const DEFAULT_JAILER_ID_BASE = 100_000
 
 /** Metadata this host advertises to the orchestrator (issue #185 §3, §6). */
 const METADATA = Object.freeze({
@@ -41,6 +48,7 @@ export class VmPodHost extends Pod {
   #vms = new Map()
   #exec
   #dryRun
+  #signalingUrl
   #jailerOpts
   #onLog
 
@@ -54,10 +62,13 @@ export class VmPodHost extends Pod {
    * @param {boolean} [opts.dryRun=false] - default dryRun for spawned VmPods
    * @param {object} [opts.jailer] - default jailer options (uid, gid,
    *   chrootBaseDir, netns, cgroups) merged into each `spawn()` call
+   * @param {string} [opts.signalingUrl] - default signaling URL handed to every
+   *   guest on its kernel command line (ws:// or wss://, no credentials)
    * @param {(msg: string) => void} [opts.onLog]
    */
   constructor(opts = {}) {
     super()
+    this.#signalingUrl = opts.signalingUrl
     this.#exec = opts.exec ?? (async (argv) => {
       throw new Error(`VmPodHost: no exec() provided, cannot run: ${argv.join(' ')}`)
     })
@@ -100,7 +111,9 @@ export class VmPodHost extends Pod {
    *   guest's own podId, which isn't known until it registers)
    * @param {object} opts
    * @param {string} opts.kernelImage
-   * @param {string} opts.rootfs
+   * @param {string} opts.rootfs - this VM's OWN disk image path
+   * @param {string} [opts.rootfsBase] - shared base image copied to `rootfs` once
+   * @param {object} [opts.network] - `buildNetworkPlan()` options (egress policy, uplink)
    * @param {{hostDevName: string, guestMac?: string}} opts.tap
    * @param {{guestCid: number, udsPath: string}} opts.vsock
    * @param {import('./vm-pod.mjs').VmPodLimits} opts.limits
@@ -114,19 +127,38 @@ export class VmPodHost extends Pod {
    */
   async spawn(name, opts = {}) {
     if (this.#vms.has(name)) throw new Error(`VmPodHost: "${name}" already spawned`)
+    if (!JAILER_ID_PATTERN.test(name)) {
+      throw new Error(`VmPodHost: "${name}" cannot be a VM id: use letters, digits and hyphens only (at most 64)`)
+    }
 
     const execFile = opts.execFile ?? '/usr/bin/firecracker'
     const dryRun = opts.dryRun ?? this.#dryRun
-    const jailerOpts = this.#jailerOpts ?? { uid: 0, gid: 0, chrootBaseDir: '/srv/jailer' }
+    const jailerOpts = this.#jailerOpts ?? {}
+    const chrootBaseDir = jailerOpts.chrootBaseDir ?? '/srv/jailer'
+
+    // Each VM's VMM runs as its own unprivileged identity (never root), so
+    // a compromised VMM cannot read or signal another VM's. An explicit
+    // `uid`/`gid` is the operator's choice (and shared by every VM); the
+    // default derives a distinct one from the VM's vsock CID.
+    const cid = opts.vsock?.guestCid
+    if (!Number.isInteger(cid) || cid < 3) throw new Error('VmPodHost: vsock.guestCid (an integer >= 3) is required')
+    const uid = jailerOpts.uid ?? (jailerOpts.uidBase ?? DEFAULT_JAILER_ID_BASE) + cid
+    const gid = jailerOpts.gid ?? (jailerOpts.gidBase ?? DEFAULT_JAILER_ID_BASE) + cid
 
     const socketPath = opts.socketPath ?? jailerApiSocketPath({
-      execFile, id: name, chrootBaseDir: jailerOpts.chrootBaseDir,
+      execFile, id: name, chrootBaseDir,
     })
 
-    // Record (but, per vm-pod.mjs's own dryRun handling, don't actually
-    // spawn) the jailer invocation that would front this VM.
+    // The jailer is the VMM: VmPod starts it (and starts a fresh one on
+    // restore), so it must return, hence `daemonize`.
+    // The VMM process is bounded by cgroup v2 limits derived from the pod's.
+    const limits = opts.limits ?? {}
+    const cgroups = jailerOpts.cgroups
+      ?? (Number.isInteger(limits.vcpus) && Number.isInteger(limits.memMib) ? cgroupsFor(limits) : [])
     const jailerArgv = buildJailerArgv({
-      ...jailerOpts, id: name, execFile,
+      ...jailerOpts, uid, gid, chrootBaseDir, id: name, execFile, daemonize: true,
+      cgroups,
+      ...(cgroups.length > 0 ? { cgroupVersion: '2' } : {}),
       firecrackerArgs: ['--api-sock', '/run/firecracker.socket'],
     })
 
@@ -136,19 +168,20 @@ export class VmPodHost extends Pod {
       exec: this.#exec,
       id: name,
       kernelImage: opts.kernelImage,
-      rootfs: opts.rootfs,
       tap: opts.tap,
       vsock: opts.vsock,
       limits: opts.limits,
       idleTimeoutMs: opts.idleTimeoutMs,
-      snapshotDir: opts.snapshotDir,
       dryRun,
+      vmmArgv: jailerArgv,
+      vmmPidFile: jailerPidFilePath({ execFile, id: name, chrootBaseDir }),
+      // Under the jailer every file Firecracker uses lives inside the
+      // chroot: the kernel, and a private copy of the base image.
+      jail: { root: jailerRootPath({ execFile, id: name, chrootBaseDir }), uid, gid },
+      rootfsBase: opts.rootfsBase ?? opts.rootfs,
+      signalingUrl: opts.signalingUrl ?? this.#signalingUrl,
+      network: opts.network,
     })
-
-    // The jailer spawn is a host command like any other TAP/nft command —
-    // route it through the same planned-commands ledger.
-    vmPod.plannedCommands.push({ argv: jailerArgv, description: 'spawn jailer (fronting firecracker)' })
-    if (!dryRun) await this.#exec(jailerArgv)
 
     this.#vms.set(name, vmPod)
     await vmPod.boot()

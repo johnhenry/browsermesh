@@ -233,6 +233,58 @@ describe('isolate pod host routes', () => {
     assert.equal(wrongDrainMethod.status, 405)
   })
 
+  describe('control token (CONTROL_TOKEN)', () => {
+    const TOKEN = 'a-long-random-control-token'
+    const request = (path, init = {}) => new Request(`http://host${path}`, init)
+
+    it('without a configured token the routes behave as before', async () => {
+      const response = await handlePodHostRequest(request('/pods'), env)
+      assert.equal(response.status, 200)
+    })
+
+    it('with a token configured, every route but /health refuses a request without it', async () => {
+      env.CONTROL_TOKEN = TOKEN
+      for (const [method, path] of [
+        ['GET', '/pods'], ['POST', '/pods/alpha/boot'], ['GET', '/pods/alpha/status'],
+        ['POST', '/pods/alpha/send'], ['DELETE', '/pods/alpha'], ['POST', '/pods/alpha/exec'],
+        ['GET', '/nope'],
+      ]) {
+        const response = await handlePodHostRequest(request(path, { method, body: method === 'POST' ? '{}' : undefined }), env)
+        assert.equal(response.status, 401, `${method} ${path}`)
+        assert.equal((await response.json()).code, POD_HOST_ERROR.EACCES)
+      }
+      assert.equal(env.POD.instances.size, 0, 'a refused request reaches no pod')
+      assert.equal((await handlePodHostRequest(request('/health'), env)).status, 200)
+    })
+
+    it('refuses a wrong, a differently-cased, a prefix and a longer token, and a non-bearer scheme', async () => {
+      env.CONTROL_TOKEN = TOKEN
+      for (const authorization of [
+        'Bearer wrong', `Bearer ${TOKEN.toUpperCase()}`, `Bearer ${TOKEN.slice(0, -1)}`, `Bearer ${TOKEN}x`,
+        `Basic ${TOKEN}`, TOKEN, 'Bearer ', '',
+      ]) {
+        const response = await handlePodHostRequest(request('/pods', { headers: { authorization } }), env)
+        assert.equal(response.status, 401, JSON.stringify(authorization))
+      }
+    })
+
+    it('accepts the right token, and the driver sends it when given one', async () => {
+      env.CONTROL_TOKEN = TOKEN
+      const ok = await handlePodHostRequest(request('/pods', { headers: { authorization: `Bearer ${TOKEN}` } }), env)
+      assert.equal(ok.status, 200)
+
+      const withToken = createIsolatePodDriver({ baseUrl: 'http://host', fetch: fetchInto(env), token: TOKEN })
+      assert.equal((await withToken.spawn(spec())).state, POD_LIFECYCLE.REGISTERED)
+      await assert.rejects(driver.list(), (err) => err.code === POD_HOST_ERROR.EACCES)
+    })
+
+    it('an empty CONTROL_TOKEN counts as not configured (an unset secret binding)', async () => {
+      env.CONTROL_TOKEN = ''
+      const response = await handlePodHostRequest(request('/pods'), env)
+      assert.equal(response.status, 200)
+    })
+  })
+
   it('reports an unreachable host as ETIMEDOUT rather than a pod-level error', async () => {
     const offline = createIsolatePodDriver({
       baseUrl: 'http://host',

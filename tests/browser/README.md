@@ -10,7 +10,6 @@ npm ci
 npx playwright install --with-deps chromium   # once; CI does this
 npm run test:browser                          # Chromium
 BM_BROWSERS=firefox,webkit npm run test:browser
-BM_KNOWN_DEFECTS=1 npm run test:browser       # also run tests for known, unfixed defects
 ```
 
 Locally you may point Playwright at a browser you already have with
@@ -56,11 +55,3 @@ Locally you may point Playwright at a browser you already have with
 - WebTransport, GPU, service workers, IndexedDB-backed storage.
 - Firefox and WebKit run in CI as allowed-to-fail legs and have not been run
   locally.
-
-## Known defect
-
-`pod/ws-transport.mjs`: `open()` resolves on `registered`, but the signalling
-server sends `peers` in a later frame, so `Pod.boot()`'s discovery hello races
-it and pods never discover each other over the relay (messaging works once
-peers are known). The discovery test is skipped until fixed; run it with
-`BM_KNOWN_DEFECTS=1`.

@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { buildJailerArgv, jailerApiSocketPath } from '../src/jailer.mjs'
+import { buildJailerArgv, jailerApiSocketPath, jailerPidFilePath, vmmCommandLineMatches } from '../src/jailer.mjs'
 
 describe('buildJailerArgv', () => {
   it('builds the minimal required argv', () => {
@@ -64,7 +64,7 @@ describe('buildJailerArgv', () => {
   })
 
   it('uses a custom jailerBin when given', () => {
-    const argv = buildJailerArgv({ id: 'demo', execFile: '/usr/bin/firecracker', uid: 0, gid: 0, jailerBin: '/usr/local/bin/jailer' })
+    const argv = buildJailerArgv({ id: 'demo', execFile: '/usr/bin/firecracker', uid: 123, gid: 100, jailerBin: '/usr/local/bin/jailer' })
     assert.equal(argv[0], '/usr/local/bin/jailer')
   })
 
@@ -84,8 +84,44 @@ describe('buildJailerArgv', () => {
   })
 
   it('rejects missing uid/gid', () => {
-    assert.throws(() => buildJailerArgv({ id: 'demo', execFile: '/usr/bin/firecracker', gid: 0 }), /uid is required/)
-    assert.throws(() => buildJailerArgv({ id: 'demo', execFile: '/usr/bin/firecracker', uid: 0 }), /gid is required/)
+    assert.throws(() => buildJailerArgv({ id: 'demo', execFile: '/usr/bin/firecracker', gid: 100 }), /uid is required/)
+    assert.throws(() => buildJailerArgv({ id: 'demo', execFile: '/usr/bin/firecracker', uid: 123 }), /gid is required/)
+  })
+
+  it('never drops privileges to root: uid and gid must be non-zero', () => {
+    assert.throws(() => buildJailerArgv({ id: 'demo', execFile: '/usr/bin/firecracker', uid: 0, gid: 100 }), /uid must be a non-zero/)
+    assert.throws(() => buildJailerArgv({ id: 'demo', execFile: '/usr/bin/firecracker', uid: 123, gid: 0 }), /gid must be a non-zero/)
+    assert.throws(() => buildJailerArgv({ id: 'demo', execFile: '/usr/bin/firecracker', uid: '123', gid: 100 }), /uid must be a non-zero/)
+  })
+})
+
+describe('jailerPidFilePath', () => {
+  it('is the pid file jailer leaves next to the chroot root, named after the exec file', () => {
+    assert.equal(
+      jailerPidFilePath({ execFile: '/usr/bin/firecracker', id: 'demo' }),
+      '/srv/jailer/firecracker/demo/root/firecracker.pid',
+    )
+    assert.equal(
+      jailerPidFilePath({ execFile: '/opt/fc-1.7', id: 'a-b', chrootBaseDir: '/var/jail/' }),
+      '/var/jail/fc-1.7/a-b/root/fc-1.7.pid',
+    )
+  })
+})
+
+describe('vmmCommandLineMatches', () => {
+  const cmdline = (...args) => args.join('\0') + '\0'
+
+  it('matches only an exact --id argument', () => {
+    assert.equal(vmmCommandLineMatches(cmdline('/usr/bin/firecracker', '--id', 'demo', '--api-sock', 's'), 'demo'), true)
+    assert.equal(vmmCommandLineMatches(cmdline('/usr/bin/firecracker', '--id', 'demo2'), 'demo'), false)
+    assert.equal(vmmCommandLineMatches(cmdline('/usr/bin/firecracker', '--id', 'my-demo'), 'demo'), false)
+    assert.equal(vmmCommandLineMatches(cmdline('/usr/bin/firecracker', '--id=demo'), 'demo'), true)
+  })
+
+  it('does not match an id that merely appears elsewhere in the command line', () => {
+    assert.equal(vmmCommandLineMatches(cmdline('/usr/bin/sleep', 'demo'), 'demo'), false)
+    assert.equal(vmmCommandLineMatches(cmdline('/usr/bin/firecracker', '--api-sock', '--id', 'x', 'demo'), 'demo'), false)
+    assert.equal(vmmCommandLineMatches('', 'demo'), false)
   })
 })
 
