@@ -1,5 +1,0 @@
----
-"@johnhenry/browsermesh-pod": minor
----
-
-Add `createIsolatedVmRuntime()` to `@johnhenry/browsermesh-pod/node-runtimes`: a `PodRuntime` that runs each hosted pod in its own V8 isolate (the optional `isolated-vm` dependency), declares the `language` boundary and may be advertised as the `isolate` lane. The isolate has no `require`, `process`, filesystem, network, timers or `WebAssembly`; a hosted module is loaded from the host's catalog only and may import nothing; only JSON strings and one log callback cross the boundary; the pod's `limits.memMib` and the request timeout are enforced by the isolate, and a breach disposes it and is reported through `onExit` (`oom` or `timeout`). `isolatedVmAvailability()` reports whether the addon loaded; `createIsolatedVmRuntime()` throws an error with code `ERR_ISOLATED_VM_UNAVAILABLE` and the reason when it did not. The runtime lane driver's exit event now also carries `cause`, the runtime's own reason. Nothing changes for installs without the addon or for callers of the existing runtimes.

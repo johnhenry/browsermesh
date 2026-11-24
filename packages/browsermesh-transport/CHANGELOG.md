@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.7.0
+
+### Minor Changes
+
+- 4e71bfa: `createMeshNode()` wires the node's identity into its WebRTC connections, so the identity binding proof runs by default: each side proves possession of its pod key over the DTLS fingerprints of the session descriptions it applied, and a signalling server that swaps the descriptions is detected and the connection closed. `requirePeerBinding` is true (nothing a peer sends is delivered before its proof verified). New options: `webrtcIdentityBinding` (default `true`; `false` turns it off), `webrtcAllowUnboundPeers` (default `false`; the named opt-out for interop with peers on transport older than 0.6.0) and `webrtcBindingTimeoutMs` (default 10000).
+
+  A peer that sends no proof (transport older than 0.6.0) is closed after the binding timeout, with the reason `timeout`. The reason now reaches the application: the caller's `connectToPeer()` rejects with `... identity binding failed: timeout` as soon as the connection is closed (it used to wait out the open timeout and say only that the channel did not open), and `PeerNode` emits `peer:binding-failed` (`{ pubKey, transport, connectionId, reason }`) on both sides (new `PeerNode#reportBindingFailure`, new `onBindingFailure` option of `createWebRTCTransportFactory`). Transport: `WebRTCMeshManager#bindingPolicy` reports whether binding is enabled and how it is applied.
+
+  Breaking default: connections between a node from this release and a peer on transport older than 0.6.0 no longer come up unless `webrtcAllowUnboundPeers: true` (or `webrtcIdentityBinding: false`). Peers on 0.6.0 or later already send and check the proof when given an identity, so two nodes from this release interoperate with no configuration. `@johnhenry/browsermesh-apps` now asks for `@johnhenry/browsermesh-transport` `>=0.6.0` as a peer. Verified on a real `RTCPeerConnection` in Chromium and Firefox (see `tests/browser/README.md`); no problem was found in how the DTLS fingerprints are read from real session descriptions.
+
+### Patch Changes
+
+- 505c215: Defaults that still carried the project's earlier name now use `browsermesh`: the default identity's display and full names (the earlier short aliases stay), the embed widget's default container id (`#browsermesh`; an existing `#clawser` element is still found when `#browsermesh` does not exist, and an explicit `containerId` is never replaced) and the channel relay's default sender. The `ChannelRelay` BroadcastChannel name and the discovery SharedWorker name keep their earlier values on purpose, because they are rendezvous points between pages that may run different releases; both are documented in the code.
+- 0341de6: Discovery messages (`pod:hello`, `pod:hello-ack`, `pod:goodbye`) are now signed with the same scheme as other pod messages, and a peer list entry exists only for a key that proved itself. A goodbye is honoured only from the peer it names (for the session that said hello), or from the link that peer was on going down. What a relay or signalling server reports about peers (`peers`, `peer-joined`, `peer-left`, a relayed frame's `source`) is a hint of whom to greet: `WebSocketTransport` sends a hello to a hinted pod and any other broadcast only to pods whose signed hello or ack verified (new `verifiedPeers`, `confirmPeer()`, `forgetPeer()`). Peers carry `authenticated` and `sid`.
+
+  Breaking default: over a relay or a custom adapter, an unsigned hello from a pod on 0.2.0 is now refused (counted as `unsigned`), so such a pod no longer joins the peer list or receives broadcasts. Set `allowUnsigned: true` on the newer pod to keep accepting them (listed with `authenticated: false`); same-origin transports keep accepting them by default. Signed hellos are accepted by 0.2.0 pods, which ignore the added fields.
+
+  `@johnhenry/browsermesh-transport`: `WshPodTransport` now hands the pod the goodbye it synthesises when a link goes down under the link's identity (`{ peerId }`), so a pod on this release honours it. A pod on an older release is unaffected.
+
+- 450e5d4: Identifiers that match a response to a request, or name a connection, are now 128 random bits from `crypto.getRandomValues` (apps: mesh-rpc, the routing proxy, orchestrator, compute, agent swarm, verification, timestamp witnesses, swarm join and submit, escrow, chunk replication, torrent, mesh-websocket and mesh-relay connections; transport: stream ids; pod: hosted-pod request ids). There is no `Math.random` or clock-and-counter fallback any more: where the platform has no CSPRNG, creating the id throws an error that says so. The modules that patched `crypto.randomUUID` with a `Math.random` version when it was missing no longer do. Escrow contract and dispute ids are random as well.
+
+  Every response is matched on the peer as well as the id: orchestrator, compute, agent swarm, verification, escrow, swarm join and submit, chunk fetch and "have" answers, timestamp witnesses (a peer that was not asked is not counted) and mesh-websocket sessions (an envelope for a connection id is taken only from the peer at the other end). mesh-rpc, the routing proxy, torrent pieces and manifests, files and terminal already did.
+
+  No wire change: the id is an opaque string to the peer that echoes it. A peer on an older release answers with whatever id it was sent. Ids are no longer of the form `<podId>:<time>:<counter>`; anything that parsed them should not.
+
 ## 0.6.0
 
 ### Minor Changes

@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.3.0
+
+### Minor Changes
+
+- d029c83: Hosted pods have owners. Within one `pod-host` resource, `send`, `exec`, `snapshot`, `restore` and `drain` on an existing pod now need the requester to have spawned it through the service or to hold an explicit grant on the pod itself (`<resource>/<name>:<verb>`); the verb on the resource alone no longer reaches another requester's pod. `status` of another's pod stays redacted and no longer registers interest in its events. A pod the service did not spawn has no owner and needs such a grant. Callers that only use pods they spawned are unaffected; a deployment that relied on one identity driving another's pods must grant on the pod. `InMemoryPodHostDriver` now refuses (`ELANE`) a podspec for another lane than its own unless constructed with the test option `acceptAnyLane: true`.
+- 3f9695f: Add `createIsolatedVmRuntime()` to `@johnhenry/browsermesh-pod/node-runtimes`: a `PodRuntime` that runs each hosted pod in its own V8 isolate (the optional `isolated-vm` dependency), declares the `language` boundary and may be advertised as the `isolate` lane. The isolate has no `require`, `process`, filesystem, network, timers or `WebAssembly`; a hosted module is loaded from the host's catalog only and may import nothing; only JSON strings and one log callback cross the boundary; the pod's `limits.memMib` and the request timeout are enforced by the isolate, and a breach disposes it and is reported through `onExit` (`oom` or `timeout`). `isolatedVmAvailability()` reports whether the addon loaded; `createIsolatedVmRuntime()` throws an error with code `ERR_ISOLATED_VM_UNAVAILABLE` and the reason when it did not. The runtime lane driver's exit event now also carries `cause`, the runtime's own reason. Nothing changes for installs without the addon or for callers of the existing runtimes.
+- 0341de6: Discovery messages (`pod:hello`, `pod:hello-ack`, `pod:goodbye`) are now signed with the same scheme as other pod messages, and a peer list entry exists only for a key that proved itself. A goodbye is honoured only from the peer it names (for the session that said hello), or from the link that peer was on going down. What a relay or signalling server reports about peers (`peers`, `peer-joined`, `peer-left`, a relayed frame's `source`) is a hint of whom to greet: `WebSocketTransport` sends a hello to a hinted pod and any other broadcast only to pods whose signed hello or ack verified (new `verifiedPeers`, `confirmPeer()`, `forgetPeer()`). Peers carry `authenticated` and `sid`.
+
+  Breaking default: over a relay or a custom adapter, an unsigned hello from a pod on 0.2.0 is now refused (counted as `unsigned`), so such a pod no longer joins the peer list or receives broadcasts. Set `allowUnsigned: true` on the newer pod to keep accepting them (listed with `authenticated: false`); same-origin transports keep accepting them by default. Signed hellos are accepted by 0.2.0 pods, which ignore the added fields.
+
+  `@johnhenry/browsermesh-transport`: `WshPodTransport` now hands the pod the goodbye it synthesises when a link goes down under the link's identity (`{ peerId }`), so a pod on this release honours it. A pod on an older release is unaffected.
+
+- 833c8b6: A pod's window message channel accepts a message only from a window and origin it was told about. New boot option `window: { sources, parent, origins, targetOrigin }`: `sources` are exact Window objects compared with `event.source`, `parent: true` adds the embedding parent (iframe) or opener (spawned window), `origins` are exact origins compared with `event.origin`, and a message must match every constraint given. A refused message is counted as `window-source` (`pod.dropped`, `message:dropped`). What an accepted window sends unsigned is delivered with `authenticated: false`, as before; a signature must still verify. The hello a child posts to its parent now goes to `targetOrigin` (default: the single configured origin, otherwise `'*'`) and only a configured parent window can answer it. `bootHostedPod()` passes `window: { parent: true }`.
+
+  Breaking default: with no `window` option nothing is accepted from another window. Previously any window could post to the pod and was heard (unsigned messages accepted by default), and any window could answer the parent handshake. A page that relied on that sets `window`. Pods on older versions are unaffected on the wire: nothing new is sent.
+
+### Patch Changes
+
+- 450e5d4: Identifiers that match a response to a request, or name a connection, are now 128 random bits from `crypto.getRandomValues` (apps: mesh-rpc, the routing proxy, orchestrator, compute, agent swarm, verification, timestamp witnesses, swarm join and submit, escrow, chunk replication, torrent, mesh-websocket and mesh-relay connections; transport: stream ids; pod: hosted-pod request ids). There is no `Math.random` or clock-and-counter fallback any more: where the platform has no CSPRNG, creating the id throws an error that says so. The modules that patched `crypto.randomUUID` with a `Math.random` version when it was missing no longer do. Escrow contract and dispute ids are random as well.
+
+  Every response is matched on the peer as well as the id: orchestrator, compute, agent swarm, verification, escrow, swarm join and submit, chunk fetch and "have" answers, timestamp witnesses (a peer that was not asked is not counted) and mesh-websocket sessions (an envelope for a connection id is taken only from the peer at the other end). mesh-rpc, the routing proxy, torrent pieces and manifests, files and terminal already did.
+
+  No wire change: the id is an opaque string to the peer that echoes it. A peer on an older release answers with whatever id it was sent. Ids are no longer of the form `<podId>:<time>:<counter>`; anything that parsed them should not.
+
 ## 0.2.0
 
 ### Minor Changes
