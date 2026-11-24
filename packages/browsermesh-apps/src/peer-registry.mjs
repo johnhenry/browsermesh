@@ -34,6 +34,40 @@ import { matchScope } from '@johnhenry/browsermesh-primitives'
 /** The longest a platform timer can wait (a 32-bit signed millisecond count). */
 const MAX_TIMER_DELAY_MS = 2 ** 31 - 1
 
+/**
+ * Namespaces whose scope grammar is written down, because wsh's capability notation (`spec/capabilities.md`) has the
+ * same forms and the two are meant to agree: `objects:ROOT[:OP]` and `mcp:TOOL`. `matchScope` reads a missing or empty
+ * segment as `*`, so a grant of `objects:` (no root) or `mcp:` (no tool) would silently cover every root or tool; the
+ * notation refuses such an entry, and so does the registry. Everything else is the registry's own and is not checked.
+ *
+ *   objects:ROOT          every operation on ROOT          (ROOT is `*`, or a name; no empty root)
+ *   objects:ROOT:OP       OP is get, call, set or on; `*` is the registry's own wildcard for every operation
+ *   mcp:TOOL              TOOL is `*` or a name; `mcp:TOOL:call` is the same grant spelled with its action
+ */
+const SCOPE_NAME_RE = /^[A-Za-z0-9_$][A-Za-z0-9._$-]{0,127}$/
+const OBJECT_OPS = new Set(['get', 'call', 'set', 'on', '*'])
+
+/** @param {unknown} scope @returns {string|null} why the scope may not be granted, or null */
+function grantRefusal(scope) {
+  if (typeof scope !== 'string' || scope === '') return 'a scope is a non-empty string'
+  const parts = scope.split(':')
+  if (parts[0] === 'objects') {
+    if (parts.length < 2 || parts.length > 3) return 'objects:ROOT[:OP]'
+    if (parts[1] !== '*' && !SCOPE_NAME_RE.test(parts[1])) return 'objects: names a root'
+    if (parts.length === 3 && !OBJECT_OPS.has(parts[2])) return 'objects:ROOT:OP, OP is get, call, set or on'
+  } else if (parts[0] === 'mcp') {
+    if (parts.length < 2 || parts.length > 3) return 'mcp:TOOL[:call]'
+    if (parts[1] !== '*' && !SCOPE_NAME_RE.test(parts[1])) return 'mcp: names a tool'
+    if (parts.length === 3 && parts[2] !== 'call' && parts[2] !== '*') return 'mcp:TOOL[:call]'
+  }
+  return null
+}
+
+/** Whether `grantCapabilities` would accept this scope. */
+export function isGrantableScope(scope) {
+  return grantRefusal(scope) === null
+}
+
 let _localCapTokenSeq = 0
 class _DefaultCapabilityToken {
   constructor({ issuer, holder, resource, permissions, constraints = {}, parentId = null, createdAt, expiresAt = null }) {
@@ -285,6 +319,11 @@ export class PeerRegistry {
    *   to newly-issued tokens for this call. Omit for no expiry.
    */
   grantCapabilities(pubKey, scopes, opts = {}) {
+    // The whole list or none of it: an entry the notation does not understand is refused, the rest is not kept.
+    for (const scope of scopes) {
+      const why = grantRefusal(scope)
+      if (why) throw new TypeError(`PeerRegistry.grantCapabilities: ${JSON.stringify(scope)} is not a scope this registry will grant (${why})`)
+    }
     const templateName = `_peer_${pubKey}`
     const existing = this.#acl.getTemplate(templateName)
     const merged = existing
