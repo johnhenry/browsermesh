@@ -25,9 +25,33 @@ both directions, carrying one named endpoint `mesh`**. The endpoint is a duplex
 byte stream with credit based flow control. The mesh's frames travel on it,
 length prefixed.
 
-Why a named endpoint and not an `rpc` channel: in wsh 0.45.0 an `rpc` channel
-cannot be used on a sealed session or over a relay bridge (johnhenry/wsh#191).
-Named endpoints work on a sealed session, direct or through the pipe relay.
+Why a named endpoint and not an `rpc` channel. The reason this note was written
+with was that in wsh 0.45.0 an `rpc` channel could not be used on a sealed session
+or over a relay bridge (johnhenry/wsh#191). **That stopped being true in wsh
+0.46.0**: an `rpc` channel now works on a sealed session and behind a relay. It
+no longer decides the matter, and the code was not changed. What still argues for
+the endpoint:
+
+* **The shape.** An endpoint is a duplex byte stream with credit based flow
+  control, which is what the mesh's length prefixed frames are. An `rpc` channel
+  is a stream of structured request, response and notification messages (what
+  `wsh-objects` and `mcp` use); carrying frames on it would put a message
+  layer under the mesh's own for nothing.
+* **The licence.** The key a pod gives a dialler holds exactly `endpoint:mesh`
+  (see Authorization below). An rpc protocol is opened with `rpc:NAME`, and one
+  that the host did not narrow is open to a key that is not restricted at all; a
+  named endpoint is the narrower thing to grant, and cannot be confused with a
+  protocol a host added.
+* **What it costs to change.** The link is a wire format the other end has to
+  speak (an older peer does not see an rpc channel it does not know), so a move
+  would need a negotiation for no gain.
+
+Object access and MCP are different: they are rpc protocols (`wsh-objects`,
+`mcp`) and they now do work over a sealed session, which is what lets a stock wsh
+client reach them on a page host. They are not the mesh link and are not carried
+by it; see [`docs/wsh-and-browsermesh.md`](../wsh-and-browsermesh.md). This was not
+re-measured here beyond what the repository's own wsh link tests exercise (the
+endpoint, on wsh 0.45.0 to 0.48.0).
 
 ```
  pod A (wsh client)                 pipe relay                 pod B (wsh host)
@@ -51,7 +75,8 @@ without ending the link.
   never has to be readable.
 * pod id = base64url(SHA-256(raw public key)); wsh fingerprint = the same hash
   in hex. The conversion is a re-encoding of the same 32 bytes
-  (`podIdToFingerprint`, `fingerprintToPodId` in `wsh-links.mjs`).
+  (`podIdToFingerprint`, `fingerprintToPodId`: one implementation, in
+  `@johnhenry/browsermesh-primitives`, and `wsh-links.mjs` re-exports them).
   `MeshWshBridge` uses the same two functions (it stays as the helper that
   syncs a `WshKeyStore` with a `MeshIdentityManager`; the link layer does not
   need it).
@@ -332,8 +357,13 @@ repository does not otherwise measure or budget sizes.
 
 `@johnhenry/wsh` is an **optional peer dependency** of
 `@johnhenry/browsermesh-transport` (and a dev dependency for tests), at the
-version range that was tested (`^0.45.0`; wsh is 0.x and breaks between
-minors). Optional peer because the transport package is used by many consumers
+version range that was tested: `>=0.45.0 <1.0.0`. The transport's wsh tests (116: link, lazy loading,
+identity; the real handshake over the in-process pipe relay) and example 18 were
+run against 0.45.0, 0.46.0, 0.46.1, 0.47.0 and 0.48.0 and pass on each; nothing
+newer has been tried (wsh is 0.x and breaks between minors, so a release past
+0.48 should be run through the same tests before it is relied on). The range was
+`^0.45.0`, which for a 0.x version excludes every later release and made a
+current wsh a peer conflict. Optional peer because the transport package is used by many consumers
 that never use wsh, the import is lazy, and a consumer that asks for the wsh
 transport without installing wsh gets an error that says what to install.
 

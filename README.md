@@ -5,6 +5,8 @@
 
 Full documentation: [opensource.johnhenry.me/browsermesh](https://opensource.johnhenry.me/browsermesh/)
 
+Documentation index: [`docs/README.md`](docs/README.md). wsh and browsermesh together: [`docs/wsh-and-browsermesh.md`](docs/wsh-and-browsermesh.md).
+
 Design docs: [`docs/hosted-pods.md`](docs/hosted-pods.md) — running `Pod` outside the browser in V8 isolates and Firecracker microVMs (tracks [#185](https://github.com/johnhenry/browsermesh/issues/185)).
 
 Peer-to-peer mesh networking for browser environments: cryptographic
