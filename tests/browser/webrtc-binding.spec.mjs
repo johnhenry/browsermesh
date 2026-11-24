@@ -1,4 +1,4 @@
-import { test, expect, until } from './fixtures.mjs'
+import { test, expect, until, exposeHostCandidates } from './fixtures.mjs'
 
 // Identity binding on a real RTCPeerConnection, in two browser contexts, signalled through the local
 // /signaling server. Each side proves possession of its pod key over the DTLS fingerprints of the
@@ -8,6 +8,8 @@ import { test, expect, until } from './fixtures.mjs'
 async function pair(open, origin, { identity }) {
   const alice = await open(origin, { isolated: true })
   const bob = await open(origin, { isolated: true })
+  await exposeHostCandidates(alice)
+  await exposeHostCandidates(bob)
   const ids = identity
     ? { a: await alice.evaluate(() => window.bm.rtcIdentityCreate()), b: await bob.evaluate(() => window.bm.rtcIdentityCreate()) }
     : { a: 'pod-alice', b: 'pod-bob' }
@@ -55,6 +57,8 @@ test('a peer that sends no proof is closed after the binding timeout, with the r
   // bob runs without identity (what a transport older than 0.6.0 does); alice requires a proof, with a short timeout.
   const alice = await open(servers.a, { isolated: true })
   const bob = await open(servers.a, { isolated: true })
+  await exposeHostCandidates(alice)
+  await exposeHostCandidates(bob)
   const aliceId = await alice.evaluate(() => window.bm.rtcIdentityCreate())
   await alice.evaluate((i) => window.bm.rtcRegister({ local: i.a, remote: 'pod-bob', identity: true, bindingTimeoutMs: 700 }), { a: aliceId })
   await bob.evaluate((i) => window.bm.rtcRegister({ local: 'pod-bob', remote: i.a, identity: false }), { a: aliceId })
@@ -73,6 +77,7 @@ test('a peer that sends no proof is closed after the binding timeout, with the r
  */
 async function withAttacker({ servers, open }, identity, body) {
   const attacker = await open(servers.a, { isolated: true })
+  await exposeHostCandidates(attacker)
   await attacker.evaluate(() => window.bm.mitmStart('__mitm__'))
   servers.a.hub.intercept = '__mitm__'
   try {

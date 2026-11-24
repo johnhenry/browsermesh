@@ -79,7 +79,7 @@ describe('createProxyHandler', () => {
     const request = { path: '/hello', method: 'GET' }
 
     it('refuses to be built without checkAccess or public: true: no handler exists to fetch anything', () => {
-      assert.throws(() => createProxyHandler({ targetOrigin: origin }), /checkAccess.*public: true|public: true.*checkAccess/)
+      assert.throws(() => createProxyHandler({ targetOrigin: origin }), /checkAccess is required unless opts\.public is true/)
       assert.throws(() => createProxyHandler({ targetOrigin: origin, public: false }), /checkAccess/)
       assert.doesNotThrow(() => createProxyHandler({ targetOrigin: origin, public: true }))
       assert.doesNotThrow(() => createProxyHandler({ targetOrigin: origin, checkAccess: () => ({ allowed: false }) }))

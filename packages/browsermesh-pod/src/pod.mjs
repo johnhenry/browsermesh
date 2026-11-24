@@ -576,7 +576,9 @@ export class Pod {
   #addPeer(podId, info) {
     if (podId === this.podId) return
     const isNew = !this.#peers.has(podId)
-    this.#peers.set(podId, { ...info, podId, lastSeen: Date.now() })
+    // A peer already known as the parent keeps that role when the same hello/ack is also seen on another path.
+    const role = this.#peers.get(podId)?.role
+    this.#peers.set(podId, { ...(role ? { role } : {}), ...info, podId, lastSeen: Date.now() })
     if (isNew) {
       this._emit('peer:found', { podId, ...info })
     }

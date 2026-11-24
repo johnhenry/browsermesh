@@ -75,7 +75,7 @@ const isWebKit = (browser) => browser.browserType().name() === 'webkit'
  * plain loopback/LAN addresses. Nothing is captured or sent; the stream only
  * has to be live while the connection is negotiated. A no-op elsewhere.
  */
-async function exposeHostCandidates(page) {
+export async function exposeHostCandidates(page) {
   if (page.context().browser().browserType().name() !== 'webkit') return
   await page.evaluate(async () => {
     window.bmCapture = await navigator.mediaDevices.getUserMedia({ audio: true })
