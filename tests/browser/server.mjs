@@ -385,9 +385,10 @@ export async function startServer({ port = 0, hub = new Hub() } = {}) {
     const endpoint = new URL(req.url, 'http://localhost').pathname
     if (endpoint !== '/relay' && endpoint !== '/signaling' && endpoint !== '/echo') return socket.destroy()
     // A WebSocket handshake is not covered by the same-origin policy, so the
-    // server checks the Origin itself: only pages this server served.
+    // server checks the Origin itself: only pages this server served. A client that sends no Origin is not a
+    // browser page (Node's WebSocket sends none), so there is no page for the check to keep out.
     const origin = req.headers.origin
-    if (origin !== `http://${req.headers.host}`) return socket.destroy()
+    if (origin !== undefined && origin !== `http://${req.headers.host}`) return socket.destroy()
     const conn = acceptUpgrade(req, socket)
     if (!conn) return
     if (endpoint === '/echo') conn.onmessage = (data) => conn.send(data)
