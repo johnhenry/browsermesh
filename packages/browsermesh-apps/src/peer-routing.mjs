@@ -25,6 +25,7 @@
  *   node --import ./test/_setup-globals.mjs --test test/peer-routing.test.mjs
  */
 
+import { MessageSigner, ReplayGuard, createMessage, verifyMessage } from '@johnhenry/browsermesh-pod'
 import {
   PROXY_LIMITS_DEFAULTS,
   DEFAULT_ALLOWED_METHODS,
@@ -51,6 +52,27 @@ export const ROUTING_DEFAULTS = Object.freeze({
   routeCacheMs: 60_000,       // 1 minute
   maxRouteEntries: 1000,
 })
+
+/**
+ * What the originator signs in a routed envelope: a `pod:message` (the pod
+ * message signature, see `@johnhenry/browsermesh-pod`) from the originator to
+ * the final recipient whose payload is `{ kind, id, message }`. The signature
+ * therefore covers the originator, the final recipient, the message id, the
+ * content, and the signer's session id and counter (which the recipient uses
+ * to refuse a copy it already accepted). `ttl`, `path` and the top-level
+ * `from`/`message` copies are NOT signed: a hop sets them, nobody relies on them.
+ */
+export const ROUTED_KIND = 'mesh-routed/v1'
+
+/** The longest `path` a delivered or forwarded envelope keeps (a diagnostic hint, bounded). */
+const MAX_PATH_ENTRIES = 32
+
+/** Random message id from the platform CSPRNG. */
+function routedMessageId() {
+  const bytes = new Uint8Array(16)
+  globalThis.crypto.getRandomValues(bytes)
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
+}
 
 // ---------------------------------------------------------------------------
 // RouteEntry (plain object factory)
@@ -114,6 +136,18 @@ export class MeshRouter {
   /** @type {Map<string, Function[]>} */
   #listeners = new Map()
 
+  /** @type {{ sign: Function }|null} signs this pod's own envelopes */
+  #signer
+
+  /** @type {boolean} accept envelopes that carry no signature */
+  #allowUnsigned
+
+  /** @type {((peerId: string) => boolean)|null} */
+  #isLinked
+
+  /** @type {ReplayGuard} refuses a signed envelope this pod already accepted */
+  #guard
+
   /**
    * @param {object} opts
    * @param {string} opts.localPodId    - This pod's identifier
@@ -121,8 +155,18 @@ export class MeshRouter {
    * @param {number} [opts.maxTTL]      - Maximum time-to-live for routed messages
    * @param {number} [opts.routeCacheMs] - How long routes remain valid
    * @param {Function} [opts.onLog]     - Logging callback
+   * @param {{ sign: Function }} [opts.signer] - A `MessageSigner` for this pod's identity. With one, every
+   *   envelope this router originates carries the originator's signature (see `ROUTED_KIND`), `route()`
+   *   hands it to `forwardFn` after signing (asynchronously), and unsigned incoming envelopes are refused
+   *   unless `allowUnsigned` says otherwise. Without one the router behaves as it always did.
+   * @param {boolean} [opts.allowUnsigned] - Accept (and deliver, marked `authenticated: false`) envelopes
+   *   with no signature, as older peers send them. Default: `false` with a `signer`, `true` without.
+   *   A signature that is present must verify whatever this is.
+   * @param {(peerId: string) => boolean} [opts.isLinked] - Whether this pod has a live link with a peer.
+   *   A forwarded envelope is dropped (`no-link`) when the peer it arrived from fails this check.
+   * @param {{ maxSenders?: number, maxSessionsPerSender?: number }} [opts.replay] - Bounds of the replay window state.
    */
-  constructor({ localPodId, forwardFn, maxTTL, routeCacheMs, onLog }) {
+  constructor({ localPodId, forwardFn, maxTTL, routeCacheMs, onLog, signer, allowUnsigned, isLinked, replay }) {
     if (!localPodId || typeof localPodId !== 'string') {
       throw new Error('localPodId is required and must be a non-empty string')
     }
@@ -131,6 +175,10 @@ export class MeshRouter {
     this.#maxTTL = maxTTL ?? ROUTING_DEFAULTS.maxTTL
     this.#routeCacheMs = routeCacheMs ?? ROUTING_DEFAULTS.routeCacheMs
     this.#onLog = onLog ?? (() => {})
+    this.#signer = signer ?? null
+    this.#allowUnsigned = allowUnsigned ?? !signer
+    this.#isLinked = typeof isLinked === 'function' ? isLinked : null
+    this.#guard = new ReplayGuard(replay)
   }
 
   // ── Routing ───────────────────────────────────────────────────────
@@ -158,19 +206,14 @@ export class MeshRouter {
 
     // 1. Direct peer?
     if (this.#directPeers.has(targetPodId)) {
-      if (this.#forwardFn) {
-        this.#forwardFn(targetPodId, envelope)
-      }
+      this.#originate(targetPodId, envelope, false)
       return { success: true, hops: 1, path: [this.#localPodId, targetPodId] }
     }
 
     // 2. Known route? (check expiry)
     const route = this.#routeTable.get(targetPodId)
     if (route && route.expiresAt > Date.now()) {
-      if (this.#forwardFn) {
-        this.#forwardFn(route.nextHop, envelope)
-      }
-      this.#emit('forward', envelope)
+      this.#originate(route.nextHop, envelope, true)
       return { success: true, hops: route.hops, path: [this.#localPodId, route.nextHop] }
     }
     // Clean up expired route
@@ -180,6 +223,28 @@ export class MeshRouter {
 
     // 3. No route
     return { success: false }
+  }
+
+  /**
+   * Hand a freshly built envelope to `forwardFn`, signed first when this router has a signer. Signing is
+   * asynchronous, so `route()` has already returned by then; a message that cannot be signed (its content
+   * is not JSON) is reported as a `drop` with reason `sign-failed`.
+   */
+  #originate(nextHop, envelope, announce) {
+    const send = (out) => {
+      if (this.#forwardFn) this.#forwardFn(nextHop, out)
+      if (announce) this.#emit('forward', out)
+    }
+    if (!this.#signer) return send(envelope)
+    const id = routedMessageId()
+    this.#signer.sign(createMessage({
+      from: this.#localPodId,
+      to: envelope.to,
+      payload: { kind: ROUTED_KIND, id, message: envelope.message },
+    })).then(
+      (signed) => send({ ...envelope, id, signed }),
+      (err) => this.#drop('sign-failed', envelope, err?.message),
+    )
   }
 
   // ── Route Table Management ────────────────────────────────────────
@@ -240,33 +305,108 @@ export class MeshRouter {
    * If the message is addressed to this pod, emit 'message'.
    * Otherwise, decrement TTL and forward to the next hop.
    *
-   * @param {object} envelope - { from, to, ttl, message, path }
+   * A signed envelope (`signed`, see `ROUTED_KIND`) is verified first, here, whether this pod is the final
+   * recipient or only a hop: the originator, final recipient, id and content are the signed ones, never the
+   * top-level `from`/`message` a hop wrote, and one that does not verify is dropped (event `drop`) rather
+   * than delivered or forwarded. The final recipient also refuses a copy it already accepted. `path` and
+   * `ttl` are set by hops: `path` is kept (bounded) as a diagnostic hint and decides nothing, `ttl` is
+   * clamped to this router's `maxTTL`. For an envelope that is neither delivered nor forwarded, the result
+   * is `undefined` when it was handled synchronously (an unsigned one) and a promise otherwise.
+   *
+   * @param {object} envelope - { from, to, ttl, message, path, id?, signed? }
+   * @param {{ via?: string }} [meta] - `via`: the peer whose link the envelope arrived on (never a field
+   *   of the envelope). When given and `isLinked` is configured, a forwarded envelope from a peer this pod
+   *   has no link with is dropped (`no-link`).
+   * @returns {Promise<void>|void}
    */
-  handleRoutedMessage(envelope) {
+  handleRoutedMessage(envelope, meta = {}) {
     if (!envelope || typeof envelope !== 'object') return
 
+    if (envelope.signed === undefined) {
+      if (!this.#allowUnsigned) return this.#drop('unsigned', envelope)
+      return this.#accept(envelope, envelope, meta.via, false)
+    }
+    return this.#verifyThenAccept(envelope, meta.via)
+  }
+
+  async #verifyThenAccept(envelope, via) {
+    const signed = envelope.signed
+    const payload = signed && typeof signed === 'object' ? signed.payload : null
+    if (!payload || typeof payload !== 'object' || payload.kind !== ROUTED_KIND || typeof payload.id !== 'string') {
+      return this.#drop('malformed', envelope)
+    }
+    // The top-level `to` is what hops route on; it has to be the signed one.
+    if (envelope.to !== signed.to) return this.#drop('wrong-recipient', envelope)
+    const forMe = signed.to === this.#localPodId
+    let verdict
+    try {
+      verdict = await verifyMessage(signed, { guard: forMe ? this.#guard : undefined })
+    } catch {
+      return this.#drop('malformed', envelope)
+    }
+    if (!verdict.ok) return this.#drop(verdict.reason, envelope)
+    const m = verdict.message
+    return this.#accept(envelope, {
+      from: m.from,
+      to: m.to,
+      message: m.payload.message,
+      id: m.payload.id,
+    }, via, true)
+  }
+
+  /**
+   * Deliver or forward an envelope whose fields (`v`) are as verified as they are going to be.
+   * @param {object} envelope - as received (only `ttl` and `path` are read from it, as hints)
+   * @param {{ from: string, to: string, message: *, id?: string }} v
+   * @param {string|undefined} via
+   * @param {boolean} authenticated
+   */
+  #accept(envelope, v, via, authenticated) {
+    const path = Array.isArray(envelope.path)
+      ? envelope.path.filter((p) => typeof p === 'string').slice(0, MAX_PATH_ENTRIES)
+      : []
+
     // Message is for us
-    if (envelope.to === this.#localPodId) {
-      this.#emit('message', envelope)
+    if (v.to === this.#localPodId) {
+      this.#emit('message', authenticated
+        ? { from: v.from, to: v.to, ttl: envelope.ttl, message: v.message, path, id: v.id, authenticated: true }
+        : { ...envelope, authenticated: false })
       return
     }
 
-    // TTL enforcement
-    const newTTL = (envelope.ttl ?? 0) - 1
+    // A hop forwards only for a peer it has a link with.
+    if (via !== undefined && this.#isLinked && !this.#isLinked(via)) {
+      return this.#drop('no-link', envelope)
+    }
+
+    // TTL enforcement (a hop cannot raise it above this router's own bound)
+    const incoming = Number.isFinite(envelope.ttl) ? Math.min(envelope.ttl, this.#maxTTL) : 0
+    const newTTL = incoming - 1
     if (newTTL <= 0) {
-      this.#onLog(`Dropping message from ${envelope.from} to ${envelope.to}: TTL expired`)
+      this.#onLog(`Dropping message from ${v.from} to ${v.to}: TTL expired`)
       return
     }
 
-    // Build forwarded envelope
-    const forwarded = {
-      ...envelope,
-      ttl: newTTL,
-      path: [...(envelope.path || []), this.#localPodId],
-    }
+    // Build forwarded envelope. A signed one is rebuilt from the verified fields (plus the signature that
+    // proves them) so that what an older recipient reads from the top level is the signed content.
+    const forwarded = authenticated
+      ? {
+          from: v.from,
+          to: v.to,
+          ttl: newTTL,
+          message: v.message,
+          path: [...path, this.#localPodId].slice(-MAX_PATH_ENTRIES),
+          id: v.id,
+          signed: envelope.signed,
+        }
+      : {
+          ...envelope,
+          ttl: newTTL,
+          path: [...(envelope.path || []), this.#localPodId],
+        }
 
     // Try to forward
-    const targetPodId = envelope.to
+    const targetPodId = v.to
 
     // Direct peer?
     if (this.#directPeers.has(targetPodId)) {
@@ -283,6 +423,15 @@ export class MeshRouter {
       this.#forwardFn(route.nextHop, forwarded)
       this.#emit('forward', forwarded)
     }
+  }
+
+  /**
+   * An envelope that is neither delivered nor forwarded because of what it is (not because of its TTL).
+   * The `claimed*` fields are what the envelope said, which is all they are.
+   */
+  #drop(reason, envelope, detail) {
+    this.#onLog(`Dropping routed message (${reason}) claiming to be from ${envelope?.from} to ${envelope?.to}${detail ? `: ${detail}` : ''}`)
+    this.#emit('drop', { reason, claimedFrom: envelope?.from ?? null, claimedTo: envelope?.to ?? null })
   }
 
   // ── Direct Peer Management ────────────────────────────────────────
@@ -342,7 +491,7 @@ export class MeshRouter {
 
   /**
    * Subscribe to an event.
-   * @param {string} event - 'message' | 'forward' | 'route:add' | 'route:remove'
+   * @param {string} event - 'message' | 'forward' | 'drop' | 'route:add' | 'route:remove'
    * @param {Function} cb
    */
   on(event, cb) {
@@ -818,7 +967,25 @@ const DEFAULT_PROXY_TIMEOUT_MS = 10000
  */
 
 /**
+ * A pod-message signer for the node's default identity, or null when the node has
+ * no wallet that can sign (a duck-typed node in a test, say).
+ */
+function walletSigner(peerNode) {
+  const wallet = peerNode?.wallet
+  const podId = peerNode?.podId
+  if (!wallet || !podId || typeof wallet.sign !== 'function' || typeof wallet.getPublicKeyBytes !== 'function') return null
+  return new MessageSigner({
+    podId,
+    sign: (data) => wallet.sign(podId, data),
+    rawPublicKey: () => wallet.getPublicKeyBytes(podId),
+  })
+}
+
+/**
  * @param {object} [opts]
+ * @param {boolean} [opts.allowUnsigned] - Accept routed envelopes with no originator signature, as pods on
+ *   earlier releases send them (delivered with `authenticated: false`; their `from` is then only a claim).
+ *   Default: `false` when the node can sign, `true` when it cannot. A signature that is present must verify.
  * @param {number} [opts.maxTTL] - Forwarded to `MeshRouter` (default 8, see `ROUTING_DEFAULTS`).
  * @param {number} [opts.routeCacheMs] - Forwarded to `MeshRouter` (default 60000, see `ROUTING_DEFAULTS`).
  * @param {string} [opts.envelopeType='mesh-routing'] - `envelope.type` used for `MeshRouter` traffic.
@@ -851,6 +1018,7 @@ export function createMeshRoutingService(opts = {}) {
     maxHeaderCount,
     maxHeaderBytes,
     requestTimeoutMs,
+    allowUnsigned,
     onLog,
   } = opts
   const wireServerSharing = 'fetchFn' in opts
@@ -862,11 +1030,19 @@ export function createMeshRoutingService(opts = {}) {
     attach(peerNode, ctx) {
       const localPodId = peerNode.podId
 
+      // The node's own identity signs what this pod originates (a node with no
+      // signing identity routes unsigned, as it always did).
+      const signer = walletSigner(peerNode)
+
       // -----------------------------------------------------------------
       // MeshRouter -- see module doc comment's "MULTI-HOP ROUTING DESIGN".
       // -----------------------------------------------------------------
       const router = new MeshRouter({
         localPodId,
+        signer,
+        allowUnsigned,
+        // An envelope arrives over some peer's session; a hop forwards only for a peer it still has one with.
+        isLinked: typeof peerNode.hasActiveSession === 'function' ? (id) => peerNode.hasActiveSession(id) : undefined,
         forwardFn: (nextHop, envelope) => {
           ctx.sendTo(nextHop, envelopeType, envelope).catch((err) => {
             log('mesh-routing:forward-send-failed', {
@@ -887,13 +1063,16 @@ export function createMeshRoutingService(opts = {}) {
       const onRouterForward = (envelope) => ctx.emit('mesh-routing:forward', envelope)
       const onRouterRouteAdd = (entry) => ctx.emit('mesh-routing:route-add', entry)
       const onRouterRouteRemove = (target) => ctx.emit('mesh-routing:route-remove', { target })
+      const onRouterDrop = (drop) => ctx.emit('mesh-routing:drop', drop)
       router.on('message', onRouterMessage)
       router.on('forward', onRouterForward)
+      router.on('drop', onRouterDrop)
       router.on('route:add', onRouterRouteAdd)
       router.on('route:remove', onRouterRouteRemove)
 
       const unsubscribeRouting = ctx.onIncomingData(envelopeType, (fromPubKey, envelope) => {
-        router.handleRoutedMessage(envelope)
+        // `fromPubKey` is the session the envelope arrived on: the direct peer, never a field of the envelope.
+        return router.handleRoutedMessage(envelope, { via: fromPubKey })
       })
 
       const api = {
@@ -1038,6 +1217,7 @@ export function createMeshRoutingService(opts = {}) {
         teardown() {
           router.off('message', onRouterMessage)
           router.off('forward', onRouterForward)
+          router.off('drop', onRouterDrop)
           router.off('route:add', onRouterRouteAdd)
           router.off('route:remove', onRouterRouteRemove)
           unsubscribeRouting()

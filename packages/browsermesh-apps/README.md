@@ -73,7 +73,7 @@ Extracted from a private monorepo (previously `packages/browsermesh-apps`), wher
 | peer-node-transport | `createPeerNodeTransport` |
 | peer-payments | `MultiPartyCreditLedger`, `WebLNProvider` |
 | peer-registry | `PeerRegistry` |
-| peer-routing | `MeshRouter`, `ServerSharing` |
+| peer-routing | `MeshRouter` (routed envelopes carry the originator's signature, verified by each hop and by the recipient), `ServerSharing` |
 | peer-services | `ServiceAdvertiser`, `ServiceBrowser` |
 | peer-terminal | `TerminalHost`, `TerminalClient` |
 | peer-timestamp | `TimestampAuthority`, `TimestampProof` |
