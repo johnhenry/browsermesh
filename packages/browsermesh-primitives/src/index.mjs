@@ -7,6 +7,34 @@ export { MeshError, MeshProtocolError, MeshCapabilityError } from "./errors.mjs"
 // Identity
 export { PodIdentity, derivePodId, encodeBase64url, decodeBase64url, supportsEd25519, probeEd25519Support, _resetEd25519Probe } from "./identity.mjs";
 
+// Session certificates and signed revocation
+export {
+  CERT_VERSION,
+  DEFAULT_MAX_LIFETIME_SECONDS,
+  DEFAULT_SKEW_SECONDS,
+  MAX_SKEW_SECONDS,
+  MAX_SCOPE_ENTRIES,
+  MAX_SCOPE_ENTRY_BYTES,
+  DEFAULT_REVOCATION_STORE_SIZE,
+  REVOCATION_KIND,
+  CredentialError,
+  verifyWithRawPublicKey,
+  podIdFromRawKey,
+  encodeSessionCertificateBody,
+  decodeSessionCertificate,
+  issueSessionCertificate,
+  createSession,
+  createSessionProof,
+  scopeAllows,
+  verifyPeerCredential,
+  revokeSessionCertificate,
+  retireIdentity,
+  verifyRevocation,
+  receiveRevocation,
+  isRevoked,
+  MemoryRevocationStore,
+} from "./session.mjs";
+
 // Wire format
 export { messageTypeRegistry, encodeMeshMessage, decodeMeshMessage } from "./wire.mjs";
 

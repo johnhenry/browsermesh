@@ -80,7 +80,9 @@ class FakeSignalingServer {
       ws.podId = data.podId
       this.#clients.set(data.podId, ws)
       ws._serverSend({ type: 'registered', podId: data.podId })
-      ws._serverSend({ type: 'peers', peers: [...this.#clients.keys()] })
+      // A real server's `peers` frame follows `registered` in a later task.
+      const peers = { type: 'peers', peers: [...this.#clients.keys()] }
+      setImmediate(() => ws._serverSend(peers))
       for (const peer of this.#clients.values()) {
         if (peer !== ws) peer._serverSend({ type: 'peer-joined', podId: data.podId })
       }

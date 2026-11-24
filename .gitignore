@@ -3,6 +3,10 @@ node_modules/
 *.tgz
 .DS_Store
 
+# Playwright output (tests/browser)
+test-results/
+playwright-report/
+
 # Sibling clone used only for local spike verification (relay + signaling
 # servers) — not part of this repo, never commit it.
 /browsermesh-servers/
