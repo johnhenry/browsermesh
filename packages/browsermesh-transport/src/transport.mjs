@@ -15,8 +15,15 @@
 // Constants
 // ---------------------------------------------------------------------------
 
-/** @type {readonly string[]} */
-const TRANSPORT_TYPES = Object.freeze(['webrtc', 'wsh-wt', 'wsh-ws']);
+/**
+ * `'wsh'` is the sealed, key-authenticated peer link over the wsh protocol
+ * (`wsh-links.mjs`). It is a type but is NOT in any default preference order:
+ * nothing uses it unless a caller lists it or requires it. (`'wsh-wt'` and
+ * `'wsh-ws'` are plain WebTransport and WebSocket and do not speak wsh; the
+ * names are historical.)
+ * @type {readonly string[]}
+ */
+const TRANSPORT_TYPES = Object.freeze(['webrtc', 'wsh-wt', 'wsh-ws', 'wsh']);
 
 /** @type {readonly string[]} */
 const TRANSPORT_STATES = Object.freeze([
@@ -283,13 +290,24 @@ export class MeshTransportNegotiator {
   /** @type {string[]} */
   #preferenceOrder = ['webrtc', 'wsh-wt', 'wsh-ws'];
 
+  /** @type {string|null} */
+  #require = null;
+
   /**
    * @param {object} [opts]
    * @param {string[]} [opts.preferenceOrder] - Override default preference
+   * @param {string} [opts.require] - A transport type that must be used:
+   *   only its adapter is tried, and its failure is the failure (there is
+   *   no fallback to any other type). Use `require: 'wsh'` to never fall
+   *   back from the sealed wsh link to an unsealed transport.
    */
   constructor(opts = {}) {
     if (opts.preferenceOrder) {
       this.#preferenceOrder = [...opts.preferenceOrder];
+    }
+    if (opts.require !== undefined && opts.require !== null) {
+      if (!TRANSPORT_TYPES.includes(opts.require)) throw new Error(`Unknown transport type: ${opts.require}`);
+      this.#require = opts.require;
     }
   }
 
@@ -316,9 +334,22 @@ export class MeshTransportNegotiator {
    *
    * @param {object} endpoints - Map of type -> endpoint string
    * @param {object} [auth]    - Auth credentials to pass to adapters
+   * @param {object} [opts]
+   * @param {string} [opts.require] - As the constructor option, for this call.
+   *   When a type is required, only that adapter is tried and its own error
+   *   is thrown unchanged.
    * @returns {Promise<MeshTransport>}
    */
-  async negotiate(endpoints, auth) {
+  async negotiate(endpoints, auth, opts = {}) {
+    const required = opts?.require ?? this.#require;
+    if (required) {
+      if (!TRANSPORT_TYPES.includes(required)) throw new Error(`Unknown transport type: ${required}`);
+      const factory = this.#adapters.get(required);
+      if (!factory) throw new Error(`Transport "${required}" is required but no adapter is registered for it`);
+      const endpoint = endpoints?.[required];
+      if (!endpoint) throw new Error(`Transport "${required}" is required but no "${required}" endpoint was given`);
+      return factory(endpoint, auth);
+    }
     const errors = [];
     for (const type of this.#preferenceOrder) {
       const factory = this.#adapters.get(type);

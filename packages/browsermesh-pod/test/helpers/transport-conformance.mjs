@@ -48,6 +48,11 @@ import assert from 'node:assert/strict'
  *   for" no-op semantics, not a bug — so `delivers: false` also swaps in a
  *   looser ready-state check matching that reality instead of asserting a
  *   false-then-true transition that NullTransport was never designed to do.
+ * @param {(transport: object) => string} [opts.senderId] - For an adapter that
+ *   authenticates the sender of every message itself (a wsh link: `from` is the
+ *   session's key, never a field of the message). Given a transport it returns the
+ *   id it will stamp as `from`; the suite then sends messages naming that id and
+ *   expects the delivered copy to carry it, instead of a made-up one.
  * @param {number} [opts.deliveryWaitMs=30] - How long to wait for async
  *   delivery. Every built-in adapter here delivers via a microtask or
  *   macrotask, never synchronously inside send() — see
@@ -55,7 +60,12 @@ import assert from 'node:assert/strict'
  *   EventEmitterTransport's bus for why.
  */
 export function runTransportConformance(name, makeTransport, opts = {}) {
-  const { makePair, delivers = true, deliveryWaitMs = 30 } = opts
+  const { makePair, delivers = true, deliveryWaitMs = 30, senderId } = opts
+  // An adapter that authenticates the sender of every message (a wsh link) sets `from` to
+  // that identity itself, so the messages below name the real sender and the delivered
+  // copy carries `from` even where the sent one had none.
+  const fromOf = (transport, fallback) => (senderId ? senderId(transport) : fallback)
+  const withFrom = (transport, msg) => (senderId ? { ...msg, from: senderId(transport) } : msg)
 
   if (typeof makeTransport !== 'function') {
     throw new TypeError('runTransportConformance() requires makeTransport to be a function')
@@ -155,12 +165,12 @@ export function runTransportConformance(name, makeTransport, opts = {}) {
         await a.open()
         await b.open()
 
-        a.send({ from: 'a' })
+        a.send({ from: fromOf(a, 'a') })
         await wait()
 
         assert.deepEqual(receivedByA, [], 'a must not receive its own send()')
         assert.equal(receivedByB.length, 1)
-        assert.deepEqual(receivedByB[0], { from: 'a' })
+        assert.deepEqual(receivedByB[0], { from: fromOf(a, 'a') })
       })
 
       it('a message object round-trips structurally equal', async () => {
@@ -173,8 +183,8 @@ export function runTransportConformance(name, makeTransport, opts = {}) {
 
         const payload = {
           type: 'pod:message',
-          from: 'pod-x',
-          to: 'pod-y',
+          from: fromOf(a, 'pod-x'),
+          to: fromOf(b, 'pod-y'), // a point-to-point adapter delivers to the pod it is addressed to
           payload: { nested: [1, 2, { three: 3 }], ok: true },
           ts: 1234567890,
         }
@@ -216,7 +226,7 @@ export function runTransportConformance(name, makeTransport, opts = {}) {
         await wait()
 
         assert.equal(receivedByC.length, 1)
-        assert.deepEqual(receivedByC[0], { x: 1 })
+        assert.deepEqual(receivedByC[0], withFrom(a, { x: 1 }))
       })
     } else {
       it('never delivers anything (declares delivers: false)', async () => {

@@ -9,21 +9,18 @@
  *
  * This bridge converts between the two formats and syncs keys.
  *
- * Implemented and unit-tested (`test/wsh-bridge.test.mjs`), but this repo
- * doesn't currently construct it anywhere outside that test suite -- there
- * is no `new MeshWshBridge(...)` call site in this package's own source.
- * It's kept available for consumers that maintain both a WshKeyStore and a
- * MeshIdentityManager and need to keep their key formats in sync.
+ * The wsh peer-link transport (`wsh-links.mjs`) does not construct this
+ * class: a link authenticates with the pod's own key (a `PodIdentity`), so
+ * there is no key store to sync. The two format conversions here ARE that
+ * transport's (`podIdToFingerprint` / `fingerprintToPodId`, one source of
+ * truth), and the class stays for consumers that maintain both a
+ * WshKeyStore and a MeshIdentityManager and need to keep them in sync.
  *
  * Run tests: `npm test` in this package (runs `test/wsh-bridge.test.mjs`
  * along with the rest of the suite).
  */
 
-import {
-  derivePodId,
-  encodeBase64url,
-  decodeBase64url,
-} from '@johnhenry/browsermesh-primitives';
+import { podIdToFingerprint, fingerprintToPodId } from './wsh-links.mjs';
 
 // ---------------------------------------------------------------------------
 // Hex <-> Base64url conversion helpers
@@ -90,8 +87,7 @@ export class MeshWshBridge {
    * @returns {string} Base64url-encoded pod ID
    */
   fingerprint2podId(hex) {
-    const bytes = hexToBytes(hex);
-    return encodeBase64url(bytes);
+    return fingerprintToPodId(hex);
   }
 
   /**
@@ -100,8 +96,7 @@ export class MeshWshBridge {
    * @returns {string} Hex-encoded fingerprint
    */
   podId2fingerprint(b64url) {
-    const bytes = decodeBase64url(b64url);
-    return bytesToHex(bytes);
+    return podIdToFingerprint(b64url);
   }
 
   /**
