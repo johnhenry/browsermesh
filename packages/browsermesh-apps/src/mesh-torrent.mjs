@@ -172,6 +172,7 @@
  */
 
 import { TorrentManager, TORRENT_DEFAULTS } from './peer-torrent.mjs'
+import { randomRequestId } from './internal/secure-id.mjs'
 import { ChunkStore } from '@johnhenry/browsermesh-sync'
 import {
   MemoryManifestStore,
@@ -568,8 +569,7 @@ export function createTorrentService({
         log('mesh-torrent:manifest-restore-failed', { error: err?.message || String(err) })
       })
 
-      let reqSeq = 0
-      const nextRequestId = () => `${peerNode.podId}:${now()}:${++reqSeq}`
+      const nextRequestId = randomRequestId
 
       /** @param {string} pubKey @param {string[]} cids */
       function recordOwner(pubKey, cids) {

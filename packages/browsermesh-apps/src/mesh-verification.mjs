@@ -146,6 +146,7 @@
  */
 
 import { VerificationQuorum } from './peer-verification.mjs'
+import { randomRequestId } from './internal/secure-id.mjs'
 
 /** Shared envelope `type` for both verify request/response directions (tagged by `kind`), mirroring `mesh-timestamp.mjs`'s `'time-request'`/`'time-response'` shape. */
 const DEFAULT_VERIFICATION_ENVELOPE_TYPE = 'mesh-verification'
@@ -220,10 +221,9 @@ export function createVerificationService({
       }
 
       // -- Default scheduler: real request/response wire protocol -----------
-      let reqSeq = 0
-      const nextRequestId = () => `${peerNode.podId}:${Date.now()}:${++reqSeq}`
+      const nextRequestId = randomRequestId
 
-      /** @type {Map<string, {resolve: Function, reject: Function, timer: ReturnType<typeof setTimeout>}>} */
+      /** @type {Map<string, {peer: string, resolve: Function, reject: Function, timer: ReturnType<typeof setTimeout>}>} */
       const pendingDispatches = new Map()
 
       const effectiveScheduler = scheduler || {
@@ -234,7 +234,7 @@ export function createVerificationService({
               pendingDispatches.delete(requestId)
               reject(new Error(`mesh-verification: dispatch to ${peerId} timed out after ${dispatchTimeoutMs}ms`))
             }, dispatchTimeoutMs)
-            pendingDispatches.set(requestId, { resolve, reject, timer })
+            pendingDispatches.set(requestId, { peer: peerId, resolve, reject, timer })
           })
 
           ctx.sendTo(peerId, envelopeType, { kind: 'verify-request', requestId, job }).catch((err) => {
@@ -303,9 +303,10 @@ export function createVerificationService({
         }
       }
 
-      function handleVerifyResponse(msg) {
+      function handleVerifyResponse(fromPubKey, msg) {
         const pending = pendingDispatches.get(msg.requestId)
         if (!pending) return // already resolved (timed out or answered) -- ignore
+        if (pending.peer !== fromPubKey) return // only the peer the request went to can answer it
         pendingDispatches.delete(msg.requestId)
         clearTimeout(pending.timer)
         if (msg.error) {
@@ -322,7 +323,7 @@ export function createVerificationService({
             log('mesh-verification:request-handling-failed', { from: fromPubKey, requestId: msg.requestId, error: err?.message || String(err) })
           })
         } else if (msg.kind === 'verify-response') {
-          handleVerifyResponse(msg)
+          handleVerifyResponse(fromPubKey, msg)
         }
       })
 

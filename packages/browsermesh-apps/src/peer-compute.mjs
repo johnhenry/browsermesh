@@ -19,12 +19,7 @@
  *   cd packages/browsermesh-apps && node --import ./test/_setup-globals.mjs --test test/peer-compute.test.mjs
  */
 
-// ---------------------------------------------------------------------------
-// Polyfill
-// ---------------------------------------------------------------------------
-
-if (!globalThis.crypto) globalThis.crypto = {}
-if (!crypto.randomUUID) crypto.randomUUID = () => 'fc-' + Math.random().toString(36).slice(2)
+import { randomUUID } from './internal/secure-id.mjs'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -373,7 +368,7 @@ export class FederatedCompute {
    */
   async submit(jobSpec) {
     const type = jobSpec.type ?? COMPUTE_DEFAULTS.type
-    const jobId = crypto.randomUUID()
+    const jobId = randomUUID()
 
     const job = new FederatedJob({
       id: jobId,
@@ -406,7 +401,7 @@ export class FederatedCompute {
       // Broadcast: same payload sent to all peers
       for (let i = 0; i < peers.length; i++) {
         const chunk = new ComputeChunk({
-          id: crypto.randomUUID(),
+          id: randomUUID(),
           jobId,
           index: i,
           payload: chunkPayloads[0] ?? jobSpec.payload,
@@ -421,7 +416,7 @@ export class FederatedCompute {
       for (let i = 0; i < chunkPayloads.length; i++) {
         const peerId = peers[i % peers.length]
         const chunk = new ComputeChunk({
-          id: crypto.randomUUID(),
+          id: randomUUID(),
           jobId,
           index: i,
           payload: chunkPayloads[i],
@@ -436,7 +431,7 @@ export class FederatedCompute {
       for (let i = 0; i < chunkPayloads.length; i++) {
         const peerId = peers[i % peers.length]
         const chunk = new ComputeChunk({
-          id: crypto.randomUUID(),
+          id: randomUUID(),
           jobId,
           index: i,
           payload: chunkPayloads[i],

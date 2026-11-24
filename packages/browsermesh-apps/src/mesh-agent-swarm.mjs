@@ -146,6 +146,7 @@
  */
 
 import { AgentSwarmCoordinator } from './peer-agent-swarm.mjs'
+import { randomRequestId } from './internal/secure-id.mjs'
 
 /** Shared envelope `type` for both request/response directions (tagged by `kind`), mirroring `mesh-compute.mjs`'s `'mesh-compute'` shape. */
 const DEFAULT_AGENT_SWARM_ENVELOPE_TYPE = 'mesh-agent-swarm'
@@ -205,10 +206,9 @@ export function createAgentSwarmService({
 
     attach(peerNode, ctx) {
       // -- Wire protocol state -------------------------------------------
-      let reqSeq = 0
-      const nextRequestId = () => `${peerNode.podId}:${Date.now()}:${++reqSeq}`
+      const nextRequestId = randomRequestId
 
-      /** @type {Map<string, {resolve: Function, reject: Function, timer: ReturnType<typeof setTimeout>}>} */
+      /** @type {Map<string, {peer: string, resolve: Function, reject: Function, timer: ReturnType<typeof setTimeout>}>} */
       const pendingDispatches = new Map()
 
       // -- meshAgentProxy: the one seam AgentSwarmCoordinator calls through
@@ -226,7 +226,7 @@ export function createAgentSwarmService({
               pendingDispatches.delete(requestId)
               reject(new Error(`mesh-agent-swarm: dispatch to ${podId} timed out after ${dispatchTimeoutMs}ms`))
             }, dispatchTimeoutMs)
-            pendingDispatches.set(requestId, { resolve, reject, timer })
+            pendingDispatches.set(requestId, { peer: podId, resolve, reject, timer })
           })
 
           ctx.sendTo(podId, envelopeType, { kind: 'agent-swarm-request', requestId, message }).catch((err) => {
@@ -288,9 +288,10 @@ export function createAgentSwarmService({
         }
       }
 
-      function handleAgentSwarmResponse(msg) {
+      function handleAgentSwarmResponse(fromPubKey, msg) {
         const pending = pendingDispatches.get(msg.requestId)
         if (!pending) return // already resolved (timed out or answered) -- ignore
+        if (pending.peer !== fromPubKey) return // only the peer the request went to can answer it
         pendingDispatches.delete(msg.requestId)
         clearTimeout(pending.timer)
         if (msg.error) {
@@ -307,7 +308,7 @@ export function createAgentSwarmService({
             log('mesh-agent-swarm:request-handling-failed', { from: fromPubKey, requestId: msg.requestId, error: err?.message || String(err) })
           })
         } else if (msg.kind === 'agent-swarm-response') {
-          handleAgentSwarmResponse(msg)
+          handleAgentSwarmResponse(fromPubKey, msg)
         }
       })
 

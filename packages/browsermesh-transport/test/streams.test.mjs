@@ -13,6 +13,22 @@ import {
 // Constants
 // ---------------------------------------------------------------------------
 
+describe('stream ids', () => {
+  it('come from crypto.getRandomValues, and creating one fails clearly where there is none', () => {
+    const a = new MeshStream();
+    const b = new MeshStream();
+    assert.notEqual(a.hexId, b.hexId);
+    const original = Object.getOwnPropertyDescriptor(globalThis, 'crypto');
+    Object.defineProperty(globalThis, 'crypto', { value: undefined, configurable: true, writable: true });
+    try {
+      assert.throws(() => new MeshStream(), /secure random|getRandomValues/);
+      assert.doesNotThrow(() => new MeshStream({ id: new Uint8Array(16) }), 'a caller-supplied id needs no random source');
+    } finally {
+      Object.defineProperty(globalThis, 'crypto', original);
+    }
+  });
+});
+
 describe('STREAM_STATES', () => {
   it('contains all 5 states', () => {
     assert.deepEqual(STREAM_STATES, ['IDLE', 'OPEN', 'HALF_CLOSED_LOCAL', 'HALF_CLOSED_REMOTE', 'CLOSED']);

@@ -204,6 +204,8 @@
  * No browser-only imports at module level.
  */
 
+import { randomRequestId } from './internal/secure-id.mjs'
+
 /** Default `envelope.type` used to route chunk-replication payloads on the shared `onIncomingData()` bus. */
 const DEFAULT_ENVELOPE_TYPE = 'chunk-replication'
 
@@ -307,9 +309,8 @@ export function createChunkReplicationService({
     name: `chunk-replication:${bucketId}`,
 
     attach(peerNode, ctx) {
-      let reqSeq = 0
-      /** Monotonic-ish unique id for correlating a request/query with its eventual response(s). */
-      const nextRequestId = () => `${peerNode?.podId || 'local'}:${Date.now()}:${++reqSeq}`
+      /** Unguessable id for correlating a request/query with its eventual response(s). */
+      const nextRequestId = randomRequestId
 
       /**
        * @type {Map<string, {expectedByTarget: Map<string, Set<string>>,
@@ -320,13 +321,13 @@ export function createChunkReplicationService({
       const pendingReplications = new Map()
 
       /**
-       * @type {Map<string, {responders: Set<string>, timer: ReturnType<typeof setTimeout>}>}
+       * @type {Map<string, {responders: Set<string>, asked: Set<string>, timer: ReturnType<typeof setTimeout>}>}
        * queryId -> in-flight "who has X" tracking, see `queryHave()`.
        */
       const pendingHaveQueries = new Map()
 
       /**
-       * @type {Map<string, {resolve: (bytes: Uint8Array) => void, reject: (err: Error) => void, timer: ReturnType<typeof setTimeout>}>}
+       * @type {Map<string, {peer: string, resolve: (bytes: Uint8Array) => void, reject: (err: Error) => void, timer: ReturnType<typeof setTimeout>}>}
        * requestId -> in-flight chunk-fetch tracking, see `fetchFrom()`.
        */
       const pendingFetches = new Map()
@@ -443,6 +444,7 @@ export function createChunkReplicationService({
       function handleHaveResponse(fromPubKey, msg) {
         const pending = pendingHaveQueries.get(msg.queryId)
         if (!pending || !msg.has) return
+        if (!pending.asked.has(fromPubKey)) return // only a peer that was asked can answer
         pending.responders.add(fromPubKey)
         pending.resolveEarly()
       }
@@ -476,6 +478,7 @@ export function createChunkReplicationService({
       function handleFetchResponse(fromPubKey, msg) {
         const pending = pendingFetches.get(msg.requestId)
         if (!pending) return
+        if (pending.peer !== fromPubKey) return // only the peer the request went to can answer it
         pendingFetches.delete(msg.requestId)
         clearTimeout(pending.timer)
 
@@ -596,6 +599,7 @@ export function createChunkReplicationService({
           }, haveQueryTimeoutMs)
           pendingHaveQueries.set(queryId, {
             responders,
+            asked: new Set(candidates),
             timer,
             resolveEarly() {
               clearTimeout(timer)
@@ -626,7 +630,7 @@ export function createChunkReplicationService({
             pendingFetches.delete(requestId)
             reject(new Error(`chunk-replication: fetch of ${cid} from ${pubKey} timed out after ${fetchTimeoutMs}ms`))
           }, fetchTimeoutMs)
-          pendingFetches.set(requestId, { resolve, reject, timer })
+          pendingFetches.set(requestId, { peer: pubKey, resolve, reject, timer })
         })
 
         try {

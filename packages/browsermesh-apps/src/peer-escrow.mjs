@@ -17,12 +17,7 @@
  *   cd packages/browsermesh-apps && node --import ./test/_setup-globals.mjs --test test/peer-escrow.test.mjs
  */
 
-// ---------------------------------------------------------------------------
-// Polyfill
-// ---------------------------------------------------------------------------
-
-if (!globalThis.crypto) globalThis.crypto = {}
-if (!crypto.randomUUID) crypto.randomUUID = () => 'esc-' + Math.random().toString(36).slice(2)
+import { randomHex, randomRequestId, randomUUID } from './internal/secure-id.mjs'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -52,14 +47,13 @@ export const ESCROW_STATUSES = Object.freeze([
 // ID generation
 // ---------------------------------------------------------------------------
 
-let _escrowSeq = 0
-
+// Contract and dispute ids can be named by a remote peer (`escrow:<id>` is an ACL resource), so they are random.
 function generateEscrowId() {
-  return `esc_${Date.now().toString(36)}_${(++_escrowSeq).toString(36)}`
+  return `esc_${randomHex(12)}`
 }
 
 function generateDisputeId() {
-  return `dsp_${Date.now().toString(36)}_${(++_escrowSeq).toString(36)}`
+  return `dsp_${randomHex(12)}`
 }
 
 // ---------------------------------------------------------------------------
@@ -113,7 +107,7 @@ export class EscrowContract {
    * @param {string|null} [opts.description]
    */
   constructor(opts) {
-    this.id = opts.id || crypto.randomUUID()
+    this.id = opts.id || randomUUID()
     this.payer = opts.payer
     this.payee = opts.payee
     this.amount = opts.amount
@@ -926,10 +920,9 @@ export function createEscrowService(opts = {}) {
       // -----------------------------------------------------------------
       // Client side -- send requests to another peer's escrow service.
       // -----------------------------------------------------------------
-      /** @type {Map<string, {resolve: Function, reject: Function, timer: ReturnType<typeof setTimeout>}>} */
+      /** @type {Map<string, {peer: string, resolve: Function, reject: Function, timer: ReturnType<typeof setTimeout>}>} */
       const pendingRequests = new Map()
-      let reqSeq = 0
-      const nextRequestId = () => `${peerNode.podId}:${Date.now()}:${++reqSeq}`
+      const nextRequestId = randomRequestId
 
       async function sendRequest(targetPubKey, op, payload) {
         const requestId = nextRequestId()
@@ -938,7 +931,7 @@ export function createEscrowService(opts = {}) {
             pendingRequests.delete(requestId)
             reject(new Error(`escrow: ${op} request to ${targetPubKey} timed out after ${requestTimeoutMs}ms`))
           }, requestTimeoutMs)
-          pendingRequests.set(requestId, { resolve, reject, timer })
+          pendingRequests.set(requestId, { peer: targetPubKey, resolve, reject, timer })
         })
 
         try {
@@ -973,6 +966,7 @@ export function createEscrowService(opts = {}) {
         } else if (msg.kind === 'response') {
           const pending = pendingRequests.get(msg.requestId)
           if (!pending) return // no longer waiting (already timed out, or not ours) -- ignore
+          if (pending.peer !== fromPubKey) return // only the peer the request went to can answer it
           pendingRequests.delete(msg.requestId)
           clearTimeout(pending.timer)
           if (msg.ok) pending.resolve(msg.result)

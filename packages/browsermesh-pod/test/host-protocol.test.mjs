@@ -481,6 +481,23 @@ describe('validateVerbRequest', () => {
 // ---------------------------------------------------------------------------
 
 describe('wire messages', () => {
+  it('generated request ids come from the platform CSPRNG; with none, creating a request fails instead of guessing', () => {
+    const original = Object.getOwnPropertyDescriptor(globalThis, 'crypto')
+    const real = globalThis.crypto
+    try {
+      // randomUUID missing: the id is still random (getRandomValues), never clock-and-counter.
+      Object.defineProperty(globalThis, 'crypto', { value: { getRandomValues: (b) => real.getRandomValues(b) }, configurable: true, writable: true })
+      const id = createHostRequest(POD_HOST_VERB.LIST).requestId
+      assert.match(id, /^[0-9a-f]{32}$/)
+      // No CSPRNG at all: nothing is made up.
+      Object.defineProperty(globalThis, 'crypto', { value: undefined, configurable: true, writable: true })
+      assert.throws(() => createHostRequest(POD_HOST_VERB.LIST), /secure random|getRandomValues/)
+      assert.doesNotThrow(() => createHostRequest(POD_HOST_VERB.LIST, {}, { requestId: 'mine' }), 'a caller-supplied id needs none')
+    } finally {
+      Object.defineProperty(globalThis, 'crypto', original)
+    }
+  })
+
   it('builds a request with a generated, unique requestId', () => {
     const a = createHostRequest(POD_HOST_VERB.LIST)
     const b = createHostRequest(POD_HOST_VERB.LIST)

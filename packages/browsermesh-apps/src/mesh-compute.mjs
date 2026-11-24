@@ -150,6 +150,7 @@
  */
 
 import { FederatedCompute } from './peer-compute.mjs'
+import { randomRequestId } from './internal/secure-id.mjs'
 
 /** Shared envelope `type` for both compute request/response directions (tagged by `kind`), mirroring `mesh-verification.mjs`'s `'mesh-verification'` shape. */
 const DEFAULT_COMPUTE_ENVELOPE_TYPE = 'mesh-compute'
@@ -220,10 +221,9 @@ export function createComputeService({
 
     attach(peerNode, ctx) {
       // -- Default scheduler: real request/response wire protocol -----------
-      let reqSeq = 0
-      const nextRequestId = () => `${peerNode.podId}:${Date.now()}:${++reqSeq}`
+      const nextRequestId = randomRequestId
 
-      /** @type {Map<string, {resolve: Function, reject: Function, timer: ReturnType<typeof setTimeout>}>} */
+      /** @type {Map<string, {peer: string, resolve: Function, reject: Function, timer: ReturnType<typeof setTimeout>}>} */
       const pendingDispatches = new Map()
 
       const effectiveListAvailablePeers = listAvailablePeers || (() => {
@@ -241,7 +241,7 @@ export function createComputeService({
               pendingDispatches.delete(requestId)
               reject(new Error(`mesh-compute: dispatch to ${peerId} timed out after ${dispatchTimeoutMs}ms`))
             }, dispatchTimeoutMs)
-            pendingDispatches.set(requestId, { resolve, reject, timer })
+            pendingDispatches.set(requestId, { peer: peerId, resolve, reject, timer })
           })
 
           ctx.sendTo(peerId, envelopeType, { kind: 'compute-request', requestId, job }).catch((err) => {
@@ -312,9 +312,10 @@ export function createComputeService({
         }
       }
 
-      function handleComputeResponse(msg) {
+      function handleComputeResponse(fromPubKey, msg) {
         const pending = pendingDispatches.get(msg.requestId)
         if (!pending) return // already resolved (timed out or answered) -- ignore
+        if (pending.peer !== fromPubKey) return // only the peer the request went to can answer it
         pendingDispatches.delete(msg.requestId)
         clearTimeout(pending.timer)
         if (msg.error) {
@@ -331,7 +332,7 @@ export function createComputeService({
             log('mesh-compute:request-handling-failed', { from: fromPubKey, requestId: msg.requestId, error: err?.message || String(err) })
           })
         } else if (msg.kind === 'compute-response') {
-          handleComputeResponse(msg)
+          handleComputeResponse(fromPubKey, msg)
         }
       })
 

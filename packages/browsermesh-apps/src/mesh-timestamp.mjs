@@ -72,6 +72,7 @@
  */
 
 import { TimestampAuthority } from './peer-timestamp.mjs'
+import { randomRequestId } from './internal/secure-id.mjs'
 
 /** Shared envelope `type` for both witness-collection directions (request/response, tagged by `kind`). */
 const DEFAULT_ENVELOPE_TYPE = 'mesh-timestamp'
@@ -140,12 +141,12 @@ export function createTimestampService({
         onLog: (level, msg) => log('mesh-timestamp:internal', { level, msg }),
       })
 
-      let reqSeq = 0
-      const nextRequestId = () => `${peerNode.podId}:${Date.now()}:${++reqSeq}`
+      const nextRequestId = randomRequestId
 
       /**
        * @type {Map<string, {resolve: (responses: Map<string, number>) => void,
-       *   timer: ReturnType<typeof setTimeout>, responses: Map<string, number>, expectedCount: number}>}
+       *   timer: ReturnType<typeof setTimeout>, responses: Map<string, number>, expectedCount: number,
+       *   targets: Set<string>}>}
        */
       const pendingWitnessRequests = new Map()
 
@@ -158,6 +159,8 @@ export function createTimestampService({
         } else if (msg.kind === 'time-response') {
           const pending = pendingWitnessRequests.get(msg.requestId)
           if (!pending) return // already resolved (timed out or fully collected) -- ignore
+          // Only a peer that was asked counts, and counts once.
+          if (!pending.targets.has(fromPubKey) || pending.responses.has(fromPubKey)) return
           pending.responses.set(fromPubKey, msg.timestamp)
           if (pending.responses.size >= pending.expectedCount) {
             clearTimeout(pending.timer)
@@ -194,7 +197,7 @@ export function createTimestampService({
             }
             resolve(responses)
           }, witnessTimeoutMs)
-          pendingWitnessRequests.set(requestId, { resolve, timer, responses, expectedCount: targets.length })
+          pendingWitnessRequests.set(requestId, { resolve, timer, responses, expectedCount: new Set(targets).size, targets: new Set(targets) })
         })
 
         await Promise.all(targets.map((pubKey) =>

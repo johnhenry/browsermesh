@@ -352,6 +352,17 @@ Package: `browsermesh-apps`.
   real WebRTC data channel in two browsers (the harness node has no registry or
   identity, so authorization is not exercised there). Message channel and seam:
   unit and in-memory duplex only; never over real WebRTC or in a browser.
+- **Identifiers.** An id that matches a response to a request (rpc, proxy,
+  dispatch, join, submit, witness, chunk, escrow, hosted-pod verbs) or names a
+  connection (`mesh-websocket`, `mesh-relay`, wire streams) is 128 random bits
+  from `crypto.getRandomValues`, with no `Math.random` fallback: where the
+  platform has no CSPRNG, creating the id throws. A response is accepted only from
+  the peer the request was sent to, and a connection id only from the peer at
+  the other end; the id alone proves nothing. Escrow contract ids are random too
+  (`escrow:<id>` is an ACL resource a peer can name). Ids that are only local
+  labels, or entity ids no peer names on the wire (ledger entries, chat
+  message ids, proposal ids), are still clock-and-counter and are listed in the
+  pull request that introduced this.
 - **Registry.** `PeerRegistry.checkAccess` is default deny (`not_in_roster`,
   `scope_denied`, `entry_expired`, `capability_revoked`); the only bypass is the
   local owner. Scopes are matched segment by segment, for any number of segments,
