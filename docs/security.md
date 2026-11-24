@@ -367,6 +367,17 @@ gives an indicator or says `unattended: true`.
   keys, a grant limited to one root and one tool, revocation mid-session, default off, nothing but
   objects and MCP, each rule broken once); with the real `PeerRegistry` (`browsermesh-apps`
   `test/wsh-services.test.mjs`). Not in a browser; the released CLIs were not run.
+- **Over a mesh channel.** The same services can be served to a mesh peer over a protocol channel
+  (`services.serveOnMesh(service)`, `connectWshServicesOverMesh`; design
+  [`design/wsh-over-mesh.md`](design/wsh-over-mesh.md)), off unless called. The channel needs
+  `protocol:wsh:open` (default deny, asked on every message); the services grants above are asked
+  on top; the key that logs in must be the channel's verified peer's own; the session is sealed and
+  the client pins the pod id. A hop that carries the channel can see that a session exists, its
+  timing and sizes and the plain handshake (host key, user name, client key), and can drop, delay or
+  end it; it cannot read, alter, replay or take over anything after sealing. Verified: the real wsh
+  client over the in-memory bus with a hostile hop (reads, alters either direction, drops) and over
+  real WebRTC (`browsermesh-apps` `test/wsh-services-mesh.test.mjs`, `test/real-peer/`). Not built:
+  a relaying pod (a mesh `--via`): it is the owner's decision (see the design note).
 
 ### Multi-hop forwarding
 

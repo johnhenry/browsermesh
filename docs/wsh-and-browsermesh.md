@@ -25,6 +25,7 @@ Short version: wsh is the door into one place; browsermesh is how many places ta
 | --- | --- | --- |
 | A mesh link carried on a sealed wsh session | `packages/browsermesh-transport/src/wsh-links.mjs`, `wsh-pod-transport.mjs`, `wsh-frames.mjs`; `createMeshNode({ wsh })` in `packages/browsermesh-apps/src/mesh-bootstrap.mjs`, `wsh-negotiator.mjs` | `WshPeerLinks`, `WshLink`, `WshPodTransport`, `createWshTransportFactory`, `rendezvousId`; example 18; [design](design/wsh-peer-link.md), [adopting it](migration-wsh-peer-link.md). Optional peer `@johnhenry/wsh`, off by default. |
 | wsh's remote objects over a mesh channel | `@johnhenry/browsermesh-objects` (`packages/browsermesh-objects`) | `exposeObjectsOnMesh`, `openObjectsOnMesh`; peers `@johnhenry/wsh/objects` and the protocol channel (`packages/browsermesh-apps/src/protocol-channel.mjs`, `protocol-roots.mjs`); example 19; [protocol channels](protocol-channel.md) |
+| A stock wsh client, or a mesh peer, using a pod's objects and MCP tools | `packages/browsermesh-transport/src/wsh-services.mjs` | `WshServices` (over a pipe relay, or `serveOnMesh` / `connectWshServicesOverMesh` over a mesh protocol channel); [design](design/wsh-services-on-a-pod.md), [over the mesh](design/wsh-over-mesh.md). Off unless constructed; objects and MCP only. |
 | The wsh TCP gateway as a virtual-network backend | `packages/browsermesh-netway/src/gateway-backend.mjs` | `GatewayBackend` speaks wsh's gateway control messages; its `GATEWAY_ERROR` codes are checked against wsh's exported `GATEWAY_FAIL_TABLE` (code 5 is "timeout" in the Node gateway and "gateway disabled" in the Rust server, one number), and it is tested against a real wsh host and a mock |
 | One key | `packages/browsermesh-primitives/src/ssh-keys.mjs` | `podIdToFingerprint`, `fingerprintToPodId`, `openSSHPublicKeyFromRaw`, `rawPublicKeyFromOpenSSH`, `podIdFromOpenSSHPublicKey`, `authorizedKeysLine`; `PodIdentity#toOpenSSHPublicKey`, `#toAuthorizedKeysLine`. See [security.md, "One key in both worlds"](security.md#one-key-in-both-worlds) |
 | One capability notation, tested | `packages/browsermesh-apps/test/capability-vectors.test.mjs`, `peer-registry.mjs` | wsh's vectors run against `PeerRegistry`; `isGrantableScope`; [capability notation](capability-notation.md) |
@@ -101,11 +102,12 @@ The grants are the same scopes as above. Design: [`design/wsh-services-on-a-pod.
 
 ## Not verified
 
-* Built and run against wsh 0.49.0 (tested range of `browsermesh-objects` and `browsermesh-mcp`: 0.49.0, the peer range
-  starts there). They use its transport-neutral caller identity (`who: { username, fingerprint, podId }`, strict about 32
+* Built and run against wsh 0.49.0 and 0.50.0 (tested range of `browsermesh-objects` and `browsermesh-mcp`: 0.49.0 to
+  0.50.0, the peer range starts at 0.49.0; the first was run when 0.49 was the newest, the second is what the repository
+  now installs). They use its transport-neutral caller identity (`who: { username, fingerprint, podId }`, strict about 32
   bytes and canonical spelling, so a peer that is not named by a real pod id is refused), `serveMcpOverDuplex` with its
-  `mcp-tool` / `mcp-call` hook, and `@johnhenry/wsh/testing` in the transport tests. `WshServices` needs 0.49 (its sessions
-  begin at `onSealed`); the rest of `browsermesh-transport` still runs against wsh 0.45.0 and 0.49.0 (its tests pass on
+  `mcp-tool` / `mcp-call` hook, and `@johnhenry/wsh/testing` in the transport tests. `WshServices` needs 0.50 (its sessions
+  begin at `onSealed`, the registry opens its channels through `authorizesItself`, and it can serve a mesh channel); the rest of `browsermesh-transport` still runs against wsh 0.45.0 and 0.49.0 (its tests pass on
   both, the services tests excepted on 0.45), and its published `wsh-in-process` subpath stays for the older wsh.
 * wsh's capability vectors run in CI from the installed package (`REQUIRE_WSH_VECTORS=1` in the apps test script).
 * The conversions in `ssh-keys.mjs` are run against `@johnhenry/wsh/identity` over valid and malformed input; the

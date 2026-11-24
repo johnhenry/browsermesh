@@ -237,7 +237,11 @@ describe('wsh services: MCP', () => {
     const s = await w.stock({ connect: false });
     w.registry.grant(s.podId, [OPEN]);
     await s.login();
-    await refused(s.client.openRpc('mcp'));
+    // wsh opens the channel for any key it let in (the handler authorizes for itself); the handler closes it at once, and nothing is answered.
+    const ch = await s.client.openRpc('mcp').catch(() => null);
+    if (ch) await refused(ch.request('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '1' } }));
+    await refused(ch ? ch.request('tools/list', {}) : Promise.reject(new Error('not opened')));
+    await waitFor(() => w.audit.some((e) => e.event === 'channel-refused' && e.channel === 'mcp'), { label: 'refusal audited' });
   });
 
   it('lists and calls exactly what the grants name, and results are labelled untrusted', async () => {
