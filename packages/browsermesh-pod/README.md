@@ -109,6 +109,7 @@ await pod.boot({
   sign,               // boolean — sign outgoing messages with the pod key (default: true)
   allowUnsigned,      // boolean — accept unsigned pod:message / pod:rpc-response (default: per transport, see "Who sent this message?")
   trust,              // 'same-origin' | 'untrusted' — overrides the transport's own `trust`
+  window,             // { sources?, parent?, origins?, targetOrigin? } — which windows may post to this pod (default: none, see "Who may post to the window?")
 })
 ```
 
@@ -267,6 +268,40 @@ cannot forge. It gives no confidentiality; a peer that forwards a message can
 read it. Encrypted transport is tracked in issue #273 and is not part of this
 change. `pod:hello`, `pod:hello-ack` and `pod:goodbye` announcements are not
 signed: they only affect the peer list and never the attribution of messages.
+
+### Who may post to the window?
+
+A page that can reach this pod's window (any frame, any opener, any page that
+holds a reference) can `postMessage` to it. The pod therefore listens to
+**no window by default**: a `message` event is refused (counted as
+`window-source`, event `message:dropped`) unless it comes from a window the pod
+was told about. Configure that with `boot({ window })`:
+
+```js
+await pod.boot({
+  window: {
+    parent: true,                          // the embedding parent (iframe) or the opener (spawned window)
+    sources: [iframe.contentWindow],       // exact Window objects, compared with event.source
+    origins: ['https://app.example'],      // exact origins, compared with event.origin ('null' only if listed)
+  },
+})
+```
+
+A message must match every constraint given. With none given nothing is
+accepted. What an accepted window sends is still checked as before: a signature
+must verify, and an unsigned message is delivered with `authenticated: false`
+(refused with `allowUnsigned: false`). The `window` option never makes an
+unsigned message trusted; it decides who is heard at all.
+
+The hello that a child posts to its parent goes to `window.targetOrigin`
+(default: the sole entry of `origins`, otherwise `'*'`), and only a configured
+parent window can answer it, so a child without `window: { parent: true }`
+never becomes `role: 'child'`.
+
+**Older behaviour:** before this option, any window could post to a pod and be
+heard (unsigned, by default). A page that relied on that now sets `window`.
+`bootHostedPod()` (the browser-lane child) sets `window: { parent: true }`: the
+driver that spawned it is its only sender.
 
 ## WebSocketTransport (relay-backed)
 

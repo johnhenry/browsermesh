@@ -44,6 +44,12 @@ Locally you may point Playwright at a browser you already have with
 - A real WebRTC data channel between two contexts through local signalling
   (host candidates over loopback, no STUN): open, both directions, 200 KB
   message, ordered burst, close, reconnect, ICE-restart renegotiation.
+- The window message channel across two origins: a top page that listens to one
+  frame accepts it and refuses another window of the same origin and a window of
+  its own origin; a pod with no `window` option accepts nothing from any window.
+  (`window-channel.spec.mjs`; the harness page is framed only when its URL asks
+  for it with `?frame-src=` / `?frame-ancestors=`, otherwise it keeps
+  `frame-ancestors 'none'`.)
 - Pod messaging through the WebSocket relay, and the transport package's
   `WebSocketTransport` (text and 1 MiB binary).
 - mesh-rpc / `browserMeshFetch` and CRDT convergence over the real data channel.

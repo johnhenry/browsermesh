@@ -48,7 +48,7 @@ export const SIGNED_FIELDS = Object.freeze({
 
 /** Why a message was dropped (the `reason` of a drop). */
 export const DROP_REASONS = Object.freeze([
-  'unsigned', 'malformed', 'sender-mismatch', 'bad-signature', 'replay', 'unsigned-rpc',
+  'unsigned', 'malformed', 'sender-mismatch', 'bad-signature', 'replay', 'unsigned-rpc', 'window-source',
 ])
 
 // ── Encoding helpers ────────────────────────────────────────────
