@@ -8,7 +8,8 @@
     "packages/*"
   ],
   "scripts": {
-    "test": "turbo run test --concurrency=4",
+    "test": "turbo run test --concurrency=4 && npm run test:docs",
+    "test:docs": "node --test scripts/*.test.mjs",
     "test:real-peer": "npm run test:real-peer --workspace=@johnhenry/browsermesh-transport && npm run test:real-peer --workspace=@johnhenry/browsermesh-apps",
     "test:browser": "playwright test --config tests/browser/playwright.config.mjs",
     "test:real-gpu": "npm run test:real-gpu --workspace=@johnhenry/browsermesh-apps",
