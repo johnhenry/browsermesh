@@ -35,6 +35,12 @@ export default defineConfig({
 			RELAY_URL: bindings.text(process.env.RELAY_URL ?? "ws://localhost:8788"),
 			SIGNALING_URL: bindings.text(process.env.SIGNALING_URL ?? "ws://localhost:8787"),
 			DISCOVERY_CHANNEL: bindings.text("pod-discovery"),
+			// Shared secret for the control routes (src/routes.mjs): when set,
+			// every route but /health requires `Authorization: Bearer <token>`.
+			// For a deployed Worker set it as a secret instead of a text var.
+			...(process.env.CONTROL_TOKEN
+				? { CONTROL_TOKEN: bindings.text(process.env.CONTROL_TOKEN) }
+				: {}),
 			POD: bindings.durableObject({
 				worker: "browsermesh-isolate-pod-host-spike",
 				exportName: "PodObject",
