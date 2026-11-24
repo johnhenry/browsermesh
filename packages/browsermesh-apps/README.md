@@ -1427,6 +1427,24 @@ number the caller schedules, so every rule is unit-tested against fake lane
 drivers (`InMemoryPodHostDriver`) without sleeping. They are additive:
 nothing calls them unless you do.
 
+**In the orchestrator.** `MeshOrchestrator#placePod(spec, { requesterId, policy })`
+and `meshctl_spawn` with a `constraints` object (and `meshctl pods spawn auto
+--requester <pubKey> --min-boundary <b>`) choose the host through
+`planPlacement()`. The requester's trust is read from the local trust graph
+(`PeerRegistry#getTrust()`): trusted only at or above `0.8` (configurable with
+`placement.trustThreshold`) or the local pod itself; no requester, no trust
+graph or no usable value is `untrusted`, which is placed only behind a
+`language` or `hardware` boundary that the HOST states in `describe()` (new
+`boundary` field; a host that does not state one counts as `none`). A podspec
+`budget` is refused unless `placement.budgetCheck` accepts it, the
+per-requester pod quota (`policy.perRequesterMaxPods`) is checked before any
+host is looked at, and each decision is audited (`placement_requested` with
+`phase: 'decision'` listing the requester, its trust, the chosen host and every
+rejection code, or `placement_denied`). `releasePlacement(host, name)` gives a
+drained pod's reservation back. Callers that pass no constraints
+(`spawnPod()`, `meshctl_spawn` and `meshctl pods spawn auto` as before) never
+reach the planner.
+
 ```js
 import { createHostPool, PLACEMENT_BOUNDARY } from '@johnhenry/browsermesh-apps'
 

@@ -19,7 +19,7 @@
  * matching" from the design doc.
  */
 
-import { MeshOrchestrator, podHostRuntimePeer } from '@johnhenry/browsermesh-apps'
+import { MeshOrchestrator, podHostRuntimePeer, decidePlacement } from '@johnhenry/browsermesh-apps'
 import { PodHostDriverError, POD_HOST_ERROR } from '@johnhenry/browsermesh-pod'
 
 /**
@@ -54,6 +54,47 @@ async function describeCandidates(session, refs) {
     }
   }
   return candidates
+}
+
+/**
+ * Choose a host with the placement planner (`planPlacement()`), for a
+ * requester whose trust is read from this CLI's trust graph
+ * (`session.peerNode.registry`). Used only when a placement flag
+ * (`--requester`, `--min-boundary`) is given; `selectAutoHost()` is
+ * unchanged for everyone else. A host that states no boundary counts as
+ * `none`, and an untrusted requester (the default) is only placed behind a
+ * `language` or `hardware` one. One-shot CLI: there is no running pod count
+ * to enforce a per-requester quota against, so none is offered here.
+ *
+ * @param {object} opts
+ * @param {import('./connect.mjs').MeshctlSession} opts.session
+ * @param {string[]} opts.candidateRefs
+ * @param {object} opts.spec - A normalized podspec.
+ * @param {string} [opts.requesterId]
+ * @param {string} [opts.minBoundary]
+ * @returns {Promise<{podId: string, description: object, via: 'planner', placement: object}>}
+ */
+export async function selectPlannedHost({ session, candidateRefs, spec, requesterId, minBoundary }) {
+  const candidates = await describeCandidates(session, candidateRefs)
+  if (candidates.length === 0) {
+    throw new PodHostDriverError(
+      POD_HOST_ERROR.ENOENT,
+      'pods spawn auto: no known hosts answered describe() -- pass --host <pubKey> at least once, '
+      + 'or use --loopback, which creates its own hosts',
+    )
+  }
+  const decision = decidePlacement({
+    spec,
+    // The candidate's `podId` is the ref it was connected under; `description.podId` is its own claim.
+    hosts: candidates.map((c) => ({ ...c.description, podId: c.podId })),
+    requesterId,
+    registry: session.peerNode?.registry,
+    localPodId: session.podId,
+    policy: minBoundary ? { minBoundary } : {},
+  })
+  if (!decision.plan.ok) throw decision.error
+  const picked = candidates.find((c) => c.podId === decision.plan.host.id)
+  return { podId: picked.podId, description: picked.description, via: 'planner', placement: decision.audit }
 }
 
 /**

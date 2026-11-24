@@ -147,6 +147,9 @@ const LANE_SHELL_BACKEND = Object.freeze({
  * @property {string[]} capabilities
  * @property {string} resource - The ACL resource verbs are checked against.
  * @property {string|null} hostLabel
+ * @property {string|null} [boundary] - The host's own claim of how strongly it
+ *   separates a pod from itself (`none|process|language|hardware`); absent or
+ *   null from an older host, which the planner treats as `none`.
  */
 
 /**
@@ -178,7 +181,11 @@ export function podHostRuntimePeer(description, extra = {}) {
     metadata: {
       runtimeClasses: [...description.runtimeClasses],
       deploymentSupport: { ...description.deploymentSupport },
-      podHost: { verbs: [...description.verbs], resource: description.resource },
+      podHost: {
+        verbs: [...description.verbs],
+        resource: description.resource,
+        ...(typeof description.boundary === 'string' ? { boundary: description.boundary } : {}),
+      },
       ...(extra.resources ? { resources: extra.resources } : {}),
       ...(extra.hostedBy ? { hostedBy: extra.hostedBy } : {}),
     },
@@ -240,7 +247,9 @@ export function createPodHostService({
 
     attach(peerNode, ctx) {
       /** @type {string[]} The verbs this host answers; everything else is ELANE/ENOTSUP. */
-      const verbs = (driver.capabilities().verbs || []).filter((verb) => POD_HOST_VERBS.includes(verb))
+      const driverCapabilities = driver.capabilities()
+      const verbs = (driverCapabilities.verbs || []).filter((verb) => POD_HOST_VERBS.includes(verb))
+      const driverBoundary = driverCapabilities.boundary
 
       /**
        * Which requesters are interested in which pod, for event fan-out.
@@ -311,6 +320,10 @@ export function createPodHostService({
           ],
           resource,
           hostLabel: hostLabel ?? null,
+          // How strongly the driver says it separates a pod from the host
+          // (`none|process|language|hardware`), or null when it says nothing.
+          // It is the host's own claim: the planner reads it, it proves nothing.
+          boundary: typeof driverBoundary === 'string' ? driverBoundary : null,
         }
       }
 
