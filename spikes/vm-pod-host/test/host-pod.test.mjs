@@ -34,8 +34,25 @@ describe('VmPodHost', () => {
     assert.equal(vmPod.plannedCommands[0].description, 'start a fresh jailed firecracker process')
     assert.deepEqual(vmPod.plannedCommands[0].argv.slice(0, 5), ['jailer', '--id', 'demo', '--exec-file', '/usr/bin/firecracker'])
     assert.ok(vmPod.plannedCommands[0].argv.includes('--daemonize'), 'VmPod starts the VMM, so it must return')
-    // Network setup follows the jailer spawn.
-    assert.equal(vmPod.plannedCommands[1].argv[0], 'ip')
+    // The jail's files are staged once the jailer has built it, then the network is set up.
+    assert.deepEqual(vmPod.plannedCommands.slice(1, 6).map((c) => c.argv[0]), ['cp', 'cp', 'chown', 'chmod', 'chmod'])
+    assert.equal(vmPod.plannedCommands[6].argv[0], 'ip')
+  })
+
+  it('runs the VM from inside its jail: chroot-relative paths, a private rootfs copy, cgroup limits', async () => {
+    const host = new VmPodHost({ dryRun: true, signalingUrl: 'wss://signal.example.com/ws' })
+    await host.start()
+    const vmPod = await host.spawn('demo', DEMO_OPTS)
+    const root = '/srv/jailer/firecracker/demo/root'
+    const staged = vmPod.plannedCommands.map((c) => c.argv.join(' '))
+    assert.ok(staged.includes(`cp --reflink=auto --no-clobber -- /vm/demo/rootfs.ext4 ${root}/rootfs.ext4`))
+    assert.equal(vmPod.plannedApiCalls.find((c) => c.api === 'putBootSource').args.kernel_image_path, 'vmlinux')
+    assert.equal(vmPod.plannedApiCalls.find((c) => c.api === 'putDrive').args[1].path_on_host, 'rootfs.ext4')
+    assert.equal(vmPod.vsockUdsPath, `${root}/v.sock`)
+    const jailer = vmPod.plannedCommands[0].argv
+    assert.deepEqual(jailer.slice(jailer.indexOf('--cgroup-version'), jailer.indexOf('--cgroup-version') + 2), ['--cgroup-version', '2'])
+    assert.ok(jailer.includes('cpu.max=100000 100000'))
+    assert.ok(jailer.includes(`memory.max=${(128 + 64) * 1024 * 1024}`))
   })
 
   it('runs each VMM as its own non-root identity unless the operator names one', async () => {

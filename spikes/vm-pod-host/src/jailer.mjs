@@ -141,6 +141,20 @@ export function jailerApiSocketPath(opts = {}) {
 }
 
 /**
+ * The jail's `root` directory as the host sees it: what Firecracker sees as
+ * `/`. Every file the VMM is given lives under it.
+ *
+ * @param {{execFile: string, id: string, chrootBaseDir?: string}} opts
+ * @returns {string}
+ */
+export function jailerRootPath({ execFile, id, chrootBaseDir = '/srv/jailer' } = {}) {
+  if (!execFile) throw new Error('jailerRootPath: execFile is required')
+  if (!id) throw new Error('jailerRootPath: id is required')
+  const execFileName = execFile.split('/').filter(Boolean).pop()
+  return `${chrootBaseDir.replace(/\/+$/, '')}/${execFileName}/${id}/root`
+}
+
+/**
  * Where a daemonized jailer records the VMM's process id: `<exec file
  * name>.pid` next to the chroot's `root`. NOT verified against a real
  * jailer (this module has never run one); `test:real-firecracker` is where
