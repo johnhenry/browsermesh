@@ -17,8 +17,8 @@ describe('TRANSPORT_TYPES', () => {
     assert.ok(Object.isFrozen(TRANSPORT_TYPES));
   });
 
-  it('contains the three expected transport types', () => {
-    assert.deepEqual(TRANSPORT_TYPES, ['webrtc', 'wsh-wt', 'wsh-ws']);
+  it('contains the expected transport types (wsh, the sealed peer link, is opt-in and not in any default order)', () => {
+    assert.deepEqual(TRANSPORT_TYPES, ['webrtc', 'wsh-wt', 'wsh-ws', 'wsh']);
   });
 
   it('cannot be modified', () => {

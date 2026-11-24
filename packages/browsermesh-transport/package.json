@@ -1,11 +1,12 @@
 {
   "name": "@johnhenry/browsermesh-transport",
   "version": "0.5.1",
-  "description": "WebSocket, WebRTC, WebTransport, and relay adapters for BrowserMesh",
+  "description": "WebSocket, WebRTC, WebTransport, relay, and sealed wsh peer-link adapters for BrowserMesh",
   "type": "module",
   "main": "./src/index.mjs",
   "exports": {
-    ".": "./src/index.mjs"
+    ".": "./src/index.mjs",
+    "./wsh-in-process": "./src/wsh-in-process.mjs"
   },
   "files": [
     "src",
@@ -19,9 +20,17 @@
     "directory": "packages/browsermesh-transport"
   },
   "peerDependencies": {
-    "@johnhenry/browsermesh-primitives": ">=0.3.0 <1.0.0"
+    "@johnhenry/browsermesh-primitives": ">=0.3.0 <1.0.0",
+    "@johnhenry/wsh": "^0.45.0"
+  },
+  "peerDependenciesMeta": {
+    "@johnhenry/wsh": {
+      "optional": true
+    }
   },
   "devDependencies": {
+    "@johnhenry/browsermesh-pod": "^0.1.1",
+    "@johnhenry/wsh": "^0.45.0",
     "node-datachannel": "^0.33.4"
   },
   "scripts": {
