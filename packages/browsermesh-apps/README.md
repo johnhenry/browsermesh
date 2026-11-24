@@ -1451,13 +1451,18 @@ hosts rank lower), an optional `preferHost`, then host id, so the answer does
 not depend on input order.
 
 **Isolation boundary.** A host states how strongly it separates a pod from
-the host: `none` (same process: `worker_threads`), `process` (a child process
-with permission flags), `language` (a V8 isolate in its own process),
-`hardware` (a microVM). Requesters are untrusted unless they say otherwise,
-and an untrusted requester is only placed behind `language` or `hardware`
+the host. Requesters are untrusted unless they say otherwise, and an
+untrusted requester is only placed behind `language` or `hardware`
 (`policy.minBoundary` raises the floor for everyone). This only refuses to
 place untrusted work where a host says there is no boundary; it does not
-create one.
+create one, and it cannot check the host's claim.
+
+| Boundary | What it is today | What it does not stop | Untrusted requesters |
+| --- | --- | --- | --- |
+| `none` | `worker_threads`: same process | everything | never placed |
+| `process` | a child process under Node's permission model | a hostile module (Node calls the model a safeguard, not a sandbox); same user and kernel | never placed |
+| `language` | a V8 isolate: `createIsolatedVmRuntime()` (in the host's own process) or `workerd` (in a process of its own) | a V8 bug. In the host's process that is a bug in the host itself; `workerd` confines it to the worker process | placed (a host operator who will not accept a V8 bug reaching the host process should require `hardware` through `policy.minBoundary`) |
+| `hardware` | a microVM (Firecracker); never run on a real host yet | a hypervisor or kernel bug, side channels | placed |
 
 **The host still decides.** A host's refusal (`EACCES`, `EBUSY`, ...) is final
 for that spawn. Only a transport-level failure (`ETIMEDOUT`) can move a spawn

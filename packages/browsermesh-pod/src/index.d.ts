@@ -642,7 +642,7 @@ export interface PodRuntimeStartOptions {
   limits: { memMib?: number };
   onLog(line: string): void;
   /** Fires once if the pod stops on its own; not for a `terminate()`. */
-  onExit(info: { code: number | null; reason: "oom" | "crashed" | "exited" }): void;
+  onExit(info: { code: number | null; reason: "oom" | "timeout" | "crashed" | "exited" }): void;
 }
 
 export interface PodRuntimeHandle {

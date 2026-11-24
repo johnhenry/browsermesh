@@ -187,6 +187,7 @@ describe('createRuntimeLaneDriver: lifecycle', () => {
     const exit = events.find((e) => e.kind === POD_HOST_EVENT_KIND.EXIT)
     assert.equal(exit.data.reason, 'crashed')
     assert.equal(exit.data.restartable, true)
+    assert.equal(exit.data.cause, 'oom')
     await assert.rejects(() => driver.send('p', { payload: 1 }), (err) => err.code === POD_HOST_ERROR.ENOENT)
   })
 
