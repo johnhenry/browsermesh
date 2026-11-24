@@ -33,6 +33,7 @@ Extracted from a private monorepo (previously `packages/browsermesh-transport`),
 | cross-origin | `CrossOriginBridge`, `CrossOriginHandshake`, `RateLimiter` |
 | wsh-bridge | `MeshWshBridge` (syncs a `WshKeyStore` with a `MeshIdentityManager`; the link layer does not use it) |
 | wsh-links | `WshPeerLinks`, `WshLink`, `WshLinkError`, `createWshTransportFactory`, `podIdToFingerprint`, `fingerprintToPodId`, `rendezvousId` |
+| wsh-services | `WshServices`, `servicesRendezvousId`, `WSH_SERVICES_GRANTS` (a stock wsh client may use a pod's objects and MCP tools: off by default, permitted only by the registry; needs `@johnhenry/wsh` 0.48 or later; see `docs/design/wsh-services-on-a-pod.md`) |
 | wsh-pod-transport | `WshPodTransport` (a `Pod` `TransportAdapter`) |
 | wsh-frames | `encodeFrame`, `FrameDecoder`, `WshFrameError`, `DEFAULT_MAX_FRAME_BYTES` |
 | wsh-in-process (subpath `@johnhenry/browsermesh-transport/wsh-in-process`) | `createInProcessPipeRelay` (tests and examples) |

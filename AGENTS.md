@@ -32,6 +32,7 @@ Higher-level packages that sit on top of those:
 | [`@johnhenry/browsermesh-objects`](packages/browsermesh-objects) | wsh's remote-object layer over a protocol channel, authorised per root and per action |
 | [`@johnhenry/browsermesh-meshctl`](packages/browsermesh-meshctl) | External CLI for the hosted-pods control surface (`meshctl`, itself a pod); private, not yet published |
 | [`@johnhenry/browsermesh-embed`](packages/browsermesh-embed) | Thin widget for embedding a browsermesh-pod-backed workspace on a page |
+| [`@johnhenry/browsermesh-mcp`](packages/browsermesh-mcp) | A page's WebMCP tools over a protocol channel (peer-depends on wsh and apps) |
 
 Packages version independently (see `RELEASING.md`); the root
 `package.json` version is only the release marker.
