@@ -292,6 +292,9 @@ export class SignalingClient {
   /** @type {Error|null} */
   #lastAuthError = null
 
+  /** @type {boolean} */
+  #replaced = false
+
   /** In-flight registration: settles connect() when `waitForRegistration`. */
   #reg = null
 
@@ -346,6 +349,22 @@ export class SignalingClient {
   get lastAuthError() { return this.#lastAuthError }
 
   /**
+   * True once the server displaced this connection for a newer one of the same pod
+   * (announced as a `replaced` event: `client.on('replaced', (notice) => ...)`, where the notice is
+   * the server's `{ code: 'replaced', reconnect: false, message }`). This client never reconnects
+   * by itself; calling `connect()` again is the application's decision, and it displaces
+   * another of the pod's connections if the server's limit is reached. Cleared by `connect()`.
+   */
+  get replaced() { return this.#replaced }
+
+  #markReplaced(notice) {
+    if (this.#replaced) return
+    this.#replaced = true
+    this.#onLog(2, 'SignalingClient connection replaced by a newer connection of this pod; not reconnecting')
+    this.#fire('replaced', notice)
+  }
+
+  /**
    * Whether the server vouched for the sender of a forwarded message: true only
    * for `sourceVerified: true` set by the server (it overwrites whatever the
    * sender put there). Open-mode and older servers read as false. This is the
@@ -366,6 +385,7 @@ export class SignalingClient {
    */
   async connect() {
     if (this.#ws) return
+    this.#replaced = false
 
     if (!this.#url) {
       throw new Error('No signaling URL configured')
@@ -652,6 +672,8 @@ export class SignalingClient {
       const data = typeof ev.data === 'string' ? JSON.parse(ev.data) : ev.data
       if (!data || !data.type) return
       this.#observeRegistration(data)
+      // The server displaced this connection for a newer one of the same pod, and says not to reconnect.
+      if (data.type === 'error' && data.code === 'replaced' && data.reconnect === false) this.#markReplaced(data)
       this.#fire(data.type, data)
     } catch (e) { silentCatch('handshake', 'ignore-malformed-messages', e) }
   }
@@ -668,7 +690,10 @@ export class SignalingClient {
   }
 
   /** @type {() => void} */
-  #handleClose = () => {
+  #handleClose = (ev) => {
+    if (ev?.code === 4409 && ev?.reason === 'replaced') {
+      this.#markReplaced({ type: 'error', code: 'replaced', reconnect: false, message: 'replaced by a newer connection of the same pod' })
+    }
     this.#abandonRegistration('SignalingClient WebSocket closed before registration')
     this.#ws = null
     this.#onLog(2, 'SignalingClient WebSocket closed')

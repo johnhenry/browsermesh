@@ -228,6 +228,12 @@ What the clients here do:
   (`challengeWaitMs`). `authentication: 'required'` never falls back; `'off'`
   never signs. Without an identity, against an authenticated server, they fail
   with a named `SignalingAuthRequiredError` and do not retry.
+- A verified pod may hold more than one connection (server `MAX_CONNECTIONS_PER_POD`,
+  default 2; messages go to the newest). A displaced connection is told
+  `replaced` (`reconnect: false`, close 4409) and the clients stay down and
+  report it (`onReplaced`, the `replaced` event) rather than reconnect and
+  displace another in turn; an open-mode server still refuses a second
+  connection for an id.
 - What the server says is a statement about the link, not about the peer:
   `serverVerifiedPeers` and `relaySourceVerified` (pod) and `isSourceVerified()`
   (core) report the server's stamp, true only for a literal `true` set by the
