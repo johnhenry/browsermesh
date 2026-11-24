@@ -424,8 +424,8 @@ does not follow redirects and bounds the response (`maxResponseBytes`,
 `createProxyHandler({ targetOrigin, checkAccess })` calls
 `checkAccess(req.fromPubKey, resource, 'request')` (resource defaults to
 `serverless-proxy:<host>`, or pass `resource`) and answers 403 unless it says
-`allowed: true`. With no `checkAccess` every request is refused; pass
-`public: true` for a proxy anyone may use.
+`allowed: true`. With neither `checkAccess` nor `public: true`,
+`createProxyHandler()` throws; pass `public: true` for a proxy anyone may use.
 
 ## Access control: scopes and grant lifetimes
 

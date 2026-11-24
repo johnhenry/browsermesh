@@ -89,8 +89,8 @@ function bodyForFetch(body, method) {
  * @param {boolean} [opts.spaFallback=false] - on a 404 from the target, retry `/index.html` under `targetOrigin` and serve that instead (client-side-routed SPA convention, matching `actually-serverless`'s own proxy handler).
  * @param {(pubKey: string, resource: string, action: string) => {allowed: boolean, reason?: string}} [opts.checkAccess] -
  *   Who may use the proxy: called as `checkAccess(req.fromPubKey, resource, 'request')`, like `ServerSharing` does
- *   with the registry. Required unless `opts.public` is true: **with neither, every request is answered 403**
- *   and nothing is fetched. A synchronous answer with `allowed: true` allows; anything else, a throw included, denies.
+ *   with the registry. Required unless `opts.public` is true: **with neither, `createProxyHandler()` throws**
+ *   (no handler is built). A synchronous answer with `allowed: true` allows; anything else, a throw included, denies.
  * @param {string} [opts.resource] - ACL resource checked (default `serverless-proxy:<host of targetOrigin>`).
  * @param {boolean} [opts.public=false] - skip the check: any caller may use the proxy.
  * @returns {(req: {fromPubKey?: string, path: string, method?: string, headers?: object, body?: *}) => Promise<{status: number, headers: object, body: Uint8Array|string}>}
@@ -111,6 +111,9 @@ export function createProxyHandler({
   }
   if (checkAccess !== undefined && typeof checkAccess !== 'function') {
     throw new TypeError('createProxyHandler: opts.checkAccess must be a function (pubKey, resource, action) => { allowed }')
+  }
+  if (checkAccess === undefined && !isPublic) {
+    throw new Error('createProxyHandler: opts.checkAccess is required unless opts.public is true (a proxy is never an open door by omission)')
   }
   const origin = new URL(targetOrigin) // throws synchronously on an invalid URL -- fail at construction, not on first request
   const gateResource = resource || `serverless-proxy:${encodeURIComponent(origin.host)}`

@@ -78,19 +78,11 @@ describe('createProxyHandler', () => {
   describe('who may use it', () => {
     const request = { path: '/hello', method: 'GET' }
 
-    it('denies every request by default: without checkAccess (or public: true) nothing is fetched', async () => {
-      let fetched = 0
-      const counting = http.createServer((req, res) => { fetched++; res.end('x') })
-      await new Promise((r) => counting.listen(0, '127.0.0.1', r))
-      try {
-        const handler = createProxyHandler({ targetOrigin: `http://127.0.0.1:${counting.address().port}` })
-        for (const fromPubKey of [undefined, 'peer-a']) {
-          const res = await handler({ ...request, fromPubKey })
-          assert.equal(res.status, 403)
-          assert.equal(res.body, 'Forbidden')
-        }
-        assert.equal(fetched, 0)
-      } finally { await new Promise((r) => counting.close(r)) }
+    it('refuses to be built without checkAccess or public: true: no handler exists to fetch anything', () => {
+      assert.throws(() => createProxyHandler({ targetOrigin: origin }), /checkAccess.*public: true|public: true.*checkAccess/)
+      assert.throws(() => createProxyHandler({ targetOrigin: origin, public: false }), /checkAccess/)
+      assert.doesNotThrow(() => createProxyHandler({ targetOrigin: origin, public: true }))
+      assert.doesNotThrow(() => createProxyHandler({ targetOrigin: origin, checkAccess: () => ({ allowed: false }) }))
     })
 
     it('asks checkAccess about the caller (the key of the session the request came on) and the target, and fetches only when allowed', async () => {

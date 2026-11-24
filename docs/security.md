@@ -309,10 +309,10 @@ Package: `browsermesh-apps` (`ServerSharing`, `createProxyHandler`).
   not truncated), 30 s, 32 headers / 8 KiB. All are options.
 - **Not protected.** Confidentiality against peers that forward the request or
   response.
-- **`createProxyHandler()`** answers 403 to every request unless it is given a
+- **`createProxyHandler()`** throws at construction unless it is given a
   `checkAccess` (called as `checkAccess(fromPubKey, resource, 'request')`, resource
   default `serverless-proxy:<host>`) or `public: true`; a caller that names no key
-  is never allowed, and a throw denies.
+  is never allowed (403), and a throw denies.
 - **Verified.** Unit, against real loopback upstream servers
   (`server-sharing-target.test.mjs`, `peer-routing.test.mjs`). Never in a
   browser.
