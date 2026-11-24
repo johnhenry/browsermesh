@@ -15,6 +15,9 @@
   "scripts": {
     "test": "node --test test/*.test.mjs"
   },
+  "devDependencies": {
+    "@johnhenry/wsh": "^0.46.0"
+  },
   "keywords": [
     "networking",
     "virtual",
