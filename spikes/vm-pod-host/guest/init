@@ -66,9 +66,24 @@ if [ -n "$IP_PARAM" ]; then
   GUEST_IP="$(echo "$IP_PARAM" | cut -d: -f1)"
   GATEWAY_IP="$(echo "$IP_PARAM" | cut -d: -f3)"
   NETMASK="$(echo "$IP_PARAM" | cut -d: -f4)"
+  # `ip addr add` wants a prefix length; the kernel command line carries a
+  # dotted netmask (src/vm-config.mjs buildBootArgs()), so convert it.
+  PREFIX=0
+  for OCTET in $(echo "$NETMASK" | tr . ' '); do
+    case "$OCTET" in
+      255) PREFIX=$((PREFIX + 8)) ;;
+      254) PREFIX=$((PREFIX + 7)) ;;
+      252) PREFIX=$((PREFIX + 6)) ;;
+      248) PREFIX=$((PREFIX + 5)) ;;
+      240) PREFIX=$((PREFIX + 4)) ;;
+      224) PREFIX=$((PREFIX + 3)) ;;
+      192) PREFIX=$((PREFIX + 2)) ;;
+      128) PREFIX=$((PREFIX + 1)) ;;
+    esac
+  done
   ip link set lo up
   ip link set eth0 up
-  ip addr add "${GUEST_IP}/${NETMASK}" dev eth0
+  ip addr add "${GUEST_IP}/${PREFIX}" dev eth0
   [ -n "$GATEWAY_IP" ] && ip route add default via "$GATEWAY_IP" dev eth0
 fi
 

@@ -27,6 +27,7 @@ Pods automatically generate an Ed25519 cryptographic identity, detect their exec
 - [Pod Kinds](#pod-kinds)
 - [Capabilities](#capabilities)
 - [Wire Protocol](#wire-protocol)
+- [Who sent this message?](#who-sent-this-message)
 - [WebSocketTransport (relay-backed)](#websockettransport-relay-backed)
 - [Running a Pod outside the browser](#running-a-pod-outside-the-browser)
 - [Pod host protocol](#pod-host-protocol)
@@ -105,6 +106,9 @@ await pod.boot({
   handshakeTimeout,   // number — ms to wait for parent ACK (default: 1000)
   discoveryTimeout,   // number — ms to wait for peer responses (default: 2000)
   globalThis,         // object — override globalThis (for testing)
+  sign,               // boolean — sign outgoing messages with the pod key (default: true)
+  allowUnsigned,      // boolean — accept unsigned pod:message / pod:rpc-response (default: per transport, see "Who sent this message?")
+  trust,              // 'same-origin' | 'untrusted' — overrides the transport's own `trust`
 })
 ```
 
@@ -210,6 +214,60 @@ const server = await createServer({ discoveryTimeout: 5000 })
 
 Message factories: `createHello()`, `createHelloAck()`, `createGoodbye()`, `createMessage()`, `createRpcRequest()`, `createRpcResponse()`.
 
+## Who sent this message?
+
+A receiver never takes the sender's identity from a field the sender or a relay
+wrote (`from`, a relay's `source`). For `pod:message`, `pod:rpc-request` and
+`pod:rpc-response` addressed to this pod (or `'*'`):
+
+- **Signed messages** (what a pod sends by default): the message carries the
+  sender's public key `pk`, a session id `sid`, a counter `seq` and a signature
+  `sig` over `"browsermesh/pod-message/v1\n"` + the canonical JSON (sorted keys)
+  of sender, recipient, type, body, `ts`, `pk`, `sid` and `seq`. The receiver
+  checks that `from` equals the pod id of `pk` (SHA-256 of the raw key,
+  base64url), that the signature verifies, and that `(sid, seq)` has not been
+  accepted before. A relay that rewrites, re-addresses or adds to the message
+  invalidates it; only the signed fields are delivered. The delivered message
+  has `authenticated: true`.
+- **Replay**: a sliding window of the last 64 sequence numbers per sender
+  session (4 sessions per sender, 1024 senders, in memory) refuses a copy of a
+  message already accepted and tolerates mild reordering. Clocks are not used
+  (`ts` is signed but not checked). A copy of a message from a session the
+  receiver has forgotten, or sent to a receiver that restarted, is not
+  recognised.
+- **Links that authenticate the peer**: a transport may call its handler with
+  `(msg, { peerId })` where `peerId` is the identity the link itself verified.
+  The sender is then `peerId`, and a message whose `from` differs is dropped.
+- **Unsigned messages** (older peers): accepted only where `allowUnsigned`
+  allows, and delivered with `authenticated: false`. Default: accepted from a
+  transport whose `trust` is `'same-origin'` (`BroadcastChannelTransport`,
+  `EventEmitterTransport`, `NullTransport`) and from messages posted to the
+  window; **refused** from every other transport, including
+  `WebSocketTransport` (`trust` is `'untrusted'`) and custom adapters that do
+  not declare `trust`. An unsigned `pod:rpc-request` is never accepted. A
+  message that carries a signature must verify whatever `allowUnsigned` is.
+  Set `allowUnsigned: true` to take unsigned messages from older peers across a
+  relay (their sender is then only a claim); `false` to refuse them everywhere.
+- Refused messages are counted by reason in `pod.dropped` (`unsigned`,
+  `unsigned-rpc`, `malformed`, `sender-mismatch`, `bad-signature`, `replay`) and
+  announced as a `message:dropped` event `{ reason, type }`.
+
+Same-origin delivery over `BroadcastChannel` keeps working, signed or not. The
+trust there is the origin: any script of the origin can post to the channel
+under any pod id, and signatures do not separate scripts that share an origin.
+
+`send()` and `broadcast()` return a promise (signing is asynchronous): await it
+before relying on the message having reached the transport. Payloads must be
+JSON-compatible. A pod booted with an identity that cannot sign (`{ podId }`)
+sends unsigned.
+
+What this does and does not protect, end to end across several hops: a signed
+message gives integrity and origin authenticity that the forwarding peers
+cannot forge. It gives no confidentiality; a peer that forwards a message can
+read it. Encrypted transport is tracked in issue #273 and is not part of this
+change. `pod:hello`, `pod:hello-ack` and `pod:goodbye` announcements are not
+signed: they only affect the peer list and never the attribution of messages.
+
 ## WebSocketTransport (relay-backed)
 
 `BroadcastChannelTransport` only reaches same-origin tabs. `WebSocketTransport` is the adapter that lets a `Pod` run anywhere a WebSocket client exists — a Node process, a browser, or a V8 isolate (workerd / Cloudflare Workers) — and still join the mesh, by speaking the `browsermesh-servers` relay/signaling wire protocol (`register`/`registered`, `relay`/`relayed`, `peers`/`peer-joined`/`peer-left`, `ping`/`pong`, `error`). This is what unlocks "hosted pods" (see [issue #185](https://github.com/johnhenry/browsermesh/issues/185)): a pod running on a machine someone else operates, reachable over the same relay a browser tab would use.
@@ -310,7 +368,8 @@ interface TransportAdapter {
   open(): Promise<void>
   close(): Promise<void>
   send(msg: object): void                       // no-op before open(), never throws
-  onMessage(handler: (msg: object) => void): void
+  onMessage(handler: (msg: object, meta?: { peerId?: string }) => void): void
+  readonly trust?: 'same-origin' | 'untrusted'  // absent means 'untrusted'; see "Who sent this message?"
 }
 
 interface DiscoveryAdapter {
@@ -595,6 +654,49 @@ yet. The other two drivers trade that safety story for more setup:
 hosts. For a hosted pod whose code you do not trust, use the CDP driver
 inside a Lane B microVM, not the in-page driver — see §8b's "Trust
 caveat".
+
+### Runtime lane driver: `PodRuntime` and `createRuntimeLaneDriver()`
+
+`createRuntimeLaneDriver({ runtime, modules })` builds a `PodHostDriver`
+(`spawn`/`status`/`send`/`drain`/`list`) over any `PodRuntime`: the narrow
+adapter that actually runs a module. The driver owns what must not depend on
+the runtime: podspec validation; which modules may run (a host-side catalog
+of names to absolute paths, never a path from the requester); which
+environment variables a pod may be given (`NODE_*`, `LD_*`, `DYLD_*`, `UV_*`
+and `OPENSSL_*` are refused, because they change how code is loaded or how
+limits apply); admission limits (`maxPods`, `maxMemMib`); the lifecycle
+state machine and its events. A runtime declares a `boundary`
+(`none`/`process`/`language`/`hardware`), and one that claims `lane:
+'isolate'` is refused unless the boundary is `language` or `hardware`.
+
+Two runtimes ship, from `@johnhenry/browsermesh-pod/node-runtimes` (the
+package root stays free of `node:` imports):
+
+| Runtime | Boundary | What it limits | What it does NOT stop |
+| --- | --- | --- | --- |
+| `createWorkerThreadsRuntime()` | `none` | heap (`resourceLimits`), environment (only what the podspec names), termination | everything else: the module can read and write any file, open any connection, start processes, and share the host's memory. `worker_threads` is not a security boundary |
+| `createPermissionProcessRuntime()` | `process` | the above, plus the Node permission model: read access to only the entry file and the hosted module, no write, no network, no child processes or workers | a determined hostile module: Node's own documentation calls the permission model a safeguard, not a sandbox. Same user and kernel as the host |
+
+Neither is the isolate lane: both are advertised as the `node` lane, and the
+placement planner in `@johnhenry/browsermesh-apps` only gives them work from
+requesters the operator trusts. A real isolate (`isolated-vm`, or `workerd`
+as in `spikes/isolate-pod-host`) implements the same `PodRuntime` interface;
+`pod-runtime.mjs` specifies it, and it is not in this repository because
+`isolated-vm` is a native dependency.
+
+```js
+import { createRuntimeLaneDriver } from '@johnhenry/browsermesh-pod'
+import { createPermissionProcessRuntime } from '@johnhenry/browsermesh-pod/node-runtimes'
+
+const driver = createRuntimeLaneDriver({
+  runtime: createPermissionProcessRuntime(),
+  modules: { greeter: '/srv/pods/greeter.mjs' }, // export async function handle(payload, ctx)
+  maxPods: 20,
+  maxMemMib: 256,
+})
+await driver.spawn({ name: 'g1', lane: 'node', run: { kind: 'module', ref: 'greeter' }, limits: { memMib: 64 } })
+await driver.send('g1', { payload: { hello: 'world' } }) // { delivered: true, reply }
+```
 
 ## InjectedPod
 

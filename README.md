@@ -59,7 +59,10 @@ source (`main`/`exports` point directly at `src/index.mjs`).
 npm install
 npm test          # turbo run test across all packages
 npm run examples  # run the runnable examples/ (see examples/README.md)
+npm run test:browser  # the mesh in a real browser (Playwright; see tests/browser/README.md)
 ```
+
+`test:browser` needs a browser once: `npx playwright install --with-deps chromium`.
 
 ## Releasing
 

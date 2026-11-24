@@ -10,6 +10,10 @@ export {
   createHello, createHelloAck, createGoodbye, createMessage,
   createRpcRequest, createRpcResponse,
 } from './messages.mjs'
+export {
+  MessageSigner, ReplayGuard, ReplayWindow, verifyMessage, signedBytes,
+  SIGNED_FIELDS, SIGNATURE_DOMAIN, REPLAY_WINDOW, DROP_REASONS,
+} from './signed-message.mjs'
 export { InjectedPod } from './injected-pod.mjs'
 export { installPodRuntime, createRuntime, createClient, createServer } from './runtime.mjs'
 export { BroadcastChannelTransport, EventEmitterTransport, NullTransport } from './transport.mjs'
@@ -24,6 +28,9 @@ export {
   createHostRequest, createHostResponse, createHostEvent,
   InMemoryPodHostDriver,
 } from './host-protocol.mjs'
+export {
+  RUNTIME_BOUNDARY, FORBIDDEN_ENV_NAME, createRuntimeLaneDriver,
+} from './pod-runtime.mjs'
 export {
   bootHostedPod, readPodName,
   DEFAULT_DISCOVERY_CHANNEL, BROWSER_HOST_READY,

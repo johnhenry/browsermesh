@@ -48,6 +48,8 @@ export * from './key-distribution.mjs';
 export * from './manifest-sync.mjs';
 export * from './chunk-replication.mjs';
 export * from './mesh-rpc.mjs';
+export * from './mesh-channel.mjs';
+export * from './protocol-channel.mjs';
 export * from './mesh-keepalive.mjs';
 export * from './mesh-fetch.mjs';
 export * from './mesh-websocket.mjs';
@@ -67,6 +69,15 @@ export * from './pod-host-service.mjs';
 export * from './pod-host-routes.mjs';
 export * from './pod-host-gateway.mjs';
 export * from './pod-supervisor.mjs';
+export {
+  planPlacement,
+  HostHealth,
+  PlacementLedger,
+  createHostPool,
+  BOUNDARY as PLACEMENT_BOUNDARY,
+  TRUST as REQUESTER_TRUST,
+} from './pod-placement.mjs';
+export { decideRestart, restartDelayMs, policyWantsRestart } from './restart-policy.mjs';
 export * from './peer-payments.mjs';
 export * from './peer-registry.mjs';
 export * from './peer-routing.mjs';

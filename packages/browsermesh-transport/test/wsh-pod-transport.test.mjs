@@ -152,6 +152,7 @@ describe('two pods over a wsh link', () => {
     await waitFor(() => got.b.length === 1 && got.a.length === 1);
     assert.equal(got.b[0].type, POD_MESSAGE);
     assert.equal(got.b[0].from, ia.podId);
+    assert.equal(got.b[0].authenticated, true);
     assert.deepEqual(got.b[0].payload, { n: 1 });
     assert.equal(got.a[0].from, ib.podId);
     assert.deepEqual(got.a[0].payload, { n: 2 });
@@ -184,6 +185,29 @@ describe('two pods over a wsh link', () => {
     assert.equal(b.peers.has('a-third-pod'), false);
     assert.equal(dropped.length, 2);
     assert.ok(dropped.every((d) => d.reason === 'foreign-sender'));
+  });
+
+  it('hands the pod the link-authenticated sender, so unsigned messages over the link are accepted as that peer and nothing else is', async () => {
+    const { a, b, ia, ib, ta, got } = await twoPods();
+    await waitFor(() => a.peers.has(ib.podId) && b.peers.has(ia.podId));
+    // Raw frames, as a pod without signing would send them.
+    ta.send({ type: POD_MESSAGE, from: ia.podId, to: ib.podId, payload: 'unsigned' });
+    ta.send(createRpcRequest({ from: ia.podId, to: ib.podId, method: 'echo', requestId: 'u1' }));
+    await waitFor(() => got.b.some((m) => m.payload === 'unsigned') && got.b.some((m) => m.type === POD_RPC_REQUEST));
+    const plain = got.b.find((m) => m.payload === 'unsigned');
+    assert.equal(plain.from, ia.podId);
+    assert.equal(plain.authenticated, true, 'the link, not a signature, authenticated it');
+    assert.equal(b.dropped.unsigned, 0);
+    assert.equal(b.dropped['unsigned-rpc'], 0);
+  });
+
+  it('pods that sign (the default) interoperate over the link', async () => {
+    const { a, b, ia, ib, got } = await twoPods();
+    await waitFor(() => a.peers.has(ib.podId) && b.peers.has(ia.podId));
+    await a.send(ib.podId, 'signed');
+    await waitFor(() => got.b.some((m) => m.payload === 'signed'));
+    assert.equal(got.b.find((m) => m.payload === 'signed').authenticated, true);
+    assert.equal(b.dropped['bad-signature'], 0);
   });
 
   it('a pod whose link goes away is removed from its peer (goodbye is synthesized)', async () => {

@@ -25,6 +25,20 @@
  *   node --import ./test/_setup-globals.mjs --test test/peer-routing.test.mjs
  */
 
+import {
+  PROXY_LIMITS_DEFAULTS,
+  DEFAULT_ALLOWED_METHODS,
+  DEFAULT_ALLOWED_REQUEST_HEADERS,
+  configuredOrigin,
+  resolveTarget,
+  checkHeaderShape,
+  selectRequestHeaders,
+  checkRequestBody,
+  copyResponseHeaders,
+  readBoundedBody,
+  responseLeftOrigin,
+} from './internal/request-target.mjs'
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -401,11 +415,38 @@ export class ServerSharing {
   /** @type {Function} */
   #onLog
 
+  /** @type {{ checkAccess: Function }|null} */
+  #registry
+
+  /** @type {Map<string, { origin: string, headers: Record<string, string>, allowedMethods: Set<string>|null }>} name -> private share state */
+  #shareState = new Map()
+
+  /** @type {Set<string>} */
+  #allowedMethods
+
+  /** @type {Set<string>} */
+  #allowedHeaders
+
+  /** @type {typeof PROXY_LIMITS_DEFAULTS} */
+  #limits
+
   /**
    * @param {object} opts
    * @param {string} opts.localPodId  - This pod's identifier
    * @param {Function} [opts.fetchFn] - (url, init?) => Response, defaults to globalThis.fetch
    * @param {Function} [opts.onLog]   - Logging callback
+   * @param {{ checkAccess: Function }} [opts.registry] - `PeerRegistry`-shaped. Every request that
+   *   names a calling peer (see `handleRequest()`) must pass
+   *   `registry.checkAccess(peerKey, 'server-share:<name>', 'request')`; without a registry such
+   *   requests are refused.
+   * @param {string[]} [opts.allowedMethods] - Methods a peer may use (default: GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS)
+   * @param {string[]} [opts.allowedRequestHeaders] - Extra request header names a peer may set, added to the defaults
+   * @param {number} [opts.maxPathLength=2048]
+   * @param {number} [opts.maxRequestBodyBytes=1048576]
+   * @param {number} [opts.maxResponseBytes=8388608]
+   * @param {number} [opts.maxHeaderCount=32]
+   * @param {number} [opts.maxHeaderBytes=8192]
+   * @param {number} [opts.requestTimeoutMs=30000]
    */
   constructor(opts) {
     const { localPodId, fetchFn, onLog } = opts
@@ -417,6 +458,20 @@ export class ServerSharing {
       ? fetchFn
       : (typeof globalThis.fetch === 'function' ? globalThis.fetch : null)
     this.#onLog = onLog ?? (() => {})
+    this.#registry = opts.registry ?? null
+    this.#allowedMethods = new Set((opts.allowedMethods ?? DEFAULT_ALLOWED_METHODS).map((m) => String(m).toUpperCase()))
+    this.#allowedHeaders = new Set([
+      ...DEFAULT_ALLOWED_REQUEST_HEADERS,
+      ...(opts.allowedRequestHeaders ?? []).map((h) => String(h).toLowerCase()),
+    ])
+    const limits = { ...PROXY_LIMITS_DEFAULTS }
+    for (const key of Object.keys(limits)) {
+      if (opts[key] !== undefined) {
+        if (!Number.isFinite(opts[key]) || opts[key] <= 0) throw new Error(`${key} must be a positive number`)
+        limits[key] = opts[key]
+      }
+    }
+    this.#limits = Object.freeze(limits)
   }
 
   // ── Expose / Unexpose ─────────────────────────────────────────────
@@ -429,6 +484,8 @@ export class ServerSharing {
    * @param {object} [opts]
    * @param {string} [opts.hostname='localhost'] - Local hostname
    * @param {string} [opts.protocol='http']      - Protocol (http or https)
+   * @param {Record<string, string>} [opts.headers] - Headers sent with every request to this
+   *   server (for example a credential the sharer chooses to attach). A peer cannot override them.
    * @returns {object} ServerConfig
    */
   expose(port, name, opts = {}) {
@@ -438,9 +495,17 @@ export class ServerSharing {
     if (!name || typeof name !== 'string') {
       throw new Error('name is required and must be a non-empty string')
     }
+    if (/[:*]/.test(name)) {
+      throw new Error('name must not contain ":" or "*"')
+    }
 
     const hostname = opts.hostname ?? 'localhost'
     const protocol = opts.protocol ?? 'http'
+    const origin = configuredOrigin(protocol, hostname, port)
+    const headerCheck = checkHeaderShape(opts.headers, { maxHeaderCount: this.#limits.maxHeaderCount, maxHeaderBytes: this.#limits.maxHeaderBytes })
+    if (!headerCheck.ok) throw new Error(`headers: ${headerCheck.reason}`)
+    const configured = {}
+    for (const [k, v] of headerCheck.entries) configured[k.toLowerCase()] = v
     const address = `mesh://${this.#localPodId}/http/${name}`
 
     const config = {
@@ -453,6 +518,7 @@ export class ServerSharing {
     }
 
     this.#exposedServers.set(name, config)
+    this.#shareState.set(name, { origin, headers: configured })
     this.#onLog(`Exposed server "${name}" at port ${port} → ${address}`)
 
     return config
@@ -465,6 +531,7 @@ export class ServerSharing {
    */
   unexpose(name) {
     const existed = this.#exposedServers.delete(name)
+    this.#shareState.delete(name)
     if (existed) {
       this.#onLog(`Unexposed server "${name}"`)
     }
@@ -481,45 +548,93 @@ export class ServerSharing {
    * @param {string} request.method   - HTTP method
    * @param {string} request.path     - Request path
    * @param {object} [request.headers] - Request headers
-   * @param {*} [request.body]        - Request body
+   * @param {*} [request.body]        - Request body (string or bytes)
+   * @param {object} [caller]
+   * @param {string} [caller.fromPubKey] - The key of the peer that sent the request, taken
+   *   from the session it arrived on and never from the message. When `caller` is given the
+   *   request must pass `registry.checkAccess(fromPubKey, 'server-share:<name>', 'request')`.
+   *   Omit `caller` only for a call made by this process itself.
    * @returns {Promise<{ status: number, headers: object, body: * }>}
    */
-  async handleRequest(request) {
+  async handleRequest(request, caller) {
     if (!request || typeof request !== 'object') {
       return { status: 400, headers: {}, body: 'Invalid request' }
     }
 
+    if (caller !== undefined) {
+      const key = caller?.fromPubKey
+      const nameOk = typeof request.name === 'string' && request.name !== '' && !/[:*]/.test(request.name)
+      const allowed = nameOk
+        && typeof key === 'string' && key !== ''
+        && this.#registry !== null
+        && this.#registry.checkAccess(key, `server-share:${request.name}`, 'request')?.allowed === true
+      if (!allowed) {
+        this.#onLog(`Refused request from ${typeof key === 'string' ? key : '(no key)'} for share "${String(request.name).slice(0, 64)}"`)
+        return { status: 403, headers: {}, body: 'Access denied' }
+      }
+    }
+
     const config = this.#exposedServers.get(request.name)
-    if (!config) {
+    const state = this.#shareState.get(request.name)
+    if (!config || !state) {
       return { status: 404, headers: {}, body: `Server "${request.name}" not found` }
     }
 
-    const url = `${config.protocol}://${config.hostname}:${config.port}${request.path || '/'}`
+    const method = request.method === undefined || request.method === null || request.method === ''
+      ? 'GET'
+      : (typeof request.method === 'string' ? request.method.toUpperCase() : null)
+    if (method === null || !this.#allowedMethods.has(method)) {
+      return { status: 405, headers: {}, body: 'Method not allowed' }
+    }
+
+    const target = resolveTarget(state.origin, request.path, { maxPathLength: this.#limits.maxPathLength })
+    if (!target.ok) {
+      return { status: 400, headers: {}, body: `Invalid request target: ${target.reason}` }
+    }
+
+    const headerCheck = checkHeaderShape(request.headers, this.#limits)
+    if (!headerCheck.ok) {
+      return { status: 400, headers: {}, body: `Invalid headers: ${headerCheck.reason}` }
+    }
+
+    const bodyCheck = checkRequestBody(request.body, this.#limits.maxRequestBodyBytes)
+    if (!bodyCheck.ok) {
+      return { status: bodyCheck.status, headers: {}, body: bodyCheck.reason }
+    }
+    if (bodyCheck.body !== undefined && (method === 'GET' || method === 'HEAD')) {
+      return { status: 400, headers: {}, body: `A ${method} request cannot carry a body` }
+    }
 
     if (!this.#fetchFn) {
       return { status: 503, headers: {}, body: 'Fetch not available' }
     }
 
     try {
-      const response = await this.#fetchFn(url, {
-        method: request.method || 'GET',
-        headers: request.headers || {},
-        body: request.body,
-      })
+      const init = {
+        method,
+        headers: selectRequestHeaders(headerCheck.entries, this.#allowedHeaders, state.headers),
+        // A redirect is returned to the peer as it is; it is never followed,
+        // so the request cannot leave the configured origin.
+        redirect: 'manual',
+        signal: AbortSignal.timeout(this.#limits.requestTimeoutMs),
+      }
+      if (bodyCheck.body !== undefined) init.body = bodyCheck.body
+      const response = await this.#fetchFn(target.url.href, init)
 
-      const responseHeaders = {}
-      if (response.headers && typeof response.headers.forEach === 'function') {
-        response.headers.forEach((value, key) => {
-          responseHeaders[key] = value
-        })
+      if (responseLeftOrigin(response, state.origin)) {
+        try { await response.body?.cancel?.() } catch { /* already closed */ }
+        return { status: 502, headers: {}, body: 'Proxy error: response did not come from the configured origin' }
       }
 
-      const body = await (typeof response.text === 'function' ? response.text() : response.body)
+      const read = await readBoundedBody(response, this.#limits.maxResponseBytes)
+      if (!read.ok) {
+        return { status: 502, headers: {}, body: 'Proxy error: response too large' }
+      }
 
       return {
         status: response.status,
-        headers: responseHeaders,
-        body,
+        headers: copyResponseHeaders(response.headers),
+        body: read.body,
       }
     } catch (err) {
       return {
@@ -727,6 +842,15 @@ export function createMeshRoutingService(opts = {}) {
     fetchFn,
     serverShareEnvelopeType = DEFAULT_SERVER_SHARE_ENVELOPE_TYPE,
     proxyTimeoutMs = DEFAULT_PROXY_TIMEOUT_MS,
+    registry,
+    allowedMethods,
+    allowedRequestHeaders,
+    maxPathLength,
+    maxRequestBodyBytes,
+    maxResponseBytes,
+    maxHeaderCount,
+    maxHeaderBytes,
+    requestTimeoutMs,
     onLog,
   } = opts
   const wireServerSharing = 'fetchFn' in opts
@@ -798,6 +922,15 @@ export function createMeshRoutingService(opts = {}) {
         serverSharing = new ServerSharing({
           localPodId,
           fetchFn,
+          registry: registry ?? peerNode.registry ?? null,
+          allowedMethods,
+          allowedRequestHeaders,
+          maxPathLength,
+          maxRequestBodyBytes,
+          maxResponseBytes,
+          maxHeaderCount,
+          maxHeaderBytes,
+          requestTimeoutMs,
           onLog: (msg) => log('mesh-routing:server-share-log', { message: msg }),
         })
 
@@ -808,13 +941,15 @@ export function createMeshRoutingService(opts = {}) {
           const { requestId } = msg
           let result
           try {
+            // The caller is the key of the session the message arrived on;
+            // nothing in `msg` can name a different one.
             result = await serverSharing.handleRequest({
               name: msg.name,
               method: msg.method,
               path: msg.path,
               headers: msg.headers,
               body: msg.body,
-            })
+            }, { fromPubKey })
           } catch (err) {
             // handleRequest() already catches its own fetchFn errors (see
             // ServerSharing.handleRequest()'s 502 path) -- reaching here
@@ -836,9 +971,11 @@ export function createMeshRoutingService(opts = {}) {
           }
         }
 
-        function handleProxyResponse(msg) {
+        function handleProxyResponse(fromPubKey, msg) {
           const pending = pendingProxyRequests.get(msg.requestId)
           if (!pending) return // no longer waiting (already timed out, or not ours) -- ignore
+          // Only the peer the request was sent to can answer it.
+          if (pending.podId !== fromPubKey) return
           pendingProxyRequests.delete(msg.requestId)
           clearTimeout(pending.timer)
           pending.resolve({ status: msg.status, headers: msg.headers || {}, body: msg.body })
@@ -851,7 +988,7 @@ export function createMeshRoutingService(opts = {}) {
               log('mesh-routing:server-share-request-handling-failed', { from: fromPubKey, requestId: msg.requestId, error: err?.message || String(err) })
             })
           } else if (msg.kind === 'proxy-response') {
-            handleProxyResponse(msg)
+            handleProxyResponse(fromPubKey, msg)
           }
         })
 
@@ -871,7 +1008,7 @@ export function createMeshRoutingService(opts = {}) {
               ctx.emit('mesh-routing:server-share-timeout', { to: podId, name, method, path })
               reject(new Error(`mesh-routing: proxy request ${method} ${path} (server "${name}") to ${podId} timed out after ${proxyTimeoutMs}ms`))
             }, proxyTimeoutMs)
-            pendingProxyRequests.set(requestId, { resolve, reject, timer })
+            pendingProxyRequests.set(requestId, { resolve, reject, timer, podId })
           })
 
           try {

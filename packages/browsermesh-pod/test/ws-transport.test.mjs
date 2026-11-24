@@ -134,7 +134,7 @@ describe('WebSocketTransport — wire encoding', () => {
 // ---------------------------------------------------------------------------
 
 describe('WebSocketTransport — point-to-point relay', () => {
-  it('delivers a targeted message via relay/relayed, attaching "from" when absent', async () => {
+  it('delivers a targeted message via relay/relayed; the relay-stamped source is kept apart from "from"', async () => {
     const net = createFakeWebSocketNetwork()
     const relay = net.createRelayServer()
     net.registerServer('ws://relay.test', relay)
@@ -152,7 +152,8 @@ describe('WebSocketTransport — point-to-point relay', () => {
 
     assert.equal(received.length, 1)
     assert.equal(received[0].to, 'bob')
-    assert.equal(received[0].from, 'alice') // injected because the envelope had no "from"
+    assert.equal(received[0].from, undefined, 'the relay-written source is not turned into a sender identity')
+    assert.equal(received[0].relaySource, 'alice')
     assert.deepEqual(received[0].payload, { text: 'hi' })
   })
 
@@ -510,5 +511,125 @@ describe('WebSocketTransport — Pod integration', () => {
 
     await alice.shutdown()
     await bob.shutdown()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Discovery whatever order the server's frames arrive in
+// ---------------------------------------------------------------------------
+
+function foundPeer(pod, podId) {
+  if (pod.peers.has(podId)) return Promise.resolve()
+  return new Promise((resolve) => {
+    pod.on('peer:found', (info) => { if (info.podId === podId) resolve() })
+  })
+}
+
+function makeWs(net, podId) {
+  return new WebSocketTransport({
+    url: 'ws://relay.test',
+    podId,
+    WebSocket: net.FakeWebSocket,
+    peersFromSignaling: true,
+    signalingUrl: 'ws://signaling.test',
+  })
+}
+
+// The timeout only bounds a failing run: each of these waits for a discovery
+// event that never comes when the defect is present.
+describe('WebSocketTransport — discovery is independent of frame order', { timeout: 5000 }, () => {
+  it('two Pods discover each other when `peers` arrives in a later task than `registered`', async () => {
+    const net = createFakeWebSocketNetwork()
+    net.registerServer('ws://relay.test', net.createRelayServer())
+    net.registerServer('ws://signaling.test', net.createSignalingServer({ splitFrames: true }))
+
+    const aliceIdentity = await PodIdentity.generate()
+    const bobIdentity = await PodIdentity.generate()
+    const alice = new Pod()
+    const bob = new Pod()
+
+    await alice.boot({ identity: aliceIdentity, transport: makeWs(net, aliceIdentity.podId), discoveryTimeout: 20 })
+    await bob.boot({ identity: bobIdentity, transport: makeWs(net, bobIdentity.podId), discoveryTimeout: 20 })
+
+    await Promise.all([foundPeer(alice, bob.podId), foundPeer(bob, alice.podId)])
+
+    await alice.shutdown()
+    await bob.shutdown()
+  })
+
+  it('a Pod that booted first greets a pod that registers after its boot finished', async () => {
+    const net = createFakeWebSocketNetwork()
+    net.registerServer('ws://relay.test', net.createRelayServer())
+    net.registerServer('ws://signaling.test', net.createSignalingServer({ splitFrames: true }))
+
+    const aliceIdentity = await PodIdentity.generate()
+    const alice = new Pod()
+    await alice.boot({ identity: aliceIdentity, transport: track(makeWs(net, aliceIdentity.podId)), discoveryTimeout: 20 })
+
+    // bob is a bare transport that never sends anything: whatever he learns,
+    // he learns because alice greeted him on the join.
+    const bob = track(makeWs(net, 'bob'))
+    const hellos = []
+    const greeted = new Promise((resolve) => {
+      bob.onMessage((msg) => {
+        if (msg.type !== 'pod:hello') return
+        hellos.push(msg)
+        resolve()
+      })
+    })
+    await bob.open()
+    await greeted
+
+    assert.equal(hellos[0].podId, alice.podId)
+    assert.equal(hellos[0].to, 'bob')
+
+    await alice.shutdown()
+  })
+
+  it('greets each peer once even when it is in the peers list and in a join event', async () => {
+    const net = createFakeWebSocketNetwork()
+    net.registerServer('ws://relay.test', net.createRelayServer())
+    const signaling = net.createSignalingServer({ splitFrames: true })
+    net.registerServer('ws://signaling.test', signaling)
+
+    const aliceIdentity = await PodIdentity.generate()
+    const alice = new Pod()
+    await alice.boot({ identity: aliceIdentity, transport: track(makeWs(net, aliceIdentity.podId)), discoveryTimeout: 20 })
+
+    const bob = track(makeWs(net, 'bob'))
+    const hellos = []
+    const sawMarker = new Promise((resolve) => {
+      bob.onMessage((msg) => {
+        if (msg.type === 'pod:hello') hellos.push(msg)
+        if (msg.type === 'pod:message') resolve()
+      })
+    })
+    await bob.open()
+    // The server repeats the join and the list for a peer we already greeted.
+    signaling.pushTo(aliceIdentity.podId, { type: 'peer-joined', podId: 'bob' })
+    signaling.pushTo(aliceIdentity.podId, { type: 'peers', peers: [aliceIdentity.podId, 'bob'] })
+    await new Promise((resolve) => setImmediate(resolve)) // both frames are handled by now
+    alice.send('bob', { marker: true }) // arrives after any hello alice would have sent
+    await sawMarker
+
+    assert.equal(hellos.length, 1)
+    await alice.shutdown()
+  })
+
+  it('a signaling-protocol primary connection learns peers from the same frames', async () => {
+    const net = createFakeWebSocketNetwork()
+    net.registerServer('ws://signaling.test', net.createSignalingServer({ splitFrames: true }))
+    const mk = (podId) => track(new WebSocketTransport({
+      url: 'ws://signaling.test', podId, WebSocket: net.FakeWebSocket, protocol: 'signaling',
+    }))
+    const alice = mk('alice')
+    await alice.open()
+    const bob = mk('bob')
+    await bob.open()
+    await new Promise((resolve) => {
+      const check = () => alice.knownPeers.has('bob') ? resolve() : setImmediate(check)
+      check()
+    })
+    assert.ok(alice.knownPeers.has('bob'))
   })
 })

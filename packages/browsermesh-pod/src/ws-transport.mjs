@@ -16,7 +16,8 @@
  *     forwarded by the signaling server as: { type: 'signal', source, envelope }
  *     (the signaling server spreads the forwarded payload and injects `source`,
  *     so any extra keys like `envelope` survive the hop unchanged)
- *   - peers: { type: 'peers', peers: string[] } (signaling only, sent once on registration)
+ *   - peers: { type: 'peers', peers: string[] } (signaling only, sent once on registration,
+ *     in a frame AFTER `registered`: `open()` can resolve before it is handled)
  *   - peer-joined / peer-left: { type: 'peer-joined'|'peer-left', podId } (signaling only)
  *   - ping / pong: { type: 'ping' } / { type: 'pong' }
  *   - error: { type: 'error', message }
@@ -56,6 +57,7 @@ export class WebSocketTransport {
   #ready = false
   #closed = true
   #knownPeers = new Set()
+  #peerJoinedHandlers = new Set()
 
   #primaryReconnect = { attempts: 0, timer: null }
   #sigReconnect = { attempts: 0, timer: null }
@@ -93,6 +95,13 @@ export class WebSocketTransport {
     this.#onLog = onLog || (() => {})
   }
 
+  /**
+   * The relay stamps `source` and can rewrite or inject envelopes, so nothing
+   * about a message is authenticated by this link. A pod requires signed
+   * messages over it unless told otherwise (`allowUnsigned`).
+   */
+  get trust() { return 'untrusted' }
+
   /** @returns {boolean} true once the primary connection is registered */
   get ready() { return this.#ready }
 
@@ -104,6 +113,19 @@ export class WebSocketTransport {
    */
   onMessage(handler) {
     this.#handler = handler
+  }
+
+  /**
+   * Be told about each peer id the server announces (`peers`, `peer-joined`)
+   * that this transport did not know yet. `peers` follows `registered` in a
+   * later frame, and pods can join at any time, so discovery must react to
+   * these rather than assume the list is complete when `open()` resolves.
+   * @param {(podId: string) => void} handler
+   * @returns {() => void} unsubscribe
+   */
+  onPeerJoined(handler) {
+    this.#peerJoinedHandlers.add(handler)
+    return () => this.#peerJoinedHandlers.delete(handler)
   }
 
   /**
@@ -327,6 +349,8 @@ export class WebSocketTransport {
   // ── Private: inbound ──────────────────────────────────────────────
 
   #handlePrimaryMessage(data) {
+    // A signaling server used as the primary connection announces peers on it.
+    if (this.#protocol === 'signaling' && this.#handlePeerFrame(data)) return
     switch (data.type) {
       case 'relayed':
       case 'signal': {
@@ -345,22 +369,41 @@ export class WebSocketTransport {
     }
   }
 
-  #handleSignalingMessage(data) {
+  /**
+   * Apply a `peers` / `peer-joined` / `peer-left` frame to `knownPeers`.
+   * Newly learned peers are announced to `onPeerJoined` handlers.
+   * @returns {boolean} true if the frame was one of those three
+   */
+  #handlePeerFrame(data) {
     switch (data.type) {
       case 'peers': {
-        for (const id of data.peers || []) {
-          if (id !== this.#podId) this.#knownPeers.add(id)
-        }
-        return
+        for (const id of data.peers || []) this.#learnPeer(id)
+        return true
       }
       case 'peer-joined': {
-        if (data.podId && data.podId !== this.#podId) this.#knownPeers.add(data.podId)
-        return
+        this.#learnPeer(data.podId)
+        return true
       }
       case 'peer-left': {
         if (data.podId) this.#knownPeers.delete(data.podId)
-        return
+        return true
       }
+      default:
+        return false
+    }
+  }
+
+  #learnPeer(id) {
+    if (!id || id === this.#podId || this.#knownPeers.has(id)) return
+    this.#knownPeers.add(id)
+    for (const handler of this.#peerJoinedHandlers) {
+      try { handler(id) } catch { /* a handler error must not break frame handling */ }
+    }
+  }
+
+  #handleSignalingMessage(data) {
+    if (this.#handlePeerFrame(data)) return
+    switch (data.type) {
       case 'ping':
         this.#send(this.#sigWs, { type: 'pong' })
         return
@@ -374,7 +417,10 @@ export class WebSocketTransport {
 
   #deliver(source, envelope) {
     if (!this.#handler || !envelope || typeof envelope !== 'object') return
-    const msg = ('from' in envelope) ? envelope : { ...envelope, from: source }
+    // `source` is written by the relay. It is passed on as `relaySource` for
+    // diagnostics and is never used as the sender's identity: the envelope's
+    // own `from` is a claim too, and a pod checks it against a signature.
+    const msg = { ...envelope, relaySource: source }
     this.#handler(msg)
   }
 }

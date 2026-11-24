@@ -31,6 +31,10 @@
  */
 
 import { EventEmitter } from 'node:events'
+import { readFile } from 'node:fs/promises'
+import { buildNetworkPlan, allocateSubnet, tapDeviceName } from './network-policy.mjs'
+import { buildBootArgs, chrootLayout, planChrootStaging } from './vm-config.mjs'
+import { vmmCommandLineMatches } from './jailer.mjs'
 
 /** Valid state machine states, matching issue #185 §5.3 exactly. */
 export const STATES = Object.freeze([
@@ -86,6 +90,13 @@ export class VmPod extends EventEmitter {
   #snapshotDir
   #dryRun
   #vmmArgv
+  #vmmPidFile
+  #jail
+  #layout = null
+  #signalingUrl
+  #rootfsBase
+  #network
+  #proc
   #state = 'cold'
   #idleTimer = null
   #podId = null
@@ -115,13 +126,54 @@ export class VmPod extends EventEmitter {
    *   `client` talks to. Run at the start of `boot()` and in `restore()`
    *   (`snapshot()` kills the VMM, so a restore needs a new one). Omit when
    *   the host starts the VMM itself, as before.
+   * @param {string} [opts.vmmPidFile] - File the daemonized VMM's pid is
+   *   written to (see `jailerPidFilePath()`). Needed to stop the VMM
+   *   (`snapshot()`, `drain()`): the VMM is stopped by pid, only after its
+   *   command line is checked to carry exactly this pod's `--id`.
+   * @param {string} [opts.rootfsBase] - A shared, read-only base image.
+   *   `rootfs` is then this pod's OWN copy, made once before first boot
+   *   (never overwritten afterwards, so a drained pod keeps its disk). The
+   *   base image is never attached to a VM, because two pods writing one
+   *   disk image can read and corrupt each other's data.
+   * @param {{hostIp?: string, guestIp?: string, uplink?: string, egress?: object}} [opts.network]
+   *   Passed to `buildNetworkPlan()`. Defaults to the `/30` for this VM's
+   *   vsock CID, the default egress policy (public addresses only) and `eth0`.
+   * @param {{readFile?: Function, kill?: Function}} [opts.proc] - Process
+   *   table access, injectable for tests.
+   * @param {{root: string, uid: number, gid: number}} [opts.jail] - Run
+   *   under the jailer: `root` is the chroot's `root` directory on the host.
+   *   Firecracker then sees every file by a name relative to the jail
+   *   (`chrootLayout()`), and `boot()` stages the kernel and a private copy
+   *   of `rootfsBase` inside it, owned by `uid:gid`. `rootfs` and
+   *   `snapshotDir` are not used in this mode.
+   * @param {string} [opts.signalingUrl] - Handed to the guest on its kernel
+   *   command line (`buildBootArgs()`); no credentials.
    */
   constructor({
     client, exec, id, kernelImage, rootfs, tap, vsock, limits,
     idleTimeoutMs = 30_000, snapshotDir, dryRun = false, vmmArgv,
+    vmmPidFile, rootfsBase, network, proc, jail, signalingUrl,
   }) {
     super()
     if (!id) throw new Error('VmPod: id is required')
+    if (rootfsBase !== undefined && rootfsBase === rootfs) {
+      throw new Error('VmPod: rootfs must be this pod\'s own copy, not the shared base image')
+    }
+    if (jail) {
+      if (!Number.isInteger(jail.uid) || jail.uid <= 0) throw new Error('VmPod: jail.uid must be a non-zero integer')
+      if (!Number.isInteger(jail.gid) || jail.gid <= 0) throw new Error('VmPod: jail.gid must be a non-zero integer')
+      if (!rootfsBase) throw new Error('VmPod: a jailed VM needs rootfsBase (the image its private copy is made from)')
+      this.#layout = chrootLayout({ root: jail.root })
+    }
+    this.#jail = jail ?? null
+    this.#signalingUrl = signalingUrl
+    this.#vmmPidFile = vmmPidFile
+    this.#rootfsBase = rootfsBase
+    this.#network = network ?? {}
+    this.#proc = {
+      readFile: proc?.readFile ?? ((path) => readFile(path, 'utf8')),
+      kill: proc?.kill ?? ((pid, signal) => process.kill(pid, signal)),
+    }
     this.#client = client
     this.#exec = exec
     this.#id = id
@@ -148,11 +200,25 @@ export class VmPod extends EventEmitter {
   /** @returns {string|null} podId of the guest ServerPod once registered */
   get podId() { return this.#podId }
 
-  /** @returns {string|undefined} the vsock device's uds_path, for host-pod.mjs's exec() */
-  get vsockUdsPath() { return this.#vsock?.udsPath }
+  /** @returns {string|undefined} the vsock socket on the HOST, for host-pod.mjs's exec() */
+  get vsockUdsPath() { return this.#layout ? this.#layout.host.vsock : this.#vsock?.udsPath }
 
-  get snapshotVmStatePath() { return `${this.#snapshotDir}/${this.#id}.vmstate` }
-  get snapshotMemPath() { return `${this.#snapshotDir}/${this.#id}.mem` }
+  /** Snapshot files as the host sees them. */
+  get snapshotVmStatePath() { return this.#layout ? this.#layout.host.vmstate : `${this.#snapshotDir}/${this.#id}.vmstate` }
+  get snapshotMemPath() { return this.#layout ? this.#layout.host.mem : `${this.#snapshotDir}/${this.#id}.mem` }
+
+  /** The names Firecracker is given: relative to the jail when jailed. */
+  get #apiPaths() {
+    return this.#layout
+      ? this.#layout.api
+      : {
+        kernel: this.#kernelImage,
+        rootfs: this.#rootfs,
+        vsock: this.#vsock?.udsPath,
+        vmstate: this.snapshotVmStatePath,
+        mem: this.snapshotMemPath,
+      }
+  }
 
   // ── State machine core ──────────────────────────────────────
 
@@ -183,7 +249,9 @@ export class VmPod extends EventEmitter {
       return undefined
     }
     this.plannedApiCalls.push({ api, args })
-    return this.#client[api](args)
+    // `putDrive(id, opts)` and `putNetworkInterface(id, opts)` take two
+    // arguments; their planned form is the pair, so spread it.
+    return Array.isArray(args) ? this.#client[api](...args) : this.#client[api](args)
   }
 
   /**
@@ -192,13 +260,19 @@ export class VmPod extends EventEmitter {
    * @param {string[]} argv
    * @param {string} [description]
    */
-  async #runExec(argv, description) {
+  async #runExec(argv, description, { tolerateFailure = false } = {}) {
     if (this.#dryRun) {
       this.plannedCommands.push({ argv, description })
       return { stdout: '', stderr: '', code: 0 }
     }
     this.plannedCommands.push({ argv, description })
-    return this.#exec(argv)
+    const result = await this.#exec(argv)
+    // A host command that fails must stop the sequence: carrying on after
+    // the network rules failed to install would start a VM with no policy.
+    if (!tolerateFailure && result && typeof result.code === 'number' && result.code !== 0) {
+      throw new Error(`VmPod: host command failed (exit ${result.code}): ${argv.join(' ')}${result.stderr ? `: ${result.stderr}` : ''}`)
+    }
+    return result
   }
 
   /** Start a fresh Firecracker process, when the host asked this pod to own that. */
@@ -209,20 +283,104 @@ export class VmPod extends EventEmitter {
 
   // ── Host-side network setup ──────────────────────────────────
 
+  /** The `/30` for this VM: the network option's addresses, else the one for its vsock CID. */
+  #addresses() {
+    const subnet = allocateSubnet(Math.max(0, (this.#vsock?.guestCid ?? 3) - 3))
+    return {
+      hostIp: this.#network.hostIp ?? subnet.hostIp,
+      guestIp: this.#network.guestIp ?? subnet.guestIp,
+      netmask: subnet.netmask,
+    }
+  }
+
+  /** @returns {string} The guest kernel command line. */
+  #bootArgs() {
+    const { hostIp, guestIp, netmask } = this.#addresses()
+    return buildBootArgs({ guestIp, gatewayIp: hostIp, netmask, signalingUrl: this.#signalingUrl })
+  }
+
+  /** Put the kernel and a private rootfs copy inside the jail. */
+  async #stageJail() {
+    const steps = planChrootStaging({
+      root: this.#jail.root,
+      kernelSrc: this.#kernelImage,
+      rootfsSrc: this.#rootfsBase,
+      uid: this.#jail.uid,
+      gid: this.#jail.gid,
+    })
+    for (const argv of steps) await this.#runExec(argv, `stage the jail: ${argv[0]}`)
+  }
+
+  /** @returns {ReturnType<typeof buildNetworkPlan>} */
+  #networkPlan() {
+    const { hostIp, guestIp } = this.#addresses()
+    return buildNetworkPlan({
+      id: this.#id,
+      tapDev: this.#tap?.hostDevName ?? tapDeviceName(this.#id),
+      guestMac: this.#tap?.guestMac,
+      hostIp,
+      guestIp,
+      uplink: this.#network.uplink,
+      egress: this.#network.egress,
+    })
+  }
+
   async #setUpTap() {
-    const dev = this.#tap?.hostDevName ?? `tap-${this.#id}`
-    await this.#runExec(['ip', 'tuntap', 'add', dev, 'mode', 'tap'], 'create TAP device')
-    await this.#runExec(['ip', 'link', 'set', dev, 'up'], 'bring TAP device up')
+    for (const argv of this.#networkPlan().setup) {
+      await this.#runExec(argv, `network: ${argv.slice(0, 3).join(' ')}`)
+    }
+  }
+
+  /** @param {{tolerateFailure?: boolean}} [opts] */
+  async #tearDownTap({ tolerateFailure = false } = {}) {
+    for (const argv of this.#networkPlan().teardown) {
+      await this.#runExec(argv, `network: ${argv.slice(0, 3).join(' ')}`, { tolerateFailure })
+    }
+  }
+
+  /**
+   * Give the pod its own disk image from the shared base, once. `--no-clobber`
+   * means a pod that is drained and booted again keeps what it wrote.
+   */
+  async #prepareRootfs() {
+    if (!this.#rootfsBase) return
+    const dir = this.#rootfs.slice(0, this.#rootfs.lastIndexOf('/')) || '/'
+    await this.#runExec(['mkdir', '-p', '--', dir], 'create the pod\'s own directory')
     await this.#runExec(
-      ['nft', 'add', 'rule', 'firecracker', 'filter', 'iifname', dev, 'oifname', 'eth0', 'accept'],
-      'nftables: allow TAP -> uplink forwarding (masquerade)',
+      ['cp', '--reflink=auto', '--no-clobber', '--', this.#rootfsBase, this.#rootfs],
+      'give the pod its own copy of the base image',
     )
   }
 
-  async #tearDownTap() {
-    const dev = this.#tap?.hostDevName ?? `tap-${this.#id}`
-    await this.#runExec(['ip', 'link', 'set', dev, 'down'], 'bring TAP device down')
-    await this.#runExec(['ip', 'tuntap', 'del', dev, 'mode', 'tap'], 'delete TAP device')
+  /**
+   * Stop this pod's VMM: by the pid it recorded, and only if that process
+   * is still the VMM started for exactly this id.
+   */
+  async #killVmm() {
+    if (!this.#vmmPidFile) {
+      throw new Error('VmPod: vmmPidFile is required to stop the VMM')
+    }
+    if (this.#dryRun) {
+      this.plannedCommands.push({ argv: ['kill-vmm', this.#vmmPidFile], description: 'stop this VM\'s VMM by its recorded pid' })
+      return
+    }
+    this.plannedCommands.push({ argv: ['kill-vmm', this.#vmmPidFile], description: 'stop this VM\'s VMM by its recorded pid' })
+    const raw = String(await this.#proc.readFile(this.#vmmPidFile)).trim()
+    if (!/^\d+$/.test(raw) || Number(raw) <= 1) {
+      throw new Error(`VmPod: pid file ${this.#vmmPidFile} does not hold a process id`)
+    }
+    const pid = Number(raw)
+    let cmdline = ''
+    try {
+      cmdline = String(await this.#proc.readFile(`/proc/${pid}/cmdline`))
+    } catch {
+      // The process is already gone: nothing to stop.
+      return
+    }
+    if (!vmmCommandLineMatches(cmdline, this.#id)) {
+      throw new Error(`VmPod: process ${pid} does not belong to VM ${this.#id}; not stopping it`)
+    }
+    this.#proc.kill(pid, 'SIGTERM')
   }
 
   // ── Lifecycle: cold -> booting -> registered ─────────────────
@@ -238,33 +396,37 @@ export class VmPod extends EventEmitter {
   async boot() {
     this.#transition('booting', 'boot() called')
 
+    if (!this.#jail) await this.#prepareRootfs()
     await this.#startVmm()
+    // The jailer builds the chroot when it starts, so its files go in after.
+    if (this.#jail) await this.#stageJail()
     await this.#setUpTap()
 
+    const api = this.#apiPaths
     await this.#callApi('putMachineConfig', {
       vcpu_count: this.#limits?.vcpus,
       mem_size_mib: this.#limits?.memMib,
       track_dirty_pages: true,
     })
     await this.#callApi('putBootSource', {
-      kernel_image_path: this.#kernelImage,
-      boot_args: 'console=ttyS0 reboot=k panic=1 root=/dev/vda rw',
+      kernel_image_path: api.kernel,
+      boot_args: this.#bootArgs(),
     })
     await this.#callApi('putDrive', ['rootfs', {
-      path_on_host: this.#rootfs,
+      path_on_host: api.rootfs,
       is_root_device: true,
       is_read_only: false,
       rate_limiter: this.#limits?.blockRateLimiter,
     }])
     await this.#callApi('putNetworkInterface', ['eth0', {
-      host_dev_name: this.#tap?.hostDevName ?? `tap-${this.#id}`,
+      host_dev_name: this.#tap?.hostDevName ?? tapDeviceName(this.#id),
       guest_mac: this.#tap?.guestMac,
       rx_rate_limiter: this.#limits?.netRateLimiter,
       tx_rate_limiter: this.#limits?.netRateLimiter,
     }])
     await this.#callApi('putVsock', {
       guest_cid: this.#vsock?.guestCid,
-      uds_path: this.#vsock?.udsPath,
+      uds_path: api.vsock,
     })
     await this.#callApi('start', undefined)
   }
@@ -337,14 +499,11 @@ export class VmPod extends EventEmitter {
    */
   async snapshot() {
     await this.#callApi('createSnapshot', {
-      snapshot_path: this.snapshotVmStatePath,
-      mem_file_path: this.snapshotMemPath,
+      snapshot_path: this.#apiPaths.vmstate,
+      mem_file_path: this.#apiPaths.mem,
       snapshot_type: 'Full',
     })
-    await this.#runExec(
-      ['pkill', '-f', `--id ${this.#id}`],
-      'kill the jailed firecracker/jailer process for this VM',
-    )
+    await this.#killVmm()
     this.#transition('snapshotted', 'snapshot/create complete, VMM killed')
   }
 
@@ -359,16 +518,19 @@ export class VmPod extends EventEmitter {
    */
   async restore() {
     this.#transition('restoring', 'restore() called')
+    // The TAP and its rules survive a snapshot unless the host restarted:
+    // remove whatever is there (it may not exist) and install a fresh set.
+    await this.#tearDownTap({ tolerateFailure: true })
     await this.#setUpTap()
     // snapshot() killed the VMM, which left its vsock UDS behind; loadSnapshot
     // fails with "Address already in use" if it is still there.
-    if (this.#vsock?.udsPath) {
-      await this.#runExec(['rm', '-f', this.#vsock.udsPath], 'unlink the stale vsock socket left by the killed VMM')
+    if (this.vsockUdsPath) {
+      await this.#runExec(['rm', '-f', this.vsockUdsPath], 'unlink the stale vsock socket left by the killed VMM')
     }
     await this.#startVmm()
     await this.#callApi('loadSnapshot', {
-      snapshot_path: this.snapshotVmStatePath,
-      mem_backend: { backend_type: 'File', backend_path: this.snapshotMemPath },
+      snapshot_path: this.#apiPaths.vmstate,
+      mem_backend: { backend_type: 'File', backend_path: this.#apiPaths.mem },
       resume_vm: false,
     })
     await this.#callApi('resume', undefined)
@@ -386,10 +548,7 @@ export class VmPod extends EventEmitter {
     this.#clearIdleTimeout()
     this.#transition('draining', 'drain() called')
     this.emit('drain:peers-notified', { id: this.#id, podId: this.#podId })
-    await this.#runExec(
-      ['pkill', '-f', `--id ${this.#id}`],
-      'kill the jailed firecracker/jailer process for this VM',
-    )
+    await this.#killVmm()
     await this.#tearDownTap()
     this.#transition('cold', 'drain complete, rootfs kept')
   }

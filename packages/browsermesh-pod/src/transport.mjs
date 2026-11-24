@@ -24,6 +24,13 @@
  * subscribed to the same channel name.
  */
 export class BroadcastChannelTransport {
+  /**
+   * Who can put a message on this transport: any script of the same origin.
+   * A pod accepts unsigned messages from a `'same-origin'` transport by
+   * default; any other value (or none) means signatures are required.
+   */
+  get trust() { return 'same-origin' }
+
   #channel = null
   #channelName
   #handler = null
@@ -89,6 +96,9 @@ export class BroadcastChannelTransport {
  *   const t2 = new EventEmitterTransport(bus)
  */
 export class EventEmitterTransport {
+  /** In-process only: whoever shares the bus. See `BroadcastChannelTransport#trust`. */
+  get trust() { return 'same-origin' }
+
   #bus
   #handler = null
   #ready = false
@@ -158,6 +168,8 @@ export class EventEmitterTransport {
  * Used when no transport is available or desired.
  */
 export class NullTransport {
+  get trust() { return 'same-origin' }
+
   get ready() { return true }
   onMessage(_handler) {}
   async open() {}

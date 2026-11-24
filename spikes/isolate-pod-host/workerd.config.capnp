@@ -37,7 +37,10 @@ using Workerd = import "/workerd/workerd.capnp";
 
 const config :Workerd.Config = (
   services = [ (name = "isolate-pod-host", worker = .podHostWorker) ],
-  sockets = [ ( name = "http", address = "*:8080", http = (), service = "isolate-pod-host" ) ],
+  # Loopback only: these routes spawn, message and drain pods. To serve them
+  # beyond this machine, put them behind something that authenticates, AND set
+  # CONTROL_TOKEN (below) so the Worker itself refuses unauthenticated calls.
+  sockets = [ ( name = "http", address = "127.0.0.1:8080", http = (), service = "isolate-pod-host" ) ],
 );
 
 const podHostWorker :Workerd.Worker = (
@@ -62,6 +65,10 @@ const podHostWorker :Workerd.Worker = (
     (name = "RELAY_URL", text = "ws://localhost:8788"),
     (name = "SIGNALING_URL", text = "ws://localhost:8787"),
     (name = "DISCOVERY_CHANNEL", text = "pod-discovery"),
+    # Optional shared secret for the control routes (routes.mjs): taken from
+    # the CONTROL_TOKEN environment variable when workerd starts. Not
+    # exercised against a real workerd by this spike's tests.
+    (name = "CONTROL_TOKEN", fromEnvironment = "CONTROL_TOKEN"),
   ],
 );
 
