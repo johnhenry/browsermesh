@@ -384,7 +384,7 @@ export class MeshRouter {
     const incoming = Number.isFinite(envelope.ttl) ? Math.min(envelope.ttl, this.#maxTTL) : 0
     const newTTL = incoming - 1
     if (newTTL <= 0) {
-      this.#onLog(`Dropping message from ${v.from} to ${v.to}: TTL expired`)
+      this.#drop('ttl-expired', envelope, `${v.from} to ${v.to}`)
       return
     }
 

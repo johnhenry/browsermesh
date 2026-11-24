@@ -15,7 +15,8 @@ import { PodIdentity } from '@johnhenry/browsermesh-primitives'
 // ---------------------------------------------------------------------------
 
 let fpSeq = 0
-let lastOfferer = null
+let offerSeq = 0
+const offerers = new Map()
 
 class FakeDC {
   readyState = 'connecting'
@@ -63,12 +64,21 @@ class FakePC {
     this.channels.push(dc)
     return dc
   }
-  async createOffer() { lastOfferer = this; return { type: 'offer', sdp: sdpFor(this.fingerprint) } }
+  // The offer names its own offerer (a field that survives a signalling server rewriting `sdp`), so an answerer
+  // pairs with the connection that made THE offer it was given, not with whichever one made an offer last
+  // (a global would pair it with a stale connection left over from an earlier test).
+  // (It travels as an SDP line, since the connection rebuilds the description it applies; a server that swaps
+  // the fingerprint line leaves it alone.)
+  async createOffer() {
+    const id = ++offerSeq
+    offerers.set(id, this)
+    return { type: 'offer', sdp: `${sdpFor(this.fingerprint)}a=x-fake-offerer:${id}\r\n` }
+  }
   async createAnswer() { return { type: 'answer', sdp: sdpFor(this.fingerprint) } }
   async setLocalDescription() {}
   async setRemoteDescription(desc) {
     if (desc.type === 'offer') {
-      const offerer = lastOfferer
+      const offerer = offerers.get(Number(/a=x-fake-offerer:(\d+)/.exec(desc.sdp)?.[1]))
       this.offerer = offerer
       for (const oc of offerer.channels) {
         const mine = new FakeDC(oc.label)
@@ -269,10 +279,12 @@ describe('identity binding: WebRTCPeerConnection', () => {
     const a = new WebRTCPeerConnection({ localPodId: ida.podId, remotePodId: idb.podId, iceServers: [], identity: ida })
     const b = new WebRTCPeerConnection({ localPodId: idb.podId, remotePodId: impostor.podId, iceServers: [], identity: idb })
     const errB = []
-    b.onError((e) => errB.push(e.message))
+    // Wait for the report of the failure itself, not for "closed" (which any other path could also reach first).
+    const failedB = new Promise((resolve) => b.onError((e) => { errB.push(e.message); resolve() }))
     const closedB = new Promise((resolve) => b.onStateChange((s) => s === 'closed' && resolve()))
     const offer = await a.createOffer()
     await a.handleAnswer(await b.handleOffer(offer))
+    await failedB
     await closedB
     assert.match(errB.join(), /wrong-pod-id/)
     assert.equal(b.bindingFailure, 'wrong-pod-id')

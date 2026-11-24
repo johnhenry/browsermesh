@@ -199,9 +199,10 @@ describe('routed envelopes are signed by the originator', () => {
     w.c.on('mesh-routing:message', (m) => delivered.push(m));
     // Alice's own envelope, captured on its way to bob, then altered before bob sees it.
     const good = next(w.b.on, 'mesh-routing:forward');
+    const arrived = next(w.c.on, 'mesh-routing:message');
     w.a.api.route(w.carol.podId, { n: 1 });
     await good;
-    await settle();
+    await arrived; // carol verifies asynchronously: wait for the event, not for a number of turns
     assert.equal(delivered.length, 1);
 
     const sent = [];
@@ -235,8 +236,11 @@ describe('routed envelopes are signed by the originator', () => {
     const w = await setup({ bobService: true, alice: { maxTTL: 1 } });
     const delivered = [];
     w.c.on('mesh-routing:message', (m) => delivered.push(m));
+    const reasons = dropsOf(w.b.on);
     w.a.api.route(w.carol.podId, { n: 1 });
+    await reasons.waitFor(1); // bob verifies, decrements the ttl to 0 and says so
     await settle();
+    assert.deepEqual(reasons, ['ttl-expired']);
     assert.deepEqual(delivered, []);
   });
 
@@ -261,7 +265,8 @@ describe('older peers and unsigned envelopes', () => {
       w.nodeB.inject(w.carol.podId, { type: 'mesh-routing', from: w.alice.podId, to: w.carol.podId, ttl: 5, message: 'old style', path: [w.alice.podId] });
     }
     const reasons = dropsOf(strict.c.on);
-    await settle();
+    await reasons.waitFor(1);
+    assert.deepEqual(reasons, ['unsigned']);
     assert.deepEqual(strict.delivered, []);
     assert.deepEqual(lax.delivered.map((m) => [m.message, m.authenticated]), [['old style', false]]);
     void reasons;

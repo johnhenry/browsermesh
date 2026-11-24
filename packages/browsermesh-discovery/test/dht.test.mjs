@@ -311,14 +311,20 @@ describe('DhtNode', () => {
     assert.equal(node.get('nope'), undefined)
   })
 
-  it('get respects TTL expiry', () => {
-    // Store with very short TTL
-    node.store('ttl-key', 'value', 1)
-    // Simulate time passing by directly storing with old timestamp
-    // We need to wait or manipulate — for testing, store directly
-    // Actually store returns immediately, so we rely on the store's storedAt
-    // Let's just verify the store/get flow works
-    assert.equal(node.get('ttl-key'), 'value')
+  it('get respects TTL expiry (injected clock, no waiting)', () => {
+    let t = 1_000
+    const timed = new DhtNode({ localId: 'node-T', now: () => t })
+    timed.store('ttl-key', 'value', 50)
+    timed.store('forever', 'v') // ttl 0: no expiry
+    assert.equal(timed.get('ttl-key'), 'value')
+    t += 50 // exactly at the TTL: still valid (expired only after storedAt + ttl)
+    assert.equal(timed.get('ttl-key'), 'value')
+    assert.equal(timed.findValue('ttl-key').found, true)
+    t += 1
+    assert.equal(timed.findValue('ttl-key').found, false)
+    assert.equal(timed.get('ttl-key'), undefined)
+    t += 1_000_000
+    assert.equal(timed.get('forever'), 'v')
   })
 
   it('bootstrap adds seed contacts to routing table', () => {

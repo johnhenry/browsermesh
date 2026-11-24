@@ -1100,9 +1100,10 @@ describe('PaymentRouter escrow sweeper', () => {
 
   it('periodically expires timed-out escrows', async () => {
     const escrow = router.getEscrow().create('pod-a', 'pod-b', 5, { timeout: 10 });
-    router.startEscrowSweeper(20);
-
-    await new Promise((resolve) => setTimeout(resolve, 60));
+    // Wait for the sweep that expires it (the callback), not for a fixed time.
+    await new Promise((resolve) => {
+      router.startEscrowSweeper(20, (expired) => { if (expired.length) resolve() });
+    });
 
     const got = router.getEscrow().get(escrow.escrowId);
     assert.equal(got.status, 'expired');
@@ -1111,12 +1112,12 @@ describe('PaymentRouter escrow sweeper', () => {
   it('calls onExpired with the expired records', async () => {
     router.getEscrow().create('pod-a', 'pod-b', 5, { timeout: 10 });
     const calls = [];
-    router.startEscrowSweeper(20, (expired) => calls.push(expired));
-
-    await new Promise((resolve) => setTimeout(resolve, 60));
+    await new Promise((resolve) => {
+      router.startEscrowSweeper(20, (expired) => { calls.push(expired); if (expired.length) resolve() });
+    });
 
     assert.ok(calls.length >= 1);
-    assert.equal(calls[0][0].status, 'expired');
+    assert.equal(calls.at(-1)[0].status, 'expired');
   });
 
   it('does not call onExpired when nothing expired', async () => {
