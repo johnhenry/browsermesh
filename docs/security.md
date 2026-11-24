@@ -279,6 +279,45 @@ key and host proof are readable by the relay, and are not secrets); a
 compromised peer; availability; anything forwarded onward over a link that is
 not sealed; peers that do not run it.
 
+### wsh services on a pod
+
+Package: `browsermesh-transport` (`WshServices`, `wsh-services.mjs`). Design:
+[`design/wsh-services-on-a-pod.md`](design/wsh-services-on-a-pod.md). A stock wsh client
+(`wsh`, `wsh-mcp`, `WshClient`) may use a pod's **objects** and **MCP tools**. **Off:**
+nothing in the repository constructs it; a pod that does not call `new WshServices(...).start()`
+has nothing listening at the services rendezvous id, and `start()` refuses unless the embedder
+gives an indicator or says `unattended: true`.
+
+- **Who may log in.** A key whose pod id (the hash of the key wsh authenticated) holds the
+  registry grant `wsh-services:open`. Nothing in a key line, an `authorized_keys` option or a
+  capability string is consulted (the host has no `authorizedKeys`), the user name is a label, and
+  an unknown key is refused at login, before any channel exists. A mesh grant (`mesh:link:connect`)
+  is not a services grant. The session is sealed (`sealSession: 'require'`, login bound to the host
+  key); the host key is the pod key, so a client pins the pod by its pod id; a plain client is served
+  nothing.
+- **What it can reach.** Only the two rpc channels `mcp` and `wsh-objects`, each needing its channel
+  grant (`protocol:mcp:open`, `protocol:objects:open`), then per request `mcp:<tool>:list|call` and
+  `objects:<root>:get|call|set|on` from the registry, on top of the page's own allow-lists. The host
+  is a memory host given nothing else: no exec, pty, files, targets, endpoints or gateway exist on
+  it, and the tests assert each is refused and that the features it states are the sealing and the
+  two protocols only. The same grant strings as the mesh uses, so one set of grants per pod id.
+- **Revocation and expiry.** Asked on every request; the registry's access-change event (revoke,
+  remove, update, expiry) ends the session of a pod that lost `wsh-services:open` (the client is told
+  why first), and a revoked channel grant closes that channel.
+- **The page decides.** A consequential tool asks the pod's own `prompt`; the wsh client cannot
+  answer it. The embedder's `indicator` is told of each session and can stop it (and refuse that key
+  until restart); `maxSessions` (4) bounds sessions; the tool bridge's and the object layer's limits
+  apply; every session and refusal is an audit event naming the pod id.
+- **Not protected.** A key that holds grants can do what they say (a key hash is not a person); a
+  tool or an object path does what it does with the page user's session; the relay sees who dials
+  which rendezvous id and when (an impostor can occupy a waiting slot, not become the pod). Whether
+  the released CLIs can dial a pipe relay URL is wsh's matter: the tests use the JavaScript
+  `WshClient`.
+- **Verified.** Unit, with the real `WshClient` over the in-process pipe relay (allowed and refused
+  keys, a grant limited to one root and one tool, revocation mid-session, default off, nothing but
+  objects and MCP, each rule broken once); with the real `PeerRegistry` (`browsermesh-apps`
+  `test/wsh-services.test.mjs`). Not in a browser; the released CLIs were not run.
+
 ### Multi-hop forwarding
 
 End to end protection ends at the pod that terminates a link. If B receives
