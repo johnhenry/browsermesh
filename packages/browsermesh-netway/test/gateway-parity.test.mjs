@@ -4,12 +4,15 @@
  * equal wsh's.
  *
  * - Opcodes: `MSG` is a public export of `@johnhenry/wsh`, compared directly.
- * - Error codes: as of wsh 0.48 the table (`GATEWAY_FAIL`) is a constant inside the host's
- *   source and is not exported. This test uses the public export when a wsh release has one
- *   (`@johnhenry/wsh/server`), and otherwise reads the same constant from the installed
- *   package's own source file. The behaviour of each code that a host can be made to
- *   produce is also checked against a real host in gateway-real-wsh.test.mjs.
- *   If neither source is reachable the test skips and says why.
+ * - Error codes: `GATEWAY_FAIL`, `GATEWAY_FAIL_TABLE` and `gatewayFailName` are public exports of
+ *   `@johnhenry/wsh` (0.49 and later). There is no other source and no fallback: where wsh is too
+ *   old to export them this fails, it does not read the file. The behaviour of each code that a
+ *   host can be made to produce is also checked against a real host in gateway-real-wsh.test.mjs.
+ *
+ * Code 5 is the one number with two meanings: wsh documents it as "timeout" in the Node gateway
+ * and as "gateway disabled" in the Rust wsh-server. netway has one name for it (`TIMEOUT`) and the
+ * code alone cannot say which happened; `GatewayBackend` puts the host's own message beside the
+ * code in the error it throws, which is what tells them apart.
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
@@ -17,20 +20,8 @@ import { GATEWAY_ERROR } from '../src/constants.mjs';
 
 let wsh = null;
 try { wsh = await import('@johnhenry/wsh'); } catch { /* skipped below */ }
-
-/** wsh's GatewayFail table and where it came from, or `{ reason }` when it cannot be reached. */
-async function wshGatewayFailTable() {
-  try {
-    const server = await import('@johnhenry/wsh/server');
-    if (server.GATEWAY_FAIL) return { table: server.GATEWAY_FAIL, from: '@johnhenry/wsh/server' };
-  } catch { /* no server entry: fall through */ }
-  try {
-    const entry = import.meta.resolve('@johnhenry/wsh/server');
-    const core = await import(new URL('./gateway-core.mjs', entry).href);
-    if (core.GATEWAY_FAIL) return { table: core.GATEWAY_FAIL, from: 'server/gateway-core.mjs of the installed package' };
-  } catch { /* not found */ }
-  return { reason: 'the installed @johnhenry/wsh exports no GatewayFail table and its source file is not reachable' };
-}
+const skip = wsh?.GATEWAY_FAIL_TABLE ? false : '@johnhenry/wsh 0.49 or later (which exports GATEWAY_FAIL_TABLE) is not installed';
+if (skip && process.env.REQUIRE_WSH_PARITY) throw new Error(`REQUIRE_WSH_PARITY is set but ${skip}`);
 
 /** The opcodes gateway-backend.mjs sends and handles, by wsh's names. */
 const BACKEND_OPCODES = Object.freeze({
@@ -51,17 +42,40 @@ const BACKEND_OPCODES = Object.freeze({
   GATEWAY_DATA: 0x7e,
 });
 
-describe('netway and wsh agree on the gateway wire values', { skip: wsh ? false : '@johnhenry/wsh is not installed' }, () => {
+describe('netway and wsh agree on the gateway wire values', { skip }, () => {
   it('every gateway opcode netway writes has the value wsh gives that name', () => {
     for (const [name, value] of Object.entries(BACKEND_OPCODES)) {
       assert.equal(wsh.MSG[name], value, `MSG.${name}`);
     }
   });
 
-  it('GATEWAY_ERROR equals wsh\'s GatewayFail table, name for name', async (t) => {
-    const found = await wshGatewayFailTable();
-    if (found.reason) { t.skip(found.reason); return; }
-    assert.deepEqual({ ...GATEWAY_ERROR }, { ...found.table }, `compared with ${found.from}`);
+  it('GATEWAY_ERROR equals wsh\'s GATEWAY_FAIL, name for name and number for number', () => {
+    assert.deepEqual({ ...GATEWAY_ERROR }, { ...wsh.GATEWAY_FAIL });
+  });
+
+  it('and equals what wsh\'s table lists, every code once', () => {
+    const fromTable = Object.fromEntries(wsh.GATEWAY_FAIL_TABLE.map(({ name, code }) => [name, code]));
+    assert.deepEqual({ ...GATEWAY_ERROR }, fromTable);
+    assert.equal(new Set(wsh.GATEWAY_FAIL_TABLE.map((row) => row.code)).size, wsh.GATEWAY_FAIL_TABLE.length);
+    for (const row of wsh.GATEWAY_FAIL_TABLE) assert.ok(row.meaning.length > 0, `${row.name} has a meaning`);
+  });
+
+  it('wsh names every code netway names the same way (gatewayFailName)', () => {
+    for (const [name, code] of Object.entries(GATEWAY_ERROR)) assert.equal(wsh.gatewayFailName(code), name);
+    assert.equal(wsh.gatewayFailName(99), null);
+  });
+
+  it('a code wsh gives a second name has ONE name here, and that is written down: 5 is timeout or "gateway disabled"', () => {
+    const twoNames = wsh.GATEWAY_FAIL_TABLE.filter((row) => row.alsoSentAs?.length);
+    // If wsh ever gives another code a second meaning, this fails and the docs of GATEWAY_ERROR must say so.
+    assert.deepEqual(twoNames.map((row) => [row.name, row.code, ...row.alsoSentAs]), [['TIMEOUT', 5, 'GATEWAY_DISABLED']]);
+    assert.equal(GATEWAY_ERROR.TIMEOUT, 5);
+    assert.equal(Object.values(GATEWAY_ERROR).filter((code) => code === 5).length, 1, 'no second name for 5 in netway: the host\'s message tells them apart');
+  });
+
+  it('the one code a client gives its own error without asking the host (UNSUPPORTED, 0) is not a wire code and is not in GATEWAY_ERROR', () => {
+    assert.deepEqual({ ...wsh.GATEWAY_FAIL_LOCAL }, { UNSUPPORTED: 0 });
+    assert.equal(Object.values(GATEWAY_ERROR).includes(0), false);
   });
 
   it('the table has distinct, positive integer codes', () => {

@@ -1,4 +1,4 @@
-import { test, expect, until, connectRtc } from './fixtures.mjs'
+import { test, expect, until, connectRtc, POD_IDS } from './fixtures.mjs'
 
 // wsh's remote-object layer over a protocol channel (@johnhenry/browsermesh-objects)
 // riding the real WebRTC data channel between two browsers: real SDP, ICE, DTLS
@@ -6,20 +6,20 @@ import { test, expect, until, connectRtc } from './fixtures.mjs'
 //
 // Bob hosts one root, `app`, through his own PeerRegistry (default deny); alice
 // opens it. The peer the host judges is the one the data channel is bound to
-// ('pod-alice' here), never a field of a message. The page runs wsh's
+// (`POD_IDS.a` here), never a field of a message. The page runs wsh's
 // transport-neutral object core (the harness serves it from node_modules).
 
 const OPEN = 'protocol:objects:open'
 const UNAUTHORIZED = -32003
 
 async function serveAndConnect(open, servers, limits = {}, layer = {}) {
-  const { alice, bob } = await connectRtc(open, servers.a)
+  const { alice, bob } = await connectRtc(open, servers.a, POD_IDS)
   await bob.evaluate(([l, y]) => window.bm.objServe(l, y), [limits, layer])
   await alice.evaluate((l) => window.bm.objClient(l), limits)
   return { alice, bob }
 }
-const grant = (bob, scopes) => bob.evaluate((s) => window.bm.objGrant('pod-alice', s), scopes)
-const revoke = (bob, scopes) => bob.evaluate((s) => window.bm.objRevoke('pod-alice', s), scopes)
+const grant = (bob, scopes) => bob.evaluate(([p, s]) => window.bm.objGrant(p, s), [POD_IDS.a, scopes])
+const revoke = (bob, scopes) => bob.evaluate(([p, s]) => window.bm.objRevoke(p, s), [POD_IDS.a, scopes])
 const run = (alice, op, ...args) => alice.evaluate(([o, a]) => window.bm.objDo(o, ...a), [op, args])
 
 test('objects over real WebRTC: default deny, then each operation needs its own action, bytes cross in chunks', async ({ servers, open }) => {
@@ -29,7 +29,7 @@ test('objects over real WebRTC: default deny, then each operation needs its own 
   expect((await alice.evaluate(() => window.bm.objOpen())).error.code).toBe(UNAUTHORIZED)
 
   await grant(bob, [OPEN, 'objects:app:get', 'objects:app:call'])
-  expect(await alice.evaluate(() => window.bm.objOpen())).toEqual({ ok: true, peer: 'pod-bob', rootNames: ['app'] })
+  expect(await alice.evaluate(() => window.bm.objOpen())).toEqual({ ok: true, peer: POD_IDS.b, rootNames: ['app'] })
 
   expect(await run(alice, 'title')).toEqual({ value: 'inbox' })
   expect(await run(alice, 'inc', 4)).toEqual({ value: 7 })

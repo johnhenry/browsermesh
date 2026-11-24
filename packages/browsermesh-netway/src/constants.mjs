@@ -37,7 +37,10 @@ export const DEFAULTS = Object.freeze({
  * @property {number} HOST_UNREACHABLE - The remote host could not be reached on the network (code 2).
  * @property {number} DNS_FAILED - DNS resolution failed for the requested hostname (code 3).
  * @property {number} POLICY_DENIED - The gateway's server-side policy blocked the request (code 4).
- * @property {number} TIMEOUT - The operation timed out before completing (code 5).
+ * @property {number} TIMEOUT - The operation timed out before completing (code 5). The one number with two meanings:
+ *   the Node gateway sends 5 for a timeout, the Rust wsh-server sends 5 when its gateway is disabled (wsh's
+ *   `GATEWAY_FAIL_TABLE` says so). The code cannot tell them apart; the host's message, which `GatewayBackend` puts beside the
+ *   code in the error it throws, does.
  * @property {number} CLOSED - The gateway connection was closed before the operation finished (code 6).
  * @property {number} QUEUE_FULL - The gateway's internal queue is full and cannot accept more work (code 7).
  */

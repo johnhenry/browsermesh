@@ -95,7 +95,7 @@ describeIfReal('MCP over the mesh: alice calls bob\'s tools over real WebRTC', (
         { name: 'lookup', description: 'reads', annotations: { readOnlyHint: true }, execute: async ({ q }) => { ran.push(['lookup', q]); return `found ${q}` } },
         { name: 'transfer', description: 'moves money', annotations: {}, execute: async ({ q }) => { ran.push(['transfer', q]); return `moved ${q}` } },
       ],
-      prompt: async (call, who) => { asked.push({ name: call.name, who: who.fingerprint }); return true },
+      prompt: async (call, who) => { asked.push({ name: call.name, who: who.podId }); return true },
     })
   })
 

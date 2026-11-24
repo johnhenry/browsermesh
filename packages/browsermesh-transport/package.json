@@ -30,7 +30,7 @@
   },
   "devDependencies": {
     "@johnhenry/browsermesh-pod": "^0.5.0",
-    "@johnhenry/wsh": "^0.48.0",
+    "@johnhenry/wsh": "^0.50.0",
     "node-datachannel": "^0.33.4"
   },
   "scripts": {

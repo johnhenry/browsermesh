@@ -4,8 +4,10 @@ Two systems say what a holder may do, in strings that look alike.
 
 - **wsh** (a key's `capabilities="..."` in `authorized_keys`, or what an `authorize()` returns): a default-deny list
   such as `objects:window:get,mcp:search,exec`. Its grammar, evaluation order and test vectors are wsh's
-  (`spec/capabilities.md` and `spec/capabilities.vectors.json` in the `@johnhenry/wsh` repository; the vectors ship
-  in the package from the release that introduced them).
+  (`spec/capabilities.md` and `spec/capabilities.vectors.json`, shipped in the `@johnhenry/wsh` package since 0.49.0 and
+  importable as `@johnhenry/wsh/spec/capabilities.vectors.json`; the notation as a pure function is
+  `@johnhenry/wsh/capabilities`: `permits`, `checkCapabilities`, `parseCapabilityList`). Nothing of that is mirrored here
+  any more: the strings and the table below say how the registry relates to it, and the vectors are run, not copied.
 - **browsermesh** (`PeerRegistry.grantCapabilities` / `checkAccess`, `MeshACL`, `matchScope`): scopes
   `<namespace>:<resource>:<action>` compared segment by segment, a missing or empty segment counting as `*`.
 
@@ -62,10 +64,16 @@ that `get` is not `call` is not `set` is not `on`, an empty list permitting noth
 ## Running the vectors
 
 ```
-npm test                                       # runs it when the installed @johnhenry/wsh ships the vectors
-REQUIRE_WSH_VECTORS=1 npm test                 # fail instead of skipping when they are missing
+npm test                                       # runs it from the installed @johnhenry/wsh (0.49.0 or later)
 WSH_CAPABILITY_VECTORS=/path/capabilities.vectors.json npm test --workspace=@johnhenry/browsermesh-apps
 ```
+
+The apps package's `npm test` sets `REQUIRE_WSH_VECTORS=1`, so a wsh that does not ship the vectors is a failure, not a
+skip (CI runs it). Against wsh 0.49.0's vectors (notation version 1, 145 requests and 32 lists, of which the shared forms
+for the Node host class are run) the registry agrees on every vector except the three listed in the test, all described
+above: **`objects: that operation allows walking toward something`** (item 2), **`rpc: has no wildcard form`** (item 3) and
+**`objects: a path is not a root`** (item 4). No new disagreement appeared with the shipped vectors. Listing and running a
+tool are mapped apart (`mcp:TOOL:list`, `mcp:TOOL:call`), as wsh 0.49's `mcp-tool` and `mcp-call` requests are.
 
 A known disagreement is listed in the test with the reason; the test fails if a listed one starts to agree (the entry
 is stale) and if an unlisted one appears.

@@ -15,14 +15,19 @@
  *    object layer). Each needs its channel grant (`protocol:mcp:open`, `protocol:objects:open`) and
  *    asks the registry on EVERY request (`mcp:<tool>:list|call`, `objects:<root>:get|call|set|on`);
  *  - ends a session when the registry says the pod's access changed and `wsh-services:open` is gone;
- *  - audits every session and every refusal, and tells an indicator about each session.
+ *  - audits every session and every refusal, and tells an indicator about each session. A session
+ *    begins when wsh says it is SEALED (`onSealed`), not at login: on a host that requires sealing a
+ *    login is told so (`who.sealRequired`), and a plain client that passes it is served nothing and is
+ *    never listed, audited as a session or shown (its refusal is audited as a refusal).
  *
- * Design and threat model: docs/design/wsh-services-on-a-pod.md. `@johnhenry/wsh` (>= 0.48) is loaded
- * lazily on `start()`.
+ * Design and threat model: docs/design/wsh-services-on-a-pod.md. `@johnhenry/wsh` (>= 0.49) is loaded
+ * lazily on `start()`. The embedder's `indicator` is wsh's `{ connected, disconnected }` callbacks shape;
+ * a page that wants wsh's own badge can pass `createPageIndicator(window, { name })`'s `show`/`hide`
+ * through it (`connected: (who, control) => badge.show(who, control.stop)`, `disconnected: (who) => badge.hide(who)`).
  */
 
 import { encodeBase64url } from '@johnhenry/browsermesh-primitives';
-import { WshLinkError, resolveCredential, fingerprintToPodId } from './wsh-links.mjs';
+import { WshLinkError, resolveCredential, fingerprintToPodId, podIdToFingerprint } from './wsh-links.mjs';
 
 const RENDEZVOUS_LABEL = 'browsermesh-wsh-services/1:';
 
@@ -51,9 +56,6 @@ const MCP_RPC = 'mcp';
 const OBJECTS_RPC = 'wsh-objects';
 // Tool and root names that can sit in a scope: no ':' and no '*', so a name can never widen a grant.
 const SCOPE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
-const UNAUTHORIZED = -32003;
-const INVALID_PARAMS = -32602;
-const STREAM_LIMIT = -32002;
 /** wsh's operation kinds, as the registry action each needs. */
 const OBJECT_ACTION = Object.freeze({ get: 'get', describe: 'get', snapshot: 'get', call: 'call', construct: 'call', set: 'set', on: 'on' });
 
@@ -73,12 +75,16 @@ let wshModule = null;
 async function loadWsh() {
   if (wshModule) return wshModule;
   try {
-    const [memory, page, main] = await Promise.all([import('@johnhenry/wsh/memory'), import('@johnhenry/wsh/page'), import('@johnhenry/wsh')]);
-    if (typeof page.webmcpTools !== 'function' || typeof page.exposeObjects !== 'function') throw new Error('this @johnhenry/wsh has no webmcpTools / exposeObjects (needs 0.48 or later)');
-    wshModule = { createMemoryHost: memory.createMemoryHost, webmcpTools: page.webmcpTools, exposeObjects: page.exposeObjects, WEBMCP_DEFAULT_LIMITS: page.WEBMCP_DEFAULT_LIMITS, RpcError: main.RpcError };
+    const [memory, page, duplex] = await Promise.all([import('@johnhenry/wsh/memory'), import('@johnhenry/wsh/page'), import('@johnhenry/wsh/duplex')]);
+    // 0.50: `authorizesItself` (the registry, not a key capability, opens the two channels), `onSealed` and the per-tool `mcp-call` hook
+    // (0.49), and `@johnhenry/wsh/duplex` (a session over a mesh channel).
+    if (typeof page.webmcpTools !== 'function' || typeof page.exposeObjects !== 'function' || typeof duplex.serveWshOverDuplex !== 'function') {
+      throw new Error('this @johnhenry/wsh is older than 0.50');
+    }
+    wshModule = { createMemoryHost: memory.createMemoryHost, webmcpTools: page.webmcpTools, exposeObjects: page.exposeObjects, serveWshOverDuplex: duplex.serveWshOverDuplex };
     return wshModule;
   } catch (cause) {
-    throw new WshLinkError('WSH_UNAVAILABLE', `wsh services need @johnhenry/wsh 0.48 or later: ${cause?.message ?? cause}`, { cause });
+    throw new WshLinkError('WSH_UNAVAILABLE', `wsh services need @johnhenry/wsh 0.50 or later: ${cause?.message ?? cause}`, { cause });
   }
 }
 
@@ -96,7 +102,39 @@ function pipeUrl(relay, id, role) {
   return u.toString();
 }
 
-const DEFAULT_RECONNECT = Object.freeze({ baseMs: 250, maxMs: 10_000 });
+/**
+ * Dial a pod's wsh services over a mesh protocol channel, with the real wsh client: the pod is the host and its pod id is the host
+ * key, so the client pins it (`expectHostKey` is the peer's fingerprint; naming another is refused). The session is sealed and the
+ * login is bound to the host key (`connectWshOverDuplex`'s defaults).
+ * @param {object} service the api of `attachService(node, undefined, createMeshProtocolService())`
+ * @param {string} peer the pod id of the pod that serves the services
+ * @param {object} credentials `connectWshOverDuplex`'s: `{ username, keyPair | signer, timeout }`
+ * @param {{ protocol?: string, signal?: AbortSignal, timeoutMs?: number }} [options]
+ * @returns the `connectWshOverDuplex` result: `{ client, connected, close() }` (`connected` has resolved)
+ */
+export async function connectWshServicesOverMesh(service, peer, credentials = {}, { protocol = 'wsh', signal, timeoutMs } = {}) {
+  const api = service?.api && typeof service.api.openProtocol === 'function' ? service.api : service;
+  if (typeof api?.openProtocol !== 'function') throw new TypeError('connectWshServicesOverMesh: a protocol service is needed');
+  const pin = podIdToFingerprint(peer);
+  if (credentials.expectHostKey !== undefined && credentials.expectHostKey !== pin) throw new TypeError('connectWshServicesOverMesh: the host key of a pod is its pod id; another expectHostKey cannot be right');
+  if (credentials.trustOnFirstUse || credentials.allowUnsealed) throw new TypeError('connectWshServicesOverMesh: the pod is pinned and the session is sealed; neither can be lifted here');
+  const { connectWshOverDuplex } = await import('@johnhenry/wsh/duplex').catch((cause) => { throw new WshLinkError('WSH_UNAVAILABLE', `wsh over a mesh channel needs @johnhenry/wsh 0.50 or later: ${cause?.message ?? cause}`, { cause }); });
+  let conn = null;
+  const held = [];
+  const deliver = (message) => { if (message instanceof Uint8Array) conn.receive(message); else conn.end('not bytes'); };
+  // The host speaks first: what arrives before the client exists is held, in order.
+  const channel = await api.openProtocol(peer, protocol, { signal, timeoutMs, setup: (ch) => { ch.onMessage((m) => { if (conn) deliver(m); else held.push(m); }); } });
+  conn = connectWshOverDuplex(
+    { send: (bytes) => channel.send(bytes), close: (reason) => { try { channel.close(reason); } catch { /* already closed */ } }, maxMessageBytes: channel.maxMessageBytes },
+    { ...credentials, expectHostKey: pin },
+  );
+  channel.onClose(() => conn.end('channel closed'));
+  for (const m of held.splice(0)) deliver(m);
+  try { await conn.connected; } catch (e) { await conn.close().catch(() => {}); throw e; }
+  return conn;
+}
+
+const DEFAULT_RECONNECT =Object.freeze({ baseMs: 250, maxMs: 10_000 });
 
 /**
  * @typedef {object} WshServicesOptions
@@ -147,6 +185,10 @@ export class WshServices {
   /** @type {Set<object>} */
   #sessions = new Set();
   #blocked = new Set();
+  /** Logins that have passed but whose session wsh has not sealed yet: not sessions (not listed, audited or shown). */
+  #unsealed = new Set();
+  /** Mesh channels being served (see `serveChannel`). */
+  #channels = new Set();
   #pendingReasons = new Map();
 
   /** @param {WshServicesOptions} opts */
@@ -217,6 +259,8 @@ export class WshServices {
     for (const t of this.#slotRetry.values()) clearTimeout(t);
     this.#slotRetry.clear();
     for (const session of [...this.#sessions]) await this.#end(session, 'stopped', 'the services were stopped');
+    for (const duplex of [...this.#channels]) { try { duplex.close(); } catch { /* already closed */ } }
+    this.#channels.clear();
     for (const set of this.#slots.values()) {
       for (const slot of set) { try { slot.host?.close(); } catch { /* already closed */ } try { slot.ws?.close(); } catch { /* already closed */ } }
       set.clear();
@@ -264,8 +308,7 @@ export class WshServices {
         ...(mcp.window?.setTimeout ? {} : { timers: mcp.timers ?? realmTimers() }),
         onCall: (e) => this.#audit('call', { ...e, podId: WshServices.#podIdOf(e.who?.fingerprint) }),
       });
-      const maxCallsPerMinute = mcp.limits?.maxCallsPerMinute ?? this.#wsh.WEBMCP_DEFAULT_LIMITS.maxCallsPerMinute;
-      this.#mcp = { handler, maxCallsPerMinute };
+      this.#mcp = { handler };
     }
     if (objects) {
       const handler = exposeObjects({
@@ -289,64 +332,39 @@ export class WshServices {
     }
   }
 
-  /** The rpc handler of the `mcp` channel: the channel grant, then wsh's bridge behind per-tool grants. */
+  /**
+   * The rpc handler of the `mcp` channel: wsh's bridge, behind the registry. The bridge asks `permits` for each tool, and says which
+   * it is doing: listing (`mcp-tool`) or running (`mcp-call`), so each is its own grant (`mcp:<tool>:list`, `mcp:<tool>:call`) with
+   * no wrapper around the bridge. The channel grant and `wsh-services:open` are asked again at the same moments.
+   */
   #mcpHandler() {
-    const { RpcError } = this.#wsh;
-    const { handler, maxCallsPerMinute } = this.#mcp;
-    return (channel, ctx = {}) => {
+    const { handler } = this.#mcp;
+    const scoped = (channel, ctx = {}) => {
       const podId = WshServices.#podIdOf(ctx.fingerprint);
-      const starts = [];
       const stillOpen = () => {
         if (this.#can(podId, ...WSH_SERVICES_GRANTS.mcp) && this.#can(podId, ...WSH_SERVICES_GRANTS.open)) return true;
         void channel.close('access revoked');
         return false;
       };
-      const intercept = {
-        'tools/list': async (_params, _rpc, inner) => {
-          if (!stillOpen()) throw new RpcError(UNAUTHORIZED, 'access revoked');
-          const result = await inner();
-          return { ...result, tools: (result?.tools ?? []).filter((t) => SCOPE_NAME.test(t.name) && this.#can(podId, `mcp:${t.name}`, 'list')) };
-        },
-        'tools/call': async (params, _rpc, inner) => {
-          if (!stillOpen()) throw new RpcError(UNAUTHORIZED, 'access revoked');
-          // Counted whether or not the call is allowed, so a caller cannot probe names without bound.
-          const t = Date.now();
-          while (starts.length && t - starts[0] >= 60_000) starts.shift();
-          if (starts.length >= maxCallsPerMinute) throw new RpcError(STREAM_LIMIT, `refused: maxCallsPerMinute: more than ${maxCallsPerMinute} calls in a minute`, { limit: 'maxCallsPerMinute' });
-          starts.push(t);
-          const name = params?.name;
-          if (typeof name !== 'string' || !SCOPE_NAME.test(name) || !this.#can(podId, `mcp:${name}`, 'call')) {
-            this.#audit('tool-refused', { podId, name: typeof name === 'string' ? name.slice(0, 128) : undefined });
-            // The same answer as a tool that does not exist.
-            throw new RpcError(INVALID_PARAMS, `unknown tool: ${name}`);
-          }
-          const result = await inner();
-          return { ...result, _meta: { ...(result?._meta ?? {}), 'wsh/untrusted': true, 'browsermesh/untrusted': true } };
-        },
-      };
-      const guarded = {
-        get closed() { return channel.closed; },
-        onRequest: (method, h) => channel.onRequest(method, intercept[method] ? (params, rpc) => intercept[method](params, rpc, () => h(params, rpc)) : h),
-        onNotification: (method, h) => channel.onNotification(method, h),
-        notify: (method, params) => channel.notify(method, params),
-        close: (reason) => channel.close(reason),
-        get onClose() { return channel.onClose; },
-        set onClose(fn) { channel.onClose = fn; },
-      };
-      handler(guarded, {
+      if (!stillOpen()) { this.#audit('channel-refused', { podId, channel: MCP_RPC }); return; }
+      handler(channel, {
         user: ctx.user ?? null,
         fingerprint: ctx.fingerprint ?? null,
-        // The bridge asks this to decide what a session sees: a tool is visible to a pod with any scope on it.
-        permits: (request) => request?.kind === 'mcp-tool' && SCOPE_NAME.test(request.tool ?? '')
-          && (this.#can(podId, `mcp:${request.tool}`, 'list') || this.#can(podId, `mcp:${request.tool}`, 'call')),
+        permits: (request) => {
+          const action = request?.kind === 'mcp-call' ? 'call' : request?.kind === 'mcp-tool' ? 'list' : null;
+          return action !== null && SCOPE_NAME.test(request.tool ?? '') && stillOpen() && this.#can(podId, `mcp:${request.tool}`, action);
+        },
       });
     };
+    // The registry decides, not a capability on the key: wsh opens this channel for any key it let in, and `stillOpen()` is the channel grant.
+    scoped.authorizesItself = true;
+    return scoped;
   }
 
   /** The rpc handler of the `wsh-objects` channel: the channel grant, then wsh's object layer behind per-root grants. */
   #objectsHandler() {
     const { handler } = this.#objects;
-    return (channel, ctx = {}) => {
+    const opened = (channel, ctx = {}) => {
       const podId = WshServices.#podIdOf(ctx.fingerprint);
       if (!this.#can(podId, ...WSH_SERVICES_GRANTS.objects)) {
         this.#audit('channel-refused', { podId, channel: OBJECTS_RPC });
@@ -355,6 +373,9 @@ export class WshServices {
       }
       handler(channel, { user: ctx.user ?? null, fingerprint: ctx.fingerprint ?? null });
     };
+    // The registry decides (here and for every root and operation), not a capability on the key.
+    opened.authorizesItself = true;
+    return opened;
   }
 
   // -- Hosts: one per waiting half, so a session can be ended on its own ---------
@@ -371,6 +392,7 @@ export class WshServices {
       sealSession: 'require',
       requireChannelBinding: true,
       auth: (who) => this.#login(who, slot),
+      onSealed: () => this.#sealed(slot),
       // Only these rpc channels exist on this host: no exec, pty, fs, targets, endpoints or gateway.
       rpc,
       ...(this.#opts.rpcMaxInflight ? { rpcMaxInflight: this.#opts.rpcMaxInflight } : {}),
@@ -388,22 +410,48 @@ export class WshServices {
     if (!podId) return false;
     const refuse = (reason) => { this.#pendingReasons.set(who.fingerprint, reason); return false; };
     if (this.#stopped) return refuse('stopped');
+    // Over a mesh channel the peer is verified by the mesh: the key that logs in must be that peer's own (a login for someone else's key is a relayed one).
+    if (slot.peer !== undefined && podId !== slot.peer) return refuse('not-the-channel-peer');
     if (this.#blocked.has(podId)) return refuse('stopped-by-indicator');
-    if (this.#sessions.size >= this.#maxSessions) return refuse('too-many-sessions');
+    // A login that is waiting to be sealed holds a place too: the bound is on what could become a session.
+    if (this.#sessions.size + this.#unsealed.size >= this.#maxSessions) return refuse('too-many-sessions');
     if (!this.#can(podId, ...WSH_SERVICES_GRANTS.open)) return refuse('no-grant');
     // What wsh itself lets the key open: only the channels this pod's registry granted, and never anything else.
+    // The key names NO capability: it may do nothing at wsh's level except open the two handlers below, which authorize for themselves
+    // (`authorizesItself`, wsh 0.50): each asks the registry for its channel grant when it opens and for every tool or root after.
     const capabilities = [];
-    // (wsh's bridge wants `mcp:*` to open its channel at all; which tools, per request, is the registry's decision.)
-    if (this.#mcp && this.#can(podId, ...WSH_SERVICES_GRANTS.mcp)) capabilities.push(`rpc:${MCP_RPC}`, 'mcp:*');
-    if (this.#objects && this.#can(podId, ...WSH_SERVICES_GRANTS.objects)) capabilities.push(`rpc:${OBJECTS_RPC}`);
-    const session = { podId, fingerprint: who.fingerprint, username: String(who.username ?? ''), since: Date.now(), slot, ended: false };
+    const session = { podId, fingerprint: who.fingerprint, username: String(who.username ?? ''), since: Date.now(), slot, ended: false, sealed: false };
     slot.session = session;
+    // On a host that requires sealing a login is not yet a session that can do anything: it is listed, audited and shown once `onSealed`
+    // says the session is sealed (a plain client that passes login on such a host is served nothing and is never any of those).
+    if (who.sealRequired === true) this.#unsealed.add(session);
+    else this.#open(session);
+    return { capabilities };
+  }
+
+  /** wsh sealed this login's session: from here it is a session. */
+  #sealed(slot) {
+    const session = slot.session;
+    if (!session || session.ended || session.sealed) return;
+    this.#unsealed.delete(session);
+    if (this.#stopped || this.#blocked.has(session.podId) || !this.#can(session.podId, ...WSH_SERVICES_GRANTS.open)) {
+      // Taken away between login and sealing.
+      this.#audit('refused', { reason: this.#stopped ? 'stopped' : this.#blocked.has(session.podId) ? 'stopped-by-indicator' : 'no-grant', podId: session.podId, fingerprint: session.fingerprint });
+      session.ended = true;
+      try { slot.host?.close(); } catch { /* already closed */ }
+      try { slot.ws?.close(); } catch { /* already closed */ }
+      return;
+    }
+    this.#open(session);
+  }
+
+  #open(session) {
+    session.sealed = true;
     this.#sessions.add(session);
-    this.#audit('session-open', { podId, fingerprint: who.fingerprint, username: session.username });
+    this.#audit('session-open', { podId: session.podId, fingerprint: session.fingerprint, username: session.username });
     try {
       this.#opts.indicator?.connected({ username: session.username, fingerprint: session.fingerprint }, { stop: () => this.#stopSession(session) });
     } catch (e) { this.#log(`indicator.connected threw: ${e?.message ?? e}`); }
-    return { capabilities };
   }
 
   #onRefused({ reason, who, detail }) {
@@ -421,7 +469,7 @@ export class WshServices {
 
   /** The registry says a pod's access changed: end the sessions of pods that may no longer log in. */
   #recheck(podId) {
-    for (const session of [...this.#sessions]) {
+    for (const session of [...this.#sessions, ...this.#unsealed]) {
       if (podId !== undefined && session.podId !== podId) continue;
       if (this.#can(session.podId, ...WSH_SERVICES_GRANTS.open)) continue;
       void this.#end(session, 'revoked', 'access revoked');
@@ -432,6 +480,13 @@ export class WshServices {
     if (session.ended) return;
     session.ended = true;
     this.#sessions.delete(session);
+    if (!session.sealed) {
+      // A login that never became a session: nothing was audited or shown when it began, so nothing is when it ends.
+      this.#unsealed.delete(session);
+      try { session.slot.host?.close(); } catch { /* already closed */ }
+      try { session.slot.ws?.close(); } catch { /* already closed */ }
+      return;
+    }
     if (tell) {
       // Tell the client why, then end its session.
       await Promise.allSettled([
@@ -443,6 +498,48 @@ export class WshServices {
     try { session.slot.ws?.close(); } catch { /* already closed */ }
     this.#audit('session-close', { podId: session.podId, fingerprint: session.fingerprint, reason });
     try { this.#opts.indicator?.disconnected({ username: session.username, fingerprint: session.fingerprint }); } catch (e) { this.#log(`indicator.disconnected threw: ${e?.message ?? e}`); }
+  }
+
+  // -- A mesh protocol channel as the duplex ---------------------------------------
+
+  /**
+   * Serve ONE mesh protocol channel (its raw messages are the duplex of wsh's `serveWshOverDuplex`): the same host, the same sealed-only rule,
+   * the same grants and audit as over a pipe relay, plus: the key that logs in must be the channel's verified peer's own. Needs `start()`.
+   * @param {object} channel a protocol channel (`send`, `onMessage`, `onClose`, `close`, `peer`, `maxMessageBytes`)
+   */
+  serveChannel(channel) {
+    if (!this.#started || this.#stopped) throw new WshLinkError('WSH_CLOSED', 'serveChannel needs started wsh services');
+    if (typeof channel?.send !== 'function' || typeof channel.onMessage !== 'function' || typeof channel.peer !== 'string') throw new TypeError('serveChannel: a protocol channel is needed');
+    const slot = { ws: null, host: null, paired: true, session: null, peer: channel.peer };
+    const duplex = this.#wsh.serveWshOverDuplex(this.#makeHost(slot), {
+      // The channel's own credit is the backpressure: its send promise is returned, so the next message waits for it.
+      send: (bytes) => channel.send(bytes),
+      close: (reason) => { try { channel.close(reason); } catch { /* already closed */ } },
+      maxMessageBytes: channel.maxMessageBytes,
+    });
+    slot.host = null;
+    duplex.ready.then((host) => { slot.host = host; }, (e) => this.#log(`accept over a mesh channel failed: ${e?.message ?? e}`));
+    slot.ws = { close: () => duplex.close() };
+    channel.onMessage((message) => { if (message instanceof Uint8Array) duplex.receive(message); else duplex.end('not bytes'); });
+    this.#channels.add(duplex);
+    channel.onClose(() => {
+      this.#channels.delete(duplex);
+      duplex.end('channel closed');
+      if (slot.session) void this.#end(slot.session, 'closed');
+    });
+    return duplex;
+  }
+
+  /**
+   * Offer the services on a protocol of a mesh node's protocol service (`attachService(node, undefined, createMeshProtocolService()).api`).
+   * Who may open the channel is the protocol host's rule: `protocol:<name>:open` in the registry, default deny. Returns what stops it.
+   * @param {{ serveProtocol(name: string, handler: Function): () => void }} service
+   * @param {{ protocol?: string }} [options]
+   */
+  serveOnMesh(service, { protocol = 'wsh' } = {}) {
+    const api = service?.api && typeof service.api.serveProtocol === 'function' ? service.api : service;
+    if (typeof api?.serveProtocol !== 'function') throw new TypeError('serveOnMesh: a protocol service is needed');
+    return api.serveProtocol(protocol, (channel) => { this.serveChannel(channel); });
   }
 
   // -- Listening: waiting host halves ---------------------------------------------

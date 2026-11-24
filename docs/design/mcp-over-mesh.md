@@ -178,15 +178,18 @@ Why a package of its own rather than inside the objects adapter's package
 
 ## Seams (what changes when wsh grows)
 
-The bridge core in wsh 0.48 is `webmcpTools(options)`, an rpc handler
-`(channel, ctx)` for wsh's own `RpcChannel`. This package does not copy it: it
-gives it a small object with the part of `RpcChannel` it uses
-(`onRequest`, `onNotification`, `notify`, `close`, an `onClose` property)
-backed by the protocol channel, and wraps the registered handlers to apply the
-per-tool scopes and to carry errors. That adapter is `src/rpc-seam.mjs`; it is
-the only file that knows the bridge's shape, so a wsh release that exports the
-handler core for any duplex, with a transport-neutral caller identity, replaces
-that one file.
+The bridge core is `webmcpTools(options)`, an rpc handler `(channel, ctx)`. Since
+wsh 0.49 it is served over any duplex by `serveMcpOverDuplex(handler, { send, who,
+permits })` from `@johnhenry/wsh/page`, which this package calls once per channel
+with the protocol channel's own messages as the duplex (reliable, in order, with
+the channel's credit as backpressure). The far side speaks plain MCP JSON-RPC 2.0.
+The earlier adapter file (`rpc-seam.mjs`, a stand-in for wsh's `RpcChannel` that
+wrapped the handlers) is gone: the caller is wsh's identity object
+(`{ username: null, fingerprint, podId }`, `podId` the channel's verified peer),
+and listing and calling are scoped apart through wsh's `permits` hook
+(`{ kind: 'mcp-tool', op: 'list' }` and `{ kind: 'mcp-call', op: 'call' }`). The
+one thing this layer still does itself is end the mesh channel when wsh ends the
+session (wsh's session has no close callback), and add its own untrusted label.
 
 ## Not solved here
 

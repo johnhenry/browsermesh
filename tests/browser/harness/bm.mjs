@@ -643,7 +643,7 @@ const bm = {
       window,
       allow,
       ...(approve ? { approve } : {}),
-      prompt: async (call, who) => { st.asked.push({ name: call.name, input: call.input, who: who.fingerprint }); return st.answer },
+      prompt: async (call, who) => { st.asked.push({ name: call.name, input: call.input, who: who.podId }); return st.answer },
       onSession: (e) => st.sessions.push(e),
     })
   },

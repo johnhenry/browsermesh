@@ -103,14 +103,20 @@ does not finish in `bindTimeoutMs` is dropped.
 with `event` one of `session-open`, `session-close` (with the reason: `closed`,
 `revoked`, `stopped`, `ttl`), `refused` (with wsh's reason, or `no-grant`),
 `channel-refused` (which channel) and `revoked`. Every event names the pod id (never
-the user name alone).
+the user name alone). A session begins when wsh says it is **sealed** (`onSealed`,
+wsh 0.49), not at login: on this host a login is told `sealRequired`, so a plain
+client that passes login is served nothing and is neither listed, audited as a
+session nor shown to the indicator (its refusal is audited as `refused`). A login
+that is waiting to be sealed counts toward `maxSessions`.
 
 **10. An indicator when the pod runs in a page.** `start()` refuses to start unless
 the embedder passes an `indicator` (`{ connected(who, control), disconnected(who) }`, the
 same shape as wsh's page host, so the same badge code serves both; `control.stop()`
 ends that session and refuses that key until the services are restarted) or says
-`unattended: true`. wsh's page host draws its own badge, but that function is not
-exported by itself; the services do not fabricate DOM.
+`unattended: true`. wsh 0.49 exports its badge as `createPageIndicator(window, { name })`
+(`show(who, stop)`, `hide(who)`); a page passes
+`{ connected: (who, c) => badge.show(who, c.stop), disconnected: (who) => badge.hide(who) }`.
+The services themselves still do not fabricate DOM, so this removes no code here.
 
 ## What a stock client does
 
