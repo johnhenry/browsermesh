@@ -159,8 +159,10 @@ export class UnknownSchemeError extends NetwayError {
 /** Thrown when attempting to write to or send through a closed socket. */
 export class SocketClosedError extends NetwayError {
   readonly code: 'ECLOSED';
+  /** Why the socket was closed, when known. */
+  readonly reason: string | null;
 
-  constructor();
+  constructor(reason?: string);
 }
 
 /** Thrown when a gateway operation does not receive a response within the configured timeout. */
@@ -262,7 +264,7 @@ export class StreamSocket {
    * Write a chunk of data to the stream.
    *
    * @param data - The data to send.
-   * @throws SocketClosedError if the socket has already been closed.
+   * @throws SocketClosedError if the socket has already been closed (see `reason`).
    */
   write(data: Uint8Array): Promise<void>;
 
@@ -273,8 +275,10 @@ export class StreamSocket {
    * Close the socket. The peer can still read what it was already given, then
    * sees EOF; a write still waiting for credit rejects.
    * Calling close on an already-closed socket is a no-op.
+   *
+   * @param reason - Recorded as `closeReason` on both endpoints.
    */
-  close(): Promise<void>;
+  close(reason?: string): Promise<void>;
 
   /** Abort both directions; the peer's reads reject with `err`. */
   destroy(err?: Error): void;
@@ -293,6 +297,9 @@ export class StreamSocket {
 
   /** Whether this socket has been closed. */
   readonly closed: boolean;
+
+  /** Why the socket was closed (by either side), or null. */
+  readonly closeReason: string | null;
 
   /**
    * Create a connected pair of StreamSockets for in-memory communication.

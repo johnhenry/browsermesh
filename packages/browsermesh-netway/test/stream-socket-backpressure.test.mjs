@@ -191,6 +191,13 @@ describe('StreamSocket backpressure: older peers (no window) are served as befor
     await sock.close();
   });
 
+  it('close(reason) works on a socket whose buffers predate close reasons', async () => {
+    const sock = new StreamSocket({ inbound: new OldBuffer(), outbound: new OldBuffer() });
+    await sock.close('gone');
+    assert.equal(sock.closeReason, null, 'an old buffer cannot carry a reason');
+    assert.equal(sock.closed, true);
+  });
+
   it('an old sender that ignores credit can overrun a windowed receiver without loss', async () => {
     const inbound = new AsyncBuffer({ windowBytes: 4, highWaterMark: 1024 });
     const sock = new StreamSocket({ inbound, outbound: new OldBuffer() });
@@ -260,6 +267,45 @@ describe('StreamSocket half-close and close', () => {
     const [a] = StreamSocket.createPair();
     await a.close();
     assert.equal(await a.read(), null);
+  });
+});
+
+describe('StreamSocket close reasons', () => {
+  it('close() without a reason leaves closeReason null on both endpoints', async () => {
+    const [a, b] = StreamSocket.createPair();
+    await a.close();
+    assert.equal(a.closeReason, null);
+    assert.equal(b.closeReason, null);
+    await assert.rejects(() => b.write(new Uint8Array(1)), (e) => e.name === 'SocketClosedError' && e.reason === null);
+  });
+
+  it('close(reason) is recorded on both endpoints and carried by later write errors', async () => {
+    const [a, b] = StreamSocket.createPair();
+    await a.close('access revoked');
+    assert.equal(a.closeReason, 'access revoked');
+    assert.equal(b.closeReason, 'access revoked');
+    assert.equal(await b.read(), null);
+    await assert.rejects(() => b.write(new Uint8Array(1)), (e) => e.name === 'SocketClosedError' && e.reason === 'access revoked');
+    await assert.rejects(() => a.write(new Uint8Array(1)), (e) => e.reason === 'access revoked');
+  });
+
+  it('the first reason given is kept', async () => {
+    const [a, b] = StreamSocket.createPair();
+    await a.close('first');
+    await b.close('second');
+    assert.equal(a.closeReason, 'first');
+    assert.equal(b.closeReason, 'first');
+  });
+
+  it('a write waiting for credit rejects with the reason the peer closed with', async () => {
+    const [a, b] = StreamSocket.createPair({ windowBytes: 10 });
+    const w = track(a.write(pattern(100)));
+    await settle();
+    await b.close('service detached');
+    await settle();
+    assert.equal(w.error?.name, 'SocketClosedError');
+    assert.equal(w.error.reason, 'service detached');
+    assert.equal(a.closeReason, 'service detached');
   });
 });
 

@@ -56,6 +56,7 @@ export class AsyncBuffer {
   #ended = false;
   #cancelled = false;
   #error = null;
+  #closeReason = null;
   #highWaterMark;
   #windowBytes;
 
@@ -80,6 +81,14 @@ export class AsyncBuffer {
 
   /** Whether no more data will be accepted (ended, cancelled or destroyed). */
   get isClosed() { return this.#ended || this.#cancelled || this.#error !== null; }
+
+  /** Why this direction was closed, when a reason was recorded (the first one is kept). */
+  get closeReason() { return this.#closeReason; }
+
+  /** Record why this direction is being closed; the first reason given is kept. */
+  setCloseReason(reason) {
+    if (reason) this.#closeReason ??= reason;
+  }
 
   #wake(list, value) {
     const waiting = list.splice(0);
@@ -122,7 +131,7 @@ export class AsyncBuffer {
   async put(data, onAccepted, aborted) {
     let off = 0;
     while (off < data.length) {
-      if (this.isClosed || (aborted && aborted())) throw new SocketClosedError();
+      if (this.isClosed || (aborted && aborted())) throw new SocketClosedError(this.#closeReason);
       const remaining = data.length - off;
       if (this.#readers.length > 0) {
         const n = Math.min(remaining, this.#windowBytes || remaining);
@@ -207,6 +216,7 @@ export class AsyncBuffer {
  * then sees EOF) and discards this side's unread input. `end()` is the
  * half-close: only the write direction stops. `destroy(err)` aborts both
  * directions and makes the peer's pending and next reads reject with `err`.
+ * `close(reason)` also records why, on both endpoints (`closeReason`).
  */
 export class StreamSocket {
   #inbound;   // data coming TO this socket
@@ -254,14 +264,14 @@ export class StreamSocket {
    *
    * @param {Uint8Array} data - The data to send.
    * @throws {SocketClosedError} If the socket is closed or write-ended, or the
-   *   peer closes before the bytes are accepted.
+   *   peer closes before the bytes are accepted (the error carries `reason`).
    */
   write(data) {
-    if (this.#closed || this.#writeEnded) return Promise.reject(new SocketClosedError());
+    if (this.#closed || this.#writeEnded) return Promise.reject(new SocketClosedError(this.closeReason));
     const out = this.#outbound;
     if (!(out.windowBytes > 0) || typeof out.put !== 'function') {
       // Peer advertised no window: served as before.
-      if (!out.push(data)) return Promise.reject(new SocketClosedError());
+      if (!out.push(data)) return Promise.reject(new SocketClosedError(this.closeReason));
       return Promise.resolve();
     }
     if (data.length === 0) return Promise.resolve();
@@ -304,12 +314,19 @@ export class StreamSocket {
    * readable for it, followed by EOF. This side's unread input is discarded and
    * its reads return `null`. Calling close on a closed socket is a no-op.
    *
+   * @param {string} [reason] - Why the socket is being closed. Recorded as
+   *   `closeReason` on both endpoints (the first reason given is kept) and
+   *   carried by the {@link SocketClosedError} of later writes.
    * @returns {Promise<void>}
    */
-  async close() {
+  async close(reason) {
     if (this.#closed) return;
     this.#closed = true;
     this.#writeEnded = true;
+    if (reason) {
+      this.#inbound.setCloseReason?.(reason);
+      this.#outbound.setCloseReason?.(reason);
+    }
     this.#cancelInbound();
     // Ending the outbound buffer also wakes a writer stuck on credit, which
     // then sees the buffer closed and rejects.
@@ -339,6 +356,9 @@ export class StreamSocket {
 
   /** Whether this socket has been closed. */
   get closed() { return this.#closed; }
+
+  /** Why the socket was closed, when `close(reason)` was given one (by either side), or `null`. */
+  get closeReason() { return this.#inbound.closeReason ?? this.#outbound.closeReason ?? null; }
 
   /** The receive window this socket advertises to its writer, in bytes (0 = none). */
   get windowBytes() { return this.#inbound.windowBytes ?? 0; }
