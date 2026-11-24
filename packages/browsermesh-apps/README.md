@@ -888,11 +888,11 @@ and never silently retries a different one after a refusal (an `EACCES`,
 or any other `PodHostDriverError`, is reported as-is). Selection prefers
 `listComputeCandidates()` (the same descriptor list `meshctl_compute`
 reads), narrowed to hosts advertising `runtime:<lane>` and preferring one
-with `availability: 'online'`. Because an ISOLATE-lane host has no `exec`
-by lane definition, it never produces a compute descriptor at all (see
-"Known limitation" below) — so for `isolate`/`browser` lanes, selection
-falls back to `listPodHosts()`, which reads the same runtime-registry peers
-directly, without that filter. `MeshOrchestrator#listPodHosts()` is new
+with `availability: 'online'`. An ISOLATE-lane host has no `exec` by lane
+definition, so it only appears in that list when spawn hosts are requested
+(see "Spawn-only hosts and the compute scorer" below), which selection does;
+if the registry exposes no candidates, selection falls back to
+`listPodHosts()`, which reads the same runtime-registry peers directly. `MeshOrchestrator#listPodHosts()` is new
 read-only bookkeeping this item adds: runtime-registry peers carrying a
 `metadata.podHost` entry (i.e. anything projected through
 `podHostRuntimePeer()`), returned as `{podId, lane, verbs, runtimeClasses,
@@ -1240,15 +1240,24 @@ writes its own records through `MeshOrchestrator#recordPlacement()`: the two
 chains are independent, with independent authors, by design — a host's audit
 log is not evidence to the requester and vice versa.
 
-### Known limitation: isolate hosts produce no compute descriptor
+### Spawn-only hosts and the compute scorer
 
-`runtimePeerToComputeDescriptor()` only returns a descriptor for peers whose
-capabilities include `shell`/`exec`/`tools`. An isolate-lane pod host has no
-`exec` by definition, so `podHostRuntimePeer()` output for one is correctly
-scored as *not* a compute target and can only be reached through this service
-directly, not through `dispatchCompute()`. Teaching the scorer that "can
-spawn" is a kind of compute even without a shell is a change to WP4's scoring
-surface, not to this service.
+`runtimePeerToComputeDescriptor()` only returns a compute descriptor for peers
+whose capabilities include `shell`/`exec`/`tools`. An isolate-lane pod host has
+no `exec` by definition, so `listComputeCandidates()` and
+`selectComputeTarget()` do not return it by default, and nothing that needs a
+shell (`runComputeTask()`, `execOnPod()`) can be routed to it.
+
+For *placement* (choosing where to spawn a pod) pass
+`{ includeSpawnHosts: true }`: `listComputeCandidates(constraints, { includeSpawnHosts: true })`
+and `selectComputeTarget({ includeSpawnHosts: true, ... })` then also return
+pod hosts that serve `spawn` but have no shell. Such a descriptor carries
+`spawn` and `runtime:<lane>` but never `compute`, and `selectComputeTarget()`
+only returns one while the scorer rates it above zero for the request (a
+`shell` module, or a lane it does not offer, never falls through to it).
+`pickAutoHost()` uses this, so an isolate host is now found by candidate
+scoring rather than by the `listPodHosts()` fallback (kept for registries that
+do not expose candidates).
 
 A runnable end-to-end walkthrough is
 [`examples/13-pod-host-service.mjs`](../../examples/13-pod-host-service.mjs).
