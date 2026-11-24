@@ -36,6 +36,7 @@ export class TransportDiscovery {
   #onPeerFound = null
   #onPeerLost = null
   #onNonDiscoveryMessage = null
+  #unsubscribePeers = null
 
   /**
    * @param {object} opts
@@ -87,19 +88,20 @@ export class TransportDiscovery {
       this.#handleMessage(msg, meta)
     })
 
+    // A transport that learns its peers from a server (WebSocketTransport)
+    // can learn them after open() resolves, or any time later. Greet each
+    // peer it announces that the broadcast hello below did not reach.
+    if (typeof this.#transport.onPeerJoined === 'function') {
+      this.#unsubscribePeers = this.#transport.onPeerJoined((podId) => this.#greet(podId))
+    }
+
     // Open transport if not already open
     if (!this.#transport.ready) {
       await this.#transport.open()
     }
 
     // Announce ourselves
-    this.#transport.send(
-      createHello({
-        podId: this.#localPodId,
-        kind: this.#localKind,
-        capabilities: this.#capabilities,
-      })
-    )
+    this.#transport.send(this.#hello())
 
     // Wait for discovery period
     return new Promise((resolve) => {
@@ -112,7 +114,27 @@ export class TransportDiscovery {
    * @param {object} [opts]
    * @param {boolean} [opts.silent] - Skip sending goodbye
    */
+  #hello() {
+    return createHello({
+      podId: this.#localPodId,
+      kind: this.#localKind,
+      capabilities: this.#capabilities,
+    })
+  }
+
+  /**
+   * Send our hello to one newly announced peer (the transport reports each
+   * peer once, again only after it left). Skipped until the transport is
+   * ready: the broadcast hello in start() reaches every peer known by then.
+   */
+  #greet(podId) {
+    if (!this.#transport.ready) return
+    this.#transport.send({ ...this.#hello(), to: podId })
+  }
+
   async stop(opts = {}) {
+    this.#unsubscribePeers?.()
+    this.#unsubscribePeers = null
     if (!opts.silent) {
       try {
         this.#transport.send(createGoodbye({ podId: this.#localPodId }))

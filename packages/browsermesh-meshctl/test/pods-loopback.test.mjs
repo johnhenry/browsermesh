@@ -151,7 +151,7 @@ describe('meshctl pods over --loopback', () => {
       assert.equal(result.chosenVia, 'orchestrator')
     })
 
-    it('picks the isolate-lane host for lane=isolate (falls back to lane-match)', async () => {
+    it('picks the isolate-lane host for lane=isolate (through orchestrator scoring, spawn hosts included)', async () => {
       const { code, stdout } = await runCli(
         ['pods', 'spawn', 'auto', '--lane', 'isolate', '--name', 'auto2', '--kind', 'skill', '--ref', 'x'],
         { session: fixture.session },
@@ -159,7 +159,7 @@ describe('meshctl pods over --loopback', () => {
       assert.equal(code, 0)
       const { result } = JSON.parse(stdout)
       assert.equal(result.host, isolateHost)
-      assert.equal(result.chosenVia, 'lane-match')
+      assert.equal(result.chosenVia, 'orchestrator')
     })
 
     it('without --lane infers the lane from --kind (command -> microvm), and fails as a usage error only when neither is given', async () => {

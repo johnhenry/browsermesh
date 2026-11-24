@@ -646,6 +646,49 @@ hosts. For a hosted pod whose code you do not trust, use the CDP driver
 inside a Lane B microVM, not the in-page driver — see §8b's "Trust
 caveat".
 
+### Runtime lane driver: `PodRuntime` and `createRuntimeLaneDriver()`
+
+`createRuntimeLaneDriver({ runtime, modules })` builds a `PodHostDriver`
+(`spawn`/`status`/`send`/`drain`/`list`) over any `PodRuntime`: the narrow
+adapter that actually runs a module. The driver owns what must not depend on
+the runtime: podspec validation; which modules may run (a host-side catalog
+of names to absolute paths, never a path from the requester); which
+environment variables a pod may be given (`NODE_*`, `LD_*`, `DYLD_*`, `UV_*`
+and `OPENSSL_*` are refused, because they change how code is loaded or how
+limits apply); admission limits (`maxPods`, `maxMemMib`); the lifecycle
+state machine and its events. A runtime declares a `boundary`
+(`none`/`process`/`language`/`hardware`), and one that claims `lane:
+'isolate'` is refused unless the boundary is `language` or `hardware`.
+
+Two runtimes ship, from `@johnhenry/browsermesh-pod/node-runtimes` (the
+package root stays free of `node:` imports):
+
+| Runtime | Boundary | What it limits | What it does NOT stop |
+| --- | --- | --- | --- |
+| `createWorkerThreadsRuntime()` | `none` | heap (`resourceLimits`), environment (only what the podspec names), termination | everything else: the module can read and write any file, open any connection, start processes, and share the host's memory. `worker_threads` is not a security boundary |
+| `createPermissionProcessRuntime()` | `process` | the above, plus the Node permission model: read access to only the entry file and the hosted module, no write, no network, no child processes or workers | a determined hostile module: Node's own documentation calls the permission model a safeguard, not a sandbox. Same user and kernel as the host |
+
+Neither is the isolate lane: both are advertised as the `node` lane, and the
+placement planner in `@johnhenry/browsermesh-apps` only gives them work from
+requesters the operator trusts. A real isolate (`isolated-vm`, or `workerd`
+as in `spikes/isolate-pod-host`) implements the same `PodRuntime` interface;
+`pod-runtime.mjs` specifies it, and it is not in this repository because
+`isolated-vm` is a native dependency.
+
+```js
+import { createRuntimeLaneDriver } from '@johnhenry/browsermesh-pod'
+import { createPermissionProcessRuntime } from '@johnhenry/browsermesh-pod/node-runtimes'
+
+const driver = createRuntimeLaneDriver({
+  runtime: createPermissionProcessRuntime(),
+  modules: { greeter: '/srv/pods/greeter.mjs' }, // export async function handle(payload, ctx)
+  maxPods: 20,
+  maxMemMib: 256,
+})
+await driver.spawn({ name: 'g1', lane: 'node', run: { kind: 'module', ref: 'greeter' }, limits: { memMib: 64 } })
+await driver.send('g1', { payload: { hello: 'world' } }) // { delivered: true, reply }
+```
+
 ## InjectedPod
 
 Lightweight subclass for Chrome extension injection or bookmarklet use. Adds page text extraction, structured data extraction, and a visual overlay indicator.

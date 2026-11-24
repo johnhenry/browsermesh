@@ -101,6 +101,9 @@ export class PeerRegistry {
    */
   #capabilityTokens = new Map()
 
+  /** @type {Set<Function>} */
+  #accessListeners = new Set()
+
   /** Validates/revokes tokens -- real `CapabilityValidator` when injected, a
    * duck-typed equivalent otherwise. @type {{ register: Function, revokeTree: Function }} */
   #capabilityValidator
@@ -199,6 +202,7 @@ export class PeerRegistry {
     if (existed) {
       this.#onLog(2, `PeerRegistry: removed ${pubKey}`)
     }
+    this.#emitAccessChange(pubKey, 'removed')
     return existed
   }
 
@@ -237,6 +241,7 @@ export class PeerRegistry {
     this.#acl.removeEntry(pubKey)
     this.#acl.addEntry(pubKey, templateName)
     this.#onLog(3, `PeerRegistry: set template '${templateName}' for ${pubKey}`)
+    this.#emitAccessChange(pubKey, 'updated')
   }
 
   /**
@@ -345,6 +350,7 @@ export class PeerRegistry {
     }
 
     this.#onLog(3, `PeerRegistry: revoked ${scopes.join(', ')} from ${pubKey}`)
+    this.#emitAccessChange(pubKey, 'revoked')
   }
 
   /**
@@ -506,6 +512,42 @@ export class PeerRegistry {
    */
   disconnectAll() {
     this.#peerManager.disconnectAll()
+  }
+
+  // ── Access-change events ────────────────────────────────────────────
+
+  /**
+   * Subscribe to changes that can reduce what a peer is allowed to do:
+   * `revokeCapabilities()`, `removePeer()`, `updatePermissions()` and
+   * `notifyAccessChange()`. Long-lived users of `checkAccess()` (relayed
+   * connections, for example) re-check on this event instead of on every use.
+   *
+   * @param {(event: { pubKey: string, kind: string }) => void} cb
+   * @returns {() => void} unsubscribe
+   */
+  onAccessChange(cb) {
+    if (typeof cb !== 'function') return () => {}
+    this.#accessListeners.add(cb)
+    return () => this.#accessListeners.delete(cb)
+  }
+
+  /**
+   * Announce that a peer's access may have changed through a path this class
+   * did not see (for example a direct change to the injected ACL).
+   *
+   * @param {string} pubKey
+   */
+  notifyAccessChange(pubKey) {
+    this.#emitAccessChange(pubKey, 'changed')
+  }
+
+  /** @param {string} pubKey @param {string} kind */
+  #emitAccessChange(pubKey, kind) {
+    for (const cb of [...this.#accessListeners]) {
+      try { cb({ pubKey, kind }) } catch (err) {
+        this.#onLog(1, `PeerRegistry: access-change listener threw: ${err?.message || err}`)
+      }
+    }
   }
 
   // ── Events ──────────────────────────────────────────────────────────
