@@ -137,6 +137,61 @@ describe('ScopedNetwork', () => {
     await net.close();
   });
 
+  describe('a byte cap for the whole network (maxBufferedBytes)', () => {
+    const yieldToQueued = async () => { for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
+
+    it('is off by default: nothing is tracked or refused however much is buffered', async () => {
+      const net = new VirtualNetwork();
+      assert.equal(net.maxBufferedBytes, null);
+      const listener = await net.listen('mem://localhost:7100');
+      await net.connect('mem://localhost:7100');
+      const server = await listener.accept();
+      server.write(new Uint8Array(200 * 1024)).catch(() => {});
+      await yieldToQueued();
+      assert.equal(net.bufferedBytes, 0, 'no cap, so no socket is retained to be counted');
+      assert.ok(await net.connect('mem://localhost:7100'));
+      await net.close();
+    });
+
+    it('refuses a new connection while the bytes buffered on its sockets are at the cap, and says why', async () => {
+      const net = new VirtualNetwork({ maxBufferedBytes: 100 * 1024 });
+      const listener = await net.listen('mem://localhost:7101');
+      const first = await net.connect('mem://localhost:7101');
+      const server = await listener.accept();
+      assert.equal(net.bufferedBytes, 0);
+      // The server writes and the client does not read: its bytes sit in the client's window.
+      server.write(new Uint8Array(150 * 1024)).catch(() => {});
+      await yieldToQueued();
+      assert.equal(net.bufferedBytes, 150 * 1024);
+      await assert.rejects(
+        () => net.connect('mem://localhost:7101'),
+        (err) => err.code === 'ENOBUFS' && /100 ?KiB|102400/.test(err.message),
+      );
+      // Reading gives the credit back, and connections are accepted again.
+      let read = 0;
+      while (read < 150 * 1024) read += (await first.read()).length;
+      assert.equal(net.bufferedBytes, 0);
+      assert.ok(await net.connect('mem://localhost:7101'));
+      await net.close();
+    });
+
+    it('a closed socket stops counting, and the cap is validated', async () => {
+      const net = new VirtualNetwork({ maxBufferedBytes: 10 });
+      const listener = await net.listen('mem://localhost:7102');
+      const client = await net.connect('mem://localhost:7102');
+      const server = await listener.accept();
+      server.write(new Uint8Array(64)).catch(() => {});
+      await yieldToQueued();
+      assert.equal(net.bufferedBytes, 64);
+      await client.close();
+      assert.equal(net.bufferedBytes, 0);
+      assert.ok(await net.connect('mem://localhost:7102'));
+      await net.close();
+      assert.throws(() => new VirtualNetwork({ maxBufferedBytes: 0 }), /maxBufferedBytes/);
+      assert.throws(() => new VirtualNetwork({ maxBufferedBytes: -5 }), /maxBufferedBytes/);
+    });
+  });
+
   it('close shuts all backends', async () => {
     const net = new VirtualNetwork();
     const listener = await net.listen('mem://localhost:7000');

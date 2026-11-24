@@ -58,7 +58,7 @@
 export { DEFAULTS, GATEWAY_ERROR, CAPABILITY } from './constants.mjs';
 export {
   NetwayError, ConnectionRefusedError, PolicyDeniedError,
-  AddressInUseError, QueueFullError, UnknownSchemeError, SocketClosedError,
+  AddressInUseError, QueueFullError, BufferLimitError, UnknownSchemeError, SocketClosedError,
   OperationTimeoutError,
 } from './errors.mjs';
 
