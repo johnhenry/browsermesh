@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.8.0
+
+### Minor Changes
+
+- 818e4fd: Add `WshServices`: a stock wsh client may use a pod's objects and MCP tools. Off unless the embedder constructs and starts it; it listens at its own rendezvous id, apart from the mesh link host, as a sealed wsh host that serves only the `mcp` and `wsh-objects` rpc channels. A key is admitted only by the pod's registry grants for its pod id (`wsh-services:open`, then `protocol:mcp:open` / `protocol:objects:open`, then per request `mcp:<tool>:list|call` and `objects:<root>:get|call|set|on`); a revocation or an expiry ends the session. The mesh link host is unchanged. Needs `@johnhenry/wsh` 0.48 or later when started.
+
+### Patch Changes
+
+- 8433d52: One conversion between a pod id and a wsh fingerprint, and explicit OpenSSH public key interop (#334).
+
+  primitives: `podIdToFingerprint` / `fingerprintToPodId` (the same 32 bytes in base64url and in hex; strict about length and encoding), `openSSHPublicKeyFromRaw`, `rawPublicKeyFromOpenSSH` (exactly one `ssh-ed25519` key: options, other key types and non-canonical or multi-line input are refused), `podIdFromOpenSSHPublicKey`, `authorizedKeysLine`, and on `PodIdentity` `toOpenSSHPublicKey()` and `toAuthorizedKeysLine({ capabilities, expires, comment })`. `capabilities` is required (an empty list is a key that may do nothing) and characters that could end an option or the line are refused. Nothing calls any of this by default, nothing reads or writes a key file, and only public keys cross (there is no OpenSSH private key parser). See `docs/security.md`, "One key in both worlds".
+
+  transport: `podIdToFingerprint`, `fingerprintToPodId` and `podIdFromRawKey` are no longer implemented here; the names are still exported from the package and are now the primitives functions, so the repository has one conversion. These functions need `@johnhenry/browsermesh-primitives` >= 0.6.0: the peer range must be raised to match in the version bump (it cannot be installed ahead of the release).
+
+  Additive. A `fingerprintToPodId` / `podIdToFingerprint` that was given something that is not a canonical 32 byte value used to accept a non-canonical final base64url character; it is now refused.
+
+- 41c3cad: The optional peer `@johnhenry/wsh` is `>=0.45.0 <1.0.0` instead of `^0.45.0` (#334).
+
+  For a 0.x version `^0.45.0` means 0.45 only, so any current wsh was a peer conflict. The wsh link tests (116) and the sealed link example were run against wsh 0.45.0, 0.46.0, 0.46.1, 0.47.0 and 0.48.0 and pass on each; nothing newer has been tried. No code changed.
+
 ## 0.7.0
 
 ### Minor Changes
