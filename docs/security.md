@@ -131,6 +131,56 @@ Packages: `browsermesh-primitives`, `browsermesh-core`.
   browsers (`tests/browser/policy-and-identity.spec.mjs`). Handshake: unit with
   mock transports.
 
+### One key in both worlds
+
+A pod's key and an OpenSSH or wsh key are the same kind of key: an Ed25519 key
+whose hash names it (`base64url(SHA-256(raw public key))` is the pod id, the
+same hash in hex is wsh's fingerprint, and `ssh-ed25519 AAAA...` is the key
+itself). Primitives has the one conversion between the three names
+(`podIdToFingerprint`, `fingerprintToPodId`, `podIdFromOpenSSHPublicKey`) and,
+on a `PodIdentity`, two explicit exports: `toOpenSSHPublicKey()` and
+`toAuthorizedKeysLine({ capabilities, expires, comment })`. **Nothing calls
+them for you.** An identity is never written to an `authorized_keys` file, an
+SSH agent or a machine by this repository, and a key that was never exported
+this way is not trusted by any machine.
+
+What listing a pod's key in a machine's `authorized_keys` means, plainly:
+
+- **A pod's key usually lives in browser storage.** It sits in IndexedDB, in the
+  clear unless the vault storage is used, or as a non-extractable `CryptoKey` in
+  a browser profile. Anything that can use that profile can sign as the pod:
+  a stolen or shared profile, a malicious extension, a script on the same origin
+  (and any XSS there), an unlocked laptop. Once the key is also listed on a
+  machine, **the same access reaches that machine**, and it does not stop at the
+  edge of the page.
+- **Machine rights are never granted from mesh trust.** Being trusted, granted a
+  capability or reachable on the mesh gives no access to a machine, and no code
+  here derives one from the other. A machine's own `authorized_keys` decides
+  who reaches it, in its own notation and by its owner.
+- **A non-extractable key can still be used by whatever runs in the page.** Not
+  being able to copy the key out does not stop the page from asking for
+  signatures.
+- **No private key crosses.** Only the public key line is written. There is no
+  OpenSSH private key parser here (nor in wsh), so `PodIdentity.fromOpenSSH...`
+  does not exist: a private key moves as PKCS#8 (`fromPkcs8`,
+  `exportPrivateKey('pkcs8')`), and converting an OpenSSH private key to PKCS#8
+  is left to the tools that already read those files.
+- **The generated line is narrow on purpose.** `capabilities` is required (an
+  empty list is a key that may do nothing), characters that could end an option
+  or the line are refused, and `expires` is written in the form wsh checks at
+  login and on every later request. wsh fails closed on a capability it does
+  not know.
+
+When it is reasonable: a machine you control, a short `expires`, a list of
+capabilities that names only what that pod needs (for example `mcp:search` or
+`objects:app:get`, and not `exec`), a key that lives in a hardware-backed signer
+or a non-extractable key on a profile only you use, and a record that you listed
+it so you can remove it. When it is not: a long-lived or unrestricted line for a
+key kept in a browser you do not control, a shared or synced profile, a pod
+that runs code from others, or any case where you would not want a script on
+that page to hold a shell on the machine. If in doubt, make a separate key for
+the machine and give the pod nothing.
+
 ## Pod messages
 
 Package: `browsermesh-pod` (`Pod`, `signed-message.mjs`). For `pod:message`,

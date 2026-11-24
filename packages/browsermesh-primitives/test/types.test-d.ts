@@ -36,7 +36,10 @@ void checkSupportsEd25519;
 void checkResetEd25519Probe;
 
 // Session certificates and vault-friendly identity.
-import { PodIdentity, createSession, verifyPeerCredential, MemoryRevocationStore, retireIdentity, receiveRevocation } from "@johnhenry/browsermesh-primitives";
+import {
+  PodIdentity, createSession, verifyPeerCredential, MemoryRevocationStore, retireIdentity, receiveRevocation,
+  podIdFromOpenSSHPublicKey, podIdToFingerprint, fingerprintToPodId, rawPublicKeyFromOpenSSH, openSSHPublicKeyFromRaw, authorizedKeysLine,
+} from "@johnhenry/browsermesh-primitives";
 
 async function checkSessions(key: Uint8Array, sign: (d: Uint8Array) => Promise<Uint8Array>): Promise<void> {
   const identity = await PodIdentity.fromSigner({ publicKey: key, sign });
@@ -52,3 +55,15 @@ async function checkSessions(key: Uint8Array, sign: (d: Uint8Array) => Promise<U
   void ext;
 }
 void checkSessions;
+
+async function checkOpenSSH(id: PodIdentity, raw: Uint8Array): Promise<void> {
+  const line: string = await id.toOpenSSHPublicKey({ comment: "pod" });
+  const authorized: string = await id.toAuthorizedKeysLine({ capabilities: ["mcp:search"], expires: new Date(), comment: "pod" });
+  const podId: string = await podIdFromOpenSSHPublicKey(line);
+  const fingerprint: string = podIdToFingerprint(podId);
+  const back: string = fingerprintToPodId(fingerprint);
+  const key: Uint8Array = rawPublicKeyFromOpenSSH(openSSHPublicKeyFromRaw(raw));
+  const built: string = authorizedKeysLine({ rawPublicKey: key, capabilities: [] });
+  void [authorized, back, built];
+}
+void checkOpenSSH;

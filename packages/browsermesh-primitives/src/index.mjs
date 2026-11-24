@@ -7,6 +7,16 @@ export { MeshError, MeshProtocolError, MeshCapabilityError } from "./errors.mjs"
 // Identity
 export { PodIdentity, derivePodId, encodeBase64url, decodeBase64url, supportsEd25519, probeEd25519Support, _resetEd25519Probe } from "./identity.mjs";
 
+// One key in two worlds: pod id <-> wsh fingerprint, and OpenSSH public key lines (explicit, never automatic)
+export {
+  podIdToFingerprint,
+  fingerprintToPodId,
+  openSSHPublicKeyFromRaw,
+  rawPublicKeyFromOpenSSH,
+  podIdFromOpenSSHPublicKey,
+  authorizedKeysLine,
+} from "./ssh-keys.mjs";
+
 // Session certificates and signed revocation
 export {
   CERT_VERSION,
