@@ -87,6 +87,11 @@ const DEFAULT_OPEN_TIMEOUT_MS = 15_000
  *   Optional: without it, inbound-only connections still come up at the
  *   `WebRTCMeshManager`/`WebRTCPeerConnection` level, just without the
  *   `PeerNode`-level session `mesh-bootstrap.mjs` wires this into.
+ * @param {(failure: { remotePodId: string, connectionId: string, reason: string }) => void} [opts.onBindingFailure]
+ *   Called once when a connection is closed because the peer did not prove the identity it claimed
+ *   (`reason`: `timeout` for a peer that sent no proof, `bad-signature`, `no-fingerprint`, ...), on either
+ *   side. `mesh-bootstrap.mjs` turns it into the node event `peer:binding-failed`. A caller's `connect()`
+ *   also rejects with the reason in its message.
  * @param {number} [opts.openTimeoutMs] - How long to wait for the callee-side
  *   DataChannel to open before giving up on firing `onIncomingConnection`
  *   (the offer/answer exchange itself already succeeded either way).
@@ -98,6 +103,7 @@ const DEFAULT_OPEN_TIMEOUT_MS = 15_000
  */
 export function createWebRTCTransportFactory({
   localPodId, meshManager, signaling, onLog, onIncomingConnection, openTimeoutMs: defaultOpenTimeoutMs,
+  onBindingFailure,
 }) {
   if (!localPodId) throw new Error('localPodId is required')
   if (!meshManager) throw new Error('meshManager is required')
@@ -126,6 +132,14 @@ export function createWebRTCTransportFactory({
         }
       })
       conn.onClose(() => wiredIce.delete(key))
+      // A connection the transport closed because the peer did not prove its identity is announced, with why.
+      conn.onStateChange((state) => {
+        if (state === 'closed' && conn.bindingFailure) {
+          const failure = { remotePodId, connectionId, reason: conn.bindingFailure }
+          log('webrtc-negotiator:binding-failed', failure)
+          try { onBindingFailure?.(failure) } catch (err) { log('webrtc-negotiator:binding-failure-callback-threw', { error: err?.message || String(err) }) }
+        }
+      })
     }
     return conn
   }
@@ -147,6 +161,16 @@ export function createWebRTCTransportFactory({
         if (state === 'connected' && conn.isOpen) {
           clearTimeout(timer)
           resolve()
+        } else if (state === 'closed') {
+          // Closed before it opened: say why now rather than after the timeout. The transport closes a
+          // connection whose peer did not prove its identity, and records the reason.
+          clearTimeout(timer)
+          const err = new Error(conn.bindingFailure
+            ? `WebRTC connection with ${conn.remotePodId ?? 'the peer'} closed: identity binding failed: ${conn.bindingFailure}`
+            : `WebRTC connection with ${conn.remotePodId ?? 'the peer'} closed before it opened`)
+          err.closedEarly = true
+          err.bindingFailure = conn.bindingFailure ?? null
+          reject(err)
         }
       })
       // In case it opened between the isOpen check above and registering
@@ -235,7 +259,8 @@ export function createWebRTCTransportFactory({
 
     try {
       await waitForOpen(conn, openTimeoutMs)
-    } catch {
+    } catch (err) {
+      if (err?.closedEarly) throw err // the connection was closed, with the reason (see waitForOpen)
       throw new Error(`WebRTC DataChannel with ${remotePodId} did not open in time`)
     }
 

@@ -1458,6 +1458,20 @@ export class WebRTCMeshManager {
   /** Local pod identifier. */
   get localPodId() { return this.#localPodId }
 
+  /**
+   * How this manager's connections treat peer identity: `enabled` (an `identity` was given, so each
+   * side proves its pod key over the DTLS fingerprints), `requirePeerBinding` (a peer that does not
+   * prove itself is closed after `timeoutMs` and nothing it sends is delivered before it has) and the timeout.
+   * @returns {{ enabled: boolean, requirePeerBinding: boolean, timeoutMs: number }}
+   */
+  get bindingPolicy() {
+    return {
+      enabled: this.#identity !== null,
+      requirePeerBinding: this.#requirePeerBinding !== false,
+      timeoutMs: this.#bindingTimeoutMs,
+    }
+  }
+
   /** Number of tracked connections, across all peers and connectionIds. */
   get connectionCount() {
     let count = 0

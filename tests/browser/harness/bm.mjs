@@ -117,7 +117,15 @@ const bm = {
    * An offer from the peer is answered automatically, on a fresh connection
    * unless it is a renegotiation of the current one.
    */
-  async rtcRegister({ local, remote }) {
+  /** Generate this page's pod identity (for identity binding); returns its pod id, which is then the signalling id. */
+  rtcIdentity: null,
+  async rtcIdentityCreate() {
+    const { PodIdentity } = await import('@johnhenry/browsermesh-primitives')
+    bm.rtcIdentity = await PodIdentity.generate()
+    return bm.rtcIdentity.podId
+  },
+  /** `identity: true` proves this page's pod key on every connection (see `rtcIdentityCreate`). */
+  async rtcRegister({ local, remote, identity = false, bindingTimeoutMs }) {
     const { WebRTCPeerConnection } = await import('@johnhenry/browsermesh-transport')
     const st = { local, remote, ws: null, conn: null, inbox: [], events: [], listeners: new Set(), answered: 0 }
     bm.rtc = st
@@ -125,7 +133,12 @@ const bm = {
     const signal = (payload) => st.ws.send(JSON.stringify({ type: 'signal', target: remote, envelope: payload }))
     const fresh = () => {
       // No STUN, no TURN: host candidates only, so the link is loopback.
-      const conn = new WebRTCPeerConnection({ localPodId: local, remotePodId: remote, iceServers: [] })
+      const conn = new WebRTCPeerConnection({
+        localPodId: local,
+        remotePodId: remote,
+        iceServers: [],
+        ...(identity ? { identity: bm.rtcIdentity, ...(bindingTimeoutMs ? { bindingTimeoutMs } : {}) } : {}),
+      })
       conn.onIceCandidate((candidate) => signal({ kind: 'ice', candidate }))
       conn.onMessage((data) => { st.inbox.push(data); for (const cb of st.listeners) cb(data) })
       conn.onStateChange((state) => st.events.push(state))
@@ -172,6 +185,52 @@ const bm = {
     st.signal({ kind: 'offer', description: offer, renegotiation: true })
   },
   rtcOpen() { return !!bm.rtc?.conn?.isOpen },
+  rtcStatus() { const c = bm.rtc.conn; return { state: c.state, bound: c.bound, failure: c.bindingFailure } },
+
+  /**
+   * An attacker that holds the signalling server: the test double hands it every offer, answer and ICE
+   * frame (`hub.intercept`), and it answers the offerer as the callee and offers to the callee as the
+   * offerer, with two RTCPeerConnections of its own, relaying everything that crosses the data channel.
+   * It has no identity, so it cannot make a proof of its own; it can only pass the victims' proofs along.
+   */
+  mitm: null,
+  async mitmStart(attackerId) {
+    const { WebRTCPeerConnection } = await import('@johnhenry/browsermesh-transport')
+    const st = { legs: new Map(), seen: [] }
+    bm.mitm = st
+    const ws = new WebSocket(`${wsBase()}/signaling`)
+    const send = (target, envelope) => ws.send(JSON.stringify({ type: 'signal', target, envelope }))
+    ws.addEventListener('message', async (event) => {
+      const msg = JSON.parse(event.data)
+      if (msg.type !== 'signal' || !msg.envelope?.mitm) return
+      const { mitm: { from, to }, kind, description, candidate } = msg.envelope
+      if (kind === 'offer') {
+        const facing = new WebRTCPeerConnection({ localPodId: to, remotePodId: from, iceServers: [] })
+        const behind = new WebRTCPeerConnection({ localPodId: from, remotePodId: to, iceServers: [] })
+        st.legs.set(`${from}>${to}`, { facing, behind })
+        facing.onIceCandidate((c) => send(from, { kind: 'ice', candidate: c }))
+        behind.onIceCandidate((c) => send(to, { kind: 'ice', candidate: c }))
+        facing.onMessage((data) => { st.seen.push(data); try { behind.send(data) } catch { /* not open yet */ } })
+        behind.onMessage((data) => { st.seen.push(data); try { facing.send(data) } catch { /* not open yet */ } })
+        facing.onClose(() => behind.close())
+        behind.onClose(() => facing.close())
+        send(from, { kind: 'answer', description: await facing.handleOffer(description) })
+        send(to, { kind: 'offer', description: await behind.createOffer() })
+      } else if (kind === 'answer') {
+        await st.legs.get(`${to}>${from}`)?.behind.handleAnswer(description)
+      } else if (kind === 'ice') {
+        const offererSide = st.legs.get(`${from}>${to}`)
+        const answererSide = st.legs.get(`${to}>${from}`)
+        if (offererSide) await offererSide.facing.addIceCandidate(candidate)
+        else if (answererSide) await answererSide.behind.addIceCandidate(candidate)
+      }
+    })
+    await new Promise((resolve, reject) => {
+      ws.addEventListener('open', () => ws.send(JSON.stringify({ type: 'register', podId: attackerId })))
+      ws.addEventListener('error', () => reject(new Error('attacker socket failed')))
+      ws.addEventListener('message', (event) => { if (JSON.parse(event.data).type === 'registered') resolve() })
+    })
+  },
   rtcSend(data) { bm.rtc.conn.send(data) },
   rtcClose() { bm.rtc.conn.close() },
   rtcUnregister() { bm.rtc?.conn?.close(); bm.rtc?.ws.close(); bm.rtc = null },
