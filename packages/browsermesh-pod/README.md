@@ -290,6 +290,15 @@ None of this requires `window`, `document`, `navigator`, `indexedDB`,
 `fetch`, `WebAssembly`, `RTCPeerConnection`, or `SharedArrayBuffer` — those
 are only probed, never required, by `detectCapabilities()`.
 
+### A sealed, key-authenticated adapter
+
+`WshPodTransport` in `@johnhenry/browsermesh-transport` implements this
+contract over wsh (a mesh link that is key-authenticated in both directions and
+sealed end to end, off by default). It stamps every inbound message's `from`
+with the key the session authenticated and drops a message that names another
+sender, so the shared conformance suite is told to name that id (`senderId`).
+See [`docs/security.md`](../../docs/security.md).
+
 ### The `TransportAdapter` and `DiscoveryAdapter` contracts
 
 Pass `opts.transport` and `opts.discovery` to `boot()` to run `Pod` anywhere

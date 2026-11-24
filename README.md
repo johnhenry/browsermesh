@@ -31,6 +31,25 @@ runtime — that sit on top of them.
 | [`@johnhenry/browsermesh-meshctl`](packages/browsermesh-meshctl) | External CLI for the hosted-pods control surface -- `meshctl` is itself a pod (private, not yet published) |
 | [`@johnhenry/browsermesh-embed`](packages/browsermesh-embed) | Thin widget for embedding a browsermesh-pod-backed workspace on a page |
 
+## Transports
+
+How two pods can be linked, and what each link gives you. The honest version,
+written from the source, is [`docs/security.md`](docs/security.md).
+
+| Link | Package | Reaches | Encrypted against a relay | Peer key checked | On by default |
+| --- | --- | --- | --- | --- | --- |
+| `BroadcastChannelTransport` | `browsermesh-pod` | same-origin tabs | n/a (no relay) | no | yes (browsers) |
+| `WebSocketTransport` (relay protocol) | `browsermesh-pod` | any runtime with a WebSocket, through a relay | no (TLS only with `wss://`) | no | no |
+| `WebSocketTransport`, `WebTransportTransport` | `browsermesh-transport` | browsers, through a server | no (TLS only) | no | in the default preference order |
+| `WebRTCTransport` | `browsermesh-transport` | browser to browser, through a signaling relay | DTLS; signaling is not signed with the pod key | no | first in the default preference order |
+| **wsh link** (`WshPeerLinks`, `WshPodTransport`) | `browsermesh-transport` | browser to browser or Node, through a wsh pipe relay | **yes: sealed end to end** | **yes: both directions, bound to the pod id, host key pinned** | **no, opt in** (`createMeshNode({ wsh })`, `'wsh'` in a negotiator's `preferenceOrder`, or `require: 'wsh'` to never fall back) |
+
+The wsh link is a mesh link carried on a sealed, key-authenticated
+[wsh](https://github.com/johnhenry/wsh) session. Design and threat model:
+[`docs/design/wsh-peer-link.md`](docs/design/wsh-peer-link.md). Adopting it:
+[`docs/migration-wsh-peer-link.md`](docs/migration-wsh-peer-link.md). Example:
+`npm run example:17`.
+
 ## Development
 
 npm workspaces + Turborepo. No build step — every package ships plain ESM
