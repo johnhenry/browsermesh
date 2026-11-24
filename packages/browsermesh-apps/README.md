@@ -474,8 +474,15 @@ mirror and is a separate book from an `EscrowManager` you create, but the router
 can see both: `router.attachEscrowManager(manager)` makes `router.listEscrows(podId?)`
 and `router.getEscrowById(id)` return one normalized view (`source: 'wire'` or
 `'manager'`), and the escrow sweeper also expires the manager's due contracts.
-An inbound `ESCROW_CREATE` is still only recorded in the book; it does not debit
-anything (the payer is a remote pod).
+By default an inbound `ESCROW_CREATE` is still only recorded in the book; it does
+not debit anything (the payer is a remote pod). To have it create a real,
+funded contract, opt in with `router.attachEscrowManager(manager, { delegateWire: true })`:
+the sending pod becomes the payer and the manager debits it, so the manager
+needs a per-pod ledger (a `MultiPartyCreditLedger`, or a `mutateLedger` hook
+that debits that pod; a single-owner `CreditLedger` would debit the local
+balance whoever sent the message). A payer who cannot fund the amount, or a
+malformed message, creates nothing, and the escrow is not also mirrored into the
+book (`listEscrows()` shows it once, as `source: 'manager'`).
 
 ## Putting it all together: sync + kernel-gated mesh + relay on one connection
 
