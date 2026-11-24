@@ -73,7 +73,20 @@ export async function buildImportMap() {
   return { imports }
 }
 
-export const CSP = (nonce) => [
+/**
+ * A page can be framed, or frame others, only when its URL asks for it
+ * (`?frame-ancestors=<origin>`, `?frame-src=<origin>,<origin>`); the values
+ * must be exact loopback origins of this test double. Every other page keeps
+ * `frame-ancestors 'none'` and no `frame-src` (so `default-src 'none'` blocks frames).
+ */
+const LOOPBACK_ORIGIN = /^http:\/\/127\.0\.0\.1:\d+$/
+export function framing(search = '') {
+  const params = new URLSearchParams(search)
+  const origins = (name) => (params.get(name) ?? '').split(',').filter((o) => LOOPBACK_ORIGIN.test(o))
+  return { ancestors: origins('frame-ancestors'), src: origins('frame-src') }
+}
+
+export const CSP = (nonce, { ancestors = [], src = [] } = {}) => [
   "default-src 'none'",
   `script-src 'self' 'nonce-${nonce}'`,
   "connect-src 'self'",
@@ -81,15 +94,17 @@ export const CSP = (nonce) => [
   "img-src data:", // the page declares an empty data: favicon so browsers do not request /favicon.ico
   "base-uri 'none'",
   "form-action 'none'",
-  "frame-ancestors 'none'",
+  ...(src.length ? [`frame-src ${src.join(' ')}`] : []),
+  `frame-ancestors ${ancestors.length ? ancestors.join(' ') : "'none'"}`,
 ].join('; ')
 
-function securityHeaders(nonce) {
+function securityHeaders(nonce, frames = {}) {
   return {
-    'Content-Security-Policy': CSP(nonce),
+    'Content-Security-Policy': CSP(nonce, frames),
     'Cross-Origin-Opener-Policy': 'same-origin',
     'Cross-Origin-Embedder-Policy': 'require-corp',
-    'Cross-Origin-Resource-Policy': 'same-origin',
+    // A page that may be framed by another origin has to say it can be loaded there.
+    'Cross-Origin-Resource-Policy': frames.ancestors?.length ? 'cross-origin' : 'same-origin',
     'X-Content-Type-Options': 'nosniff',
     'Cache-Control': 'no-store',
   }
@@ -319,7 +334,7 @@ export async function startServer({ port = 0, hub = new Hub() } = {}) {
       const html = (await readFile(path.join(HARNESS, 'index.html'), 'utf8'))
         .replaceAll('{{NONCE}}', nonce)
         .replace('{{IMPORT_MAP}}', JSON.stringify(importMap))
-      return res.writeHead(200, { ...securityHeaders(nonce), 'Content-Type': MIME['.html'] }).end(html)
+      return res.writeHead(200, { ...securityHeaders(nonce, framing(url.search)), 'Content-Type': MIME['.html'] }).end(html)
     }
     if (pathname.startsWith('/pkg/')) {
       const [, , dir, ...rest] = pathname.split('/')

@@ -66,7 +66,7 @@ export const DISCOVERY_TYPES = Object.freeze([POD_HELLO, POD_HELLO_ACK, POD_GOOD
 
 /** Why a message was dropped (the `reason` of a drop). */
 export const DROP_REASONS = Object.freeze([
-  'unsigned', 'malformed', 'sender-mismatch', 'bad-signature', 'replay', 'unsigned-rpc',
+  'unsigned', 'malformed', 'sender-mismatch', 'bad-signature', 'replay', 'unsigned-rpc', 'window-source',
 ])
 
 // ── Encoding helpers ────────────────────────────────────────────

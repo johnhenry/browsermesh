@@ -131,6 +131,14 @@ Package: `browsermesh-pod` (`Pod`, `signed-message.mjs`). For `pod:message`,
   hellos: admitted only where `allowUnsigned` allows (default: same-origin
   transports and the window; refused over a relay or a custom adapter), listed
   with `authenticated: false`.
+- **Window channel.** A pod listens to **no window by default**: a `message`
+  event is refused (`window-source`) unless it matches the `window` boot option
+  (`sources`: exact Window objects compared with `event.source`; `parent: true`;
+  `origins`: exact origins compared with `event.origin`), every constraint given
+  having to match. What an accepted window sends unsigned is delivered with
+  `authenticated: false` (refused with `allowUnsigned: false`); a signature must
+  verify either way. Only the configured parent can answer the parent
+  handshake, and the child's hello is posted to the configured origin.
 - **Bounded.** Replay window of the last 64 sequence numbers per sender session;
   4 sessions per sender, 1024 senders, in memory. Drops are counted in
   `pod.dropped` by reason (`unsigned`, `unsigned-rpc`, `malformed`,
@@ -138,7 +146,7 @@ Package: `browsermesh-pod` (`Pod`, `signed-message.mjs`). For `pod:message`,
 - **Options and defaults.** `sign` (default `true`). `allowUnsigned`: default
   `true` only for transports that declare `trust === 'same-origin'`
   (`BroadcastChannelTransport`, `EventEmitterTransport`, `NullTransport`) and
-  for window messages; `false` for `WebSocketTransport` and for any custom
+  for messages from a window the pod was told to listen to; `false` for `WebSocketTransport` and for any custom
   adapter that does not declare `trust`. An unsigned `pod:rpc-request` is never
   accepted. `send()` and `broadcast()` return promises.
 - **Not protected.** Confidentiality: a signed message is readable by the relay
@@ -153,7 +161,9 @@ Package: `browsermesh-pod` (`Pod`, `signed-message.mjs`). For `pod:message`,
 - **Verified.** Unit (`message-authenticity.test.mjs`, with a hostile relay,
   fixed vectors and each signed field shown to be covered); real browser for
   messaging over BroadcastChannel and over the WebSocket relay (signed by
-  default).
+  default). The window channel: unit with fake `MessageEvent`s
+  (`window-channel.test.mjs`) and real browser with a top page and three frames
+  on two origins (`tests/browser/window-channel.spec.mjs`).
 
 ## Peer links by transport
 

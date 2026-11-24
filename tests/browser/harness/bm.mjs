@@ -99,6 +99,54 @@ const bm = {
   podSend(to, payload) { bm.pod.send(to, payload) },
   async podShutdown() { await bm.pod?.shutdown(); bm.pod = null },
 
+  // -- the window message channel ---------------------------------------------
+
+  frames: [],
+  /** What the window-channel pod delivered: `{from, payload, authenticated}`. */
+  windowInbox: [],
+  /** Add an iframe (the page's policy must allow the origin as `frame-src`); resolves on load. */
+  addFrame(url) {
+    return new Promise((resolve) => {
+      const frame = document.createElement('iframe')
+      frame.addEventListener('load', () => resolve(bm.frames.length - 1))
+      frame.src = url
+      bm.frames.push(frame)
+      document.body.append(frame)
+    })
+  },
+  /**
+   * Boot a pod with no transport, listening to windows as configured:
+   * `trustFrame: n` (the nth frame this page added), `parent: true`, `origins: [...]`.
+   * With none of them it accepts nothing from another window (the default).
+   */
+  async windowPodBoot({ trustFrame, parent, origins } = {}) {
+    const { Pod, NullTransport } = await import('@johnhenry/browsermesh-pod')
+    const win = {}
+    if (trustFrame !== undefined) win.sources = [bm.frames[trustFrame].contentWindow]
+    if (parent) win.parent = true
+    if (origins) win.origins = origins
+    const pod = new Pod()
+    pod.on('message', (m) => bm.windowInbox.push({ from: m.from, payload: m.payload, authenticated: m.authenticated }))
+    await pod.boot({
+      transport: new NullTransport(),
+      window: Object.keys(win).length ? win : undefined,
+      discoveryTimeout: 10,
+      handshakeTimeout: 10,
+    })
+    bm.pod = pod
+    return pod.podId
+  },
+  /** Post a pod message to another window: `'parent'`, `'frame:n'` (a frame this page added), `'sibling:n'` (a frame of the parent). */
+  async windowPost(target, { to, payload, signed = false }) {
+    const { createMessage, MessageSigner } = await import('@johnhenry/browsermesh-pod')
+    const [kind, n] = target.split(':')
+    const w = kind === 'parent' ? window.parent : kind === 'frame' ? bm.frames[Number(n)].contentWindow : window.parent.frames[Number(n)]
+    let msg = createMessage({ from: bm.pod.podId, to, payload })
+    if (signed) msg = await new MessageSigner(bm.pod.identity).sign(msg)
+    else msg = { ...msg, from: 'an-unsigned-sender' }
+    w.postMessage(msg, '*')
+  },
+
   /** Plain BroadcastChannel, no package code: used to prove origins are isolated. */
   rawChannel: null,
   rawInbox: [],

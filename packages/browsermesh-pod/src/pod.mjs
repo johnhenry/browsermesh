@@ -31,6 +31,32 @@ const DEFAULT_HANDSHAKE_TIMEOUT = 1000
 const DEFAULT_DISCOVERY_TIMEOUT = 2000
 const DEFAULT_DISCOVERY_CHANNEL = 'pod-discovery'
 
+/**
+ * The windows a pod listens to (`boot({ window })`). `null` for a constraint means it was not given;
+ * with neither given nothing is accepted.
+ */
+function windowPolicyOf(cfg, kind, g) {
+  let origins = null
+  let sources = null
+  if (cfg?.origins !== undefined) {
+    if (!Array.isArray(cfg.origins) || cfg.origins.some((o) => typeof o !== 'string' || o === '*')) {
+      throw new TypeError('window.origins must be a list of exact origins ("*" is not one)')
+    }
+    origins = [...cfg.origins]
+  }
+  if (cfg?.sources !== undefined) {
+    if (!Array.isArray(cfg.sources)) throw new TypeError('window.sources must be a list of windows')
+    sources = [...cfg.sources]
+  }
+  if (cfg?.parent) {
+    // A dedicated worker's only sender is the page that created it, and its `event.source` is null.
+    const parent = kind === 'iframe' ? g.parent : kind === 'spawned' ? g.opener : kind === 'worker' ? null : undefined
+    sources = parent !== undefined ? [...(sources ?? []), parent] : (sources ?? [])
+  }
+  const sole = origins?.length === 1 && origins[0] !== 'null' ? origins[0] : '*'
+  return { origins, sources, targetOrigin: cfg?.targetOrigin ?? sole }
+}
+
 /** @typedef {'idle'|'booting'|'ready'|'shutdown'} PodState */
 /** @typedef {'autonomous'|'child'|'peer'|'controlled'|'hybrid'} PodRole */
 
@@ -49,6 +75,7 @@ export class Pod {
   #signer = null
   #guard = new ReplayGuard()
   #allowUnsigned = undefined
+  #windowPolicy = { origins: null, sources: null, targetOrigin: '*' }
   #trust = 'untrusted'
   #rx = Promise.resolve()
   #dropped = Object.fromEntries(DROP_REASONS.map((r) => [r, 0]))
@@ -111,6 +138,15 @@ export class Pod {
    *   whatever this is set to. A link that authenticates its peer (see `meta.peerId`) needs no
    *   signature for discovery messages either.
    * @param {'same-origin'|'untrusted'} [opts.trust] - Overrides the transport's own `trust`.
+   * @param {object} [opts.window] - Which windows may post to this pod. **Default: none**: a
+   *   `message` event from any window is refused (`window-source`). A message is accepted only if it
+   *   matches every constraint given:
+   *   `sources` (exact Window objects, e.g. an iframe's `contentWindow`; `parent: true` adds the
+   *   embedding parent of an iframe or the opener of a spawned window) compared with `event.source`,
+   *   and `origins` (exact origins, `'null'` only if listed) compared with `event.origin`.
+   *   What an accepted window sends unsigned is delivered with `authenticated: false` (or refused
+   *   with `allowUnsigned: false`); a signature must verify either way. The hello to the parent is
+   *   posted to `targetOrigin` (default: the sole entry of `origins`, else `'*'`).
    * @param {{ maxSenders?: number, maxSessionsPerSender?: number }} [opts.replay] - Bounds of the replay window state.
    */
   async boot(opts = {}) {
@@ -130,6 +166,7 @@ export class Pod {
       this.#allowUnsigned = opts.allowUnsigned
       this.#guard = new ReplayGuard(opts.replay)
       this.#kind = detectPodKind(this.#g)
+      this.#windowPolicy = windowPolicyOf(opts.window, this.#kind, this.#g)
       this.#capabilities = detectCapabilities(this.#g)
       this.#g[POD_RUNTIME_KEY] = {
         podId: this.podId,
@@ -313,6 +350,11 @@ export class Pod {
     this.#messageHandler = (event) => {
       const data = event.data
       if (!data || !data.type) return
+      if (!this.#windowAccepts(event)) {
+        // Only pod traffic is worth counting; any page's other messages pass through here.
+        if (typeof data.type === 'string' && data.type.startsWith('pod:')) this.#countDrop('window-source', data.type)
+        return
+      }
       this.#handleIncoming(data, 'window')
     }
     this.#g.addEventListener('message', this.#messageHandler)
@@ -341,6 +383,9 @@ export class Pod {
       const handler = (event) => {
         const data = event.data
         if (data?.type === POD_HELLO_ACK && data.targetPodId === this.podId) {
+          // Only the configured parent window can answer for the parent (the pod's
+          // own message handler has already counted a refusal).
+          if (!this.#windowAccepts(event)) return
           // The ack names the parent; it counts only if that parent proved it.
           admitDiscovery(data, undefined, { guard: this.#guard, allowUnsigned: this.#allowUnsigned ?? true }).then((verdict) => {
             if (!verdict.ok) return this.#countDrop(verdict.reason, data.type)
@@ -353,7 +398,7 @@ export class Pod {
         }
       }
       this.#g.addEventListener('message', handler)
-      target.postMessage(hello, '*')
+      target.postMessage(hello, this.#windowPolicy.targetOrigin)
     })
   }
 
@@ -512,6 +557,15 @@ export class Pod {
         this.#goodbye({ podId, sid, authenticated })
         break
     }
+  }
+
+  /** Whether a `message` event comes from a window this pod was told to listen to. */
+  #windowAccepts(event) {
+    const { origins, sources } = this.#windowPolicy
+    if (origins === null && sources === null) return false
+    if (origins !== null && !origins.includes(event.origin)) return false
+    if (sources !== null && !sources.includes(event.source ?? null)) return false
+    return true
   }
 
   #countDrop(reason, type) {

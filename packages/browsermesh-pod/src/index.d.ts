@@ -302,6 +302,18 @@ export interface PodBootOptions {
   allowUnsigned?: boolean;
   /** Overrides the transport's `trust`. */
   trust?: 'same-origin' | 'untrusted';
+  /**
+   * Which windows may post to this pod (`message` events). Default: none. A message is accepted only if it
+   * matches every constraint given: `event.source` is one of `sources` (or the embedding parent / opener
+   * with `parent: true`), and `event.origin` is one of `origins` (exact origins; `'null'` only if listed).
+   */
+  window?: {
+    sources?: object[];
+    parent?: boolean;
+    origins?: string[];
+    /** `targetOrigin` of the hello posted to the parent. Default: the sole entry of `origins`, else `'*'`. */
+    targetOrigin?: string;
+  };
   replay?: { maxSenders?: number; maxSessionsPerSender?: number };
 }
 
@@ -334,7 +346,7 @@ export declare class Pod {
   boot(opts?: PodBootOptions): Promise<void>;
   shutdown(opts?: PodShutdownOptions): Promise<void>;
   /** Messages refused so far, by reason. */
-  get dropped(): Record<'unsigned' | 'unsigned-rpc' | 'malformed' | 'sender-mismatch' | 'bad-signature' | 'replay', number>;
+  get dropped(): Record<'unsigned' | 'unsigned-rpc' | 'malformed' | 'sender-mismatch' | 'bad-signature' | 'replay' | 'window-source', number>;
   send(targetPodId: string, payload: unknown): Promise<void>;
   broadcast(payload: unknown): Promise<void>;
   on(event: string, cb: (data: any) => void): void;

@@ -28,7 +28,7 @@ export const test = base.extend({
     const problems = []
     const extra = []
     const pages = []
-    const open = async (origin, { isolated = false, probe = false } = {}) => {
+    const open = async (origin, { isolated = false, probe = false, query = {} } = {}) => {
       let ctx = context
       if (isolated) {
         ctx = await browser.newContext()
@@ -42,7 +42,8 @@ export const test = base.extend({
           if (msg.type() === 'error') problems.push(`console.error: ${msg.text()}`)
         })
       }
-      await page.goto(`${origin.origin}/${probe ? '?probe' : ''}`)
+      const search = new URLSearchParams(query).toString()
+      await page.goto(`${origin.origin}/${probe ? '?probe' : search ? `?${search}` : ''}`)
       await page.waitForFunction(() => window.bmReady === true)
       return page
     }

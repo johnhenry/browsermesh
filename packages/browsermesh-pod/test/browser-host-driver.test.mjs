@@ -87,7 +87,9 @@ function makeChildGlobal({ BC, name, href, frameKind }) {
     postMessage(data) {
       // Deliver to self, matching what a real window's "receive end" does
       // when something else calls `childWindow.postMessage(...)`.
-      for (const { type, fn } of [...listeners]) if (type === 'message') fn({ data })
+      // The sender is the driver's window: the frame's parent or opener (a worker's owner is `null`).
+      const source = frameKind === 'worker' ? null : (g.opener ?? g.parent)
+      for (const { type, fn } of [...listeners]) if (type === 'message') fn({ data, source, origin: 'https://driver.example' })
     },
   }
   if (frameKind === 'worker') {
