@@ -184,3 +184,94 @@ describe('WebSocketTransport: signalling protocol 2', () => {
     assert.throws(() => new WebSocketTransport({ url: 'ws://x', podId: 'a', authentication: 'required' }), SignalingAuthRequiredError)
   })
 })
+
+describe('WebSocketTransport: a displaced connection ("replaced")', () => {
+  const quiet = (ms = 40) => new Promise((r) => setTimeout(r, ms))
+
+  it('does not reconnect, says so by name, and the application decides', async () => {
+    const { net, server } = world({ mode: 'authenticated', maxConnectionsPerPod: 2 })
+    const identity = await PodIdentity.generate()
+    const make = () => track(new WebSocketTransport(sigOpts(net, { podId: identity.podId, identity, reconnect: { baseMs: 1, maxMs: 1 } })))
+    const first = make()
+    const seen = []
+    first.onReplaced((info) => seen.push(info))
+    await first.open()
+    await make().open()
+    await make().open() // a third connection of the pod displaces the oldest
+    await until(() => seen.length === 1, 'the replaced notice')
+    assert.equal(seen[0].kind, 'primary')
+    assert.match(seen[0].message, /newer connection/)
+    assert.equal(first.replaced?.kind, 'primary')
+    await until(() => !first.ready, 'the closed connection')
+    const before = server.connectionCount
+    await quiet()
+    assert.equal(server.connectionCount, before, 'no automatic reconnect after being replaced')
+    assert.equal(server.connectionsOf(identity.podId), 2, 'the other two stay')
+    // The application may open it again on purpose.
+    await first.open()
+    assert.equal(first.ready, true)
+    assert.equal(first.replaced, null)
+  })
+
+  it('a 4409 close with reason "replaced" is enough, even if the error frame never arrived', async () => {
+    const { net, server } = world({ mode: 'authenticated' })
+    const identity = await PodIdentity.generate()
+    const t = track(new WebSocketTransport(sigOpts(net, { podId: identity.podId, identity, reconnect: { baseMs: 1, maxMs: 1 } })))
+    const seen = []
+    t.onReplaced((info) => seen.push(info))
+    await t.open()
+    net.sockets[0]._serverClose(4409, 'replaced')
+    await until(() => seen.length === 1, 'the replaced notice')
+    await quiet()
+    assert.equal(server.connectionCount, 1)
+  })
+
+  it('other closes still reconnect (4409 with another reason, or a plain drop)', async () => {
+    const { net, server } = world({ mode: 'authenticated' })
+    const identity = await PodIdentity.generate()
+    const t = track(new WebSocketTransport(sigOpts(net, { podId: identity.podId, identity, reconnect: { baseMs: 1, maxMs: 1 } })))
+    const seen = []
+    t.onReplaced((info) => seen.push(info))
+    await t.open()
+    net.sockets[0]._serverClose(4409, 'something else')
+    await until(() => server.connectionCount === 2 && t.ready, 'a reconnect')
+    assert.equal(seen.length, 0)
+  })
+
+  it('open mode keeps today\'s behaviour: a second connection for an id is refused ("podId already registered"), open() rejects, and the loser keeps retrying', async () => {
+    const { net, server } = world({ mode: 'open' })
+    const a = track(new WebSocketTransport(sigOpts(net, { podId: 'same-id' })))
+    await a.open()
+    const seen = []
+    const b = track(new WebSocketTransport(sigOpts(net, { podId: 'same-id', reconnect: { baseMs: 1, maxMs: 1 } })))
+    b.onReplaced((info) => seen.push(info))
+    await assert.rejects(b.open(), /podId already registered/)
+    await until(() => server.connectionCount >= 3, 'the loser retrying')
+    assert.equal(seen.length, 0, 'not a "replaced": an older server\'s 4409 carries no such code')
+    assert.equal(a.ready, true)
+  })
+
+  it('one pod using the same server for its primary and its signalingUrl stays connected on both and receives each message once', async () => {
+    const { net, server } = world({ mode: 'authenticated' })
+    const identity = await PodIdentity.generate()
+    const other = await PodIdentity.generate()
+    const t = track(new WebSocketTransport(sigOpts(net, {
+      podId: identity.podId, identity, signalingUrl: 'ws://signal.test', peersFromSignaling: true,
+    })))
+    const got = []
+    t.onMessage((m) => got.push(m.n))
+    const replaced = []
+    t.onReplaced((i) => replaced.push(i))
+    await t.open()
+    const sender = track(new WebSocketTransport(sigOpts(net, { podId: other.podId, identity: other })))
+    await sender.open()
+    assert.equal(server.connectionsOf(identity.podId), 2)
+    for (let n = 1; n <= 6; n++) sender.send({ type: 'pod:hello', to: identity.podId, n })
+    await until(() => got.length >= 6, 'six messages')
+    await quiet()
+    assert.deepEqual(got, [1, 2, 3, 4, 5, 6], 'each message once, in order, whichever connection is the newest')
+    assert.equal(server.connectionsOf(identity.podId), 2, 'neither connection displaced the other')
+    assert.equal(replaced.length, 0)
+    assert.equal(t.ready, true)
+  })
+})
