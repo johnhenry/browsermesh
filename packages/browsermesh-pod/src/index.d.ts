@@ -204,7 +204,12 @@ export interface WebSocketTransportOptions {
 export declare class WebSocketTransport implements TransportAdapter {
   constructor(opts: WebSocketTransportOptions);
   get ready(): boolean;
+  /** Pod ids the server named (hints of whom to greet) plus the confirmed ones. */
   get knownPeers(): Set<string>;
+  /** Pod ids whose signed hello or ack verified: the recipients of broadcasts. */
+  get verifiedPeers(): Set<string>;
+  confirmPeer(podId: string): void;
+  forgetPeer(podId: string): void;
   onMessage(handler: (msg: any) => void): void;
   open(): Promise<void>;
   send(msg: any): void;
@@ -216,10 +221,14 @@ export declare class WebSocketTransport implements TransportAdapter {
 export interface PeerFoundInfo {
   podId: string;
   kind?: string;
+  sid?: string | null;
+  authenticated?: boolean;
 }
 
 export interface PeerLostInfo {
   podId: string;
+  sid?: string | null;
+  authenticated?: boolean;
 }
 
 export interface DiscoveryAdapter {
@@ -237,9 +246,15 @@ export declare class TransportDiscovery implements DiscoveryAdapter {
     localKind: string;
     capabilities?: PodCapabilities | null;
     timeout?: number;
+    /** A `MessageSigner`: hello, ack and goodbye are signed with it. */
+    signer?: { sign(msg: any): Promise<any> } | null;
+    guard?: unknown;
+    /** Admit unsigned discovery messages from older peers (default true for a bare adapter; `Pod` passes its own policy). */
+    allowUnsigned?: boolean;
   });
   onPeerDiscovered(handler: (info: PeerFoundInfo) => void): void;
   onPeerLost(handler: (info: PeerLostInfo) => void): void;
+  onDropped(handler: (info: { reason: string; type: string }) => void): void;
   onMessage(handler: (msg: any) => void): void;
   start(): Promise<void>;
   stop(opts?: { silent?: boolean }): Promise<void>;
@@ -263,6 +278,10 @@ export interface PeerInfo {
   kind?: string;
   role?: string;
   lastSeen: number;
+  /** The session id the peer's signed hello named (null when it was not signed). */
+  sid?: string | null;
+  /** True when the peer proved its key (a verified signature, or a link that authenticates the peer); false for an unsigned hello admitted from an older peer. */
+  authenticated?: boolean;
 }
 
 export interface PodBootOptions {

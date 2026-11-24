@@ -116,6 +116,21 @@ Package: `browsermesh-pod` (`Pod`, `signed-message.mjs`). For `pod:message`,
   `handler(msg, { peerId })`; the sender is then that id, a mismatching `from`
   is dropped, and no per-message signature is required. `WshPodTransport` does
   this.
+- **Discovery messages.** `pod:hello`, `pod:hello-ack` and `pod:goodbye` are
+  signed with the same scheme and counter. A peer list entry exists only for a
+  key that proved itself (the pod id a hello names must be the hash of the key
+  that signed it) and is marked `authenticated: true`; a goodbye removes only the
+  peer it names, only for the session that said hello, and an unsigned goodbye
+  never removes an entry a signature proved. A link that authenticates its peer
+  stands in for the signature (`WshPodTransport` hands over a goodbye under the
+  link's identity when the link goes down). What a relay or signalling server
+  says about who is connected (`peers`, `peer-joined`, `peer-left`, a relayed
+  frame's `source`) is a hint of whom to greet, never membership:
+  `WebSocketTransport` sends a hello to a hinted pod and any other broadcast
+  only to pods whose signed hello or ack verified. Pods on 0.2.0 send unsigned
+  hellos: admitted only where `allowUnsigned` allows (default: same-origin
+  transports and the window; refused over a relay or a custom adapter), listed
+  with `authenticated: false`.
 - **Bounded.** Replay window of the last 64 sequence numbers per sender session;
   4 sessions per sender, 1024 senders, in memory. Drops are counted in
   `pod.dropped` by reason (`unsigned`, `unsigned-rpc`, `malformed`,
@@ -130,8 +145,9 @@ Package: `browsermesh-pod` (`Pod`, `signed-message.mjs`). For `pod:message`,
   and by every peer that forwards it. A relay can drop or delay messages.
   Replay state is in memory: a copy from a session the receiver forgot, or sent
   after the receiver restarted, is not recognised. Same-origin delivery trusts
-  the origin: any script of the origin can post under any pod id. `pod:hello`,
-  `pod:hello-ack` and `pod:goodbye` are unsigned and only change the peer list.
+  the origin: any script of the origin can post under any pod id, and announce
+  or retire a pod. A signed hello proves that the key spoke at some time, not
+  that it is online now (a relay can replay one the receiver has forgotten).
   `MeshRouter`'s forwarded envelopes (`from`, `path`) in `browsermesh-apps` are
   written by each hop and are not covered.
 - **Verified.** Unit (`message-authenticity.test.mjs`, with a hostile relay,
@@ -144,7 +160,7 @@ Package: `browsermesh-pod` (`Pod`, `signed-message.mjs`). For `pod:message`,
 | Link | Encrypted against the network | Encrypted against a relay | Who the peer is, as far as this code checks | On by default | Verified |
 | --- | --- | --- | --- | --- | --- |
 | `BroadcastChannelTransport` (pod) | the browser's same-origin isolation | no relay | any same-origin context on that channel name | yes (pod default) | unit; real browser (also across two origins: invisible) |
-| `WebSocketTransport` (pod, relay protocol) | TLS only if the URL is `wss://` | **no**: the relay reads every envelope | pod messages are signed (see above); the relay's `source` is passed as `relaySource` and not believed; the `register` frame sends no proof of key | pods sign by default; `allowUnsigned` false here | unit; real browser against a test-double relay |
+| `WebSocketTransport` (pod, relay protocol) | TLS only if the URL is `wss://` | **no**: the relay reads every envelope | pod messages and discovery messages are signed (see above); the relay's `source` and its peer lists are hints, not membership, and are not believed; the `register` frame sends no proof of key | pods sign by default; `allowUnsigned` false here | unit; real browser against a test-double relay |
 | `WebSocketTransport` / `WebTransportTransport` (transport package) | as above | no | none by the transport itself; optional `padding` and `jitterMs` hide sizes and timing from a network observer, not from the relay | padding and jitter off | WebSocket: unit and real browser (text, 1 MiB binary); WebTransport: mock only |
 | WebRTC (`WebRTCPeerConnection`, `WebRTCMeshManager`) | DTLS (standard data channel encryption) | the signaling relay carries offers and answers, including DTLS fingerprints | signaling names the peer's pod id. With `identity` set, each side proves possession of its pod key over both descriptions' DTLS fingerprints (a swapped description is detected, the connection is closed); a peer sending no proof is closed after `bindingTimeoutMs` (10 s) unless `requirePeerBinding: false`. A renegotiation whose fingerprint changes is rejected | **binding off**; `createMeshNode()` does not enable it | DTLS channel: unit, real peer, real browser. Binding: duplex and fixed vectors only; never over a real `RTCPeerConnection` |
 | **wsh link** (`WshPeerLinks`, `WshPodTransport`) | sealed end to end (authenticated encryption, X25519 + ML-KEM-768) | **sealed: ciphertext only** | the key wsh authenticated, which must hash to the pod id claimed; the dialler pins the host to the pod id it meant to reach; the listener's `authorize` decides (default: nobody) | **off**; `createMeshNode({ wsh })` or an explicit transport; never in a default preference order | real wsh handshake and sealed session over an in-process pipe relay; not a browser; not a real relay deployment |

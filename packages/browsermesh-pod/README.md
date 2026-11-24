@@ -265,8 +265,40 @@ What this does and does not protect, end to end across several hops: a signed
 message gives integrity and origin authenticity that the forwarding peers
 cannot forge. It gives no confidentiality; a peer that forwards a message can
 read it. Encrypted transport is tracked in issue #273 and is not part of this
-change. `pod:hello`, `pod:hello-ack` and `pod:goodbye` announcements are not
-signed: they only affect the peer list and never the attribution of messages.
+change.
+
+**Discovery messages are attributable.** `pod:hello`, `pod:hello-ack` and
+`pod:goodbye` are signed with the same scheme and the same session counter as
+the messages above (the signed fields are `type`, `podId`, `kind`,
+`capabilities`, `to`, `targetPodId`, `ts`, `pk`, `sid` and `seq` as each type
+has them). A pod enters the peer list only when the key that signed its hello
+or ack is the pod id it names; the entry says `authenticated: true` and records
+the session id (`sid`). A goodbye is honoured only from the pod it names, only
+for the session that said hello, and an unsigned goodbye never removes an entry
+that a signature proved. A link that authenticates its peer (`meta.peerId`)
+stands in for the signature, and `WshPodTransport` hands the pod a goodbye
+under the link's identity when a link goes down.
+
+What a relay or signalling server says about who is connected (`peers`,
+`peer-joined`, `peer-left`, and the `source` of a relayed frame) is only a hint
+of whom to greet. `WebSocketTransport` sends a hello to a hinted pod but sends
+any other broadcast only to pods whose signed hello or ack verified
+(`transport.verifiedPeers`); a pod the relay invents never becomes a peer and
+never receives a broadcast.
+
+Older pods (0.2.0) send unsigned hellos. They are admitted by the same
+`allowUnsigned` rule as unsigned messages: by default only over a same-origin
+transport (and the window), listed with `authenticated: false`; **refused over
+a relay or a custom adapter** (counted as `unsigned`, event `message:dropped`
+with type `pod:hello`) unless `allowUnsigned: true`. A pod on 0.2.0 still
+accepts the signed hellos of this version (it ignores the extra fields). Two
+pods over a relay need this version on both sides, or `allowUnsigned: true` on
+the newer one. Same-origin `BroadcastChannel` keeps working signed or not; the
+trust there is the origin, and any script of the origin can announce or retire
+a pod.
+
+A signed hello proves that the key spoke at some time, not that it is online
+now: a relay can replay one from a session this pod has forgotten.
 
 ## WebSocketTransport (relay-backed)
 

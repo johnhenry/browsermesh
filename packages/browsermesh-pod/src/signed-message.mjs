@@ -32,6 +32,7 @@
 import { PodIdentity } from '@johnhenry/browsermesh-primitives'
 import {
   POD_MESSAGE, POD_RPC_REQUEST, POD_RPC_RESPONSE,
+  POD_HELLO, POD_HELLO_ACK, POD_GOODBYE,
 } from './messages.mjs'
 
 export const SIGNATURE_DOMAIN = 'browsermesh/pod-message/v1\n'
@@ -39,12 +40,29 @@ export const SIGNATURE_DOMAIN = 'browsermesh/pod-message/v1\n'
 /** Number of sequence numbers behind the highest seen that are still accepted (once each). */
 export const REPLAY_WINDOW = 64
 
-/** Fields covered by the signature, per message type. Anything else on a received message is ignored. */
+/**
+ * Fields covered by the signature, per message type. Anything else on a received message is ignored.
+ *
+ * The discovery messages name their sender `podId` (not `from`), so that is the field a
+ * receiver checks against the signing key. `to` on a hello or goodbye is optional: absent
+ * (or `'*'`) means "everyone", and when present it is signed like the rest.
+ */
 export const SIGNED_FIELDS = Object.freeze({
   [POD_MESSAGE]: Object.freeze(['type', 'from', 'to', 'payload', 'ts', 'pk', 'sid', 'seq']),
   [POD_RPC_REQUEST]: Object.freeze(['type', 'from', 'to', 'method', 'params', 'requestId', 'ts', 'pk', 'sid', 'seq']),
   [POD_RPC_RESPONSE]: Object.freeze(['type', 'from', 'to', 'requestId', 'result', 'error', 'ts', 'pk', 'sid', 'seq']),
+  [POD_HELLO]: Object.freeze(['type', 'podId', 'kind', 'capabilities', 'to', 'ts', 'pk', 'sid', 'seq']),
+  [POD_HELLO_ACK]: Object.freeze(['type', 'podId', 'kind', 'targetPodId', 'ts', 'pk', 'sid', 'seq']),
+  [POD_GOODBYE]: Object.freeze(['type', 'podId', 'to', 'ts', 'pk', 'sid', 'seq']),
 })
+
+/** The field that names the sender, per message type. */
+const SENDER_FIELD = Object.freeze({
+  [POD_HELLO]: 'podId', [POD_HELLO_ACK]: 'podId', [POD_GOODBYE]: 'podId',
+})
+
+/** The discovery message types (`pod:hello`, `pod:hello-ack`, `pod:goodbye`). */
+export const DISCOVERY_TYPES = Object.freeze([POD_HELLO, POD_HELLO_ACK, POD_GOODBYE])
 
 /** Why a message was dropped (the `reason` of a drop). */
 export const DROP_REASONS = Object.freeze([
@@ -265,7 +283,12 @@ export async function verifyMessage(msg, { guard } = {}) {
   const fields = SIGNED_FIELDS[msg.type]
   if (!fields) return { ok: false, reason: 'malformed' }
   if (msg.sig === undefined && msg.pk === undefined) return { ok: false, reason: 'unsigned' }
-  if (typeof msg.from !== 'string' || typeof msg.to !== 'string' || typeof msg.sid !== 'string'
+  const discovery = DISCOVERY_TYPES.includes(msg.type)
+  const sender = msg[SENDER_FIELD[msg.type] ?? 'from']
+  const addressed = discovery
+    ? (msg.to === undefined || typeof msg.to === 'string') && (msg.type !== POD_HELLO_ACK || typeof msg.targetPodId === 'string')
+    : typeof msg.to === 'string'
+  if (typeof sender !== 'string' || !addressed || typeof msg.sid !== 'string'
     || typeof msg.pk !== 'string' || typeof msg.sig !== 'string' || !Number.isSafeInteger(msg.seq)) {
     return { ok: false, reason: 'malformed' }
   }
@@ -273,7 +296,7 @@ export async function verifyMessage(msg, { guard } = {}) {
   const sig = fromBase64url(msg.sig)
   if (!raw || raw.length !== 32 || !sig || sig.length !== 64) return { ok: false, reason: 'malformed' }
 
-  if ((await podIdOfRawKey(raw)) !== msg.from) return { ok: false, reason: 'sender-mismatch' }
+  if ((await podIdOfRawKey(raw)) !== sender) return { ok: false, reason: 'sender-mismatch' }
 
   let bytes
   try { bytes = signedBytes(msg) } catch { return { ok: false, reason: 'malformed' } }
@@ -284,9 +307,42 @@ export async function verifyMessage(msg, { guard } = {}) {
   } catch { valid = false }
   if (!valid) return { ok: false, reason: 'bad-signature' }
 
-  if (guard && !guard.accept(msg.from, msg.sid, msg.seq)) return { ok: false, reason: 'replay' }
+  if (guard && !guard.accept(sender, msg.sid, msg.seq)) return { ok: false, reason: 'replay' }
 
   const message = {}
   for (const f of fields) if (msg[f] !== undefined) message[f] = msg[f]
-  return { ok: true, from: msg.from, message }
+  return { ok: true, from: sender, message }
+}
+
+/**
+ * Decide whether a discovery message (`pod:hello`, `pod:hello-ack`,
+ * `pod:goodbye`) is attributable to the pod it names, and say how.
+ *
+ * - A link that authenticates its peer (`meta.peerId`) fixes the sender: the
+ *   message must name that peer, and needs no signature.
+ * - Otherwise a signature must verify (the message names the pod whose key
+ *   signed it, and is fresh).
+ * - An unsigned message from an older peer is admitted only when
+ *   `allowUnsigned` is true, and then marked `authenticated: false`.
+ *
+ * @param {object} msg
+ * @param {{ peerId?: string }|undefined} meta
+ * @param {{ guard?: ReplayGuard, allowUnsigned?: boolean }} [opts]
+ * @returns {Promise<{ ok: true, podId: string, authenticated: boolean, sid: string|null } | { ok: false, reason: string }>}
+ */
+export async function admitDiscovery(msg, meta, { guard, allowUnsigned = false } = {}) {
+  if (!msg || typeof msg !== 'object' || !DISCOVERY_TYPES.includes(msg.type) || typeof msg.podId !== 'string') {
+    return { ok: false, reason: 'malformed' }
+  }
+  if (typeof meta?.peerId === 'string') {
+    if (msg.podId !== meta.peerId) return { ok: false, reason: 'sender-mismatch' }
+    return { ok: true, podId: msg.podId, authenticated: true, sid: typeof msg.sid === 'string' ? msg.sid : null }
+  }
+  if (msg.sig !== undefined || msg.pk !== undefined) {
+    const verdict = await verifyMessage(msg, { guard })
+    if (!verdict.ok) return verdict
+    return { ok: true, podId: verdict.from, authenticated: true, sid: msg.sid }
+  }
+  if (!allowUnsigned) return { ok: false, reason: 'unsigned' }
+  return { ok: true, podId: msg.podId, authenticated: false, sid: null }
 }
