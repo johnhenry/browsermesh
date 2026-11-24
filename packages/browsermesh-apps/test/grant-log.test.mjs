@@ -132,6 +132,15 @@ describe('GrantLog (direct)', () => {
     assert.equal(alice.registry.checkAccess(bob.podId, RESOURCE, 'delete').allowed, false)
   })
 
+  it('a scope the registry will not grant (objects:ROOT:OP with an operation that does not exist) is skipped, and the rest of the replay goes on', async () => {
+    const log = new GrantLog({ resource: 'objects:docs', localPodId: alice.podId, wallet: alice.wallet, registry: alice.registry })
+    await log.bootstrapAdmin()
+    await log.grant(bob.podId, ['get', 'fly', 'on'])
+    assert.equal(alice.registry.checkAccess(bob.podId, 'objects:docs', 'get').allowed, true)
+    assert.equal(alice.registry.checkAccess(bob.podId, 'objects:docs', 'on').allowed, true)
+    assert.equal(alice.registry.checkAccess(bob.podId, 'objects:docs', 'fly').allowed, false)
+  })
+
   it('a non-admin cannot locally construct a grant (rejected before it is even signed)', async () => {
     const log = new GrantLog({ resource: RESOURCE, localPodId: bob.podId, wallet: bob.wallet, registry: bob.registry })
     // Bob never bootstrapped himself as admin.

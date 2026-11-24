@@ -61,6 +61,9 @@ function dropsOf(on) {
   Object.defineProperty(reasons, 'waitFor', { enumerable: false, value: (n) => (reasons.length >= n ? Promise.resolve() : new Promise((resolve) => waiting.push({ n, resolve }))) })
   return reasons
 }
+/** Wait for a condition, turn by turn. Signing and opening are real asynchronous crypto, so how many turns they take
+ * depends on machine load: a test that needs a result waits for it (an event, a scheduled wait, a delivery), never for a number of turns. */
+const until = async (condition) => { while (!condition()) await new Promise((r) => setImmediate(r)) }
 const settle = async () => { for (let i = 0; i < 30; i++) await new Promise((r) => setImmediate(r)) }
 
 /** alice -> bob (a hop) -> carol. Everyone shares one injected clock. */
@@ -130,6 +133,7 @@ describe('a sealed routed message', () => {
     w.a.on('mesh-routing:sealed-fallback', (f) => fallbacks.push(f))
     const got = next(w.c.on, 'mesh-routing:message')
     w.a.api.route(w.carol.podId, { text: SECRET })
+    await until(() => w.waits.length >= 1 && w.nodeB.inbox.length >= 1) // the key request has left and the wait is scheduled
     await settle()
     assert.equal(w.nodeB.inbox.length, 1, 'only the key request has left; the message waits')
     assert.deepEqual(w.waits.slice(0, 1), [2000], 'the wait is the default 2 s')
@@ -171,7 +175,7 @@ describe('a sealed routed message', () => {
     const got = []
     w.c.on('mesh-routing:message', (m) => got.push(m))
     w.a.api.route(w.carol.podId, { n: 1 })
-    await settle()
+    await until(() => w.waits.length >= 1)
     w.fire()
     while (got.length < 1) await new Promise((r) => setImmediate(r))
     const waitsAfterFirst = w.waits.length
@@ -183,7 +187,7 @@ describe('a sealed routed message', () => {
     // After the negative cache has run out (injected clock) the next message waits again.
     w.clock.t += 61_000
     w.a.api.route(w.carol.podId, { n: 3 })
-    await settle()
+    await until(() => w.waits.length > waitsAfterFirst) // it waited again
     assert.ok(w.waits.length > waitsAfterFirst, 'it waited again')
     w.fire()
     while (got.length < 3) await new Promise((r) => setImmediate(r))
@@ -198,7 +202,7 @@ describe('a sealed routed message', () => {
     assert.deepEqual([...reasons], ['sealed-unavailable', 'sealed-unavailable'])
     const got = []
     w.c.on('mesh-routing:message', (m) => got.push(m))
-    await settle()
+    await until(() => w.waits.length >= 1)
     w.fire()
     while (got.length < 3) await new Promise((r) => setImmediate(r))
     await settle()
@@ -213,9 +217,9 @@ describe('a sealed routed message', () => {
     const heard = []
     w.nodeB.onIncomingData((from, d) => { if (d?.type === 'mesh-routing') heard.push(d) })
     w.a.api.route(w.carol.podId, { text: SECRET })
-    await settle()
+    await until(() => w.waits.length >= 1) // the key request is out and its bounded wait is scheduled
     w.fire()
-    await settle()
+    await until(() => fallbacks.length >= 1 && JSON.stringify(heard).includes('launch code')) // told, and sent readable
     assert.deepEqual(fallbacks.map((f) => f.reason), ['timeout'], 'the sender is told it fell back')
     assert.ok(JSON.stringify(heard).includes('launch code'), 'the fallback is readable by that hop')
     assert.throws(() => w.a.api.route(w.carol.podId, { text: SECRET }, { requireSealed: true }), SealedUnavailableError)
@@ -481,7 +485,7 @@ describe('older peers', () => {
     const w = await world({ carol: { sealing: false } })
     const got = next(w.c.on, 'mesh-routing:message')
     w.a.api.route(w.carol.podId, { text: SECRET })
-    await settle()
+    await until(() => w.waits.length >= 1)
     w.fire()
     const msg = await got
     assert.deepEqual(msg.message, { text: SECRET })

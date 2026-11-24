@@ -37,6 +37,7 @@
     "typecheck": "tsc --noEmit -p test/tsconfig.json"
   },
   "devDependencies": {
+    "@johnhenry/wsh": "^0.48.0",
     "typescript": "^7.0.2"
   },
   "engines": {

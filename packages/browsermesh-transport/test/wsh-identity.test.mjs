@@ -31,6 +31,13 @@ describe('wsh identity mapping', () => {
     assert.equal(id.podId, await wsh.podId(raw));
   });
 
+  it('the conversion exists once, in primitives: the names here are those same functions', async () => {
+    const primitives = await import('@johnhenry/browsermesh-primitives');
+    assert.equal(podIdToFingerprint, primitives.podIdToFingerprint);
+    assert.equal(fingerprintToPodId, primitives.fingerprintToPodId);
+    assert.equal(podIdFromRawKey, primitives.podIdFromRawKey);
+  });
+
   it('MeshWshBridge converts with the same functions (one source of truth)', async () => {
     const id = await PodIdentity.generate();
     const bridge = new MeshWshBridge({}, {});

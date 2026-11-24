@@ -181,7 +181,7 @@ changes for code that does not ask for it. Design and threat model:
 [`docs/design/wsh-peer-link.md`](../../docs/design/wsh-peer-link.md); what is and
 is not protected: [`docs/security.md`](../../docs/security.md).
 
-Install the optional peer, `npm install @johnhenry/wsh` (`^0.45.0`). It is
+Install the optional peer, `npm install @johnhenry/wsh` (`>=0.45.0 <1.0.0`; tested on 0.45.0 to 0.48.0). It is
 imported lazily on the first `listen()` / `connect()`, so a page that never
 uses a wsh link loads none of it.
 

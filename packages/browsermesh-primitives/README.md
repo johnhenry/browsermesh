@@ -92,6 +92,7 @@ console.log(set.has('item')) // true
 - `PodIdentity` -- Ed25519 key pair with sign/verify; also `fromCryptoKeyPair`, `fromJwk`, `fromPkcs8`, `fromSigner`, `generate({ extractable })` (see [Vault-friendly identity](#vault-friendly-identity-session-certificates-and-revocation))
 - `derivePodId(publicKey)` -- SHA-256 hash to base64url pod ID
 - `encodeBase64url(bytes)` / `decodeBase64url(str)` -- URL-safe base64
+- One key, three names, explicitly (nothing calls these for you; read [One key in both worlds](../../docs/security.md#one-key-in-both-worlds) before listing a pod key on a machine): `podIdToFingerprint` / `fingerprintToPodId` (a pod id and wsh's hex fingerprint), `openSSHPublicKeyFromRaw`, `rawPublicKeyFromOpenSSH`, `podIdFromOpenSSHPublicKey`, `authorizedKeysLine`, and on a `PodIdentity` `toOpenSSHPublicKey()` and `toAuthorizedKeysLine({ capabilities, expires, comment })`. Public keys only: there is no OpenSSH private key parser (a private key crosses as PKCS#8).
 - Session certificates and signed revocation: `createSession`, `issueSessionCertificate`, `verifyPeerCredential`, `scopeAllows`, `revokeSessionCertificate`, `retireIdentity`, `receiveRevocation`, `isRevoked`, `MemoryRevocationStore`, `CredentialError`
 
 ### Wire Format
