@@ -31,7 +31,11 @@ Extracted from the private `clawser` monorepo (previously `packages/browsermesh-
 | gateway | `GatewayNode`, `GatewayDiscovery`, `RouteTable` |
 | streams | `MeshStream`, `StreamMultiplexer` |
 | cross-origin | `CrossOriginBridge`, `CrossOriginHandshake`, `RateLimiter` |
-| wsh-bridge | `MeshWshBridge` |
+| wsh-bridge | `MeshWshBridge` (syncs a `WshKeyStore` with a `MeshIdentityManager`; the link layer does not use it) |
+| wsh-links | `WshPeerLinks`, `WshLink`, `WshLinkError`, `createWshTransportFactory`, `podIdToFingerprint`, `fingerprintToPodId`, `rendezvousId` |
+| wsh-pod-transport | `WshPodTransport` (a `Pod` `TransportAdapter`) |
+| wsh-frames | `encodeFrame`, `FrameDecoder`, `WshFrameError`, `DEFAULT_MAX_FRAME_BYTES` |
+| wsh-in-process (subpath `@johnhenry/browsermesh-transport/wsh-in-process`) | `createInProcessPipeRelay` (tests and examples) |
 | wisp | `WispTransport` |
 | channel-relay | `ChannelRelay` |
 
@@ -163,6 +167,123 @@ padding *inside* the end-to-end seal:
   padding inside the seal for relay-blind payloads.
 
 Constant-rate cover traffic is deliberately not provided.
+
+## Sealed peer links over wsh
+
+A mesh link can be a [wsh](https://github.com/johnhenry/wsh) session: key login
+in both directions, a host key the dialler pins to the pod id it meant to
+reach, a login bound to the connection, and a session sealed end to end so a
+relay can neither read nor alter it. A pod's Ed25519 key is its wsh identity
+and the pod id a peer claims must be the hash of the key wsh authenticated, so
+the sender of every message on a link is that key. **Off by default**; nothing
+changes for code that does not ask for it. Design and threat model:
+[`docs/design/wsh-peer-link.md`](../../docs/design/wsh-peer-link.md); what is and
+is not protected: [`docs/security.md`](../../docs/security.md).
+
+Install the optional peer, `npm install @johnhenry/wsh` (`^0.45.0`). It is
+imported lazily on the first `listen()` / `connect()`, so a page that never
+uses a wsh link loads none of it.
+
+Between two browsers neither can listen, so a pod that wants to be reached
+waits at its own rendezvous id on a wsh **pipe relay** (a relay that copies
+bytes and vouches for nothing; `createPipeRelay` in `@johnhenry/wsh/pipe-relay`)
+and a pod that wants to reach it dials that id:
+
+```js
+import { PodIdentity } from '@johnhenry/browsermesh-primitives'
+import { WshPeerLinks } from '@johnhenry/browsermesh-transport'
+
+const identity = await PodIdentity.generate()
+const links = new WshPeerLinks({
+  identity,                                   // or { podId, signer } for a key held elsewhere
+  relays: ['wss://relay.example/'],           // pipe relay base URL(s)
+  authorize: ({ podId }) => allowed.has(podId), // who may link to this pod. Default: nobody
+})
+await links.listen()                          // be reachable
+await links.connect(otherPodId)               // reach a peer; redialled if the link is lost
+links.on('message', ({ from, data }) => { /* `from` is the authenticated pod id */ })
+await links.send(otherPodId, { hello: 'sealed' })   // resolves when the stream accepted it
+```
+
+**For a `Pod`**: `WshPodTransport` is a `TransportAdapter`, so a `Pod` uses it
+unchanged. `from` is set to the authenticated key and a message that names
+another sender is dropped.
+
+```js
+const transport = new WshPodTransport({ identity, relays, authorize, peers: [otherPodId] })
+await pod.boot({ identity, transport })
+```
+
+**For `PeerNode`** (mesh-rpc, mesh-sync, mesh-relay and the rest): use
+`createMeshNode({ wsh: { relays } })` from `@johnhenry/browsermesh-apps`, or
+register the adapter yourself:
+
+```js
+negotiator.registerAdapter('wsh', createWshTransportFactory(links))   // endpoint = the peer's pod id
+```
+
+### Selection
+
+`'wsh'` is a `TRANSPORT_TYPES` member but is in no default preference order.
+Opt in by listing it (`new MeshTransportNegotiator({ preferenceOrder: ['wsh',
+'webrtc'] })`) or by requiring it: `new MeshTransportNegotiator({ require: 'wsh'
+})`, or `negotiate(endpoints, auth, { require: 'wsh' })`. With `require` only
+the wsh adapter is tried and its failure is the failure, **never a fallback to
+an unsealed transport**. There is no setting that makes a wsh link plain:
+sealing is always on and checked after login.
+`TransportFactory.create('wsh', { links, peerPodId })` returns an unconnected
+`WshLink`.
+
+### What the link does
+
+- **Frames**: `u32 length | u8 kind | payload` on one named endpoint (`mesh`);
+  `maxFrameBytes` (default 1 MiB) is checked on the header, before the payload
+  is buffered.
+- **Backpressure**: writes wait for the endpoint's credit window; `send()`
+  resolves when the stream accepted the frame. Pending sends queue up to
+  `maxQueuedBytes` (default 4 MiB), then reject with `WSH_BACKPRESSURE`. A slow
+  reader (a handler that returns a promise, or `pause(podId)`) stalls its sender
+  at a bounded amount.
+- **Simultaneous dial**: if two pods dial each other at once, exactly one link
+  survives, the one the lower pod id initiated; nothing is reported as down.
+- **Liveness and reconnect**: the wsh client pings and closes on a missed pong
+  (`keepAlive`); a kept peer is redialled with backoff (`reconnect`), a refusal
+  or host key mismatch stops it.
+- **Errors**: `WshLinkError` with a stable `code` (`WSH_HOSTKEY_MISMATCH`,
+  `WSH_REFUSED` with `reason`, `WSH_NOT_SEALED`, `WSH_UNREACHABLE`,
+  `WSH_SEAL_FAILED`, `WSH_FRAME_TOO_LARGE`, `WSH_BAD_FRAME`, `WSH_BACKPRESSURE`,
+  `WSH_CLOSED`, `WSH_UNAVAILABLE`). The listening side gets wsh's `onRefused`
+  reasons through the `refused` event (plus `identity-mismatch`).
+
+### Testing without a network
+
+```js
+import { createInProcessPipeRelay } from '@johnhenry/browsermesh-transport/wsh-in-process'
+const env = await createInProcessPipeRelay()      // wsh's real pipe relay, in this process
+new WshPeerLinks({ identity, relays: ['wss://relay.invalid'], WebSocket: env.WebSocket, authorize })
+// env.recorded holds every byte the relay copied; env.tap can alter them; env.dropAll() ends every pipe
+```
+
+It is a separate subpath because it imports wsh's pipe relay, which has a
+Node-only listener a browser bundle should not follow.
+
+### Bundle size
+
+Measured with esbuild (minified, browser, code splitting, `@johnhenry/browsermesh-primitives`
+external), size of what is added:
+
+| | raw | gzip |
+| --- | ---: | ---: |
+| a page that imports only `MeshTransportNegotiator` / `WebSocketTransport` (no wsh link): added to the main chunk | +0.56 kB | +0.16 kB |
+| a page that imports `WshPeerLinks`: the link code in the main chunk | 21.1 kB | 7.8 kB |
+| lazy, dialling role (`@johnhenry/wsh` client): shared wsh core + client | 170.6 kB | 52.8 kB |
+| lazy, listening role (`@johnhenry/wsh/memory`): shared wsh core + host | 237.4 kB | 74.5 kB |
+| lazy, both roles | 259.2 kB | 82.9 kB |
+| lazy, only where WebCrypto has no ML-KEM (`@noble/post-quantum`) | +19.2 kB | +7.6 kB |
+
+The wsh chunks load on the first `connect()` / `listen()`; a page that never
+links over wsh never fetches them. These are one-off measurements of wsh 0.45.0,
+not a budget this repository enforces.
 
 ## License
 

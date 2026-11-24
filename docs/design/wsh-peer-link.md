@@ -2,8 +2,11 @@
 
 Status: implemented in `@johnhenry/browsermesh-transport` (`wsh-links.mjs`,
 `wsh-pod-transport.mjs`, `wsh-frames.mjs`) and wired through the peer layer in
-`@johnhenry/browsermesh-apps` (`wsh-negotiator.mjs`). Resolves issue #273
-(option 1). Off by default.
+`@johnhenry/browsermesh-apps` (`wsh-negotiator.mjs`, `createMeshNode({ wsh })`).
+Resolves issue #273 (option 1). Off by default. What it protects and does not:
+[`../security.md`](../security.md). Adopting it:
+[`../migration-wsh-peer-link.md`](../migration-wsh-peer-link.md). Example:
+`examples/18-wsh-sealed-peer-link.mjs`.
 
 ## Why
 
@@ -90,10 +93,10 @@ authenticates the dialler. An impostor can occupy a waiting slot (a nuisance,
 handled by keeping slots topped up); it can not become B.
 
 Why the pipe relay and not relay (reverse host) mode: in relay mode the relay
-stamps the operator's identity on messages and is a party to the bridge. A pipe
-relay vouches for nothing, and named endpoints work through it on a sealed
-session. Relay mode would need the operator proof options and still carries no
-named endpoint across the bridge.
+stamps the operator's identity on messages and is a party to the bridge (wsh
+documents that only control messages cross it), so it would need the operator
+proof and sealed bridge options on top. A pipe relay vouches for nothing, and
+named endpoints work through it on a sealed session (tested here).
 
 Non-browser pods (Node) may also listen directly (`createWshServer`) and be
 dialled without a relay; the hub takes a `socketFactory` so a direct URL or a
@@ -144,7 +147,9 @@ where `length` counts the kind byte and payload.
 
 * Liveness comes from wsh: the client pings and closes on a missed pong
   (`keepAlive: { pingIntervalMs, pongTimeoutMs }`); when it does, the relay
-  closes the other half and the host sees the endpoint end.
+  closes the other half and the host sees the endpoint end. (The tests drop
+  sockets; none makes a relay go silent, so the ping timeout path itself is
+  wsh's and is not exercised here.)
 * `peer-down` carries a reason: `closed`, `seal-failed` (a frame did not open),
   `frame-too-large`, `bad-frame`, `superseded` (never reported as down),
   `transport` (the socket dropped), `local-close`.
@@ -190,7 +195,16 @@ know about.
 * To use it: construct a `WshPeerLinks` (identity, relay URL(s), `authorize`),
   register `negotiator.registerAdapter('wsh', factory)` and either put `'wsh'`
   in `preferenceOrder` or pass `require: 'wsh'`. `TransportFactory.create('wsh',
-  { links, peerPodId })` returns an unconnected link for the same purpose.
+  { links, peerPodId })` returns an unconnected link for the same purpose. A
+  `Pod` takes `WshPodTransport` as its transport; a mesh node takes
+  `createMeshNode({ wsh: { relays } })` (with `require: true` for the
+  fail-closed setting). There is no option literally named `transport: 'wsh'`:
+  the negotiator's preference order is the registry's way of choosing adapters.
+* `PeerNode.connectToPeer()` used to fall through to a transportless registry
+  connection on any negotiation failure; it now rethrows when its negotiator was
+  told to `require` a transport, so `require: 'wsh'` holds at the peer layer too.
+  `require` governs outbound connects only: inbound WebRTC offers are still
+  answered while a WebRTC signaling bus is wired.
 * **`require`** (constructor option or third argument of `negotiate`) means:
   only that adapter is tried and its failure is the failure. There is no
   fallback to anything unsealed. Without `require`, a preference order that
@@ -210,9 +224,11 @@ be `true`, `false`, or `{ expires }`; the key is never given anything but the
 link layer cannot hand a peer an exec channel or a gateway on this host.
 
 `@johnhenry/browsermesh-apps` provides `createWshAuthorizer(registry)`, which
-asks `PeerRegistry`: a peer is allowed when the registry knows it and its
+asks `PeerRegistry`: a peer is allowed when
 `checkAccess(podId, 'mesh:link', 'connect')` passes (the ACL scope
-`mesh:link:connect`; `MeshACL` wildcards apply). Unknown peers are refused.
+`mesh:link:connect`; `MeshACL` wildcards apply, and so does revocation). A peer
+with no grant is refused. `requireKnownPeer: true` additionally requires the
+peer to be in the registry's peer list.
 
 ## Peer layer wiring
 
@@ -297,10 +313,20 @@ with the pod's own `WebSocketTransport`, and has not been built here; the
 ## Bundle size
 
 `@johnhenry/wsh` is `sideEffects: false` with one entry point per role, and
-is imported lazily (`import()` on first use), so a page that never uses the
-wsh transport loads none of it. The dialling role imports `@johnhenry/wsh`
-(the client); the listening role imports `@johnhenry/wsh/memory` (the host).
-Measured sizes are in the transport package README.
+is imported lazily (`import()` with a literal specifier on first use, so a
+bundler splits it into chunks a page that never links over wsh never fetches).
+The dialling role imports `@johnhenry/wsh` (the client); the listening role
+imports `@johnhenry/wsh/memory` (the host). The in-process test relay is a
+separate subpath (`@johnhenry/browsermesh-transport/wsh-in-process`) because it
+imports wsh's pipe relay, which has a Node-only listener.
+
+Measured with esbuild (minified, browser, splitting), wsh 0.45.0: a page that
+uses no wsh link pays +0.56 kB raw / +0.16 kB gzip in the main chunk (the
+`'wsh'` factory case); a page that imports `WshPeerLinks` has 21.1 kB raw /
+7.8 kB gzip of link code; lazily, the dialling role adds 170.6 kB raw / 52.8 kB
+gzip, the listening role 237.4 kB / 74.5 kB, both 259.2 kB / 82.9 kB, plus
+19.2 kB / 7.6 kB for `@noble/post-quantum` where WebCrypto has no ML-KEM. The
+repository does not otherwise measure or budget sizes.
 
 ## Dependency
 

@@ -227,6 +227,36 @@ This reaches the `WebRTCMeshManager` that `createMeshNode()` attaches to the
 returned node as `node.meshManager`, and from there every
 `WebRTCPeerConnection` it creates.
 
+## Sealed, key-authenticated links: `createMeshNode({ wsh })`
+
+Opt in (off by default) to carry mesh links on [wsh](https://github.com/johnhenry/wsh)
+sessions: key login in both directions, the host key pinned to the pod id you
+meant to reach, and a session sealed end to end so the relay can read and alter
+nothing. Needs the optional peer `@johnhenry/wsh` and a wsh pipe relay; see
+[`browsermesh-transport`'s README](../browsermesh-transport/README.md#sealed-peer-links-over-wsh)
+and [`docs/security.md`](../../docs/security.md) for what it does and does not
+protect.
+
+```js
+const node = await createMeshNode({
+  signalingTransport,
+  wsh: { relays: ['wss://relay.example/'] },   // `require: true` to never fall back to another transport
+});
+// The registry decides who may link to this node (default deny):
+node.registry.grantCapabilities(peerPodId, ['mesh:link:connect']);
+await node.connectToPeer(otherPodId, { wsh: otherPodId });
+```
+
+The node's own identity is the wsh identity. An inbound link becomes a
+`PeerNode` session under the pod id derived from the key wsh authenticated, so
+`fromPubKey` in `onIncomingData()` is that key and every service
+(`mesh-rpc`, `mesh-sync`, `mesh-relay`, ...) runs over the link unchanged.
+`createWshAuthorizer(registry)`, `createWshAdapterFactory(links)` and
+`attachWshLinks({ node, links, negotiator })` are the pieces `createMeshNode`
+uses, exported for a hand-built node. `wsh.require` governs outbound
+`connectToPeer()`; inbound WebRTC offers are still answered while a WebRTC
+signaling bus is wired.
+
 ## Sharing a `VirtualNetwork` with specific peers: mesh relay
 
 Real-world scenario: your peer already reaches a real local service (e.g. an
