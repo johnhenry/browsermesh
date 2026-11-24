@@ -81,10 +81,40 @@ describe('createVmPodDriver', () => {
     assert.equal(machineConfig.args.vcpu_count, 2)
     assert.equal(machineConfig.args.mem_size_mib, 256)
     const drive = vmPod.plannedApiCalls.find((call) => call.api === 'putDrive')
-    assert.equal(drive.args[1].path_on_host, '/vm/default.ext4')
+    // The configured default is a shared BASE: the VM boots its own copy.
+    assert.equal(drive.args[1].path_on_host, '/vm/run/alpha/rootfs.ext4')
+    assert.deepEqual(
+      vmPod.plannedCommands.find((c) => c.argv[0] === 'cp').argv,
+      ['cp', '--reflink=auto', '--no-clobber', '--', '/vm/default.ext4', '/vm/run/alpha/rootfs.ext4'],
+    )
     const vsock = vmPod.plannedApiCalls.find((call) => call.api === 'putVsock')
     assert.equal(vsock.args.uds_path, '/vm/run/alpha.vsock')
     assert.equal(vsock.args.guest_cid, 3)
+  })
+
+  it('gives two pods from the same base image two different disks', async () => {
+    const { host, driver } = await makeDriver()
+    await driver.spawn(spec({ name: 'one' }))
+    await driver.spawn(spec({ name: 'two' }))
+    const disks = ['one', 'two'].map((name) => host.vms.get(name)
+      .plannedApiCalls.find((call) => call.api === 'putDrive').args[1].path_on_host)
+    assert.notEqual(disks[0], disks[1])
+    assert.ok(!disks.includes('/vm/default.ext4'), 'the shared base is never attached')
+  })
+
+  it('names the TAP from a hash so a 64-character pod name still fits an interface name', async () => {
+    const { host, driver } = await makeDriver()
+    const name = 'p'.repeat(64)
+    await driver.spawn(spec({ name }))
+    const net = host.vms.get(name).plannedApiCalls.find((call) => call.api === 'putNetworkInterface')
+    assert.match(net.args[1].host_dev_name, /^tap-[0-9a-f]{10}$/)
+  })
+
+  it('passes the egress policy through to the host network rules', async () => {
+    const { host, driver } = await makeDriver({ network: { egress: { mode: 'none' } } })
+    await driver.spawn(spec())
+    const rules = host.vms.get('alpha').plannedCommands.map((c) => c.argv.join(' ')).join('\n')
+    assert.doesNotMatch(rules, /masquerade/)
   })
 
   it('allocates a distinct vsock CID per pod', async () => {
@@ -109,7 +139,14 @@ describe('createVmPodDriver', () => {
     const { host, driver } = await makeDriver({ rootfsCatalog: { alpine: '/vm/alpine.ext4' } })
     await driver.spawn(spec({ run: { kind: 'rootfs', ref: 'alpine' } }))
     const drive = host.vms.get('alpha').plannedApiCalls.find((call) => call.api === 'putDrive')
-    assert.equal(drive.args[1].path_on_host, '/vm/alpine.ext4')
+    assert.equal(drive.args[1].path_on_host, '/vm/run/alpha/rootfs.ext4')
+    assert.equal(host.vms.get('alpha').plannedCommands.find((c) => c.argv[0] === 'cp').argv.at(-2), '/vm/alpine.ext4')
+
+    // A ref naming an Object.prototype member is not a catalog entry.
+    await assert.rejects(
+      driver.spawn(spec({ name: 'gamma', run: { kind: 'rootfs', ref: 'constructor' } })),
+      (err) => err.code === POD_HOST_ERROR.ENOENT,
+    )
 
     await assert.rejects(
       driver.spawn(spec({ name: 'beta', run: { kind: 'rootfs', ref: '/etc/shadow' } })),
