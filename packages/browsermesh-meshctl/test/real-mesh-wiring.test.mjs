@@ -17,6 +17,7 @@ import { describe, it, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { createRealMeshSession } from '../src/real-mesh.mjs'
 import { buildTestIdentity, runCli } from './helpers.mjs'
+import { SignalingDouble, createDoubleNetwork } from '../../../tests/support/signaling-double.mjs'
 
 const OPEN = 1
 const CLOSED = 3
@@ -204,6 +205,54 @@ describe('real-mesh wiring (fake signaling transport)', () => {
     )
     assert.equal(code, 2)
     assert.equal(JSON.parse(stderr).error.code, 'EUSAGE')
+  })
+
+  describe('against the signalling server\'s authenticated mode (protocol 2)', () => {
+    it('registers with its persisted identity: the server verifies the pod id against the key', async () => {
+      const net = createDoubleNetwork()
+      const server = net.add('ws://signal.test', new SignalingDouble({ mode: 'authenticated', publicOrigin: 'ws://signal.test' }))
+      const { cliIdentity, cleanup } = await buildTestIdentity()
+      cleanups.push(cleanup)
+
+      const session = await createRealMeshSession({
+        cliIdentity, signalingUrl: 'ws://signal.test', WebSocketCtor: net.WebSocket, timeoutMs: 1000,
+      })
+      cleanups.push(session.close)
+
+      assert.deepEqual(session.signalingTransport.registration, { mode: 'authenticated', verified: true })
+      assert.equal(server.size, 1)
+      const reg = server.received.find((r) => r.data.type === 'register').data
+      assert.equal(reg.protocol, 2)
+      assert.equal(reg.podId, cliIdentity.podId)
+    })
+
+    it('still joins an open-mode server (after the bounded wait for a challenge that never comes)', async () => {
+      const net = createDoubleNetwork()
+      net.add('ws://signal.test', new SignalingDouble({ mode: 'open' }))
+      const { cliIdentity, cleanup } = await buildTestIdentity()
+      cleanups.push(cleanup)
+
+      const session = await createRealMeshSession({
+        cliIdentity, signalingUrl: 'ws://signal.test', WebSocketCtor: net.WebSocket, timeoutMs: 1000, signalingChallengeWaitMs: 5,
+      })
+      cleanups.push(session.close)
+      assert.deepEqual(session.signalingTransport.registration, { mode: 'open', verified: false })
+    })
+
+    it("signalingAuthentication: 'required' refuses an open-mode server by name", async () => {
+      const net = createDoubleNetwork()
+      net.add('ws://signal.test', new SignalingDouble({ mode: 'open' }))
+      const { cliIdentity, cleanup } = await buildTestIdentity()
+      cleanups.push(cleanup)
+
+      await assert.rejects(
+        createRealMeshSession({
+          cliIdentity, signalingUrl: 'ws://signal.test', WebSocketCtor: net.WebSocket, timeoutMs: 1000,
+          signalingAuthentication: 'required', signalingChallengeWaitMs: 5,
+        }),
+        (e) => e.code === 'no-challenge',
+      )
+    })
   })
 
   it('createRealMeshSession() without --signaling throws a usage error', async () => {
