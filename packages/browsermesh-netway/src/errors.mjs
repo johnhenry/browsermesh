@@ -99,6 +99,21 @@ export class QueueFullError extends NetwayError {
 }
 
 /**
+ * Thrown by {@link VirtualNetwork#connect} when the network's byte cap
+ * (`maxBufferedBytes`) is reached by what its sockets hold unread or unsent.
+ *
+ * @property {string} code - Always `'ENOBUFS'`.
+ */
+export class BufferLimitError extends NetwayError {
+  /** @param {number} limit - The cap, in bytes. */
+  constructor(limit) {
+    super(`Network buffer limit reached (${limit} bytes held on open sockets)`, 'ENOBUFS');
+    this.name = 'BufferLimitError';
+    this.limit = limit;
+  }
+}
+
+/**
  * Thrown by {@link Router#resolve} when the address contains a URI scheme that
  * has no registered backend.
  *

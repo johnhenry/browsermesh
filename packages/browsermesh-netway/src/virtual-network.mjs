@@ -28,7 +28,7 @@ import { Router, parseAddress } from './router.mjs';
 import { PolicyEngine } from './policy.mjs';
 import { LoopbackBackend } from './loopback-backend.mjs';
 import { CAPABILITY } from './constants.mjs';
-import { PolicyDeniedError } from './errors.mjs';
+import { PolicyDeniedError, BufferLimitError } from './errors.mjs';
 
 /**
  * Top-level virtual network that routes operations to scheme-specific backends.
@@ -41,12 +41,29 @@ export class VirtualNetwork {
   #router;
   #policyEngine;
   #backends = [];
+  #maxBufferedBytes;
+  /** Client sockets this network handed out, for the byte cap. @type {Set<import('./stream-socket.mjs').StreamSocket>} */
+  #sockets = new Set();
 
   /**
    * Create a VirtualNetwork with a default {@link LoopbackBackend} registered
    * for the `mem` and `loop` schemes.
+   *
+   * @param {object} [opts]
+   * @param {number} [opts.maxBufferedBytes] - A cap on the bytes held unread
+   *   (`readableLength`) or unsent (`writableLength`) by the stream sockets
+   *   `connect()` has handed out and not closed. While it is reached,
+   *   `connect()` refuses new connections with {@link BufferLimitError}
+   *   (`ENOBUFS`); reading and closing give room back. Each socket is already
+   *   bounded by its own window; this bounds the sum. Off by default. It is
+   *   admission control on connections opened through this network: sockets a
+   *   listener accepts are the other end of those and are not counted.
    */
-  constructor() {
+  constructor({ maxBufferedBytes } = {}) {
+    if (maxBufferedBytes !== undefined && !(Number.isFinite(maxBufferedBytes) && maxBufferedBytes > 0)) {
+      throw new RangeError('VirtualNetwork: maxBufferedBytes must be a positive number');
+    }
+    this.#maxBufferedBytes = maxBufferedBytes ?? null;
     this.#router = new Router();
     this.#policyEngine = new PolicyEngine();
 
@@ -82,7 +99,25 @@ export class VirtualNetwork {
    */
   async connect(address) {
     const { backend, parsed } = this.#router.resolve(address);
-    return backend.connect(parsed.host, parsed.port);
+    if (this.#maxBufferedBytes !== null && this.bufferedBytes >= this.#maxBufferedBytes) {
+      throw new BufferLimitError(this.#maxBufferedBytes);
+    }
+    const socket = await backend.connect(parsed.host, parsed.port);
+    if (this.#maxBufferedBytes !== null && socket && typeof socket.readableLength === 'number') this.#sockets.add(socket);
+    return socket;
+  }
+
+  /** The byte cap, or `null` when there is none. */
+  get maxBufferedBytes() { return this.#maxBufferedBytes; }
+
+  /** Bytes currently held unread or unsent by the open sockets this network handed out (counted only when a cap is set). */
+  get bufferedBytes() {
+    let total = 0;
+    for (const socket of this.#sockets) {
+      if (socket.closed) { this.#sockets.delete(socket); continue; }
+      total += socket.readableLength + socket.writableLength;
+    }
+    return total;
   }
 
   /**

@@ -84,7 +84,7 @@ Still missing for that:
 
 - the object layer itself (handles, lifetimes, path resolution, snapshots): wsh#190;
 - subscription flow control above the raw notify (a slow subscriber is bounded by credit, but coalescing or dropping events is the layer's policy);
-- a way to learn a peer supports the channel without trying (`peerSupports` is a hook; there is no advertisement in discovery yet);
+- ~~a way to learn a peer supports the channel without trying~~: done in `channel-advertisement.mjs` (`channelAdvertisement()` goes into what a peer announces, `peerSupportsFromAdvertisements(lookup)` is the `peerSupports` hook; a peer that advertises nothing is still tried, and an advertisement is a claim, not an authorisation). Nothing publishes the advertisement for you yet: a deployment adds it to its runtime-registry record (as pod hosts add `pod-host`);
 - per-root authorisation helpers (today each handler calls `checkAccess`);
 - streams larger than one message (large reads must be chunked by the protocol with `progress`; a stream abstraction over the link is not built);
 - a real-WebRTC test of the channel (only in-memory duplexes are tested).
