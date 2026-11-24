@@ -67,7 +67,15 @@ export async function buildImportMap() {
     const entry = typeof dot === 'string' ? dot : dot?.import ?? pkg.main
     if (!pkg.name || !entry) continue
     imports[pkg.name] = `/pkg/${dir}/${entry.replace(/^\.\//, '')}`
+    // Subpath exports that are plain files (`@johnhenry/browsermesh-apps/protocol-channel`).
+    for (const [key, target] of Object.entries(pkg.exports ?? {})) {
+      if (key === '.' || typeof target !== 'string' || !target.startsWith('./')) continue
+      imports[`${pkg.name}${key.slice(1)}`] = `/pkg/${dir}/${target.replace(/^\.\//, '')}`
+    }
   }
+  // wsh's object layer, for packages that peer-depend on it. Its transport-neutral core (`objects-core.mjs`) is what
+  // the page needs and has no imports of its own; `/vendor/wsh/` serves wsh's source from node_modules, read only.
+  imports['@johnhenry/wsh/objects'] = '/harness/wsh-objects.mjs'
   // The examples are written for Node and import `node:assert/strict`.
   imports['node:assert/strict'] = '/harness/assert-shim.mjs'
   return { imports }
@@ -358,6 +366,9 @@ export async function startServer({ port = 0, hub = new Hub() } = {}) {
     }
     if (pathname.startsWith('/examples/')) {
       return sendFile(res, nonce, path.join(REPO, 'examples'), pathname.slice('/examples/'.length))
+    }
+    if (pathname.startsWith('/vendor/wsh/')) {
+      return sendFile(res, nonce, path.join(REPO, 'node_modules', '@johnhenry', 'wsh', 'src'), pathname.slice('/vendor/wsh/'.length))
     }
     if (pathname.startsWith('/harness/')) {
       return sendFile(res, nonce, HARNESS, pathname.slice('/harness/'.length))

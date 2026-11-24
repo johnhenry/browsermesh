@@ -68,6 +68,12 @@ Locally you may point Playwright at a browser you already have with
   messages, progress, notifications, cancel (the callee's handler sees its `AbortSignal`), revocation closing
   the channel at once and a later grant reopening it, and credit-based flow control (a reader that stops
   reading holds the sender at one window; catching up delivers every message).
+- wsh's remote-object layer over a protocol channel (`@johnhenry/browsermesh-objects`, `objects.spec.mjs`):
+  default deny, each operation judged by its own action (a peer granted `get` and `call` is refused `set`
+  and a subscription), a 200 KB result chunked across messages, events in order, a one-way callback, a
+  handle that never widens its path, revoking a subscription's grant ending the session at once and
+  detaching the host's listener, and a reader that stops reading making the host drop events with every drop
+  counted. The harness serves wsh's transport-neutral object core from `node_modules` (`/vendor/wsh/`).
 - Examples 01, 02 and 05 unmodified in a page (their own transports stay
   simulated).
 - The packages load and run under the strict policy above.
