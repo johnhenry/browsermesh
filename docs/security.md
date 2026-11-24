@@ -553,7 +553,10 @@ Package: `browsermesh-apps`.
   request a `guard()`ed handler receives; root and action names cannot carry
   scope syntax. An already-open stream or subscription is authorised when it
   starts, not again. Anything finer than a root is left to the protocol's
-  handlers.
+  handlers. `grantCapabilities` refuses a malformed `objects:` or `mcp:` scope
+  (an empty root or tool would otherwise read as `*`); how these scopes relate
+  to wsh's key capabilities, and where the two differ, is in
+  [`capability-notation.md`](capability-notation.md).
 - **Confidential.** Not by these layers; they inherit the link (DTLS, sealed
   wsh, or nothing).
 - **Bounded.** `mesh-rpc`: `requestTimeoutMs` 10000, `maxBodyBytes` 1 MiB,

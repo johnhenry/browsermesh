@@ -219,6 +219,7 @@
 
 import { ORSet, encodeBase64url, decodeBase64url } from '@johnhenry/browsermesh-primitives'
 import { guardVerifyMethod, isVerifyOrderError } from './internal/verify-order.mjs'
+import { isGrantableScope } from './peer-registry.mjs'
 
 /** Default `envelope.type` used to route GrantLog payloads on the shared `onIncomingData()` bus. */
 const DEFAULT_ENVELOPE_TYPE = 'grant-log'
@@ -699,7 +700,10 @@ export class GrantLog {
       const added = [...after].filter((s) => !before.has(s))
       const removed = [...before].filter((s) => !after.has(s))
 
-      if (added.length > 0) this.#registry.grantCapabilities(pubKey, added)
+      // A scope in a namespace with a written grammar that does not follow it is not granted (the registry would
+      // refuse it); it must not stop the replay of everything else.
+      const grantable = added.filter((s) => isGrantableScope(s))
+      if (grantable.length > 0) this.#registry.grantCapabilities(pubKey, grantable)
       if (removed.length > 0) this.#registry.revokeCapabilities(pubKey, removed)
 
       if ((added.length > 0 || removed.length > 0) && this.#onGrantChange) {
