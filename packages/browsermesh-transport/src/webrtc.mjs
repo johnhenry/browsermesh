@@ -81,6 +81,21 @@ export const PUBLIC_STUN_SERVERS = Object.freeze([
   { urls: 'stun:stun.l.google.com:19302' },
 ])
 
+let _noIceServersNoted = false
+
+/**
+ * Reset the once-per-process "no ICE servers" note. For tests.
+ * @returns {void}
+ */
+export function resetNoIceServersNote() { _noIceServersNoted = false }
+
+const NO_ICE_SERVERS_NOTE =
+  'WebRTC connection failed and no ICE servers are configured, so only host ' +
+  'candidates were tried (fine on one LAN, usually not across NATs). Pass ' +
+  '`iceServers` with your own STUN/TURN server; PUBLIC_STUN_SERVERS is an ' +
+  'opt-in public one, at the cost of telling its operator your public address. ' +
+  'This note is shown once.'
+
 /**
  * Merge user-configured ICE servers (typically TURN, for NAT traversal
  * when direct/STUN connectivity fails) with the defaults. Silently
@@ -1026,6 +1041,11 @@ export class WebRTCPeerConnection {
          * 'connecting' on a connection that has terminally failed.
          */
         if (this.#state !== 'closed') this.#setState('failed')
+        if (this.#iceServers.length === 0 && !_noIceServersNoted) {
+          _noIceServersNoted = true
+          if (this.#onLog) this.#onLog(NO_ICE_SERVERS_NOTE)
+          else console.warn(`[browsermesh-transport] ${NO_ICE_SERVERS_NOTE}`)
+        }
         this.#fireError(new Error('PeerConnection state: failed'))
         return
       }

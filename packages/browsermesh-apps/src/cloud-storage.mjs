@@ -199,6 +199,7 @@
 
 import { attachService, createEventBus } from './mesh-service.mjs'
 import { createCloudStorageBackend } from './cloud-storage-backend.mjs'
+import { readJsonMessage } from './internal/json-message.mjs'
 import { createGrantLogService } from './grant-log.mjs'
 import { createKeyDistributionService } from './key-distribution.mjs'
 import { createManifestSyncService } from './manifest-sync.mjs'
@@ -527,13 +528,13 @@ export class CloudStorage {
     const run = async () => {
       const socket = await this.#ensureSocket()
       const encoder = new TextEncoder()
-      const decoder = new TextDecoder()
       await socket.write(encoder.encode(JSON.stringify(cmd)))
-      const chunk = await socket.read()
-      if (chunk === null) {
+      const msg = await readJsonMessage(socket)
+      if (msg.eof) {
         throw new Error('CloudStorage: local backend socket closed unexpectedly')
       }
-      return JSON.parse(decoder.decode(chunk))
+      if (msg.error) throw msg.error
+      return msg.value
     }
 
     const result = this.#socketQueue.then(run, run)

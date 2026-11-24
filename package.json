@@ -10,7 +10,8 @@
   "scripts": {
     "test": "turbo run test --concurrency=4",
     "test:real-peer": "npm run test:real-peer --workspace=@johnhenry/browsermesh-transport && npm run test:real-peer --workspace=@johnhenry/browsermesh-apps",
-    "test:real-gpu": "npm run test:real-gpu --workspace=@johnhenry/browsermesh-apps",
+    "test:browser": "playwright test --config tests/browser/playwright.config.mjs",
+    "test:real-gpu":"npm run test:real-gpu --workspace=@johnhenry/browsermesh-apps",
     "changeset": "changeset",
     "version-packages": "changeset version",
     "release": "changeset publish",
@@ -32,10 +33,12 @@
     "example:13": "node examples/13-pod-host-service.mjs",
     "example:14": "node examples/14-pod-host-over-mesh-fetch.mjs",
     "example:15": "node examples/15-agent-spawns-hosted-pod.mjs",
-    "example:16": "node examples/16-supervised-hosted-pods.mjs"
+    "example:16": "node examples/16-supervised-hosted-pods.mjs",
+    "example:17": "node examples/17-mesh-channel.mjs"
   },
   "devDependencies": {
     "@changesets/cli": "^2.27.0",
+    "@playwright/test": "1.65.1",
     "turbo": "^2.0.0"
   },
   "engines": {

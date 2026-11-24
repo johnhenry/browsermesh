@@ -15,6 +15,7 @@ Application layer for BrowserMesh: marketplace, chat, payments, compute orchestr
 - [Connecting a real mesh node: `createMeshNode()`](#connecting-a-real-mesh-node-createmeshnode)
   - [TURN server configuration](#turn-server-configuration)
 - [Sharing a `VirtualNetwork` with specific peers: mesh relay](#sharing-a-virtualnetwork-with-specific-peers-mesh-relay)
+- [Sharing a local HTTP server: `ServerSharing`](#sharing-a-local-http-server-serversharing)
 - [CloudStorage bucket authorization and key distribution](#cloudstorage-bucket-authorization-and-key-distribution)
 - [CloudStorage: the ergonomic SDK](#cloudstorage-the-ergonomic-sdk)
 - [Torrent service: durable stores, authorization and serve limits](#torrent-service-durable-stores-authorization-and-serve-limits)
@@ -285,6 +286,50 @@ inherited `Backend` "not implemented" throws). See
 simulated mesh connection) and
 `test/real-peer/mesh-relay.test.mjs` for the real-WebRTC, real-TCP proof.
 
+## Sharing a local HTTP server: `ServerSharing`
+
+`ServerSharing` (also wired by `createMeshRoutingService({ fetchFn, registry })`)
+lets a peer make requests to an HTTP server you `expose(port, name, opts)`.
+What it enforces:
+
+- **Access.** Every request that arrives from a peer must pass
+  `registry.checkAccess(peerKey, 'server-share:<name>', 'request')`, i.e. the
+  scope `server-share:<name>:request` (wildcards such as
+  `server-share:*:request` work, as for `mesh-relay:<service>:connect`).
+  `peerKey` is the key of the session the message arrived on, never a field of
+  the message. With no registry, every peer request is refused. A direct
+  `handleRequest(request)` call with no second argument is an in-process call
+  and is not access-checked.
+  Share names may not contain `:` or `*`.
+  ```js
+  host.registry.grantCapabilities(bob.podId, ['server-share:web:request']);
+  ```
+- **Target.** The upstream URL is built from the configured origin
+  (`protocol://hostname:port`) as base. The peer supplies a path and query
+  only; it must begin with a single `/`, may not contain a scheme, an
+  authority, a backslash, whitespace, a control character or a `#` fragment,
+  and after resolution the origin must equal the configured one. Anything else
+  is refused with status 400 before anything is sent.
+- **Method and headers.** Methods default to `GET, HEAD, POST, PUT, PATCH,
+  DELETE, OPTIONS` (`allowedMethods` narrows them). Of the peer's headers only
+  `accept`, `accept-language`, `cache-control`, `content-type`, `if-*` and
+  `range` are forwarded (`allowedRequestHeaders` adds names); `Host`,
+  hop-by-hop headers, `Cookie`, `Authorization`, `Forwarded` and `X-Forwarded-*`
+  are never taken from a peer. Headers the sharer sets with
+  `expose(port, name, { headers })` are always sent and cannot be overridden.
+- **Redirects** are not followed, for any origin; the 3xx response is returned
+  to the peer as it is.
+- **Sizes.** Defaults: path 2048 characters, 32 headers / 8 KiB of headers,
+  request body 1 MiB (`maxRequestBodyBytes`), response body 8 MiB
+  (`maxResponseBytes`; a larger response is refused with 502, never truncated),
+  30 s per request (`requestTimeoutMs`). Cookies and hop-by-hop headers are
+  not passed back to the peer.
+
+`createProxyHandler()` (`serverless-proxy.mjs`) applies the same target rule,
+does not follow redirects and bounds the response (`maxResponseBytes`,
+`requestTimeoutMs`). It does not itself check who the caller is; that is done
+by whatever serves the site.
+
 ## CloudStorage bucket authorization and key distribution
 
 `grant-log.mjs`'s `GrantLog` (`createGrantLogService()`) is a replicated,
@@ -474,8 +519,15 @@ mirror and is a separate book from an `EscrowManager` you create, but the router
 can see both: `router.attachEscrowManager(manager)` makes `router.listEscrows(podId?)`
 and `router.getEscrowById(id)` return one normalized view (`source: 'wire'` or
 `'manager'`), and the escrow sweeper also expires the manager's due contracts.
-An inbound `ESCROW_CREATE` is still only recorded in the book; it does not debit
-anything (the payer is a remote pod).
+By default an inbound `ESCROW_CREATE` is still only recorded in the book; it does
+not debit anything (the payer is a remote pod). To have it create a real,
+funded contract, opt in with `router.attachEscrowManager(manager, { delegateWire: true })`:
+the sending pod becomes the payer and the manager debits it, so the manager
+needs a per-pod ledger (a `MultiPartyCreditLedger`, or a `mutateLedger` hook
+that debits that pod; a single-owner `CreditLedger` would debit the local
+balance whoever sent the message). A payer who cannot fund the amount, or a
+malformed message, creates nothing, and the escrow is not also mirrored into the
+book (`listEscrows()` shows it once, as `source: 'manager'`).
 
 ## Putting it all together: sync + kernel-gated mesh + relay on one connection
 
@@ -575,6 +627,55 @@ envelope's own `from` field, which a remote peer could set to anything.
 
 `test/real-peer/wire-envelope.test.mjs` runs all three over a real
 `RTCPeerConnection` pair (`npm run test:real-peer`).
+
+## Message channel: `createMeshChannelService`
+
+`mesh-rpc` is HTTP-shaped (`{ method, path, headers, body }` in, a status out,
+a JSON body of at most 1 MiB) and stays exactly as it is. A second service,
+`createMeshChannelService()` (`mesh-channel.mjs`, also `@johnhenry/browsermesh-apps/mesh-channel`),
+sits beside it on its own envelope type for protocols that need a message
+layer. Over one link per peer it gives both sides:
+
+- requests in both directions (ids are per direction), `notify`, and
+  `ctx.progress(value)` per request;
+- cancel per request: the callee's handler gets `ctx.signal`; the caller's
+  late results are dropped;
+- native `Uint8Array` values anywhere in a message (a small self-contained
+  codec; base64 only carries chunks inside the JSON envelope and is not part
+  of the API);
+- a negotiated maximum message size, enforced from a message's first chunk
+  (its announced length), before anything is assembled, and locally before
+  anything is sent;
+- credit-based flow control in bytes: a sender may have at most the receiver's
+  `window` of unconsumed bytes in flight, so a slow reader bounds a sender's
+  memory (and a reader that stops stops the sender);
+- `maxInflight` requests per peer, a `close()` that rejects every pending
+  request, and the caller's verified identity (`ctx.peer`, the key the session
+  is bound to; never a field of the message) in every handler.
+
+```js
+const a = attachService(nodeA, undefined, createMeshChannelService())
+const b = attachService(nodeB, undefined, createMeshChannelService({
+  // Runs the moment the link exists, before any request can arrive on it.
+  onLink(link) {
+    link.onRequest('read', async ({ path }, { peer, signal, progress }) => {
+      // authorise `peer` yourself, e.g. ctx.registry.checkAccess(peer, ...)
+      await progress({ chunk: new Uint8Array(4) })
+      return { data: new Uint8Array(10) }
+    })
+  },
+}))
+const link = await a.api.open(nodeB.podId)
+const { data } = await link.request('read', { path: 'x' }, { signal, onProgress })
+```
+
+Like `mesh-rpc`, it does not authorise anything itself. Compatibility: the
+first thing sent to a peer is one `hello`; a peer that does not run the
+service ignores it and `open()` rejects with `MeshChannelError`
+(`code -32000`, `reason 'unsupported'`) after `handshakeTimeoutMs`; pass
+`peerSupports(peer)` to refuse without sending even that. See
+`examples/17-mesh-channel.mjs` and the module comment in `mesh-channel.mjs`
+for the wire frames, the memory model and the error codes.
 
 ## `fetch()`/`WebSocket`-shaped mesh access: `browserMeshFetch` and `BrowserMeshWebSocket`
 
@@ -787,11 +888,11 @@ and never silently retries a different one after a refusal (an `EACCES`,
 or any other `PodHostDriverError`, is reported as-is). Selection prefers
 `listComputeCandidates()` (the same descriptor list `meshctl_compute`
 reads), narrowed to hosts advertising `runtime:<lane>` and preferring one
-with `availability: 'online'`. Because an ISOLATE-lane host has no `exec`
-by lane definition, it never produces a compute descriptor at all (see
-"Known limitation" below) — so for `isolate`/`browser` lanes, selection
-falls back to `listPodHosts()`, which reads the same runtime-registry peers
-directly, without that filter. `MeshOrchestrator#listPodHosts()` is new
+with `availability: 'online'`. An ISOLATE-lane host has no `exec` by lane
+definition, so it only appears in that list when spawn hosts are requested
+(see "Spawn-only hosts and the compute scorer" below), which selection does;
+if the registry exposes no candidates, selection falls back to
+`listPodHosts()`, which reads the same runtime-registry peers directly. `MeshOrchestrator#listPodHosts()` is new
 read-only bookkeeping this item adds: runtime-registry peers carrying a
 `metadata.podHost` entry (i.e. anything projected through
 `podHostRuntimePeer()`), returned as `{podId, lane, verbs, runtimeClasses,
@@ -1139,15 +1240,24 @@ writes its own records through `MeshOrchestrator#recordPlacement()`: the two
 chains are independent, with independent authors, by design — a host's audit
 log is not evidence to the requester and vice versa.
 
-### Known limitation: isolate hosts produce no compute descriptor
+### Spawn-only hosts and the compute scorer
 
-`runtimePeerToComputeDescriptor()` only returns a descriptor for peers whose
-capabilities include `shell`/`exec`/`tools`. An isolate-lane pod host has no
-`exec` by definition, so `podHostRuntimePeer()` output for one is correctly
-scored as *not* a compute target and can only be reached through this service
-directly, not through `dispatchCompute()`. Teaching the scorer that "can
-spawn" is a kind of compute even without a shell is a change to WP4's scoring
-surface, not to this service.
+`runtimePeerToComputeDescriptor()` only returns a compute descriptor for peers
+whose capabilities include `shell`/`exec`/`tools`. An isolate-lane pod host has
+no `exec` by definition, so `listComputeCandidates()` and
+`selectComputeTarget()` do not return it by default, and nothing that needs a
+shell (`runComputeTask()`, `execOnPod()`) can be routed to it.
+
+For *placement* (choosing where to spawn a pod) pass
+`{ includeSpawnHosts: true }`: `listComputeCandidates(constraints, { includeSpawnHosts: true })`
+and `selectComputeTarget({ includeSpawnHosts: true, ... })` then also return
+pod hosts that serve `spawn` but have no shell. Such a descriptor carries
+`spawn` and `runtime:<lane>` but never `compute`, and `selectComputeTarget()`
+only returns one while the scorer rates it above zero for the request (a
+`shell` module, or a lane it does not offer, never falls through to it).
+`pickAutoHost()` uses this, so an isolate host is now found by candidate
+scoring rather than by the `listPodHosts()` fallback (kept for registries that
+do not expose candidates).
 
 A runnable end-to-end walkthrough is
 [`examples/13-pod-host-service.mjs`](../../examples/13-pod-host-service.mjs).
