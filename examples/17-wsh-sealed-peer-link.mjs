@@ -13,7 +13,9 @@
  *
  * The relay here is wsh's real pipe relay (`@johnhenry/wsh/pipe-relay`) running in
  * this process (`createInProcessPipeRelay`), so the example needs no network, but
- * the handshake, the key login and the sealed session are the real thing. Needs
+ * the handshake, the key login and the sealed session are the real thing (the
+relay is imported from `@johnhenry/browsermesh-transport/wsh-in-process`, a
+subpath kept out of the main entry). Needs
  * the optional peer `@johnhenry/wsh`, which this monorepo installs for its tests.
  *
  * See docs/design/wsh-peer-link.md.
@@ -22,7 +24,8 @@
 import assert from 'node:assert/strict'
 import { Pod } from '@johnhenry/browsermesh-pod'
 import { PodIdentity } from '@johnhenry/browsermesh-primitives'
-import { WshPodTransport, createInProcessPipeRelay } from '@johnhenry/browsermesh-transport'
+import { WshPodTransport } from '@johnhenry/browsermesh-transport'
+import { createInProcessPipeRelay } from '@johnhenry/browsermesh-transport/wsh-in-process'
 
 const RELAY = 'wss://relay.example' // never dialled: the in-process relay answers
 const relay = await createInProcessPipeRelay()

@@ -22,7 +22,8 @@ import { PeerRegistry } from '../src/peer-registry.mjs'
 import { ManualStrategy } from '@johnhenry/browsermesh-discovery'
 import { VirtualNetwork } from '@johnhenry/browsermesh-netway'
 import { MeshPeerManager, TrustGraph, MeshACL, MeshIdentityManager, IdentityWallet } from '@johnhenry/browsermesh-core'
-import { createInProcessPipeRelay, MeshTransportNegotiator } from '@johnhenry/browsermesh-transport'
+import { MeshTransportNegotiator } from '@johnhenry/browsermesh-transport'
+import { createInProcessPipeRelay } from '@johnhenry/browsermesh-transport/wsh-in-process'
 
 const RELAY = 'wss://relay.invalid'
 const enc = new TextEncoder()
