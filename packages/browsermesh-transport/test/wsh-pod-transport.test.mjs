@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { Pod, EventEmitterTransport, POD_MESSAGE, POD_RPC_REQUEST, POD_RPC_RESPONSE, createRpcRequest, createRpcResponse } from '@johnhenry/browsermesh-pod';
 import { PodIdentity } from '@johnhenry/browsermesh-primitives';
 import { runTransportConformance } from '../../browsermesh-pod/test/helpers/transport-conformance.mjs';
-import { WshPodTransport } from '../src/index.mjs';
+import { WshPodTransport } from '../src/wsh.mjs';
 import { waitFor, settle } from './_wait.mjs';
 import { RELAY, makeEnv, makeIdentities } from './helpers/wsh-rig.mjs';
 

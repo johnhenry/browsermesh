@@ -32,11 +32,15 @@ Extracted from a private monorepo (previously `packages/browsermesh-transport`),
 | streams | `MeshStream`, `StreamMultiplexer` |
 | cross-origin | `CrossOriginBridge`, `CrossOriginHandshake`, `RateLimiter` |
 | wsh-bridge | `MeshWshBridge` (syncs a `WshKeyStore` with a `MeshIdentityManager`; the link layer does not use it) |
-| wsh-links | `WshPeerLinks`, `WshLink`, `WshLinkError`, `createWshTransportFactory`, `podIdToFingerprint`, `fingerprintToPodId`, `rendezvousId` |
-| wsh-services | `WshServices`, `servicesRendezvousId`, `WSH_SERVICES_GRANTS` (a stock wsh client may use a pod's objects and MCP tools: off by default, permitted only by the registry; needs `@johnhenry/wsh` 0.48 or later; see `docs/design/wsh-services-on-a-pod.md`) |
-| wsh-pod-transport | `WshPodTransport` (a `Pod` `TransportAdapter`) |
 | wsh-frames | `encodeFrame`, `FrameDecoder`, `WshFrameError`, `DEFAULT_MAX_FRAME_BYTES` |
-| wsh-in-process (subpath `@johnhenry/browsermesh-transport/wsh-in-process`) | `createInProcessPipeRelay` (tests and examples) |
+| wsh-links (subpath `@johnhenry/browsermesh-transport/wsh`) | `WshPeerLinks`, `WshLink`, `WshLinkError`, `createWshTransportFactory`, `rendezvousId` |
+| wsh-services (subpath `/wsh`) | `WshServices`, `servicesRendezvousId`, `WSH_SERVICES_GRANTS` (a stock wsh client may use a pod's objects and MCP tools: off by default, permitted only by the registry; needs `@johnhenry/wsh` 0.50 or later; see `docs/design/wsh-services-on-a-pod.md`) |
+| wsh-relay (subpath `/wsh`) | `WshRelay`, `connectWshServicesViaRelay` |
+| wsh-pod-transport (subpath `/wsh`) | `WshPodTransport` (a `Pod` `TransportAdapter`) |
+| wsh-in-process (subpath `@johnhenry/browsermesh-transport/wsh-in-process`, **Node only**) | `createInProcessPipeRelay` (tests and examples) |
+
+`@johnhenry/browsermesh-transport/wsh` re-exports every `wsh-*` module above (the two that need no wsh as well).
+See [Bundling for the browser](#bundling-for-the-browser).
 | wisp | `WispTransport` |
 | channel-relay | `ChannelRelay` |
 
@@ -45,6 +49,44 @@ Extracted from a private monorepo (previously `packages/browsermesh-transport`),
 ```bash
 npm install @johnhenry/browsermesh-transport @johnhenry/browsermesh-primitives
 ```
+
+## Bundling for the browser
+
+The main entry (`@johnhenry/browsermesh-transport`, `src/index.mjs`) is bundlable for a browser with
+`@johnhenry/wsh` **absent**: nothing it reaches imports a `@johnhenry/wsh` specifier or a Node-only module,
+and its only bare specifier is the `@johnhenry/browsermesh-primitives` peer. A test pins that
+(`test/main-entry-graph.test.mjs` reads the import graph the way a bundler does), and the browser suite loads
+the entry in a page whose import map has no wsh at all (`tests/browser/transport-no-wsh.spec.mjs`). So an
+application that never uses wsh needs no stub, no alias and no peer: leave `@johnhenry/wsh` uninstalled.
+
+What needs wsh lives behind its own subpath, imported only by code that uses it:
+
+| You use | Import from | Needs `@johnhenry/wsh` |
+| --- | --- | --- |
+| wsh peer links (`WshPeerLinks`, `WshLink`, `createWshTransportFactory`), `WshPodTransport` | `@johnhenry/browsermesh-transport/wsh` | 0.45 or later, on the first `connect()` / `listen()` |
+| wsh services over a mesh channel, the relaying pod (`WshServices`, `WshRelay`, `connectWshServicesOverMesh`, `connectWshServicesViaRelay`) | `@johnhenry/browsermesh-transport/wsh` | 0.50 or later, on first use |
+| the in-process test relay (`createInProcessPipeRelay`) | `@johnhenry/browsermesh-transport/wsh-in-process` (Node only) | any wsh with the pipe relay |
+
+`@johnhenry/wsh` is an optional peer (`"*"`: any version satisfies it, so a consumer that pins an older wsh for
+another reason does not get a second, nested copy). The floors above are checked when the feature is used, and a
+wsh that is missing or too old fails there with a `WshLinkError` whose code is `WSH_UNAVAILABLE`. Importing
+`/wsh` never loads wsh: its modules import it lazily with literal specifiers, so a bundler can split it out and a
+page that never links over wsh never fetches it. `./wsh-in-process` has only a `node` export condition: a
+bundler for the browser cannot resolve it (it fails clearly, instead of pulling wsh's Node-only pipe relay in).
+
+### Moving off the old names (0.10 and earlier)
+
+Up to 0.10 the main entry also re-exported `WshPeerLinks`, `WshLink`, `WshLinkError`, `createWshTransportFactory`,
+`rendezvousId`, `initiatorWins`, `resolveCredential`, `LINK_USERNAME_PREFIX`, `usernameForPodId`, `WshServices`,
+`servicesRendezvousId`, `WSH_SERVICES_GRANTS`, `wshObjectActionFor`, `connectWshServicesOverMesh`, `WshRelay`,
+`WSH_RELAY_PROTOCOL`, `connectWshServicesViaRelay` and `WshPodTransport`. For one release (0.11) they still resolve
+from the package root **where the `node` export condition applies** (Node, and a bundler built for Node), so a
+Node program keeps working unchanged. Anywhere else (a bundler or import map for the browser, a vendored copy of
+`src/`) the root no longer carries them: import them from `@johnhenry/browsermesh-transport/wsh`. The next
+minor removes the root's `node` shim; change the import before then. Everything else on the main entry is
+unchanged (`MeshWshBridge`, `encodeFrame`, `FrameDecoder`, `WshFrameError`, `podIdToFingerprint`,
+`fingerprintToPodId` and `podIdFromRawKey` stay), and `TransportFactory.create('wsh', { links, peerPodId })` now
+builds the link through `links.link(peerPodId)` instead of importing it.
 
 ## Usage
 
@@ -181,9 +223,10 @@ changes for code that does not ask for it. Design and threat model:
 [`docs/design/wsh-peer-link.md`](../../docs/design/wsh-peer-link.md); what is and
 is not protected: [`docs/security.md`](../../docs/security.md).
 
-Install the optional peer, `npm install @johnhenry/wsh` (`>=0.45.0 <1.0.0`; tested on 0.45.0 to 0.48.0). It is
+Import the link code from `@johnhenry/browsermesh-transport/wsh` and install the optional peer,
+`npm install @johnhenry/wsh` (0.45 or later for links, 0.50 or later for the services; developed against 0.50). It is
 imported lazily on the first `listen()` / `connect()`, so a page that never
-uses a wsh link loads none of it.
+uses a wsh link loads none of it. See [Bundling for the browser](#bundling-for-the-browser).
 
 Between two browsers neither can listen, so a pod that wants to be reached
 waits at its own rendezvous id on a wsh **pipe relay** (a relay that copies
@@ -192,7 +235,7 @@ and a pod that wants to reach it dials that id:
 
 ```js
 import { PodIdentity } from '@johnhenry/browsermesh-primitives'
-import { WshPeerLinks } from '@johnhenry/browsermesh-transport'
+import { WshPeerLinks } from '@johnhenry/browsermesh-transport/wsh'
 
 const identity = await PodIdentity.generate()
 const links = new WshPeerLinks({
@@ -265,8 +308,8 @@ new WshPeerLinks({ identity, relays: ['wss://relay.invalid'], WebSocket: env.Web
 // env.recorded holds every byte the relay copied; env.tap can alter them; env.dropAll() ends every pipe
 ```
 
-It is a separate subpath because it imports wsh's pipe relay, which has a
-Node-only listener a browser bundle should not follow.
+It is a separate subpath, with only a `node` export condition, because it imports wsh's pipe relay, which has a
+Node-only listener a browser bundle must not follow.
 
 ### Bundle size
 

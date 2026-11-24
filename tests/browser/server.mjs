@@ -359,9 +359,13 @@ export async function startServer({ port = 0, hub = new Hub() } = {}) {
       return res.writeHead(405, securityHeaders(nonce)).end('method not allowed')
     }
     if (pathname === '/' || pathname === '/index.html') {
+      // `?import-map=no-wsh`: the import map of an application that does not use wsh, with no `@johnhenry/wsh*` entry.
+      const map = url.searchParams.get('import-map') === 'no-wsh'
+        ? { imports: Object.fromEntries(Object.entries(importMap.imports).filter(([name]) => !name.startsWith('@johnhenry/wsh'))) }
+        : importMap
       const html = (await readFile(path.join(HARNESS, 'index.html'), 'utf8'))
         .replaceAll('{{NONCE}}', nonce)
-        .replace('{{IMPORT_MAP}}', JSON.stringify(importMap))
+        .replace('{{IMPORT_MAP}}', JSON.stringify(map))
       return res.writeHead(200, { ...securityHeaders(nonce, framing(url.search)), 'Content-Type': MIME['.html'] }).end(html)
     }
     if (pathname.startsWith('/pkg/')) {

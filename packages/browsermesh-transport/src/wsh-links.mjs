@@ -122,7 +122,7 @@ async function loadWsh(load) {
   try {
     return await load();
   } catch (cause) {
-    throw new WshLinkError('WSH_UNAVAILABLE', `the wsh transport needs @johnhenry/wsh: install it (npm install @johnhenry/wsh). ${cause?.message ?? ''}`.trim(), { cause });
+    throw new WshLinkError('WSH_UNAVAILABLE', `the wsh transport needs @johnhenry/wsh 0.45 or later: install it (npm install @johnhenry/wsh).${cause?.message ?? ''}`.trim(), { cause });
   }
 }
 const loadClient = () => (clientModule ??= loadWsh(() => import('@johnhenry/wsh')));

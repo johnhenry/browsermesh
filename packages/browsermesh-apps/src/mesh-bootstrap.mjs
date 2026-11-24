@@ -376,7 +376,7 @@ import { registerOrchestratorTools } from './mesh-orchestrator-tools.mjs'
  *   peer sends is then delivered unverified). A proof that is sent and does not verify still closes the connection.
  * @param {number} [options.webrtcBindingTimeoutMs] - How long to wait for the peer's proof (default 10000).
  * @param {object} [options.wsh] - Opt in to the sealed wsh peer link
- *   (`@johnhenry/browsermesh-transport`'s `WshPeerLinks`, which needs the
+ *   (`@johnhenry/browsermesh-transport/wsh`'s `WshPeerLinks`, which needs the
  *   optional peer `@johnhenry/wsh`). Off unless given. The node's own identity
  *   is the wsh identity. `relays` (pipe relay URLs) and any other
  *   `WshPeerLinks` option are passed through (`WebSocket`, `socketFactory`,
@@ -1108,7 +1108,8 @@ export async function createMeshNode(options = {}) {
   // node's own identity is the wsh identity; a peer may link only if the
   // registry grants it mesh:link:connect unless `wsh.authorize` says otherwise.
   if (wsh) {
-    const { WshPeerLinks } = await import('@johnhenry/browsermesh-transport')
+    // The wsh links live at the transport's `/wsh` subpath from 0.11; an older transport serves them from its root.
+    const { WshPeerLinks } = await import('@johnhenry/browsermesh-transport/wsh').catch(() => import('@johnhenry/browsermesh-transport'))
     const { require: _require, listen = true, authorize, ...hubOptions } = wsh
     const links = new WshPeerLinks({
       identity: identityManager.getIdentity(podId),

@@ -12,7 +12,7 @@ import assert from 'node:assert/strict'
 
 import { PodIdentity } from '@johnhenry/browsermesh-primitives'
 import { MeshPeerManager, TrustGraph, MeshACL } from '@johnhenry/browsermesh-core'
-import { WshServices, servicesRendezvousId, podIdToFingerprint, podIdFromRawKey } from '@johnhenry/browsermesh-transport'
+import { WshServices, servicesRendezvousId, podIdToFingerprint, podIdFromRawKey } from '@johnhenry/browsermesh-transport/wsh'
 import { createInProcessPipeRelay } from '@johnhenry/browsermesh-transport/wsh-in-process'
 import { PeerRegistry } from '../src/peer-registry.mjs'
 import { fakeClock } from './helpers/fake-clock.mjs'

@@ -68,6 +68,9 @@ Locally you may point Playwright at a browser you already have with
   messages, progress, notifications, cancel (the callee's handler sees its `AbortSignal`), revocation closing
   the channel at once and a later grant reopening it, and credit-based flow control (a reader that stops
   reading holds the sender at one window; catching up delivers every message).
+- The transport's main entry without wsh (`transport-no-wsh.spec.mjs`): a page whose import map has no
+  `@johnhenry/wsh*` entry (`/?import-map=no-wsh`) imports `@johnhenry/browsermesh-transport` and requests no wsh
+  module; the wsh features load only from the `/wsh` subpath.
 - wsh's remote-object layer over a protocol channel (`@johnhenry/browsermesh-objects`, `objects.spec.mjs`):
   default deny, each operation judged by its own action (a peer granted `get` and `call` is refused `set`
   and a subscription), a 200 KB result chunked across messages, events in order, a one-way callback, a

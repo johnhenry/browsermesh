@@ -1,7 +1,6 @@
 import { silentCatch } from './silent-catch.mjs'
 import { encodeWireData } from './wire-data.mjs'
 import { resolveIceTransportPolicy } from './webrtc.mjs'
-import { WshLink } from './wsh-links.mjs'
 import { padTo, unpad } from '@johnhenry/browsermesh-primitives';
 /**
 // STATUS: INTEGRATED — wired into the `Pod` lifecycle (@johnhenry/browsermesh-pod), proven via E2E testing
@@ -1422,7 +1421,10 @@ export class TransportFactory {
         // The sealed wsh peer link: `{ links: WshPeerLinks, peerPodId }`. Not
         // part of getSupportedTypes()/negotiate(): it is only ever asked for.
         if (!opts?.links || !opts?.peerPodId) throw new Error("create('wsh') needs { links, peerPodId }");
-        return new WshLink(opts.links, opts.peerPodId);
+        // `links.link()` builds the `WshLink`; this file imports nothing from the wsh modules, so a
+        // browser build of the main entry never reaches `@johnhenry/wsh`.
+        if (typeof opts.links.link !== 'function') throw new Error("create('wsh'): links must be a WshPeerLinks");
+        return opts.links.link(opts.peerPodId);
       }
       default:
         throw new Error(`Unknown transport type: ${type}`);

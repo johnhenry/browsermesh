@@ -24,7 +24,7 @@ subpath kept out of the main entry). Needs
 import assert from 'node:assert/strict'
 import { Pod } from '@johnhenry/browsermesh-pod'
 import { PodIdentity } from '@johnhenry/browsermesh-primitives'
-import { WshPodTransport } from '@johnhenry/browsermesh-transport'
+import { WshPodTransport } from '@johnhenry/browsermesh-transport/wsh'
 import { createInProcessPipeRelay } from '@johnhenry/browsermesh-transport/wsh-in-process'
 
 const RELAY = 'wss://relay.example' // never dialled: the in-process relay answers
