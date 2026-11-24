@@ -1,4 +1,4 @@
-import { test, expect, until, connectRtc } from './fixtures.mjs'
+import { test, expect, until, connectRtc, POD_IDS } from './fixtures.mjs'
 
 // MCP across the mesh in real browsers (#334 item 3, docs/design/mcp-over-mesh.md): page B (bob) registers WebMCP
 // tools through the capture shim (`captureWebMcp` + `navigator.modelContext.registerTool`, as an application would)
@@ -7,9 +7,11 @@ import { test, expect, until, connectRtc } from './fixtures.mjs'
 // the question for a consequential tool is bob's (the harness answers it with `mcpAnswer`), never alice's.
 
 const OPEN = ['protocol:mcp:open']
+const grant = (bob, scopes) => bob.evaluate(([p, s]) => window.bm.mcpGrant(p, s), [POD_IDS.a, scopes])
+const revoke = (bob, scopes) => bob.evaluate(([p, s]) => window.bm.mcpRevoke(p, s), [POD_IDS.a, scopes])
 
 async function setup(open, servers, serveOptions) {
-  const { alice, bob } = await connectRtc(open, servers.a)
+  const { alice, bob } = await connectRtc(open, servers.a, POD_IDS)
   await bob.evaluate((o) => window.bm.mcpServe(o), serveOptions ?? {})
   await alice.evaluate(() => window.bm.mcpClient())
   return { alice, bob }
@@ -22,7 +24,7 @@ test('MCP over real WebRTC: default deny, then per-tool grants; a peer without t
   expect((await alice.evaluate(() => window.bm.mcpConnect())).error.code).toBe(-32003)
 
   // The right to open, nothing else: connected, but the list is empty and every call is "unknown".
-  await bob.evaluate((s) => window.bm.mcpGrant('pod-alice', s), OPEN)
+  await grant(bob, OPEN)
   expect(await alice.evaluate(() => window.bm.mcpConnect())).toEqual({ ok: true, tools: ['tools'] })
   expect(await alice.evaluate(() => window.bm.mcpList())).toEqual({ tools: [] })
   const unknown = await alice.evaluate(() => window.bm.mcpCall('echo', { text: 'hi' }))
@@ -30,7 +32,7 @@ test('MCP over real WebRTC: default deny, then per-tool grants; a peer without t
   expect((await bob.evaluate(() => window.bm.mcpHostState())).ran).toEqual([])
 
   // List and call scopes, per tool.
-  await bob.evaluate((s) => window.bm.mcpGrant('pod-alice', s), ['mcp:echo:list', 'mcp:echo:call', 'mcp:buy:list'])
+  await grant(bob, ['mcp:echo:list', 'mcp:echo:call', 'mcp:buy:list'])
   expect(await alice.evaluate(() => window.bm.mcpList())).toEqual({ tools: ['buy', 'echo'] })
   const echoed = await alice.evaluate(() => window.bm.mcpCall('echo', { text: 'hello' }))
   expect(echoed.text).toBe('text:echo ran with {"text":"hello"}')
@@ -41,19 +43,19 @@ test('MCP over real WebRTC: default deny, then per-tool grants; a peer without t
   expect((await bob.evaluate(() => window.bm.mcpHostState())).ran).toEqual([['echo', { text: 'hello' }]])
 
   // Revocation: the very next call is refused.
-  await bob.evaluate((s) => window.bm.mcpRevoke('pod-alice', s), ['mcp:echo:call'])
+  await revoke(bob, ['mcp:echo:call'])
   expect((await alice.evaluate(() => window.bm.mcpCall('echo', { text: 'again' }))).error.code).toBe(-32602)
   expect((await bob.evaluate(() => window.bm.mcpHostState())).ran.length).toBe(1)
 
   // Revoking the right to open closes the channel at once.
-  await bob.evaluate((s) => window.bm.mcpRevoke('pod-alice', s), OPEN)
+  await revoke(bob, OPEN)
   await until(alice, () => window.bm.mcpClientState().closed === 1)
   expect((await alice.evaluate(() => window.bm.mcpList())).error).toBeTruthy()
 })
 
 test('MCP over real WebRTC: a consequential tool asks the serving page, never the caller; a denial runs nothing', async ({ servers, open }) => {
   const { alice, bob } = await setup(open, servers)
-  await bob.evaluate((s) => window.bm.mcpGrant('pod-alice', s), [...OPEN, 'mcp:*:list', 'mcp:*:call'])
+  await grant(bob, [...OPEN, 'mcp:*:list', 'mcp:*:call'])
   await alice.evaluate(() => window.bm.mcpConnect())
 
   // Read-only: no question.
@@ -65,7 +67,7 @@ test('MCP over real WebRTC: a consequential tool asks the serving page, never th
   const denied = await alice.evaluate(() => window.bm.mcpCall('buy', { item: 'car' }))
   expect(denied.error.code).toBe(-32003)
   let host = await bob.evaluate(() => window.bm.mcpHostState())
-  expect(host.asked).toEqual([{ name: 'buy', input: { item: 'car' }, who: 'pod-alice' }])
+  expect(host.asked).toEqual([{ name: 'buy', input: { item: 'car' }, who: POD_IDS.a }])
   expect(host.ran.filter(([name]) => name === 'buy')).toEqual([])
 
   // He says yes: it runs.
@@ -79,7 +81,7 @@ test('MCP over real WebRTC: a consequential tool asks the serving page, never th
 
 test('MCP over real WebRTC: a hostile result arrives as inert, labelled text; cancel reaches the tool', async ({ servers, open }) => {
   const { alice, bob } = await setup(open, servers)
-  await bob.evaluate((s) => window.bm.mcpGrant('pod-alice', s), [...OPEN, 'mcp:*:list', 'mcp:*:call'])
+  await grant(bob, [...OPEN, 'mcp:*:list', 'mcp:*:call'])
   await alice.evaluate(() => window.bm.mcpConnect())
 
   // Text written by a third party is data: delivered as text in both pages, flagged untrusted, nothing parsed or run.
@@ -103,7 +105,7 @@ test('MCP over real WebRTC: a hostile result arrives as inert, labelled text; ca
 
 test('MCP over real WebRTC: list-changed is delivered for a tool the page allows and the caller may list', async ({ servers, open }) => {
   const { alice, bob } = await setup(open, servers, { allow: ['echo', 'late'] })
-  await bob.evaluate((s) => window.bm.mcpGrant('pod-alice', s), [...OPEN, 'mcp:*:list'])
+  await grant(bob, [...OPEN, 'mcp:*:list'])
   await alice.evaluate(() => window.bm.mcpConnect())
   expect(await alice.evaluate(() => window.bm.mcpList())).toEqual({ tools: ['echo'] })
   await bob.evaluate(() => window.bm.mcpRegisterLate('late'))

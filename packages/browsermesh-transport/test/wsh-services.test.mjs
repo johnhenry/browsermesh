@@ -180,19 +180,42 @@ describe('wsh services: who may log in', () => {
     await refused(probe.login());
   });
 
-  it('a plain (unsealed) client is served nothing, whatever it was granted', async () => {
-    const w = await world();
+  it('a plain (unsealed) client is served nothing, whatever it was granted, and is neither audited as a session nor shown to the person', async () => {
+    const shown = [];
+    const w = await world({ extra: { unattended: false, indicator: { connected: (who) => shown.push(['connected', who]), disconnected: (who) => shown.push(['disconnected', who]) } } });
     const probe = await w.stock({ connect: false });
     w.registry.grant(probe.podId, [OPEN, 'protocol:mcp:open', 'protocol:objects:open', 'mcp:*:call', 'mcp:*:list', 'objects:*:get']);
     const client = new WshClient({ transportFactories: { ws: () => new WebSocketTransport({ WebSocket: w.env.WebSocket }), wt: () => { throw new Error('no'); } } });
     cleanups.push(() => client.disconnect().catch(() => {}));
+    let loggedIn = false;
     try {
       await client.connect(`${RELAY}/r/${w.rid}`, { username: 'alice', keyPair: probe.keyPair, transport: 'ws', expectHostKey: podIdToFingerprint(w.identity.podId), sealSession: false, timeout: 1500 });
-    } catch { return; /* refused at login: also fine */ }
-    assert.equal(client.sessionSealed, false);
-    await refused(client.openRpc('mcp'));
-    await refused(openObjects(client));
+      loggedIn = true;
+    } catch { /* refused at login: fine */ }
+    if (loggedIn) {
+      assert.equal(client.sessionSealed, false);
+      await refused(client.openRpc('mcp'));
+      await refused(openObjects(client));
+    }
+    // A login that never became a sealed session is not a session: not listed, not audited as one, not shown, and it closes without a "session-close".
+    await client.disconnect().catch(() => {});
+    await settle(() => w.audit.length, { quietFor: 50 });
     assert.deepEqual(w.ran, []);
+    assert.equal(w.services.sessions.length, 0);
+    assert.deepEqual(w.audit.filter((e) => e.event === 'session-open' || e.event === 'session-close'), [], JSON.stringify(w.audit));
+    assert.deepEqual(shown, []);
+  });
+
+  it('a login is told it is not yet a session on a host that requires sealing, and the session starts when sealing completes', async () => {
+    const shown = [];
+    const w = await world({ extra: { unattended: false, indicator: { connected: (who) => shown.push(['connected', who]), disconnected: (who) => shown.push(['disconnected', who]) } } });
+    const s = await w.stock({ connect: false });
+    w.registry.grant(s.podId, [OPEN]);
+    await s.login();
+    await waitFor(() => w.services.sessions.length === 1, { label: 'sealed session' });
+    assert.equal(s.client.sessionSealed, true);
+    assert.deepEqual(w.audit.filter((e) => e.podId === s.podId).map((e) => e.event), ['session-open']);
+    assert.deepEqual(shown.map(([k]) => k), ['connected']);
   });
 
   it('maxSessions bounds the sessions: the next login is refused', async () => {
@@ -229,7 +252,7 @@ describe('wsh services: MCP', () => {
     assert.deepEqual(list.tools.map((t) => t.name), ['echo'], 'the one tool this key may list; "buy" and "hidden" are not shown');
     const result = await ch.request('tools/call', { name: 'echo', arguments: { text: 'hi' } });
     assert.equal(result.content[0].text, 'echo: hi');
-    assert.equal(result._meta['browsermesh/untrusted'], true);
+    assert.equal(result._meta['wsh/untrusted'], true, "wsh's own label, which no tool can unset");
     await assert.rejects(ch.request('tools/call', { name: 'buy', arguments: {} }), /unknown tool/);
     await assert.rejects(ch.request('tools/call', { name: 'hidden', arguments: {} }), /unknown tool/);
     assert.deepEqual(w.ran, [['echo', { text: 'hi' }]]);

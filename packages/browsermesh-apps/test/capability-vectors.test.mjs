@@ -6,13 +6,13 @@
 // strings coincide. This runs wsh's vectors, for the shared forms only, against the registry, so that "they agree"
 // is a test and the places where they do not are written down.
 //
-// The vectors come from the installed `@johnhenry/wsh` (the file ships with the package from the release that
-// introduced it) or from the file named by WSH_CAPABILITY_VECTORS. Where neither exists this skips and says so;
-// REQUIRE_WSH_VECTORS makes that a failure.
+// The vectors come from the installed `@johnhenry/wsh` (`@johnhenry/wsh/spec/capabilities.vectors.json`: the file ships
+// with the package from 0.49.0) or from the file named by WSH_CAPABILITY_VECTORS. Where neither exists this skips and
+// says so; REQUIRE_WSH_VECTORS makes that a failure, and this package's `npm test` sets it, so a skip is a failure in CI.
 //
 // Shared forms and how they map (docs/wsh-and-browsermesh.md has the table):
 //   objects:ROOT[:OP]   the same string is a mesh scope; a request is checkAccess(peer, 'objects:ROOT', OP)
-//   mcp:TOOL            the same string; a request is checkAccess(peer, 'mcp:TOOL', 'call')
+//   mcp:TOOL            the same string; running a tool is checkAccess(peer, 'mcp:TOOL', 'call'), listing it 'list'
 //   rpc:NAME            is the mesh scope protocol:NAME:open; a request is checkAccess(peer, 'protocol:NAME', 'open')
 // Not shared (the vectors for them are not run): exec, pty, fs:*, gateway:*, unix:*, endpoint:*, target:*, relay, and
 // the wsh-only rules that a list with rpc:wsh-objects alone means every root, and that any objects: entry opens the channel.
@@ -20,7 +20,6 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import path from 'node:path';
 
 import { PeerRegistry } from '../src/peer-registry.mjs';
 import { MeshPeerManager, TrustGraph, MeshACL } from '@johnhenry/browsermesh-core';
@@ -29,10 +28,9 @@ import { fakeClock } from './helpers/fake-clock.mjs';
 function locateVectors() {
   if (process.env.WSH_CAPABILITY_VECTORS) return process.env.WSH_CAPABILITY_VECTORS;
   try {
-    const entry = fileURLToPath(import.meta.resolve('@johnhenry/wsh'));
-    const candidate = path.resolve(path.dirname(entry), '..', 'spec', 'capabilities.vectors.json');
+    const candidate = fileURLToPath(import.meta.resolve('@johnhenry/wsh/spec/capabilities.vectors.json'));
     if (existsSync(candidate)) return candidate;
-  } catch { /* wsh not installed */ }
+  } catch { /* wsh not installed, or an older one that does not ship the vectors */ }
   return null;
 }
 
@@ -60,8 +58,10 @@ function ask({ capabilities, request, expires, now }) {
     reg.grantCapabilities(PEER, capabilities.map(meshScope), expires ? { expiresAt: Date.parse(expires) } : {});
   } catch (error) { return { refused: error.message }; }
   const [resource, action] = request.kind === 'objects' ? [`objects:${request.root}`, request.op]
-    : request.kind === 'mcp-call' || request.kind === 'mcp-tool' ? [`mcp:${request.tool}`, 'call']
-      : [`protocol:${request.protocol}`, 'open'];
+    // listing a tool and running one are asked apart (wsh >= 0.49 says which, and browsermesh-mcp scopes them apart: `mcp:TOOL:list`, `mcp:TOOL:call`)
+    : request.kind === 'mcp-call' ? [`mcp:${request.tool}`, 'call']
+      : request.kind === 'mcp-tool' ? [`mcp:${request.tool}`, 'list']
+        : [`protocol:${request.protocol}`, 'open'];
   return { permitted: reg.checkAccess(PEER, resource, action).allowed === true };
 }
 

@@ -71,7 +71,7 @@
     "webtorrent": "^3.0.21"
   },
   "scripts": {
-    "test": "node --import ./test/_setup-globals.mjs --test test/*.test.mjs",
+    "test": "REQUIRE_WSH_VECTORS=1 node --import ./test/_setup-globals.mjs --test test/*.test.mjs",
     "test:real-peer": "node --import ./test/_setup-globals.mjs --test --test-concurrency=1 test/real-peer/*.test.mjs",
     "test:real-torrent": "node --import ./test/_setup-globals.mjs --test --test-concurrency=1 test/real-torrent/*.test.mjs",
     "test:real-gpu": "node --import ./test/_setup-globals.mjs --test test/gpu-real-webgpu/*.test.mjs"

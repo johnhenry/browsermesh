@@ -2,7 +2,11 @@
 // record and tamper with every byte it copies, and a few pod/hub builders.
 import { PodIdentity } from '@johnhenry/browsermesh-primitives';
 import { WshPeerLinks } from '../../src/index.mjs';
-import { createInProcessPipeRelay } from '../../src/wsh-in-process.mjs';
+// wsh's own in-process relay (0.49 and later). The published `wsh-in-process` subpath is the same double for older wsh, so the
+// tests can also be run against the oldest wsh this package claims (0.45): that is the only reason the fallback exists.
+const { createInProcessPipeRelay } = await import('@johnhenry/wsh/testing')
+  .then((m) => (typeof m.createInProcessPipeRelay === 'function' ? m : import('../../src/wsh-in-process.mjs')))
+  .catch(() => import('../../src/wsh-in-process.mjs'));
 
 export const RELAY = 'wss://relay.invalid';
 

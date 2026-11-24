@@ -34,12 +34,18 @@ test('each operation maps to its own action; an unknown kind maps to nothing', (
   assert.equal(actionFor(undefined), null)
 })
 
-test('the caller identity is the verified pod id in the neutral slot, never a fake fingerprint', () => {
-  const who = whoFor('pod-abc')
-  assert.deepEqual({ ...who }, { username: null, fingerprint: null, podId: 'pod-abc' })
-  assert.equal(podIdOf(who), 'pod-abc')
-  assert.equal(podIdOf({ fingerprint: 'pod-abc' }), null, 'a fingerprint is never read as a pod id')
+test("the caller identity is wsh's own: the verified pod id, and the fingerprint of the same key derived from it", async () => {
+  const { podIdToFingerprint, normalizeIdentity } = await import('@johnhenry/wsh/identity')
+  const { PodIdentity } = await import('@johnhenry/browsermesh-primitives')
+  const { podId } = await PodIdentity.generate()
+  const who = whoFor(podId)
+  assert.deepEqual({ ...who }, { username: null, fingerprint: podIdToFingerprint(podId), podId })
+  assert.deepEqual({ ...who }, { ...normalizeIdentity({ podId }) }, 'one definition of who, wsh\'s')
+  assert.equal(podIdOf(who), podId)
+  assert.equal(podIdOf({ fingerprint: podIdToFingerprint(podId) }), null, 'a fingerprint is never read as a pod id')
   assert.throws(() => whoFor(''), TypeError)
+  assert.throws(() => whoFor('pod-abc'), TypeError, 'not the name of a key: refused, not passed on')
+  assert.throws(() => whoFor(`${podId.slice(0, 42)}B`), TypeError, 'a spelling of a key that is not canonical is refused too')
 })
 
 // ── values ──────────────────────────────────────────────────────────────────
@@ -473,9 +479,12 @@ test('arguments: nothing is served without roots, a service or an authorizer; a 
 
 test('a channel factory serves any protocol host: here a bare in-memory duplex with no mesh service at all', async () => {
   const { memoryChannelPair } = await import('./helpers/memory-channel.mjs')
-  const { a: client, b: server } = memoryChannelPair('client-id', 'server-id')
+  const { PodIdentity } = await import('@johnhenry/browsermesh-primitives')
+  const clientId = (await PodIdentity.generate()).podId
+  const serverId = (await PodIdentity.generate()).podId
+  const { a: client, b: server } = memoryChannelPair(clientId, serverId)
   const app = makeApp()
-  const authorizer = createRootAuthorizer({ protocol: 'objects', check: (peer, resource, action) => peer === 'client-id' && resource === 'objects:app' && action === 'get' })
+  const authorizer = createRootAuthorizer({ protocol: 'objects', check: (peer, resource, action) => peer === clientId && resource === 'objects:app' && action === 'get' })
   const objects = exposeObjectsOnMesh((accept) => { accept(server); return () => {} }, { roots: { app }, allow, authorizer })
   const { roots } = await openObjectsOnMesh(client)
   assert.equal(await roots.app.title, 'inbox')

@@ -55,8 +55,9 @@ A grant lets a peer *ask*. A tool that is not read-only is then asked about by t
 ## What is and is not offered
 
 Tools only. No resources, prompts, sampling, roots or elicitation. Results are
-labelled untrusted (`_meta['browsermesh/untrusted']`, `untrusted: true` on the
-typed client). Bounds (`limits`) are wsh's `WEBMCP_DEFAULT_LIMITS`: 64 tools,
+labelled untrusted (`_meta['wsh/untrusted']` from wsh and `_meta['browsermesh/untrusted']` from this layer,
+`untrusted: true` on the typed client). The caller is wsh's identity object in the prompt and in `onCall`:
+`{ username: null, fingerprint, podId }`, `podId` the channel's verified peer and `fingerprint` the hex name of the same key. Bounds (`limits`) are wsh's `WEBMCP_DEFAULT_LIMITS`: 64 tools,
 16 KiB of schema per tool, 64 KiB of input, 256 KiB of result, 4 in flight and 30
 calls a minute per session, a 120 s call timeout. Cancelling a call, or closing
 the channel, aborts the tool's `signal`.
@@ -73,6 +74,8 @@ the channel, aborts the tool's `signal`.
 
 ## Compatibility
 
-Nothing new on the link: the protocol name is `mcp` (version 1) on the existing protocol seam. A peer without
+Nothing new on the link: the protocol name is `mcp` (version 1) on the existing protocol seam, and its messages are
+plain MCP JSON-RPC 2.0 objects in the channel's own messages (wsh's `serveMcpOverDuplex`). A peer without
 protocol support answers `mesh.protocol.open` with -32601; one that does not serve `mcp` answers -32003. Peer
-dependencies: `@johnhenry/wsh` >=0.48.0 and `@johnhenry/browsermesh-apps`.
+dependencies: `@johnhenry/wsh` >=0.49.0 (tested at 0.49.0) and `@johnhenry/browsermesh-apps`. This package has
+not been published before this change; nothing older speaks to it.

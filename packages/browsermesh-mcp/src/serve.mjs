@@ -8,15 +8,21 @@
  * What it decides, in order, on every request of every session:
  *   1. the channel opened at all: `protocol:mcp:open` (the protocol host's own check, default deny);
  *   2. the page offers the tool at all: `allow` (exact names, nothing by default);
- *   3. this peer may see it (`mcp:<tool>:list`) or call it (`mcp:<tool>:call`), through the registry;
+ *   3. this peer may see it (`mcp:<tool>:list`) or call it (`mcp:<tool>:call`), through the registry,
+ *      asked through wsh's own hook (`permits`): listing is `{ kind: 'mcp-tool', op: 'list' }`, a call
+ *      `{ kind: 'mcp-call', op: 'call' }`, so the two are scoped apart without wrapping the handler;
  *   4. for a tool that is not read-only: the person at THIS page says yes (`approve`, `prompt`);
  *   5. bounds, by name (`limits`).
  * The peer is the channel's verified one, never a field of a message. The question to the person is the
  * serving page's: the caller cannot see, answer or influence it.
+ *
+ * The wire is plain MCP JSON-RPC 2.0 in the protocol channel's own messages (`serveMcpOverDuplex` of
+ * `@johnhenry/wsh/page`): the channel's credit and ordering carry it, and an MCP client library can be
+ * pointed straight at it.
  */
-import { webmcpTools, WEBMCP_DEFAULT_LIMITS } from '@johnhenry/wsh/page'
+import { webmcpTools, serveMcpOverDuplex } from '@johnhenry/wsh/page'
+import { podIdToFingerprint } from '@johnhenry/wsh/identity'
 import { MCP_PROTOCOL, MCP_ACTIONS, TOOL_SCOPE_NAME } from './scopes.mjs'
-import { rpcChannelOverMesh, mcpError } from './rpc-seam.mjs'
 
 const realmTimers = () => ({
   setTimeout: (fn, ms) => globalThis.setTimeout(fn, ms),
@@ -25,8 +31,19 @@ const realmTimers = () => ({
   clearInterval: (id) => globalThis.clearInterval(id),
 })
 
-const INVALID_PARAMS = -32602
-const STREAM_LIMIT = -32002
+/** The largest message the seam accepts or sends: wsh's default, and never more than the channel carries. */
+const MAX_MESSAGE_BYTES = 1024 * 1024
+
+/**
+ * Every result of a tool call is page content that may carry text written by third parties. wsh labels it
+ * (`_meta['wsh/untrusted']`, which no tool can unset); this layer adds its own label beside it.
+ */
+function labelled(message) {
+  const meta = message?.result?._meta
+  return meta && meta['wsh/untrusted'] === true
+    ? { ...message, result: { ...message.result, _meta: { ...meta, 'browsermesh/untrusted': true } } }
+    : message
+}
 
 /** @param {any} service the api of `attachService(node, undefined, createMeshProtocolService())`, or the attached host itself */
 function protocolApi(service) {
@@ -89,58 +106,36 @@ export function serveMcpOnMesh(service, options = {}) {
     ...(timers ? { timers } : (window?.setTimeout ? {} : { timers: realmTimers() })),
     now,
   })
-  const maxCallsPerMinute = limits.maxCallsPerMinute ?? WEBMCP_DEFAULT_LIMITS.maxCallsPerMinute
 
-  /** @type {Set<{ peer: string, since: number }>} */
+  /** wsh's hook, for one peer: listing a tool and running one are asked apart, each for its own action. Anything else is refused. */
+  const permitsFor = (peer) => (request) => {
+    if (request?.kind === 'mcp-tool') return can(peer, request.tool, 'list')
+    if (request?.kind === 'mcp-call') return can(peer, request.tool, 'call')
+    return false
+  }
+
+  /** @type {Set<{ peer: string, since: number, session: object, channel: object }>} */
   const sessions = new Set()
+  /** wsh ends a session by itself (`closeSessions`, a failed send); the mesh channel under it is closed here when it does. */
+  const reap = () => { for (const s of sessions) if (s.session.closed && !s.channel.closed) { try { s.channel.close('session ended') } catch { /* already closed */ } } }
 
   const unserve = api.serveProtocol(protocol, (channel) => {
     const peer = channel.peer
-    const who = { username: null, fingerprint: peer }
-    const session = { peer, since: now(), starts: [] }
-    sessions.add(session)
+    const entry = { peer, since: now(), session: null, channel }
+    entry.session = serveMcpOverDuplex(handler, {
+      // The channel's own message queue is the duplex: reliable, in order, with the channel's credit as backpressure.
+      send: (message) => channel.send(labelled(message)).catch((e) => { try { channel.close('send failed') } catch { /* already closed */ } throw e }),
+      who: { podId: peer },
+      permits: permitsFor(peer),
+      maxMessageBytes: Math.min(channel.maxMessageBytes, MAX_MESSAGE_BYTES),
+    })
+    sessions.add(entry)
     try { onSession?.({ peer, state: 'open' }) } catch { /* the embedder's callback */ }
+    channel.onMessage((message) => { entry.session.receive(message) })
     channel.onClose(() => {
-      sessions.delete(session)
+      entry.session.close('channel closed')
+      sessions.delete(entry)
       try { onSession?.({ peer, state: 'close' }) } catch { /* the embedder's callback */ }
-    })
-
-    const rpc = rpcChannelOverMesh(channel, {
-      intercept: {
-        // Only the tools this peer may list; a tool it may only call is callable but not listed.
-        'tools/list': async (_params, _ctx, inner) => {
-          const result = await inner()
-          return { ...result, tools: (result?.tools ?? []).filter((t) => can(peer, t.name, 'list')) }
-        },
-        'tools/call': async (params, _ctx, inner) => {
-          // Counted whether or not the call is allowed, so a caller cannot probe names without bound.
-          const t = now()
-          session.starts = session.starts.filter((s) => t - s < 60_000)
-          if (session.starts.length >= maxCallsPerMinute) {
-            emit({ outcome: 'refused', name: params?.name, who, limit: 'maxCallsPerMinute', detail: `more than ${maxCallsPerMinute} calls in a minute` })
-            throw mcpError(STREAM_LIMIT, `refused: maxCallsPerMinute: more than ${maxCallsPerMinute} calls in a minute`, { limit: 'maxCallsPerMinute' })
-          }
-          session.starts.push(t)
-          const name = params?.name
-          if (!can(peer, name, 'call')) {
-            emit({ outcome: 'unauthorized', name: typeof name === 'string' ? name.slice(0, 128) : undefined, who, detail: 'no grant' })
-            // The same answer as a tool that does not exist.
-            throw mcpError(INVALID_PARAMS, `unknown tool: ${name}`)
-          }
-          const result = await inner()
-          return {
-            ...result,
-            // The result is data of this page and may carry text written by third parties; no tool can unset this.
-            _meta: { ...(result?._meta ?? {}), 'wsh/untrusted': true, 'browsermesh/untrusted': true },
-          }
-        },
-      },
-    })
-    handler(rpc, {
-      user: null,
-      fingerprint: peer,
-      // The bridge asks this to decide what a session sees: a tool is visible to a peer with any scope on it.
-      permits: (request) => request?.kind === 'mcp-tool' && (can(peer, request.tool, 'list') || can(peer, request.tool, 'call')),
     })
   })
 
@@ -151,11 +146,20 @@ export function serveMcpOnMesh(service, options = {}) {
     /** The tools (as `tools/list` states them) that any peer could be granted now. */
     async list() { return (await handler.list()).filter((t) => TOOL_SCOPE_NAME.test(t.name)) },
     /** Tell every session (or those of one peer) why, then end it. Resolves with how many were ended. */
-    closeSessions: (reason, peer) => handler.closeSessions(reason, peer),
+    async closeSessions(reason, peer) {
+      let fingerprint
+      if (peer !== undefined) {
+        try { fingerprint = podIdToFingerprint(peer) } catch { return 0 }
+      }
+      const ended = await handler.closeSessions(reason, fingerprint)
+      reap()
+      return ended
+    },
     /** Stop serving: no new channel opens, and every session ends. */
     async close() {
       unserve()
       await handler.closeSessions('the page stopped serving its tools')
+      reap()
     },
   }
 }

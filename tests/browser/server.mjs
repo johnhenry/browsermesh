@@ -81,6 +81,8 @@ export async function buildImportMap() {
   // The one third-party dependency a package under test needs in the page: wsh's browser-safe page entry
   // (the WebMCP bridge), served from the installed package's source, nothing else of it.
   imports['@johnhenry/wsh/page'] = '/vendor/wsh/page-host.mjs'
+  // wsh's identity entry (a key's names: pod id, fingerprint, OpenSSH line): browser-safe, no imports outside its own directory.
+  imports['@johnhenry/wsh/identity'] = '/vendor/wsh/identity.mjs'
   return { imports }
 }
 

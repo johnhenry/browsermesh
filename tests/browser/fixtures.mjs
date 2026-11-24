@@ -85,12 +85,16 @@ export async function exposeHostCandidates(page) {
 /** Wait for a synchronous in-page predicate (never an async one: a Promise is truthy). */
 export const until = (page, fn, arg) => page.waitForFunction(fn, arg)
 
+/** Readable stand-ins for pod ids that are valid ones (exactly 43 canonical base64url characters), for the layers that go through wsh's identity. */
+export const POD_IDS = Object.freeze({ a: `podAlice${'A'.repeat(35)}`, b: `podBob${'A'.repeat(37)}` })
+
 /**
  * Two pages, each in its own browser context, connected by a real WebRTC data
  * channel through the local signalling server. Resolves when both ends report
  * the channel open.
  */
 export async function connectRtc(open, origin, ids = { a: 'pod-alice', b: 'pod-bob' }) {
+  // (wsh's caller identity is strict about what names a key: the specs that go through it pass `POD_IDS`, 43 canonical base64url characters.)
   const alice = await open(origin, { isolated: true })
   const bob = await open(origin, { isolated: true })
   await exposeHostCandidates(alice)

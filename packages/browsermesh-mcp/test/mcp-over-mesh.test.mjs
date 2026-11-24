@@ -4,6 +4,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { podIdToFingerprint } from '@johnhenry/wsh/identity'
 import { serveMcpOnMesh, connectMcpOnMesh, openMcpOnMesh, MCP_PROTOCOL, mcpScopes } from '../src/index.mjs'
 import { bus, serviceOn, fakeWindow, tool, flush, until } from './helpers.mjs'
 
@@ -147,8 +148,11 @@ test('the caller is the channel\'s verified peer, not anything in the message', 
   // Fields that claim another identity travel in the params; nothing reads them.
   await client.callTool('echo', { text: 'x', who: w.eve.podId, fingerprint: w.eve.podId, peer: w.eve.podId })
   assert.equal(w.prompts.length, 1)
-  assert.equal(w.prompts[0].who.fingerprint, w.alice.podId)
-  assert.equal(w.events.at(-1).who.fingerprint, w.alice.podId)
+  assert.equal(w.prompts[0].who.podId, w.alice.podId)
+  assert.equal(w.events.at(-1).who.podId, w.alice.podId)
+  // wsh's identity: the fingerprint is the hex name of the same key, derived from the pod id, never the pod id itself.
+  assert.equal(w.prompts[0].who.fingerprint, podIdToFingerprint(w.alice.podId))
+  assert.equal(w.prompts[0].who.username, null)
 })
 
 test('approval stays with the page: a consequential tool asks the serving page, a read-only one does not', async () => {
@@ -412,4 +416,57 @@ test('serve validates its arguments; a tool name that cannot carry a scope is ne
   assert.throws(() => mcpScopes.tool('*'), TypeError)
   const served = serveMcpOnMesh(svc, { tools: [tool('_hidden')], allow: ['_hidden'] })
   assert.deepEqual(await served.list(), [], 'a name that cannot be granted is not served')
+})
+
+test("rule: wsh's hook scopes list and call apart, each asked for its own action and nothing else", async () => {
+  const asked = []
+  const w = await world({ grants: 'none', serve: { authorize: (peer, name, action) => { asked.push([name, action]); return true } } })
+  w.bob.registry.grantCapabilities(w.alice.podId, mcpScopes.open())
+  const client = await connectMcpOnMesh(w.aliceSvc, w.bob.podId)
+  await client.initialize()
+  await client.listTools()
+  assert.ok(asked.length > 0)
+  assert.ok(asked.every(([, action]) => action === 'list'), `a listing asks only about listing: ${JSON.stringify(asked)}`)
+  asked.length = 0
+  await client.callTool('echo', { text: 'x' })
+  assert.ok(asked.some(([name, action]) => name === 'echo' && action === 'call'))
+  assert.ok(asked.every(([, action]) => action === 'call'), `a call asks only about calling: ${JSON.stringify(asked)}`)
+})
+
+test('the wire is plain MCP JSON-RPC in the channel\'s own messages: no browsermesh request layer, and bad messages are answered or dropped, never fatal', async () => {
+  const w = await world()
+  const channel = await w.aliceSvc.openProtocol(w.bob.podId, MCP_PROTOCOL)
+  const inbox = []
+  channel.onMessage((m) => { inbox.push(m) })
+  await channel.send({ jsonrpc: '2.0', id: 'a', method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '1' } } })
+  await until(() => inbox.some((m) => m.id === 'a'), 'the initialize result')
+  assert.deepEqual(Object.keys(inbox.find((m) => m.id === 'a')).sort(), ['id', 'jsonrpc', 'result'])
+  // Not JSON-RPC 2.0: a request id we can read is answered with an error, anything else is dropped.
+  await channel.send({ id: 'b', method: 'tools/list' })
+  await channel.send('nonsense')
+  await channel.send([{ jsonrpc: '2.0', id: 'c', method: 'tools/list' }])
+  await until(() => inbox.some((m) => m.id === 'b'), 'the refusal')
+  assert.equal(inbox.find((m) => m.id === 'b').error.code, -32600)
+  // The session still works afterwards.
+  await channel.send({ jsonrpc: '2.0', id: 'd', method: 'tools/list' })
+  await until(() => inbox.some((m) => m.id === 'd'), 'the list')
+  assert.deepEqual(inbox.find((m) => m.id === 'd').result.tools.map((t) => t.name).sort(), ['buy', 'echo'])
+  // A request id still in flight is refused, not run twice.
+  const entered = Promise.withResolvers()
+  w.page.register(tool('slow', { execute: () => new Promise(() => { entered.resolve() }) }))
+  w.bob.registry.grantCapabilities(w.alice.podId, mcpScopes.tool('slow'))
+  await channel.send({ jsonrpc: '2.0', id: 'e', method: 'tools/call', params: { name: 'slow', arguments: {} } })
+  await entered.promise
+  await channel.send({ jsonrpc: '2.0', id: 'e', method: 'tools/call', params: { name: 'slow', arguments: {} } })
+  await until(() => inbox.some((m) => m.id === 'e' && m.error), 'the duplicate id to be refused')
+  assert.equal(inbox.find((m) => m.id === 'e').error.code, -32600)
+  channel.close()
+})
+
+test('a message larger than the channel can carry is refused and nothing runs', async () => {
+  const w = await world()
+  const client = await connectMcpOnMesh(w.aliceSvc, w.bob.podId)
+  const tooBig = await client.request('tools/call', { name: 'echo', arguments: { text: 'y'.repeat(2 * 1024 * 1024) } }).catch((e) => e)
+  assert.ok(tooBig instanceof Error, 'refused before it is sent, or by the receiving seam')
+  assert.deepEqual(w.calls, [])
 })

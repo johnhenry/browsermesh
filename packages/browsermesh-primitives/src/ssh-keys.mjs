@@ -23,9 +23,10 @@
  * a line that carries options or control characters is refused rather than cut
  * to what looks right. `@johnhenry/wsh` has the same conversions
  * (`fingerprintToPodId`, `podIdToFingerprint`, `exportPublicKeySSH`,
- * `parseSSHPublicKey`); a test checks the two agree on every valid input
- * (wsh is a development dependency of that test, not a dependency of this
- * package) and wsh is the more lenient of the two on malformed input.
+ * `parseSSHPublicKey`, and since 0.49 the `@johnhenry/wsh/identity` entry
+ * point, strict in the same ways); a test runs both over the valid inputs and
+ * the strictness cases and lists the few places they differ (wsh is a
+ * development dependency of that test, not a dependency of this package).
  */
 import { encodeBase64url, decodeBase64url } from './identity.mjs';
 import { podIdFromRawKey } from './session.mjs';

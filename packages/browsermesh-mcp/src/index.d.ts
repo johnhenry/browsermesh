@@ -30,10 +30,11 @@ export interface McpToolDefinition {
 
 export interface McpCall { name: string; title: string | null; description: string; input: Record<string, unknown>; consequential: boolean; readOnly: boolean }
 export interface McpCallEvent {
-  outcome: 'ok' | 'error' | 'denied' | 'approved' | 'refused' | 'unknown' | 'unlisted' | 'unauthorized'
+  /** `unknown` is also what a tool the caller has no `call` grant for is reported as: it is answered like a tool that does not exist. */
+  outcome: 'ok' | 'error' | 'denied' | 'approved' | 'refused' | 'unknown' | 'unlisted'
   name?: string
-  /** `fingerprint` is the caller's verified pod id. */
-  who?: { username: string | null; fingerprint: string | null }
+  /** wsh's caller identity: `podId` is the caller's verified pod id and `fingerprint` the hex name of the same key, derived from it. */
+  who?: { username: string | null; fingerprint: string | null; podId?: string | null }
   limit?: string
   detail?: string
 }
@@ -46,7 +47,7 @@ export interface ServeMcpOptions {
   allow: string[]
   approve?: 'never' | 'consequential' | 'always'
   /** The person at THIS page. Answers `true` to allow. Default: a dialog in `window.document`, else deny. */
-  prompt?: (call: McpCall, who: { username: string | null; fingerprint: string | null }, extra: { signal: AbortSignal }) => boolean | Promise<boolean>
+  prompt?: (call: McpCall, who: { username: string | null; fingerprint: string | null; podId?: string | null }, extra: { signal: AbortSignal }) => boolean | Promise<boolean>
   capture?: { list(): McpToolDefinition[]; subscribe?(fn: () => void): () => void } | null
   limits?: Partial<{ maxTools: number; maxSchemaBytes: number; maxInputBytes: number; maxResultBytes: number; maxInflight: number; maxCallsPerMinute: number; callTimeoutMs: number }>
   /** Replaces the registry-backed decision. */
