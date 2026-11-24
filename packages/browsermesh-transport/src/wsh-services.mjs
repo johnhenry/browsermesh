@@ -148,6 +148,7 @@ const DEFAULT_RECONNECT =Object.freeze({ baseMs: 250, maxMs: 10_000 });
  * @property {{ connected(who: object, control: { stop(): Promise<boolean> }): void, disconnected(who: object): void }} [indicator]
  * @property {boolean} [unattended] nobody is in front of this pod: allows starting without an indicator
  * @property {(event: object) => void} [onAudit]
+ * @property {string[]} [acceptVia] pod ids of relaying pods (`WshRelay`) allowed to carry a session over a mesh channel for a key that is not their own; empty by default (the key must be the channel peer's own)
  * @property {number} [maxSessions=4]
  * @property {number} [listenSlots=2]
  * @property {number} [bindTimeoutMs]
@@ -187,6 +188,7 @@ export class WshServices {
   #blocked = new Set();
   /** Logins that have passed but whose session wsh has not sealed yet: not sessions (not listed, audited or shown). */
   #unsealed = new Set();
+  #acceptVia = new Set();
   /** Mesh channels being served (see `serveChannel`). */
   #channels = new Set();
   #pendingReasons = new Map();
@@ -213,6 +215,8 @@ export class WshServices {
     this.#relays = relays;
     this.#WebSocketCtor = opts.WebSocket ?? globalThis.WebSocket ?? null;
     this.#socketFactory = opts.socketFactory ?? null;
+    this.#acceptVia = new Set(opts.acceptVia ?? []);
+    for (const via of this.#acceptVia) if (typeof via !== 'string' || !via) throw new TypeError('WshServices: acceptVia lists pod ids');
     this.#maxSessions = opts.maxSessions ?? 4;
     if (!Number.isSafeInteger(this.#maxSessions) || this.#maxSessions < 1) throw new TypeError('maxSessions must be a positive integer');
     this.#slotsWanted = opts.listenSlots ?? 2;
@@ -411,7 +415,8 @@ export class WshServices {
     const refuse = (reason) => { this.#pendingReasons.set(who.fingerprint, reason); return false; };
     if (this.#stopped) return refuse('stopped');
     // Over a mesh channel the peer is verified by the mesh: the key that logs in must be that peer's own (a login for someone else's key is a relayed one).
-    if (slot.peer !== undefined && podId !== slot.peer) return refuse('not-the-channel-peer');
+    // (The one exception is a relaying pod this pod lists in `acceptVia`: it carries a session it cannot read, for a key that is not its own.)
+    if (slot.peer !== undefined && podId !== slot.peer && !this.#acceptVia.has(slot.peer)) return refuse('not-the-channel-peer');
     if (this.#blocked.has(podId)) return refuse('stopped-by-indicator');
     // A login that is waiting to be sealed holds a place too: the bound is on what could become a session.
     if (this.#sessions.size + this.#unsealed.size >= this.#maxSessions) return refuse('too-many-sessions');
@@ -448,7 +453,7 @@ export class WshServices {
   #open(session) {
     session.sealed = true;
     this.#sessions.add(session);
-    this.#audit('session-open', { podId: session.podId, fingerprint: session.fingerprint, username: session.username });
+    this.#audit('session-open', { podId: session.podId, fingerprint: session.fingerprint, username: session.username, ...(session.slot.peer !== undefined && session.slot.peer !== session.podId ? { via: session.slot.peer } : {}) });
     try {
       this.#opts.indicator?.connected({ username: session.username, fingerprint: session.fingerprint }, { stop: () => this.#stopSession(session) });
     } catch (e) { this.#log(`indicator.connected threw: ${e?.message ?? e}`); }
