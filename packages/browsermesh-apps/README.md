@@ -1221,6 +1221,61 @@ for the external-CLI surface, and
 for a runnable walkthrough (crash a pod twice, watch backoff and two
 restarts, then drain the parent with cascade).
 
+## Pod placement planner
+
+`planPlacement()`, `HostHealth`, `PlacementLedger` and `createHostPool()`
+(`pod-placement.mjs`) are the pure half of choosing where a hosted pod goes
+([issue #185](https://github.com/johnhenry/browsermesh/issues/185) §6). No
+clock and no timers are used: time is passed in, and a restart delay is a
+number the caller schedules, so every rule is unit-tested against fake lane
+drivers (`InMemoryPodHostDriver`) without sleeping. They are additive:
+nothing calls them unless you do.
+
+```js
+import { createHostPool, PLACEMENT_BOUNDARY } from '@johnhenry/browsermesh-apps'
+
+const pool = createHostPool({
+  hosts: [
+    { id: 'edge-1', driver: isolateDriver, boundary: PLACEMENT_BOUNDARY.LANGUAGE, capacity: { pods: 200, memMib: 4096 } },
+    { id: 'kvm-1', driver: microvmDriver, boundary: PLACEMENT_BOUNDARY.HARDWARE, capacity: { pods: 20, vcpus: 16, memMib: 16384 } },
+  ],
+  policy: { perRequesterMaxPods: 5 },
+})
+const { hostId, status } = await pool.spawn(podspec, { requester: { id: 'alice' } })
+```
+
+Hard rules, in the order they are checked (each rejected host reports a
+`code` and a `reason`): `lane` (the podspec's lane), `verb` (serves `spawn`),
+`draining`, `health` (unhealthy hosts are skipped until their cooldown ends,
+then probed once), `avoided`, `boundary`, `caps` (every `caps` entry in the
+podspec), `capacity` (pods, vcpus, MiB against what is already reserved). A
+requester over `perRequesterMaxPods` is refused before any host is looked at.
+Ranking among the hosts that pass: headroom, health (degraded and probing
+hosts rank lower), an optional `preferHost`, then host id, so the answer does
+not depend on input order.
+
+**Isolation boundary.** A host states how strongly it separates a pod from
+the host: `none` (same process: `worker_threads`), `process` (a child process
+with permission flags), `language` (a V8 isolate in its own process),
+`hardware` (a microVM). Requesters are untrusted unless they say otherwise,
+and an untrusted requester is only placed behind `language` or `hardware`
+(`policy.minBoundary` raises the floor for everyone). This only refuses to
+place untrusted work where a host says there is no boundary; it does not
+create one.
+
+**The host still decides.** A host's refusal (`EACCES`, `EBUSY`, ...) is final
+for that spawn. Only a transport-level failure (`ETIMEDOUT`) can move a spawn
+to the next host, and only with `maxAttempts` above its default of 1. Failures
+count against the host's `HostHealth`.
+
+`pool.drainHost(id)` stops placing on a host and moves its pods
+make-before-break; a pod that cannot be re-placed is left running and
+reported in `failed`. `pool.handleExit({ hostId, name, exit })` applies the
+restart policy shared with the supervisor (`decideRestart()`: never restart a
+drain, exponential backoff from the podspec's `backoffMs`, give up at
+`maxRestarts`) and returns `{ restart, delayMs, run }`; `run()` re-places the
+pod on a host other than the one that failed.
+
 ## Pod host over mesh:// and the HTTP gateway
 
 [Issue #185](https://github.com/johnhenry/browsermesh/issues/185) control-surface
