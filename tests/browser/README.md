@@ -52,6 +52,15 @@ Locally you may point Playwright at a browser you already have with
   `frame-ancestors 'none'`.)
 - Pod messaging through the WebSocket relay, and the transport package's
   `WebSocketTransport` (text and 1 MiB binary).
+- WebRTC identity binding on a real `RTCPeerConnection` (`webrtc-binding.spec.mjs`): both sides prove
+  their pod key over the DTLS fingerprints read from real SDP, and the connection stays bound through an
+  ICE restart; a peer that sends no proof is closed after the timeout with reason `timeout`; and with a
+  signalling server that swaps the session descriptions for an attacker's, the connection is closed
+  (`bad-signature`), while the same attack without binding goes unnoticed (the control). The attacker is a
+  page with two `RTCPeerConnection`s of its own, handed every offer/answer/ICE frame by the test double
+  (`hub.intercept`); it relays what crosses the data channel and cannot make a proof of its own.
+  Passes in Chromium and Firefox; WebKit does not open a data channel in the local run (it also fails
+  `webrtc.spec.mjs` there).
 - mesh-rpc / `browserMeshFetch` and CRDT convergence over the real data channel.
 - Examples 01, 02 and 05 unmodified in a page (their own transports stay
   simulated).

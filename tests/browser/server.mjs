@@ -246,6 +246,14 @@ export class Hub {
   /** @type {Map<string, Map<string, WsConnection>>} endpoint -> podId -> connection */
   #rooms = new Map([['/relay', new Map()], ['/signaling', new Map()]])
 
+  /**
+   * A test double for a malicious signalling server: the podId of a client that is handed every
+   * `signal` frame addressed to anyone else (wrapped as `{ mitm: { from, to }, ...envelope }`).
+   * Frames sent by that client are routed normally. `null` (default) is an honest server.
+   * @type {string|null}
+   */
+  intercept = null
+
   attach(endpoint, conn) {
     const room = this.#rooms.get(endpoint)
     let podId = null
@@ -273,6 +281,13 @@ export class Hub {
       if (msg.type === 'ping') return reply({ type: 'pong' })
       const forwarded = endpoint === '/relay' ? 'relay' : 'signal'
       if (msg.type === forwarded) {
+        if (this.intercept && endpoint === '/signaling' && podId !== this.intercept && msg.target !== this.intercept) {
+          const attacker = room.get(this.intercept)
+          if (attacker) {
+            attacker.send(JSON.stringify({ type: 'signal', source: podId, envelope: { mitm: { from: podId, to: msg.target }, ...msg.envelope } }))
+            return
+          }
+        }
         const target = room.get(msg.target)
         if (!target) return reply({ type: 'error', message: `peer "${msg.target}" not found` })
         target.send(JSON.stringify({

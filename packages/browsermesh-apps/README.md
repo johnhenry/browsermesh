@@ -187,6 +187,22 @@ const node = await createMeshNode({
 
 ### TURN server configuration
 
+**WebRTC identity binding is on by default.** `createMeshNode()` wires the node's
+identity into its WebRTC connections: each side proves possession of its pod key
+over the DTLS fingerprints of the session descriptions it applied, so a
+signalling server that swapped the descriptions is detected and the connection
+is closed, and nothing a peer sends is delivered before its proof verified. A
+peer on `@johnhenry/browsermesh-transport` older than 0.6.0 sends no proof: its
+connection is closed after `webrtcBindingTimeoutMs` (default 10 s) with the
+reason `timeout`. The caller's `connectToPeer()` rejects with
+`... identity binding failed: timeout`, and the node emits
+`peer:binding-failed` (`{ pubKey, transport, connectionId, reason }`) on either
+side. To interoperate with such peers anyway, pass
+`webrtcAllowUnboundPeers: true` (this node still proves itself; a peer that never
+proves itself is accepted and what it sends is unverified; a proof that is sent
+and does not verify still closes the connection). `webrtcIdentityBinding: false`
+turns it off entirely.
+
 By default, `createMeshNode()` gathers **no ICE servers at all** (no STUN,
 no TURN) -- host candidates only, which is enough for peers on the same LAN
 and discloses nothing to a third party. That's fine for typical NAT, but

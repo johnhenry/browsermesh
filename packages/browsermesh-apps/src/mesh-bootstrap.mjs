@@ -365,6 +365,16 @@ import { registerOrchestratorTools } from './mesh-orchestrator-tools.mjs'
  *   `[new ManualStrategy()]` there instead.
  * @param {string} [options.discoveryChannelName='mesh-discovery']
  * @param {number} [options.announceInterval]
+ * @param {boolean} [options.webrtcIdentityBinding=true] - Wire the node's identity into its WebRTC
+ *   connections: each side proves possession of its pod key over the DTLS fingerprints of the descriptions
+ *   it applied, so a signalling server that swapped the descriptions is detected and the connection closed.
+ *   `false` turns it off (nothing is sent or required). A peer that never proves itself (transport older
+ *   than 0.6.0) is closed after `webrtcBindingTimeoutMs` (default 10 s) with the reason `timeout`: the caller's
+ *   `connectToPeer()` rejects with it and the node emits `peer:binding-failed`.
+ * @param {boolean} [options.webrtcAllowUnboundPeers=false] - The named opt-out for interop with peers on
+ *   transport older than 0.6.0: this node still proves itself, but accepts a peer that never does (what such a
+ *   peer sends is then delivered unverified). A proof that is sent and does not verify still closes the connection.
+ * @param {number} [options.webrtcBindingTimeoutMs] - How long to wait for the peer's proof (default 10000).
  * @param {object} [options.wsh] - Opt in to the sealed wsh peer link
  *   (`@johnhenry/browsermesh-transport`'s `WshPeerLinks`, which needs the
  *   optional peer `@johnhenry/wsh`). Off unless given. The node's own identity
@@ -822,6 +832,9 @@ export async function createMeshNode(options = {}) {
     capabilities = [],
     signalingTransport,
     iceServers,
+    webrtcIdentityBinding = true,
+    webrtcAllowUnboundPeers = false,
+    webrtcBindingTimeoutMs,
     enableAudit = false,
     auditChain: providedAuditChain,
     auditChainId,
@@ -985,7 +998,30 @@ export async function createMeshNode(options = {}) {
   // caller-supplied servers (typically TURN) alongside DEFAULT_ICE_SERVERS
   // (empty by default), filtering out malformed entries rather than handing
   // them straight to WebRTCMeshManager.
-  const meshManager = new WebRTCMeshManager({ localPodId: podId, iceServers: mergeIceServers(iceServers), onLog })
+  // The node's own identity is wired into every connection, so each side proves possession of its pod
+  // key over the DTLS fingerprints of the descriptions it applied: a signalling server that swaps the
+  // descriptions is detected and the connection closed. A peer that never proves itself (transport older
+  // than 0.6.0) is closed after the binding timeout (default 10 s) with the reason `timeout`, unless
+  // `webrtcAllowUnboundPeers` says to accept it.
+  let bindingIdentity = null
+  if (webrtcIdentityBinding !== false) {
+    const candidate = identityManager.getIdentity(podId)
+    if (candidate && typeof candidate.sign === 'function' && typeof candidate.rawPublicKey === 'function') {
+      bindingIdentity = candidate
+    } else {
+      onLog('mesh-bootstrap:webrtc-binding-unavailable', { reason: 'the node identity cannot sign' })
+    }
+  }
+  const meshManager = new WebRTCMeshManager({
+    localPodId: podId,
+    iceServers: mergeIceServers(iceServers),
+    onLog,
+    ...(bindingIdentity ? {
+      identity: bindingIdentity,
+      requirePeerBinding: !webrtcAllowUnboundPeers,
+      bindingTimeoutMs: webrtcBindingTimeoutMs,
+    } : {}),
+  })
   const signaling = new MeshSignalingChannel({ localPodId: podId, transport: effectiveSignalingTransport, onLog })
   await signaling.open()
 
@@ -1031,6 +1067,11 @@ export async function createMeshNode(options = {}) {
     meshManager,
     signaling,
     onLog,
+    // A connection closed because the peer did not prove its identity becomes the node event
+    // 'peer:binding-failed' (and the caller's connectToPeer() rejects with the reason).
+    onBindingFailure: ({ remotePodId, connectionId, reason }) => {
+      node.reportBindingFailure(remotePodId, { transport: 'webrtc', connectionId, reason })
+    },
     // Callee side: once an auto-answered inbound offer's DataChannel opens,
     // give it the same PeerNode-level session bookkeeping connectToPeer()
     // gives the caller side, so sendTo()/onIncomingData() work symmetrically
