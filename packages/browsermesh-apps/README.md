@@ -1288,9 +1288,23 @@ requester holding `pod-host:status` or `pod-host:list` can read the others'
 pods. What it reads is limited: `env` values and `run.input` in a pod's
 `spec` are returned as `"[redacted]"` (the names stay) to every requester
 except the one that spawned that pod through this service; a pod the service
-did not spawn is redacted for everyone. Verbs on another requester's pod
-(`drain`, `exec`, `send`) are still allowed by the scope: separate resources
-are how tenants are kept apart.
+did not spawn is redacted for everyone.
+
+**A pod belongs to the requester that spawned it.** The verb on the resource is
+necessary but not sufficient: `send`, `exec`, `snapshot`, `restore` and `drain`
+on an existing pod also need the requester to have spawned it through this
+service, or an explicit grant on the pod itself, whose resource is
+`<resource>/<pod name>` (for example
+`registry.grantCapabilities(carol, ['pod-host/web:drain'])`; a grant of the
+verb on the resource alone does not delegate). A pod the service did not spawn
+(made directly on the driver, or before the service restarted: ownership is
+held in memory) has no owner and needs such a grant. A name the driver does
+not know still answers `ENOENT`. `status` of another's pod still works, with
+its `env` values and input redacted, and registers no interest in the pod's
+events (its log and lifecycle events go only to the owner and to requesters
+granted something on the pod). A refusal answers `EACCES`, emits
+`pod-host:denied` and writes a `placement_denied` record. Separate resources
+remain the way to keep tenants' scopes apart.
 
 `describe()` is **not** gated, and travels on its own `pod-host:describe`
 envelope rather than as a ninth verb: it returns only what the host would

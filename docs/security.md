@@ -363,8 +363,10 @@ Summary:
 | isolate `isolated-vm` / `workerd` | specified only | language | not built | never |
 | browser in-page / CDP / extension | yes (a page) | tab / browser context / extension world | in-page: no sandbox attribute, a same-origin pod shares the parent's storage; CDP: the browser's network position; extension: the extension's permissions | unit and fakes; one e2e with headless Chrome for CDP |
 
-Across lanes: scopes are per resource, not per pod (a requester granted `drain`,
-`exec` or `send` can use it on any pod under that resource); `env` values and
+Across lanes: a pod belongs to the requester that spawned it (`send`, `exec`,
+`snapshot`, `restore` and `drain` need ownership or an explicit grant on the pod,
+`<resource>/<name>:<verb>`, not only the verb on the host resource; ownership is
+in memory); `env` values and
 `run.input` are shown only to the requester that spawned the pod; `describe()`
 is ungated; placement refuses an untrusted requester on a weak boundary. Not
 defended: hypervisor, kernel and V8 vulnerabilities, side channels, the host

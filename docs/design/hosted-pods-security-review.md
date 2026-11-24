@@ -68,7 +68,11 @@ and the Durable Object's storage, which holds the pod's identity key.
 Before running requester code here, bindings and storage must not be visible
 to it (one isolate per trust domain; `isolated-vm`/`workerd` runtimes are
 specified, not built). The control routes are loopback-only in the shipped
-self-hosting config and take an optional bearer token (`routes.test.mjs`).
+self-hosting config and take an optional bearer token (`routes.test.mjs`); a
+host told to listen beyond loopback (`node src/serve.mjs --address ...`, which
+sets `LISTEN_ADDRESS`) refuses to start without a `CONTROL_TOKEN`, and a Worker
+that knows it listens beyond loopback without one serves only `/health`
+(`listen-guard.test.mjs`; not run against a real workerd).
 
 ### browser lanes
 
@@ -80,10 +84,15 @@ self-hosting config and take an optional bearer token (`routes.test.mjs`).
 
 ## 2. Across all lanes: the control plane and the service
 
-- **Scopes are per resource, not per pod.** `checkAccess(pubKey, resource, verb)`:
-  a requester granted `drain`, `exec` or `send` on a resource can use them on
-  any pod under it, including another requester's. Tenants are kept apart by
-  giving each its own resource (README, "Gating"). Not changed.
+- **A pod belongs to the requester that spawned it.** The verb on the host
+  resource (`checkAccess(pubKey, resource, verb)`) is not enough for `send`,
+  `exec`, `snapshot`, `restore` and `drain` on an existing pod: the requester
+  must have spawned it through the service, or hold an explicit grant on the
+  pod itself (`<resource>/<name>:<verb>`). A pod the service did not spawn has
+  no owner and needs such a grant. `status` of another's pod is redacted and
+  registers no event interest. Tested: `pod-host-tenancy.test.mjs`. Ownership
+  is held in memory: after a service restart the pods that survived have no
+  owner until granted.
 - **What a requester reads of another's pod** is limited: `env` values and
   `run.input` are redacted for everyone but the spawner (#297).
 - **`describe()` is ungated** by design (it reveals only what the host
@@ -124,8 +133,9 @@ establishes.
   *allowed* destination; disk space in a pod's own image; the number of
   threads in a worker; a `worker_threads` or permission-model pod's CPU use
   (only memory is limited).
-- **Within one resource, another requester's pod** can be drained, executed
-  in or messaged by a requester holding the verb (section 2).
+- **Ownership is per service instance and in memory** (section 2): it is not
+  persisted, and a requester that holds a wildcard grant on the resource is
+  not thereby an owner of anyone's pod.
 - **`worker_threads` pods** reach everything the host can; **permission-model
   pods** share the host's user and kernel and Node documents the model as a
   safeguard, not a sandbox against hostile code.
