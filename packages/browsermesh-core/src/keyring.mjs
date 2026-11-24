@@ -1,5 +1,5 @@
 /**
- * clawser-mesh-keyring.js -- Key hierarchy and linking.
+ * keyring.mjs -- Key hierarchy and linking.
  *
  * Manages parent-child relationships between mesh identities
  * (device, delegate, org, alias, recovery). Provides chain

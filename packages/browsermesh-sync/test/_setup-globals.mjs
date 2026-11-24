@@ -1,8 +1,8 @@
 // Polyfill browser globals for Node.js test environment.
 // Use with: node --import ./test/_setup-globals.mjs --test test/*.test.mjs
 //
-// Vendored from clawser's web/test/_setup-globals.mjs (fully generic, no
-// clawser-app coupling) so this package's tests are self-contained.
+// Fully generic (no host-application coupling) so this package's tests are
+// self-contained.
 
 const store = {};
 globalThis.localStorage = {

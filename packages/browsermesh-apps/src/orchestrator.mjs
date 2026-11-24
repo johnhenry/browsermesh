@@ -1,5 +1,5 @@
 /**
- * clawser-mesh-orchestrator.js -- Pod orchestration engine + tools.
+ * orchestrator.mjs --Pod orchestration engine + tools.
  *
  * MeshOrchestrator coordinates pods across the P2P mesh network.
  * Each operation is also exposed as a BrowserTool subclass so the AI agent
@@ -8,7 +8,7 @@
  * No browser-only imports at module level.
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-mesh-orchestrator.test.mjs
+ *   cd packages/browsermesh-apps && node --import ./test/_setup-globals.mjs --test test/orchestrator.test.mjs
  */
 
 import { MESH_TYPE } from '@johnhenry/browsermesh-primitives'
@@ -21,7 +21,7 @@ import {
   PodHostDriverError,
 } from '@johnhenry/browsermesh-pod'
 
-// A real browser environment (clawser's web/clawser-tools.js) may already
+// A real browser environment (the host application's tool layer) may already
 // have defined a real, richer `globalThis.BrowserTool` -- honored first, as
 // before. Otherwise (plain Node, e.g. this package's own tests, or any
 // standalone use of this file), fall back to compat.mjs's real `BrowserTool`
@@ -2257,7 +2257,7 @@ function parseMeshctlFlags(args) {
  * Subcommands: pods, status, exec, deploy, top, compute, expose, drain,
  * spawn, snapshot, restore, hosted, hosts, supervise, supervised
  *
- * @param {import('./clawser-shell.js').CommandRegistry} shellRegistry
+ * @param {object} shellRegistry
  * @param {MeshOrchestrator} orchestrator
  */
 export function registerMeshctlBuiltins(shellRegistry, orchestrator) {

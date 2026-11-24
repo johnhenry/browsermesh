@@ -1,8 +1,8 @@
 /**
- * clawser-peer-agent.js -- Remote agent interaction over peer sessions.
+ * peer-agent.mjs --Remote agent interaction over peer sessions.
  *
  * Allows one peer to chat with, invoke tools on, and query memories of
- * another peer's AI agent. AgentHost serves the local ClawserAgent to
+ * another peer's AI agent. AgentHost serves the local agent to
  * remote peers, while AgentClient provides a promise-based interface for
  * interacting with a remote peer's agent. Built on top of PeerSession's
  * service handler system using the 'agent' service type.
@@ -11,7 +11,7 @@
  * No browser-only imports at module level.
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-peer-agent.test.mjs
+ *   cd packages/browsermesh-apps && node --import ./test/_setup-globals.mjs --test test/peer-agent.test.mjs
  */
 
 // ---------------------------------------------------------------------------
@@ -49,7 +49,7 @@ const ACTION_CAPABILITY = Object.freeze({
 // ---------------------------------------------------------------------------
 
 /**
- * Serves agent operations from the local ClawserAgent to remote peers.
+ * Serves agent operations from the local agent to remote peers.
  *
  * Registers a handler on the PeerSession for the 'agent' service type.
  * Incoming requests are validated against capability requirements before
@@ -71,7 +71,7 @@ export class AgentHost {
    */
   #agent
 
-  /** @type {import('./clawser-gateway.js').ChannelGateway|null} */
+  /** @type {object|null} */
   #gateway
 
   /** @type {object|null} { recordUsage(peerId, usage) } */
@@ -87,7 +87,7 @@ export class AgentHost {
    * @param {object} opts
    * @param {object} opts.session - PeerSession instance
    * @param {object} opts.agent - Agent interface with run/executeTool/searchMemories
-   * @param {import('./clawser-gateway.js').ChannelGateway} [opts.gateway] - Channel gateway for unified routing
+   * @param {object} [opts.gateway] - Channel gateway for unified routing
    * @param {object} [opts.costTracker] - Cost tracker with recordUsage(peerId, usage)
    * @param {Function} [opts.onLog] - Logging callback
    */
@@ -514,7 +514,7 @@ export class AgentClient {
  *
  * @param {object} session - PeerSession instance
  * @param {object} agent - Agent with run/executeTool/searchMemories
- * @param {import('./clawser-gateway.js').ChannelGateway} gateway - Channel gateway
+ * @param {object} gateway - Channel gateway
  * @param {Function} [onLog] - Logging callback
  * @returns {AgentHost}
  */

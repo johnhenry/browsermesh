@@ -1,6 +1,6 @@
 /**
-// STATUS: INTEGRATED — wired into ClawserPod lifecycle, proven via E2E testing
- * clawser-mesh-chat.js -- CRDT-backed chat rooms for BrowserMesh.
+// STATUS: INTEGRATED — wired into the Pod lifecycle (@johnhenry/browsermesh-pod), proven via E2E testing
+ * chat.mjs --CRDT-backed chat rooms for BrowserMesh.
  *
  * ChatMessage envelopes, ChatRoom with ORSet membership, LWWMap
  * presence, moderation, and a multi-room MeshChat manager.
@@ -8,7 +8,7 @@
  * No browser-only imports at module level.
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-mesh-chat.test.mjs
+ *   cd packages/browsermesh-apps && node --import ./test/_setup-globals.mjs --test test/chat.test.mjs
  */
 
 import {

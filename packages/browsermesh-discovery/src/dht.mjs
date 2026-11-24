@@ -1,5 +1,5 @@
 /**
- * clawser-mesh-dht.js -- DHT/Gossip protocol for BrowserMesh.
+ * dht.mjs -- DHT/Gossip protocol for BrowserMesh.
  *
  * Provides Kademlia-style distributed hash table with XOR-based routing,
  * epidemic gossip protocol for state dissemination, and a DHT-backed
@@ -14,7 +14,7 @@
  * No browser-only imports at module level.
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-mesh-dht.test.mjs
+ *   cd packages/browsermesh-discovery && node --import ./test/_setup-globals.mjs --test test/dht.test.mjs
  */
 
 import { DiscoveryStrategy } from './discovery.mjs'

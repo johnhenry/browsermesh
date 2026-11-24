@@ -8,8 +8,8 @@ import {
   bytesToHex,
 } from '../src/wsh-bridge.mjs';
 // Sibling package, not yet published — MeshIdentityManager lives in
-// browsermesh-core (verified low-drift against the live web/clawser-mesh-
-// identity.js this was ported from). Once both packages are published,
+// browsermesh-core (verified low-drift against the
+// host application's identity module this was ported from). Once both packages are published,
 // switch this to a real "browsermesh-core" dependency.
 import {
   MeshIdentityManager,

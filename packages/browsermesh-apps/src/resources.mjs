@@ -1,5 +1,5 @@
 /**
- * clawser-mesh-resources.js -- Resource advertisement, discovery, and job
+ * resources.mjs --Resource advertisement, discovery, and job
  * scheduling for BrowserMesh.
  *
  * Peers advertise hardware/software resources, discover matching nodes, score
@@ -8,7 +8,7 @@
  * No browser-only imports at module level.
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-mesh-resources.test.mjs
+ *   cd packages/browsermesh-apps && node --import ./test/_setup-globals.mjs --test test/resources.test.mjs
  */
 
 import { MESH_TYPE } from '@johnhenry/browsermesh-primitives';

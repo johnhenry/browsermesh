@@ -1,5 +1,5 @@
 /**
- * clawser-mesh-payments.js -- Payment channels for BrowserMesh.
+ * payments.mjs --Payment channels for BrowserMesh.
  *
  * Double-entry credit ledger, bidirectional micropayment channels,
  * escrow management, and a payment router that ties them together.
@@ -7,7 +7,7 @@
  * No browser-only imports at module level.
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-mesh-payments.test.mjs
+ *   cd packages/browsermesh-apps && node --import ./test/_setup-globals.mjs --test test/payments.test.mjs
  */
 
 import { MESH_TYPE } from '@johnhenry/browsermesh-primitives';
@@ -914,7 +914,7 @@ export class PaymentChannel {
     const set = this.#listeners.get(event);
     if (!set) return;
     for (const cb of set) {
-      try { cb(data); } catch (e) { silentCatch('clawser-mesh-payments', 'channel-listener', e) }
+      try { cb(data); } catch (e) { silentCatch('payments', 'channel-listener', e) }
     }
   }
 
@@ -1315,7 +1315,7 @@ export class PaymentRouter {
   #recordDispute(dispute) {
     this.#disputes.push(dispute);
     for (const cb of this.#disputeListeners) {
-      try { cb(dispute); } catch (e) { silentCatch('clawser-mesh-payments', 'onPaymentDispute-callback', e) }
+      try { cb(dispute); } catch (e) { silentCatch('payments', 'onPaymentDispute-callback', e) }
     }
   }
 
@@ -1427,7 +1427,7 @@ export class PaymentRouter {
     this.stopEscrowSweeper();
     const report = (expired) => {
       if (expired.length > 0 && onExpired) {
-        try { onExpired(expired); } catch (e) { silentCatch('clawser-mesh-payments', 'onExpired', e) }
+        try { onExpired(expired); } catch (e) { silentCatch('payments', 'onExpired', e) }
       }
     };
     this.#escrowSweeperTimer = setInterval(() => {
@@ -1442,7 +1442,7 @@ export class PaymentRouter {
         if (due.length > 0) {
           mgr.checkExpired(now)
             .then(() => report(due.map((id) => mgr.getContract(id)).filter((c) => c && c.status === 'expired').map(normalizeManagerContract)))
-            .catch((e) => silentCatch('clawser-mesh-payments', 'manager-checkExpired', e));
+            .catch((e) => silentCatch('payments', 'manager-checkExpired', e));
         }
       }
     }, intervalMs);
@@ -1498,7 +1498,7 @@ export class PaymentRouter {
         if (typeof deposit === 'number' && Number.isFinite(deposit) && deposit > 0) {
           ch.open(0, deposit);
         }
-      } catch (e) { silentCatch('clawser-mesh-payments', 'ignore-duplicate-or-invalid-opens', e) }
+      } catch (e) { silentCatch('payments', 'ignore-duplicate-or-invalid-opens', e) }
     });
 
     // Inbound: channel payment update
@@ -1511,10 +1511,10 @@ export class PaymentRouter {
           // on an unsigned/invalid update when verification is active.
           const result = ch.receive(payload);
           if (result && typeof result.then === 'function') {
-            result.catch((e) => silentCatch('clawser-mesh-payments', 'ignore-invalid-signed-update', e));
+            result.catch((e) => silentCatch('payments', 'ignore-invalid-signed-update', e));
           }
         }
-      } catch (e) { silentCatch('clawser-mesh-payments', 'ignore-invalid-updates', e) }
+      } catch (e) { silentCatch('payments', 'ignore-invalid-updates', e) }
     });
 
     // Inbound: channel close
@@ -1536,7 +1536,7 @@ export class PaymentRouter {
                 this.#recordDispute(result.dispute);
               }
             })
-            .catch((e) => silentCatch('clawser-mesh-payments', 'handleCloseMessage', e));
+            .catch((e) => silentCatch('payments', 'handleCloseMessage', e));
           return;
         }
 
@@ -1551,13 +1551,13 @@ export class PaymentRouter {
                 this.#recordDispute(result.dispute);
               }
             })
-            .catch((e) => silentCatch('clawser-mesh-payments', 'finalizeClose', e));
+            .catch((e) => silentCatch('payments', 'finalizeClose', e));
           return;
         }
 
         // Legacy unilateral close (no signing configured on this channel).
         this.closeChannel(fromPodId);
-      } catch (e) { silentCatch('clawser-mesh-payments', 'this.closeChannel', e) }
+      } catch (e) { silentCatch('payments', 'this.closeChannel', e) }
     });
 
     // Inbound: escrow creation
@@ -1570,7 +1570,7 @@ export class PaymentRouter {
           return this.#createManagerEscrow(fromPodId, payeePodId, amount, conditions);
         }
         this.#escrow.create(fromPodId, payeePodId, amount, conditions);
-      } catch (e) { silentCatch('clawser-mesh-payments', 'ignore-invalid-escrow', e) }
+      } catch (e) { silentCatch('payments', 'ignore-invalid-escrow', e) }
     });
   }
 
@@ -1590,7 +1590,7 @@ export class PaymentRouter {
         description: typeof conditions?.description === 'string' ? conditions.description : undefined,
         timeoutMs: typeof timeout === 'number' && timeout > 0 ? timeout : undefined,
       });
-    } catch (e) { silentCatch('clawser-mesh-payments', 'manager-escrow-create', e) }
+    } catch (e) { silentCatch('payments', 'manager-escrow-create', e) }
   }
 
   /**

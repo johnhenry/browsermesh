@@ -1128,13 +1128,13 @@ describe('HandshakeCoordinator glare (simultaneous bidirectional connectToPeer)'
     const coordLo = new HandshakeCoordinator({ localPodId: podLo, signalingClient: signalerLo, transportFactory: factoryLo })
     const coordHi = new HandshakeCoordinator({ localPodId: podHi, signalingClient: signalerHi, transportFactory: factoryHi })
 
-    // Mirror exactly how ClawserPod wires inbound offers to acceptConnection
-    // (clawser-pod.js's `onIncomingConnection(async ({remotePodId, offer}) =>
+    // Mirror exactly how the host application's pod class wires inbound offers
+    // to acceptConnection (`onIncomingConnection(async ({remotePodId, offer}) =>
     // handshakeCoordinator.acceptConnection(remotePodId, offer))`).
     coordLo.onIncomingConnection(({ remotePodId, offer }) => coordLo.acceptConnection(remotePodId, offer))
     coordHi.onIncomingConnection(({ remotePodId, offer }) => coordHi.acceptConnection(remotePodId, offer))
 
-    // The actual bug scenario (see #202 / clawser's mesh-p2p-e2e.spec.mjs):
+    // The actual bug scenario (see #202):
     // both pods discover each other via symmetric discovery and BOTH
     // independently call connectToPeer() on the other at essentially the
     // same time -- neither awaits the other first, and neither knows

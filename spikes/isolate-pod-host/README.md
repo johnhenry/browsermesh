@@ -264,7 +264,7 @@ npm 11 does not run dependency install scripts by default.
 - `cf build` and `cf dev` (via `@cloudflare/vite-plugin`) both bundle
   `../../packages/browsermesh-pod/src/index.mjs` and
   `../../packages/browsermesh-primitives/src/index.mjs` with zero changes
-  to either package — confirms issue #185 §1's "zero Clawser imports,
+  to either package — confirms issue #185 §1's "zero host-application imports,
   plain ESM, zero deps" premise holds up against Vite's Workers target, same
   as it did against wrangler's esbuild target before the migration.
 

@@ -1,5 +1,5 @@
 /**
- * clawser-peer-agent-swarm.js — Multi-agent coordination protocol.
+ * peer-agent-swarm.mjs —Multi-agent coordination protocol.
  *
  * Agents share goals, decompose tasks, divide work, merge results,
  * and achieve collective objectives across the mesh.
@@ -17,7 +17,7 @@
  * what makes remote dispatch real).
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-peer-agent-swarm.test.mjs
+ *   cd packages/browsermesh-apps && node --import ./test/_setup-globals.mjs --test test/peer-agent-swarm.test.mjs
  */
 
 // ---------------------------------------------------------------------------

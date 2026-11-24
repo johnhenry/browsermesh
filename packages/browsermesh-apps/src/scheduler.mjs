@@ -1,6 +1,6 @@
 /**
-// STATUS: INTEGRATED — wired into ClawserPod lifecycle, proven via E2E testing
- * clawser-mesh-scheduler.js -- Mesh-aware task scheduling for BrowserMesh.
+// STATUS: INTEGRATED — wired into the Pod lifecycle (@johnhenry/browsermesh-pod), proven via E2E testing
+ * scheduler.mjs --Mesh-aware task scheduling for BrowserMesh.
  *
  * Distributes tasks across mesh peers using configurable scheduling policies
  * (best-fit, first-fit, round-robin, load-balanced). Includes a priority queue,
@@ -9,7 +9,7 @@
  * No browser-only imports at module level.
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-mesh-scheduler.test.mjs
+ *   cd packages/browsermesh-apps && node --import ./test/_setup-globals.mjs --test test/scheduler.test.mjs
  */
 
 // ---------------------------------------------------------------------------

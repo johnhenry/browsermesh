@@ -9,7 +9,7 @@ zero npm dependencies, pure ES modules.
 
 ## Provenance
 
-Extracted from the private `clawser` monorepo (previously `packages/browsermesh-kernel`), where it was manually published to npm, unscoped, as `browsermesh-kernel@0.1.0` (2026-07-17) with no CI ever automating that publish. This is its first release as part of the `@johnhenry/browsermesh` monorepo; the version restarts at `0.0.0` per family convention.
+Extracted from a private monorepo (previously `packages/browsermesh-kernel`), where it was manually published to npm, unscoped, as `browsermesh-kernel@0.1.0` (2026-07-17) with no CI ever automating that publish. This is its first release as part of the `@johnhenry/browsermesh` monorepo; the version restarts at `0.0.0` per family convention.
 
 ## Cross-package relationship
 
@@ -72,10 +72,9 @@ kernel.close()
 
 ## Origin
 
-Extracted from the [clawser](https://github.com/erisera-code/clawser) browser
-agent workspace, where it underpins workspace tenants, shell pipes, MCP
+Extracted from a private browser agent workspace, where it underpins workspace tenants, shell pipes, MCP
 service registration, provider cost tracing, sandboxed code execution, and
-daemon IPC — all as opt-in hooks (`clawser-kernel-integration.js`) that are
+daemon IPC — all as opt-in hooks in the host application that are
 no-ops when the kernel isn't active.
 
 ## License

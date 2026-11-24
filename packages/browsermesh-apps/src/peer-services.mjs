@@ -1,6 +1,6 @@
 /**
-// STATUS: INTEGRATED — wired into ClawserPod lifecycle, proven via E2E testing
- * clawser-peer-services.js -- Service advertising and discovery for P2P mesh.
+// STATUS: INTEGRATED — wired into the Pod lifecycle (@johnhenry/browsermesh-pod), proven via E2E testing
+ * peer-services.mjs --Service advertising and discovery for P2P mesh.
  *
  * Peers advertise capabilities (agent, terminal, files, compute, http-proxy, model)
  * and others can discover and connect to them.
@@ -11,7 +11,7 @@
  * No browser-only imports at module level. All dependencies injected.
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-peer-services.test.mjs
+ *   cd packages/browsermesh-apps && node --import ./test/_setup-globals.mjs --test test/peer-services.test.mjs
  */
 
 // ---------------------------------------------------------------------------

@@ -393,8 +393,7 @@ describe('PaymentChannel', () => {
 });
 
 // ---------------------------------------------------------------------------
-// PaymentChannel -- signed updates + mutual close (clawser #31 port)
-// ---------------------------------------------------------------------------
+// PaymentChannel -- signed updates + mutual close// ---------------------------------------------------------------------------
 //
 // A fake Ed25519-shaped signFn/verifyFn pair, matching the shape of
 // MeshIdentityManager.sign(podId, data) / .verify(pubKey, sig, data) from

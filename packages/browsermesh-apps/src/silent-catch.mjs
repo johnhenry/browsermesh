@@ -2,31 +2,44 @@
  * silent-catch.mjs — debug-gated structured logger for the
  * `try { … } catch { /* ignore *\/ }` pattern.
  *
- * Vendored from clawser-silent-catch.mjs (fully standalone, no other
- * clawser-app imports) so this package doesn't need to reach into web/.
+ * Vendored from a standalone module of the host application (no other
+ * host-application imports) so this package doesn't need to reach into it.
  *
  * Replaces silent catches with an opt-in inspectable record. Default
  * behaviour is unchanged (silent), so this is a drop-in replacement.
  * Users surface the events by enabling debug mode:
  *
- *   localStorage.setItem('clawser_debug', 'true')   // persistent
- *   // or, in DevTools:  clawserDebug.enable()
+ *   localStorage.setItem('browsermesh_debug', 'true')   // persistent
+ *   // or, in DevTools:  browsermeshDebug.enable()
+ *
+ * The old `clawser_debug` localStorage key (and `clawserDebug` global) are
+ * deprecated aliases, kept for compatibility.
  */
+
+/** Primary localStorage key for the debug switch. */
+const DEBUG_KEY = 'browsermesh_debug';
+/** Deprecated alias, kept for compatibility. */
+const LEGACY_DEBUG_KEY = 'clawser_debug';
+
+function readDebugFlag() {
+  return localStorage.getItem(DEBUG_KEY) === 'true'
+    || localStorage.getItem(LEGACY_DEBUG_KEY) === 'true';
+}
 
 let enabled = false;
 try {
   if (typeof localStorage !== 'undefined') {
-    enabled = localStorage.getItem('clawser_debug') === 'true';
+    enabled = readDebugFlag();
   }
 } catch {
   // localStorage may throw in privacy / sandbox contexts — treat as disabled
 }
 
-/** Re-check the localStorage flag; called by clawserDebug.enable/disable. */
+/** Re-check the localStorage flag; called by browsermeshDebug.enable/disable. */
 export function refreshSilentCatchState() {
   try {
     if (typeof localStorage !== 'undefined') {
-      enabled = localStorage.getItem('clawser_debug') === 'true';
+      enabled = readDebugFlag();
     }
   } catch {
     enabled = false;
@@ -36,7 +49,7 @@ export function refreshSilentCatchState() {
 /**
  * Log a silent-catch event. No-op unless debug mode is enabled.
  *
- * @param {string} module     — file/component (e.g. 'clawser-pod')
+ * @param {string} module     — file/component (e.g. 'pod')
  * @param {string} operation  — what was attempted (e.g. 'relay-disconnect')
  * @param {*}      error      — the caught value
  * @param {object} [context]  — extra structured fields
@@ -51,5 +64,5 @@ export function silentCatch(module, operation, error, context) {
   }
   const entry = { module, operation, error: error?.message || String(error) };
   if (context) Object.assign(entry, context);
-  console.warn('[clawser:silent-catch]', entry);
+  console.warn('[browsermesh:silent-catch]', entry);
 }

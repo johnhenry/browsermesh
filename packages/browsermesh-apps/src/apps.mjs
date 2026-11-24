@@ -1,5 +1,5 @@
 /**
- * clawser-mesh-apps.js -- Decentralized App Ecosystem for BrowserMesh.
+ * apps.mjs --Decentralized App Ecosystem for BrowserMesh.
  *
  * Provides a full app lifecycle for mesh-distributed applications:
  * manifest definition, installation, permission checking, a distributed
@@ -12,7 +12,7 @@
  * No browser-only imports at module level.
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-mesh-apps.test.mjs
+ *   cd packages/browsermesh-apps && node --import ./test/_setup-globals.mjs --test test/apps.test.mjs
  */
 
 import { MESH_TYPE } from '@johnhenry/browsermesh-primitives';
@@ -566,7 +566,7 @@ export class AppRegistry {
 
     // Stop if active
     if (inst.state !== 'stopped' && inst.state !== 'error') {
-      try { inst.stop(); } catch (e) { silentCatch('clawser-mesh-apps', 'inst.stop', e) }
+      try { inst.stop(); } catch (e) { silentCatch('apps', 'inst.stop', e) }
     }
 
     this.#apps.delete(appId);
@@ -664,7 +664,7 @@ export class AppRegistry {
 
     // Stop if active
     if (inst.state !== 'stopped' && inst.state !== 'installed' && inst.state !== 'error') {
-      try { inst.stop(); } catch (e) { silentCatch('clawser-mesh-apps', 'inst.stop', e) }
+      try { inst.stop(); } catch (e) { silentCatch('apps', 'inst.stop', e) }
     }
 
     // Create new instance with new manifest, preserving data

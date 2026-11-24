@@ -376,7 +376,7 @@ describe('RelayStrategy', () => {
     await s.stop();
   });
 
-  it('clears the connect-timeout handle once the socket opens (no leaked timer holding the event loop open, clawser#158)', async () => {
+  it('clears the connect-timeout handle once the socket opens (no leaked timer holding the event loop open, #158)', async () => {
     const originalClearTimeout = globalThis.clearTimeout;
     const cleared = [];
     globalThis.clearTimeout = (id) => { cleared.push(id); return originalClearTimeout(id); };

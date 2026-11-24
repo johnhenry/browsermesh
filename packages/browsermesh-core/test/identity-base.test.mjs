@@ -211,7 +211,7 @@ describe('IdentityManager', () => {
   });
 
   it('getCurrent() returns the in-memory identity (method-form alias)', () => {
-    // Closes the silent ghost-method bug: clawser-ui-chat.js read the
+    // Closes the silent ghost-method bug: the host application's chat UI read the
     // active identity via `state.identityManager?.getCurrent?.()` to
     // pull the agent-message avatar URL, but `getCurrent` did not
     // exist — every agent message rendered without the avatar.

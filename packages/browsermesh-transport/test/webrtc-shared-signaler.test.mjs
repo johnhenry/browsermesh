@@ -5,7 +5,7 @@
 // sender's podId. A WebRTCTransport must act only on messages from its own
 // remote peer: with three pods, a pod negotiating with two peers at once
 // otherwise applied one peer's answer to the other peer's RTCPeerConnection
-// (clawser#223: one link one-way, one pod with no sessions).
+// (one link one-way, one pod with no sessions).
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { WebRTCTransport } from '../src/websocket.mjs';

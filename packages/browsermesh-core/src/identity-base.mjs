@@ -1,4 +1,4 @@
-// clawser-identity.js — Agent Identity System (AIEOS v1.1)
+// identity-base.mjs — Agent Identity System (AIEOS v1.1)
 //
 // Supports three identity formats:
 //   - plain: single system prompt string

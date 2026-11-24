@@ -1,6 +1,6 @@
 /**
-// STATUS: INTEGRATED — wired into ClawserPod lifecycle, proven via E2E testing
- * clawser-mesh-transport.js -- Transport Abstraction Layer.
+// STATUS: INTEGRATED — wired into the `Pod` lifecycle (@johnhenry/browsermesh-pod), proven via E2E testing
+ * transport.mjs -- Transport Abstraction Layer.
  *
  * Unified interface for mesh connections across transport types.
  * Actual transport creation is pluggable via adapter factories passed
@@ -8,7 +8,7 @@
  * without real WebRTC/WebSocket/WebTransport connections.
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-mesh-transport.test.mjs
+ *   cd packages/browsermesh-transport && node --import ./test/_setup-globals.mjs --test test/transport.test.mjs
  */
 
 // ---------------------------------------------------------------------------

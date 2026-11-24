@@ -1,6 +1,6 @@
 /**
-// STATUS: INTEGRATED — wired into ClawserPod lifecycle, proven via E2E testing
- * clawser-mesh-acl.js -- Remote access control for BrowserMesh.
+// STATUS: INTEGRATED — wired into Pod (@johnhenry/browsermesh-pod) lifecycle, proven via E2E testing
+ * acl.mjs -- Remote access control for BrowserMesh.
  *
  * ScopeTemplate bundles, roster management, invitation tokens, and
  * access checking. Wraps mesh-primitives ACLEngine with higher-level
@@ -9,7 +9,7 @@
  * No browser-only imports at module level.
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-mesh-acl.test.mjs
+ *   cd packages/browsermesh-core && node --import ./test/_setup-globals.mjs --test test/acl.test.mjs
  */
 
 import {

@@ -1,5 +1,5 @@
 /**
- * Tests for clawser-peer-collab-bridge.js — CollabBridge + CollabManager
+ * Tests for collab-bridge.mjs — CollabBridge + CollabManager
  * wiring between CollabSession, PeerSession, MeshSyncEngine, and SyncCoordinator.
  *
  * Run:

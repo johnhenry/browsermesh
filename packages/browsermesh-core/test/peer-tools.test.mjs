@@ -207,7 +207,7 @@ describe('MeshSchedulerSubmitTool — real cross-package ScheduledTask import', 
   // ScheduledTask via a monorepo-relative path
   // ('../../browsermesh-apps/src/scheduler.mjs') that only ever resolved
   // inside this workspace -- any standalone consumer installing both
-  // packages via npm (e.g. clawser) would hit ERR_MODULE_NOT_FOUND on
+  // packages via npm would hit ERR_MODULE_NOT_FOUND on
   // every real invocation, since esm.sh/node_modules resolution has no
   // concept of monorepo-relative paths. Fixed to import the real package
   // NAME (`@johnhenry/browsermesh-apps`), matching the lazy-optional-peer

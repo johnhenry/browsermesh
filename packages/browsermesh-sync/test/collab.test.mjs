@@ -1,5 +1,5 @@
 /**
- * Tests for clawser-peer-collab.js -- Real-time collaborative editing
+ * Tests for collab.mjs -- Real-time collaborative editing
  * via Yjs CRDT adapter, awareness state, and collab sessions.
  *
  * Run:

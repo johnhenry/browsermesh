@@ -4,8 +4,8 @@ import { resolveIceTransportPolicy } from './webrtc.mjs'
 import { WshLink } from './wsh-links.mjs'
 import { padTo, unpad } from '@johnhenry/browsermesh-primitives';
 /**
-// STATUS: INTEGRATED — wired into ClawserPod lifecycle, proven via E2E testing
- * clawser-mesh-websocket.js -- WebSocket, WebRTC & WebTransport Adapters.
+// STATUS: INTEGRATED — wired into the `Pod` lifecycle (@johnhenry/browsermesh-pod), proven via E2E testing
+ * websocket.mjs -- WebSocket, WebRTC & WebTransport Adapters.
  *
  * Concrete transport implementations for the BrowserMesh transport
  * abstraction layer. Each adapter wraps a browser API (WebSocket,
@@ -16,7 +16,7 @@ import { padTo, unpad } from '@johnhenry/browsermesh-primitives';
  * negotiates the best available transport for a given peer pair.
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-mesh-websocket.test.mjs
+ *   cd packages/browsermesh-transport && node --import ./test/_setup-globals.mjs --test test/websocket.test.mjs
  */
 
 // ---------------------------------------------------------------------------
@@ -458,7 +458,7 @@ export class WebSocketTransport {
    */
   _fireEvent(event, data) {
     for (const cb of this.#callbacks[event] || []) {
-      try { cb(data); } catch (e) { silentCatch('clawser-mesh-websocket', 'swallow-listener-errors', e) }
+      try { cb(data); } catch (e) { silentCatch('websocket', 'swallow-listener-errors', e) }
     }
   }
 
@@ -509,7 +509,7 @@ export class WebSocketTransport {
       try {
         this.#dispatch(ping);
         this.#stats.lastPingMs = Date.now();
-      } catch (e) { silentCatch('clawser-mesh-websocket', 'ignore-send-errors-during-heartbeat', e) }
+      } catch (e) { silentCatch('websocket', 'ignore-send-errors-during-heartbeat', e) }
     }, this.#heartbeatIntervalMs);
   }
 
@@ -547,8 +547,8 @@ const BULK_CHANNEL_LABEL = 'mesh-bulk';
 
 /**
  * `ordered: false`, still fully reliable (no `maxRetransmits`/
- * `maxPacketLifeTime`). Justified by clawser's chunk reassembly
- * (`web/clawser-mesh-files.js`), which addresses each chunk by content hash
+ * `maxPacketLifeTime`). Justified by the host application's chunk reassembly
+ * (its mesh file-transfer module), which addresses each chunk by content hash
  * plus offset and dedupes into a `Set` -- no order dependency -- so an
  * out-of-order chunk on this channel reassembles identically to an in-order
  * one, and unordered delivery also avoids head-of-line blocking *within*
@@ -690,7 +690,7 @@ export class WebRTCTransport {
     const offs = this.#signalerOffs;
     this.#signalerOffs = [];
     for (const off of offs) {
-      try { off(); } catch (e) { silentCatch('clawser-mesh-websocket', 'signaler-unsubscribe', e) }
+      try { off(); } catch (e) { silentCatch('websocket', 'signaler-unsubscribe', e) }
     }
   }
 
@@ -740,7 +740,7 @@ export class WebRTCTransport {
         // addIceCandidate docblock records this being fixed there; this path
         // still had it.
         Promise.resolve(this.#pc.addIceCandidate(data.candidate)).catch((e) => {
-          silentCatch('clawser-mesh-websocket', 'ignore-rejected-ice-candidate', e);
+          silentCatch('websocket', 'ignore-rejected-ice-candidate', e);
         });
       }
     }));
@@ -843,7 +843,7 @@ export class WebRTCTransport {
           // See connect()'s identical handler: the promise must not be
           // dropped, for the same reason.
           Promise.resolve(this.#pc.addIceCandidate(data.candidate)).catch((e) => {
-            silentCatch('clawser-mesh-websocket', 'ignore-rejected-ice-candidate', e);
+            silentCatch('websocket', 'ignore-rejected-ice-candidate', e);
           });
         }
       }));
@@ -935,10 +935,10 @@ export class WebRTCTransport {
   async close() {
     this.#state = 'closing';
     if (this.#dataChannel) {
-      try { this.#dataChannel.close(); } catch (e) { silentCatch('clawser-mesh-websocket', 'this', e) }
+      try { this.#dataChannel.close(); } catch (e) { silentCatch('websocket', 'this', e) }
     }
     if (this.#bulkChannel) {
-      try { this.#bulkChannel.close(); } catch (e) { silentCatch('clawser-mesh-websocket', 'this', e) }
+      try { this.#bulkChannel.close(); } catch (e) { silentCatch('websocket', 'this', e) }
     }
     if (this.#pc) {
       this.#pc.close();
@@ -1038,7 +1038,7 @@ export class WebRTCTransport {
    */
   _fireEvent(event, data) {
     for (const cb of this.#callbacks[event] || []) {
-      try { cb(data); } catch (e) { silentCatch('clawser-mesh-websocket', 'swallow-listener-errors', e) }
+      try { cb(data); } catch (e) { silentCatch('websocket', 'swallow-listener-errors', e) }
     }
   }
 }
@@ -1174,10 +1174,10 @@ export class WebTransportTransport {
     if (this.#state === 'closed' || this.#state === 'disconnected') return;
     this.#state = 'closing';
     if (this.#writer) {
-      try { await this.#writer.close(); } catch (e) { silentCatch('clawser-mesh-websocket', 'this', e) }
+      try { await this.#writer.close(); } catch (e) { silentCatch('websocket', 'this', e) }
     }
     if (this.#transport) {
-      try { this.#transport.close(); } catch (e) { silentCatch('clawser-mesh-websocket', 'this', e) }
+      try { this.#transport.close(); } catch (e) { silentCatch('websocket', 'this', e) }
     }
     this.#state = 'closed';
     this._fireEvent('close');
@@ -1235,7 +1235,7 @@ export class WebTransportTransport {
    */
   _fireEvent(event, data) {
     for (const cb of this.#callbacks[event] || []) {
-      try { cb(data); } catch (e) { silentCatch('clawser-mesh-websocket', 'swallow-listener-errors', e) }
+      try { cb(data); } catch (e) { silentCatch('websocket', 'swallow-listener-errors', e) }
     }
   }
 }

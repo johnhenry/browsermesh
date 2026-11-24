@@ -1,12 +1,12 @@
 /**
-// STATUS: INTEGRATED — wired into ClawserPod lifecycle, proven via E2E testing
- * clawser-peer-verification.js — Verification quorum protocol.
+// STATUS: INTEGRATED — wired into the Pod lifecycle (@johnhenry/browsermesh-pod), proven via E2E testing
+ * peer-verification.mjs —Verification quorum protocol.
  *
  * Run the same job on N peers, collect results, vote on correctness.
  * Enables trustless compute verification without TEEs.
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-peer-verification.test.mjs
+ *   cd packages/browsermesh-apps && node --import ./test/_setup-globals.mjs --test test/peer-verification.test.mjs
  */
 
 // ---------------------------------------------------------------------------

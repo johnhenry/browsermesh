@@ -1,6 +1,6 @@
 /**
-// STATUS: INTEGRATED — wired into ClawserPod lifecycle, proven via E2E testing
- * clawser-mesh-webrtc.js -- WebRTC mesh transport.
+// STATUS: INTEGRATED — wired into the `Pod` lifecycle (@johnhenry/browsermesh-pod), proven via E2E testing
+ * webrtc.mjs -- WebRTC mesh transport.
  *
  * Provides WebRTC DataChannel-based P2P connections for the BrowserMesh.
  * Includes signaling helpers, connection management, and a transport
@@ -9,7 +9,7 @@
  * No browser-only imports at module level.
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-mesh-webrtc.test.mjs
+ *   cd packages/browsermesh-transport && node --import ./test/_setup-globals.mjs --test test/webrtc.test.mjs
  */
 
 import { MeshTransport } from './transport.mjs'
@@ -200,8 +200,8 @@ const BULK_CHANNEL_LABEL = 'mesh-bulk'
  * still fully *reliable* (SCTP retransmits until every chunk arrives; there
  * is no `maxRetransmits`/`maxPacketLifeTime` bound here), just not ordered.
  *
- * Justified by the consumer, not assumed: clawser's chunk reassembly
- * (`web/clawser-mesh-files.js`) addresses each chunk by content hash (`cid`)
+ * Justified by the consumer, not assumed: the host application's chunk reassembly
+ * (its mesh file-transfer module) addresses each chunk by content hash (`cid`)
  * plus offset and dedupes into a `Set` keyed by that hash -- there is no
  * array-index/push-order dependency, so a chunk that overtakes an earlier
  * one on the wire reassembles identically to one that didn't. Callers
@@ -748,7 +748,7 @@ export class WebRTCPeerConnection {
     const dc = this.#extraChannels.get(name)
     if (!dc) return false
     this.#extraChannels.delete(name)
-    try { dc.close() } catch (e) { silentCatch('clawser-mesh-webrtc', 'close-extra', e) }
+    try { dc.close() } catch (e) { silentCatch('webrtc', 'close-extra', e) }
     return true
   }
 
@@ -909,19 +909,19 @@ export class WebRTCPeerConnection {
     this.#bindingTimer = null
     try {
       if (this.#dataChannel) {
-        try { this.#dataChannel.close() } catch (e) { silentCatch('clawser-mesh-webrtc', 'this', e) }
+        try { this.#dataChannel.close() } catch (e) { silentCatch('webrtc', 'this', e) }
         this.#dataChannel = null
       }
       if (this.#bulkChannel) {
-        try { this.#bulkChannel.close() } catch (e) { silentCatch('clawser-mesh-webrtc', 'this', e) }
+        try { this.#bulkChannel.close() } catch (e) { silentCatch('webrtc', 'this', e) }
         this.#bulkChannel = null
       }
       for (const [name, dc] of [...this.#extraChannels]) {
         this.#extraChannels.delete(name)
-        try { dc.close() } catch (e) { silentCatch('clawser-mesh-webrtc', 'close-extra', e) }
+        try { dc.close() } catch (e) { silentCatch('webrtc', 'close-extra', e) }
       }
       if (this.#pc) {
-        try { this.#pc.close() } catch (e) { silentCatch('clawser-mesh-webrtc', 'this', e) }
+        try { this.#pc.close() } catch (e) { silentCatch('webrtc', 'this', e) }
         this.#pc = null
       }
     } finally {
@@ -993,22 +993,22 @@ export class WebRTCPeerConnection {
     this.#extraChannels.clear()
     for (const x of extras) {
       x.onopen = null; x.onmessage = null; x.onclose = null; x.onerror = null
-      try { x.close() } catch (e) { silentCatch('clawser-mesh-webrtc', 'release-extra', e) }
+      try { x.close() } catch (e) { silentCatch('webrtc', 'release-extra', e) }
     }
     this.#dataChannel = null
     this.#bulkChannel = null
     this.#pc = null
     if (dc) {
       dc.onopen = null; dc.onmessage = null; dc.onclose = null; dc.onerror = null
-      try { dc.close() } catch (e) { silentCatch('clawser-mesh-webrtc', 'release-dc', e) }
+      try { dc.close() } catch (e) { silentCatch('webrtc', 'release-dc', e) }
     }
     if (bulkDc) {
       bulkDc.onopen = null; bulkDc.onmessage = null; bulkDc.onclose = null; bulkDc.onerror = null
-      try { bulkDc.close() } catch (e) { silentCatch('clawser-mesh-webrtc', 'release-bulk-dc', e) }
+      try { bulkDc.close() } catch (e) { silentCatch('webrtc', 'release-bulk-dc', e) }
     }
     if (pc) {
       pc.onicecandidate = null; pc.ondatachannel = null; pc.onconnectionstatechange = null
-      try { pc.close() } catch (e) { silentCatch('clawser-mesh-webrtc', 'release-pc', e) }
+      try { pc.close() } catch (e) { silentCatch('webrtc', 'release-pc', e) }
     }
   }
 
@@ -1038,7 +1038,7 @@ export class WebRTCPeerConnection {
     if (next === 'closed') this.#clearDisconnectedGrace()
     this.#state = next
     for (const cb of this.#stateChangeCbs) {
-      try { cb(next) } catch (e) { silentCatch('clawser-mesh-webrtc', 'swallow', e) }
+      try { cb(next) } catch (e) { silentCatch('webrtc', 'swallow', e) }
     }
   }
 
@@ -1046,7 +1046,7 @@ export class WebRTCPeerConnection {
     this.#pc.onicecandidate = (event) => {
       if (event.candidate) {
         for (const cb of this.#iceCandidateCbs) {
-          try { cb(event.candidate) } catch (e) { silentCatch('clawser-mesh-webrtc', 'swallow', e) }
+          try { cb(event.candidate) } catch (e) { silentCatch('webrtc', 'swallow', e) }
         }
       }
     }
@@ -1226,7 +1226,7 @@ export class WebRTCPeerConnection {
         }
       }
       for (const cb of this.#messageCbs) {
-        try { cb(parsed, name) } catch (e) { silentCatch('clawser-mesh-webrtc', 'swallow', e) }
+        try { cb(parsed, name) } catch (e) { silentCatch('webrtc', 'swallow', e) }
       }
     }
     dc.onclose = () => {
@@ -1364,13 +1364,13 @@ export class WebRTCPeerConnection {
 
   #fireClose() {
     for (const cb of this.#closeCbs) {
-      try { cb() } catch (e) { silentCatch('clawser-mesh-webrtc', 'swallow', e) }
+      try { cb() } catch (e) { silentCatch('webrtc', 'swallow', e) }
     }
   }
 
   #fireError(err) {
     for (const cb of this.#errorCbs) {
-      try { cb(err) } catch (e) { silentCatch('clawser-mesh-webrtc', 'swallow', e) }
+      try { cb(err) } catch (e) { silentCatch('webrtc', 'swallow', e) }
     }
   }
 
@@ -1529,7 +1529,7 @@ export class WebRTCMeshManager {
     // Forward messages to manager-level listeners
     conn.onMessage((data) => {
       for (const cb of this.#messageCbs) {
-        try { cb(data, remotePodId, connectionId) } catch (e) { silentCatch('clawser-mesh-webrtc', 'swallow', e) }
+        try { cb(data, remotePodId, connectionId) } catch (e) { silentCatch('webrtc', 'swallow', e) }
       }
     })
     // Auto-remove on close
@@ -1583,7 +1583,7 @@ export class WebRTCMeshManager {
 
   #notifyReconnectOffer(offer, remotePodId, connectionId) {
     for (const cb of this.#reconnectOfferCbs) {
-      try { cb(offer, remotePodId, connectionId) } catch (e) { silentCatch('clawser-mesh-webrtc', 'swallow', e) }
+      try { cb(offer, remotePodId, connectionId) } catch (e) { silentCatch('webrtc', 'swallow', e) }
     }
   }
 
@@ -1610,7 +1610,7 @@ export class WebRTCMeshManager {
           // Refund the backoff rather than counting it against the peer.
           this.#clearReconnectState(remotePodId, connectionId)
         }
-      } catch (e) { silentCatch('clawser-mesh-webrtc', 'reconnect-attempt', e) }
+      } catch (e) { silentCatch('webrtc', 'reconnect-attempt', e) }
     }, delay)
     this.#reconnectTimers.set(key, timer)
   }
@@ -1762,7 +1762,7 @@ export class WebRTCMeshManager {
   closeAll() {
     for (const byConnectionId of this.#connections.values()) {
       for (const conn of byConnectionId.values()) {
-        try { conn.close() } catch (e) { silentCatch('clawser-mesh-webrtc', 'conn.close', e) }
+        try { conn.close() } catch (e) { silentCatch('webrtc', 'conn.close', e) }
       }
     }
     this.#connections.clear()

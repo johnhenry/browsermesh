@@ -1,6 +1,6 @@
 /**
-// STATUS: INTEGRATED — wired into ClawserPod lifecycle, proven via E2E testing
- * clawser-mesh-webtransport.js -- WebTransport transport bridge.
+// STATUS: INTEGRATED — wired into the `Pod` lifecycle (@johnhenry/browsermesh-pod), proven via E2E testing
+ * webtransport.mjs -- WebTransport transport bridge.
  *
  * Extends MeshTransport with WebTransport API support. Provides
  * datagram and bidirectional stream communication. Falls back gracefully
@@ -9,7 +9,7 @@
  * No browser-only imports at module level.
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-mesh-webtransport.test.mjs
+ *   cd packages/browsermesh-transport && node --import ./test/_setup-globals.mjs --test test/webtransport.test.mjs
  */
 
 import { MeshTransport } from './transport.mjs'
@@ -127,11 +127,11 @@ export class WebTransportBridge extends MeshTransport {
     this._setState('closing')
     this.#streams.clear()
     if (this.#writer) {
-      try { this.#writer.close() } catch (e) { silentCatch('clawser-mesh-webtransport', 'this', e) }
+      try { this.#writer.close() } catch (e) { silentCatch('webtransport', 'this', e) }
       this.#writer = null
     }
     if (this.#transport) {
-      try { this.#transport.close() } catch (e) { silentCatch('clawser-mesh-webtransport', 'this', e) }
+      try { this.#transport.close() } catch (e) { silentCatch('webtransport', 'this', e) }
       this.#transport = null
     }
     this._setState('closed')

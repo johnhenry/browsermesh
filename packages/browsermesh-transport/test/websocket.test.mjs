@@ -904,7 +904,7 @@ describe('WebRTCTransport', () => {
   });
 
   // Regression coverage for a bug found while root-causing
-  // erisera-code/clawser#164 (mesh P2P connectivity): handleOffer() (the
+  // an upstream issue (mesh P2P connectivity): handleOffer() (the
   // answerer role) never wired ICE candidates at all -- connect() (the
   // offerer role) sends its own gathered candidates via
   // signaler.sendIceCandidate() and feeds remote candidates it receives via

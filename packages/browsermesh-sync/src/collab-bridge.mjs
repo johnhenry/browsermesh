@@ -1,6 +1,6 @@
 /**
 // STATUS: EXPERIMENTAL — wires peer-collab CRDT into mesh transport layer
- * clawser-peer-collab-bridge.js — Connects the CollabSession (Yjs CRDT)
+ * collab-bridge.mjs — Connects the CollabSession (Yjs CRDT)
  * and MeshSyncEngine to the PeerSession transport and SyncCoordinator.
  *
  * CollabBridge: per-peer adapter that bridges CollabSession's simple
@@ -20,7 +20,7 @@
  *   collabManager.attach(peerNode);
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-peer-collab-bridge.test.mjs
+ *   cd packages/browsermesh-sync && node --import ./test/_setup-globals.mjs --test test/collab-bridge.test.mjs
  */
 
 import {
@@ -52,16 +52,16 @@ export const CRDT_SYNC_SERVICE_TYPE = 'crdt-sync'
  * One CollabBridge per connected peer.
  */
 export class CollabBridge {
-  /** @type {import('./clawser-peer-session.js').PeerSession} */
+  /** @type {PeerSession} */
   #peerSession
 
   /** @type {Map<string, CollabSession>} docId -> CollabSession */
   #collabSessions = new Map()
 
-  /** @type {import('./clawser-mesh-sync.js').MeshSyncEngine|null} */
+  /** @type {import('./sync.mjs').MeshSyncEngine|null} */
   #syncEngine
 
-  /** @type {import('./clawser-mesh-delta-sync.js').SyncCoordinator|null} */
+  /** @type {import('./delta-sync.mjs').SyncCoordinator|null} */
   #syncCoordinator
 
   /** @type {string} */
@@ -78,9 +78,9 @@ export class CollabBridge {
 
   /**
    * @param {object} opts
-   * @param {import('./clawser-peer-session.js').PeerSession} opts.peerSession
-   * @param {import('./clawser-mesh-sync.js').MeshSyncEngine} [opts.syncEngine]
-   * @param {import('./clawser-mesh-delta-sync.js').SyncCoordinator} [opts.syncCoordinator]
+   * @param {PeerSession} opts.peerSession
+   * @param {import('./sync.mjs').MeshSyncEngine} [opts.syncEngine]
+   * @param {import('./delta-sync.mjs').SyncCoordinator} [opts.syncCoordinator]
    * @param {Function} [opts.onLog]
    */
   constructor({ peerSession, syncEngine, syncCoordinator, onLog }) {
@@ -340,13 +340,13 @@ export class CollabManager {
   /** @type {Map<string, CollabBridge>} remotePodId -> CollabBridge */
   #bridges = new Map()
 
-  /** @type {import('./clawser-mesh-sync.js').MeshSyncEngine|null} */
+  /** @type {import('./sync.mjs').MeshSyncEngine|null} */
   #syncEngine
 
-  /** @type {import('./clawser-mesh-delta-sync.js').SyncCoordinator|null} */
+  /** @type {import('./delta-sync.mjs').SyncCoordinator|null} */
   #syncCoordinator
 
-  /** @type {import('./clawser-peer-session.js').SessionManager|null} */
+  /** @type {SessionManager|null} */
   #sessionManager
 
   /** @type {string} */
@@ -373,9 +373,9 @@ export class CollabManager {
   /**
    * @param {object} opts
    * @param {string} opts.localPodId
-   * @param {import('./clawser-mesh-sync.js').MeshSyncEngine} [opts.syncEngine]
-   * @param {import('./clawser-mesh-delta-sync.js').SyncCoordinator} [opts.syncCoordinator]
-   * @param {import('./clawser-peer-session.js').SessionManager} [opts.sessionManager]
+   * @param {import('./sync.mjs').MeshSyncEngine} [opts.syncEngine]
+   * @param {import('./delta-sync.mjs').SyncCoordinator} [opts.syncCoordinator]
+   * @param {SessionManager} [opts.sessionManager]
    * @param {Function} [opts.onLog]
    */
   constructor({ localPodId, syncEngine, syncCoordinator, sessionManager, onLog }) {
@@ -400,7 +400,7 @@ export class CollabManager {
   /**
    * Attach to a PeerNode to auto-manage bridges on peer lifecycle events.
    *
-   * @param {import('./clawser-peer-node.js').PeerNode} peerNode
+   * @param {PeerNode} peerNode
    */
   attach(peerNode) {
     if (this.#peerNode) this.detach()
@@ -496,7 +496,7 @@ export class CollabManager {
    * falls back to direct PeerNode session lookup.
    *
    * @param {string} peerId
-   * @returns {import('./clawser-peer-session.js').PeerSession|null}
+   * @returns {PeerSession|null}
    */
   #findPeerSession(peerId) {
     // Try SessionManager first (provides full PeerSession with handler routing)

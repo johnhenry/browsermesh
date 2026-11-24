@@ -1,5 +1,5 @@
 /**
- * clawser-peer-compute.js — Federated compute orchestration.
+ * peer-compute.mjs —Federated compute orchestration.
  *
  * Split large compute jobs across multiple peers (map/reduce pattern).
  * Combines scheduling, verification, escrow, and result merging.
@@ -16,7 +16,7 @@
  * settled by issue #86's resolved design pass).
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-peer-compute.test.mjs
+ *   cd packages/browsermesh-apps && node --import ./test/_setup-globals.mjs --test test/peer-compute.test.mjs
  */
 
 // ---------------------------------------------------------------------------

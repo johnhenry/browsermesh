@@ -1,11 +1,11 @@
 /**
- * clawser-mesh-identity-tools.js -- Identity BrowserTools for mesh.
+ * identity-tools.mjs -- Identity BrowserTools for mesh.
  *
  * 8 BrowserTool subclasses for managing mesh identities via the agent.
- * Follows the pattern in clawser-mesh-tools.js.
+ * Follows the pattern in peer-tools.mjs.
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-mesh-identity-tools.test.mjs
+ *   cd packages/browsermesh-core && node --import ./test/_setup-globals.mjs --test test/identity-tools.test.mjs
  */
 
 import { BrowserTool } from './compat.mjs';

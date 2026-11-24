@@ -1,12 +1,12 @@
 /**
-// STATUS: INTEGRATED — wired into ClawserPod lifecycle, proven via E2E testing
- * Clawser Mesh Streams
+// STATUS: INTEGRATED — wired into the `Pod` lifecycle (@johnhenry/browsermesh-pod), proven via E2E testing
+ * BrowserMesh Streams
  *
  * Multiplexed data streaming with credit-based backpressure.
  * Wraps BrowserMesh streaming-protocol.md spec (0x12-0x16 wire codes)
  * with a higher-level application API.
  *
- * @module clawser-mesh-streams
+ * @module streams
  */
 
 import { MESH_TYPE, MESH_ERROR } from '@johnhenry/browsermesh-primitives';

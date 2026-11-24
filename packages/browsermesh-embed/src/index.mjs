@@ -200,5 +200,11 @@ export class EmbeddedPod extends Pod {
   }
 }
 
-/** Backward-compatible alias */
-export const ClawserEmbed = EmbeddedPod
+/** Package-named alias of EmbeddedPod. */
+export const BrowsermeshEmbed = EmbeddedPod
+
+/**
+ * Deprecated alias, kept for compatibility.
+ * @deprecated Use BrowsermeshEmbed.
+ */
+export const ClawserEmbed = BrowsermeshEmbed

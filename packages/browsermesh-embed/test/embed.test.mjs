@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
-import { EmbeddedPod, ClawserEmbed } from '../src/index.mjs'
+import { EmbeddedPod, BrowsermeshEmbed, ClawserEmbed } from '../src/index.mjs'
 import { Pod } from '@johnhenry/browsermesh-pod'
 import { installDomStub, makeElement } from './_dom-stub.mjs'
 
@@ -145,8 +145,12 @@ describe('EmbeddedPod', () => {
     assert.equal(received[0], result)
   })
 
-  test('ClawserEmbed is a backward-compatible alias for EmbeddedPod', () => {
-    assert.equal(ClawserEmbed, EmbeddedPod)
+  test('BrowsermeshEmbed is an alias for EmbeddedPod', () => {
+    assert.equal(BrowsermeshEmbed, EmbeddedPod)
+  })
+
+  test('ClawserEmbed is a deprecated alias for BrowsermeshEmbed', () => {
+    assert.equal(ClawserEmbed, BrowsermeshEmbed)
   })
 })
 

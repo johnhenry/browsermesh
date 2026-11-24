@@ -1,6 +1,6 @@
 import { silentCatch } from './silent-catch.mjs'
 /**
- * clawser-mesh-discovery.js -- Peer discovery and service directory for BrowserMesh.
+ * discovery.mjs -- Peer discovery and service directory for BrowserMesh.
  *
  * Provides multi-strategy peer discovery (BroadcastChannel, relay, manual) and
  * a local service directory with svc:// URI routing for the mesh network.
@@ -17,7 +17,7 @@ import { silentCatch } from './silent-catch.mjs'
  * No browser-only imports at module level.
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-mesh-discovery.test.mjs
+ *   cd packages/browsermesh-discovery && node --import ./test/_setup-globals.mjs --test test/discovery.test.mjs
  */
 
 // ---------------------------------------------------------------------------
@@ -545,7 +545,7 @@ export class RelayStrategy extends DiscoveryStrategy {
         try {
           const msg = JSON.parse(event.data);
           this.#handleMessage(msg);
-        } catch (e) { silentCatch('clawser-mesh-discovery', 'ignore-malformed', e) }
+        } catch (e) { silentCatch('discovery', 'ignore-malformed', e) }
       };
 
       ws.onclose = () => {

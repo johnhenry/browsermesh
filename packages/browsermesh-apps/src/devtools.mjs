@@ -1,6 +1,6 @@
 /**
-// STATUS: INTEGRATED — wired into ClawserPod lifecycle, proven via E2E testing
- * clawser-mesh-devtools.js -- Mesh DevTools Inspector.
+// STATUS: INTEGRATED — wired into the Pod lifecycle (@johnhenry/browsermesh-pod), proven via E2E testing
+ * devtools.mjs --Mesh DevTools Inspector.
  *
  * Provides diagnostic snapshot and health checking for the mesh subsystem.
  * Exposed as a BrowserTool so the AI agent can query mesh state.
@@ -8,7 +8,7 @@
  * No browser-only imports at module level.
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-mesh-devtools.test.mjs
+ *   cd packages/browsermesh-apps && node --import ./test/_setup-globals.mjs --test test/devtools.test.mjs
  */
 
 const BrowserTool = globalThis.BrowserTool || class { constructor() {} }

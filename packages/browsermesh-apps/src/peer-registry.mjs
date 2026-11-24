@@ -1,7 +1,7 @@
 import { silentCatch } from './silent-catch.mjs'
 import { matchScope } from '@johnhenry/browsermesh-primitives'
 /**
- * clawser-peer-registry.js -- Unified peer registry with permission management.
+ * peer-registry.mjs --Unified peer registry with permission management.
  *
  * Wraps MeshPeerManager, TrustGraph, and MeshACL into a single facade that
  * coordinates peer lifecycle, trust, and access control. All three subsystems
@@ -11,7 +11,7 @@ import { matchScope } from '@johnhenry/browsermesh-primitives'
  * No browser-only imports at module level.
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-peer-registry.test.mjs
+ *   cd packages/browsermesh-apps && node --import ./test/_setup-globals.mjs --test test/peer-registry.test.mjs
  */
 
 // ---------------------------------------------------------------------------
@@ -646,7 +646,7 @@ export class PeerRegistry {
 
     const fire = (event, data) => {
       for (const cb of [...(callbacks[event] || [])]) {
-        try { cb(data) } catch (e) { silentCatch('clawser-peer-registry', 'swallow', e) }
+        try { cb(data) } catch (e) { silentCatch('peer-registry', 'swallow', e) }
       }
     }
 

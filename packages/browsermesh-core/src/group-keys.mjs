@@ -1,5 +1,5 @@
 /**
- * clawser-mesh-group-keys.js -- Symmetric group encryption for multi-party sessions.
+ * group-keys.mjs -- Symmetric group encryption for multi-party sessions.
  *
  * Epoch-based key rotation with AES-GCM-256. Forward secrecy on member removal
  * by generating a new epoch key and distributing it only to remaining members.
@@ -10,7 +10,7 @@
  * No browser-only imports at module level.
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-mesh-group-keys.test.mjs
+ *   cd packages/browsermesh-core && node --import ./test/_setup-globals.mjs --test test/group-keys.test.mjs
  */
 
 import { padTo, unpad } from '@johnhenry/browsermesh-primitives'

@@ -1,6 +1,6 @@
 /**
-// STATUS: INTEGRATED — wired into ClawserPod lifecycle, proven via E2E testing
- * clawser-peer-memory-sync.js — CRDT-backed agent memory replication.
+// STATUS: INTEGRATED — wired into Pod (@johnhenry/browsermesh-pod) lifecycle, proven via E2E testing
+ * memory-sync.mjs — CRDT-backed agent memory replication.
  *
  * Replicate agent memory across the mesh using CRDTs. An agent's memory
  * survives device failure — when the user reconnects, memory resyncs
@@ -18,7 +18,7 @@
  *   - trust: use podId to look up trust scores
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-peer-memory-sync.test.mjs
+ *   cd packages/browsermesh-sync && node --import ./test/_setup-globals.mjs --test test/memory-sync.test.mjs
  */
 
 // ---------------------------------------------------------------------------

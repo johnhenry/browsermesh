@@ -1,5 +1,5 @@
 /**
- * Clawser Skill Marketplace
+ * BrowserMesh Skill Marketplace
  *
  * Browse, search, rate, and install agent skills from a catalog.
  * The catalog is loaded from a JSON source (local or remote).

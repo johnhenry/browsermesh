@@ -1,5 +1,5 @@
 /**
- * clawser-identity-wallet.js -- High-level multi-identity wallet.
+ * identity-wallet.mjs -- High-level multi-identity wallet.
  *
  * Wraps MeshIdentityManager and IdentitySelector to provide a unified
  * API for identity lifecycle, contact management, and access grants.
@@ -7,7 +7,7 @@
  * No browser-only imports at module level.
  *
  * Run tests:
- *   node --import ./web/test/_setup-globals.mjs --test web/test/clawser-identity-wallet.test.mjs
+ *   cd packages/browsermesh-core && node --import ./test/_setup-globals.mjs --test test/identity-wallet.test.mjs
  */
 
 // ---------------------------------------------------------------------------
