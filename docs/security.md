@@ -156,8 +156,7 @@ Package: `browsermesh-pod` (`Pod`, `signed-message.mjs`). For `pod:message`,
   the origin: any script of the origin can post under any pod id, and announce
   or retire a pod. A signed hello proves that the key spoke at some time, not
   that it is online now (a relay can replay one the receiver has forgotten).
-  `MeshRouter`'s forwarded envelopes (`from`, `path`) in `browsermesh-apps` are
-  written by each hop and are not covered.
+  Routed envelopes are covered in [multi-hop forwarding](#multi-hop-forwarding).
 - **Verified.** Unit (`message-authenticity.test.mjs`, with a hostile relay,
   fixed vectors and each signed field shown to be covered); real browser for
   messaging over BroadcastChannel and over the WebSocket relay (signed by
@@ -206,11 +205,35 @@ not sealed; peers that do not run it.
 
 End to end protection ends at the pod that terminates a link. If B receives
 something from A over a wsh link and sends it on to C over any other link, what
-C gets is as protected as the B to C link, and B can read and change it. At the
-link layer a forwarded message is distinguishable (a message naming a third
-sender is dropped); at the application layer it is not: `mesh-relay`,
-`mesh-rpc` and other services put the original requester inside an envelope
-sent by the forwarder, and nothing marks which links on a path were sealed.
+C gets is as protected as the B to C link, and B can read it. At the link layer
+a forwarded message is distinguishable (a message naming a third sender is
+dropped).
+
+**Routed envelopes** (`MeshRouter`, `createMeshRoutingService` in
+`browsermesh-apps`) carry the **originator's signature**: a `pod:message`
+signature (the pod message scheme above) from the originator to the final
+recipient over `{ kind: 'mesh-routed/v1', id, message }`, so it covers the
+originator, the final recipient, the message id, the content, and the signer's
+session id and counter. The final recipient verifies it and refuses a copy it
+already accepted; every forwarding hop verifies it too and drops what does not
+verify (event `mesh-routing:drop`, reasons `unsigned`, `malformed`,
+`wrong-recipient`, `sender-mismatch`, `bad-signature`, `replay`, `no-link`,
+`sign-failed`). A hop may append itself to `path` and lowers `ttl`, which are
+not signed: `path` is a diagnostic hint, bounded to 32 entries and used for
+nothing, and `ttl` is clamped to the router's own `maxTTL`. A hop forwards
+only for a peer it has a link with (`hasActiveSession`). After this, **a hop
+cannot forge or alter a routed message's content, origin or recipient. It can
+still drop, delay, reorder and read it: confidentiality across hops is not
+provided.** Per-hop sealing exists where a link is a wsh link; end-to-end
+sealing across hops is not built, and the options are written down in
+[`design/routed-confidentiality.md`](design/routed-confidentiality.md). Default:
+signed, and unsigned envelopes from older peers are refused unless
+`allowUnsigned: true` (then delivered with `authenticated: false`, their `from`
+only a claim). Replay state at the recipient is in memory and bounded like the
+pod's. Not covered: other services that wrap a requester inside an envelope the
+forwarder sends (`mesh-relay`, `mesh-rpc` and the like) still name the original
+requester only as the forwarder says, and nothing marks which links on a path
+were sealed.
 
 Design and threat model for wsh: [`design/wsh-peer-link.md`](design/wsh-peer-link.md).
 Adopting it: [`migration-wsh-peer-link.md`](migration-wsh-peer-link.md). Usage:
