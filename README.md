@@ -48,7 +48,7 @@ The wsh link is a mesh link carried on a sealed, key-authenticated
 [wsh](https://github.com/johnhenry/wsh) session. Design and threat model:
 [`docs/design/wsh-peer-link.md`](docs/design/wsh-peer-link.md). Adopting it:
 [`docs/migration-wsh-peer-link.md`](docs/migration-wsh-peer-link.md). Example:
-`npm run example:17`.
+`npm run example:18`.
 
 ## Development
 

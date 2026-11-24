@@ -355,6 +355,10 @@ contract over wsh (a mesh link that is key-authenticated in both directions and
 sealed end to end, off by default). It stamps every inbound message's `from`
 with the key the session authenticated and drops a message that names another
 sender, so the shared conformance suite is told to name that id (`senderId`).
+It also calls the pod's message handler as `handler(msg, { peerId })` with that
+key, which a pod treats as a link-authenticated sender (see "Who sent this
+message?"): a message over a wsh link is accepted without a per-message
+signature as that peer, and pods that sign by default interoperate with it too.
 See [`docs/security.md`](../../docs/security.md).
 
 ### The `TransportAdapter` and `DiscoveryAdapter` contracts

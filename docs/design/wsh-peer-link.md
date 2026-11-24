@@ -6,7 +6,7 @@ Status: implemented in `@johnhenry/browsermesh-transport` (`wsh-links.mjs`,
 Resolves issue #273 (option 1). Off by default. What it protects and does not:
 [`../security.md`](../security.md). Adopting it:
 [`../migration-wsh-peer-link.md`](../migration-wsh-peer-link.md). Example:
-`examples/17-wsh-sealed-peer-link.mjs`.
+`examples/18-wsh-sealed-peer-link.mjs`.
 
 ## Why
 
