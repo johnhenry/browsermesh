@@ -114,7 +114,7 @@ describeIfReal('HTTP in, a pod over a real WebRTC data channel answers', () => {
     const page = await request({ port: listener.port, host: 'pod.test' })
     assert.equal(page.status, 200)
     assert.equal(page.body.toString(), '<h1>hello from a pod</h1>')
-    assert.equal(page.headers['content-security-policy'], "default-src 'none'; sandbox")
+    assert.equal(page.headers['content-security-policy'], "default-src 'none'; frame-ancestors 'none'; sandbox")
     assert.equal(page.headers['cache-control'], 'no-store')
     const echo = await request({ port: listener.port, host: 'pod.test', path: '/echo', method: 'POST', body: 'ping' })
     assert.equal(echo.body.toString(), 'POST ping from the ingress')

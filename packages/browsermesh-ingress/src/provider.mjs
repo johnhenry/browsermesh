@@ -10,7 +10,7 @@ import { ChannelErrorCode, MeshChannelError } from '@johnhenry/browsermesh-apps/
 import { IngressError } from './errors.mjs'
 import { NO_BODY_STATUS, isPodId } from './headers.mjs'
 import {
-  FETCH_METHOD, HTTP_PROTOCOL, HTTP_VERSIONS, KIND_REQUEST, KIND_RESPONSE, sha256Hex, signedBytes, validateRequestHead, validateStreamMeta,
+  FETCH_METHOD, HTTP_PROTOCOL, HTTP_VERSIONS, KIND_REQUEST, KIND_RESPONSE, sha256Hex, signedBytes, signedRequestBytes, validateRequestHead, validateStreamMeta,
 } from './wire.mjs'
 
 export const PROVIDER_LIMIT_DEFAULTS = Object.freeze({
@@ -40,40 +40,63 @@ function deferred() {
  * @param {object} service - a mesh service with the protocol channel (`attachService(node, undefined, createMeshProtocolService())`, or its `.api`)
  * @param {Function|{ fetch: Function }} handler - `(request, { peer, signal, client }) => Response | Promise<Response>`
  * @param {object} opts
- * @param {string[]|((peer: string) => boolean)} opts.allowFrom - the ingress pods served; required, nothing is served to any other
+ * @param {string[]|((podId: string, context: { peer: string, protocol: string, version: number }) => (boolean|Promise<boolean>))} opts.allowFrom
+ *   The ingress pods served; required, nothing is served to any other. A list names pod ids. A function is asked with the
+ *   channel's verified pod id and a context, on open and again for every request; only `true` serves (anything else, a throw
+ *   or a rejection refuses). With a function the provider's own check carries the weight (for an ingress whose pod id is new
+ *   each session: verify a signed request with `verifyRequest`).
+ * @param {(request: Request, context: { peer: string, sig: string|undefined, bytes: Uint8Array, rid: number, nonce: string }) => (boolean|Promise<boolean>)} [opts.verifyRequest]
+ *   Runs before the handler, on a clone of the request (its body is still the handler's to read). Only `true` lets the request
+ *   through; `false`, anything else or a throw refuses it and the handler never runs. `sig` is what the ingress's `signRequest`
+ *   made (absent when it signed nothing) and `bytes` is exactly what it signed, rebuilt from what arrived.
  * @param {object} [opts.limits] - see `PROVIDER_LIMIT_DEFAULTS`
  * @param {(bytes: Uint8Array, info: { peer: string }) => (string|Promise<string>)} [opts.sign] - sign the response: the provider buffers it so the signature covers the body
  * @param {string} [opts.protocol='http']
  * @returns {{ stop(): void, stats(): object }}
  */
-export function serveHttpOnMesh(service, handler, { allowFrom, limits: limitOptions, sign, protocol = HTTP_PROTOCOL, onLog } = {}) {
+export function serveHttpOnMesh(service, handler, { allowFrom, limits: limitOptions, sign, verifyRequest, protocol = HTTP_PROTOCOL, onLog } = {}) {
   const api = service && typeof service === 'object' ? (service.api ?? service) : null
   if (typeof api?.serveProtocol !== 'function') throw new TypeError('serveHttpOnMesh: the first argument is a mesh service with serveProtocol (createMeshProtocolService)')
   const fn = typeof handler === 'function' ? handler : typeof handler?.fetch === 'function' ? (req, ctx) => handler.fetch(req, ctx) : null
   if (!fn) throw new TypeError('serveHttpOnMesh: handler must be a function or { fetch }')
   if (sign !== undefined && typeof sign !== 'function') throw new TypeError('serveHttpOnMesh: sign must be a function')
-  let allowed
-  if (Array.isArray(allowFrom) && allowFrom.length && allowFrom.every(isPodId)) { const set = new Set(allowFrom); allowed = (p) => set.has(p) }
-  else if (typeof allowFrom === 'function') allowed = (p) => { try { return allowFrom(p) === true } catch { return false } }
-  else throw new TypeError('serveHttpOnMesh: allowFrom (a non-empty list of ingress pod ids, or a function) is required: nothing is served to a pod that is not named')
+  if (verifyRequest !== undefined && typeof verifyRequest !== 'function') throw new TypeError('serveHttpOnMesh: verifyRequest must be a function')
+  /** @type {(peer: string, context: object) => (boolean|Promise<boolean>)} Never throws; true or false, or a promise of one. */
+  let decide
+  if (Array.isArray(allowFrom) && allowFrom.length && allowFrom.every(isPodId)) { const set = new Set(allowFrom); decide = (p) => set.has(p) }
+  else if (typeof allowFrom === 'function') {
+    decide = (p, context) => {
+      let verdict
+      try { verdict = allowFrom(p, context) } catch { return false }
+      return verdict && typeof verdict.then === 'function' ? Promise.resolve(verdict).then((v) => v === true, () => false) : verdict === true
+    }
+  } else throw new TypeError('serveHttpOnMesh: allowFrom (a non-empty list of ingress pod ids, or a function) is required: nothing is served to a pod that is not named')
   const limits = { ...PROVIDER_LIMIT_DEFAULTS, ...limitOptions }
   for (const [k, v] of Object.entries(limits)) if (!Number.isSafeInteger(v) || v <= 0) throw new TypeError(`serveHttpOnMesh: limits.${k} must be a positive integer`)
   const log = onLog || (() => {})
 
   const channels = new Set()
-  const counters = { channels: 0, requests: 0, refused: 0, errors: 0, requestBytes: 0, responseBytes: 0, inflight: 0 }
+  const counters = { channels: 0, requests: 0, refused: 0, declined: 0, errors: 0, requestBytes: 0, responseBytes: 0, inflight: 0 }
 
-  function accept(channel, { peer }) {
-    if (!allowed(peer)) { counters.refused += 1; channel.close('not an ingress this pod serves'); return }
+  function accept(channel, { peer, version }) {
+    const context = { peer, protocol, version }
+    // `open` is the verdict at the open: true, false, or null while an async `allowFrom` is still deciding. Nothing is
+    // served on a channel whose verdict is not true: every request asks again (below) and a body that arrives meanwhile
+    // is only held, bounded, until a request claims it.
+    const first = decide(peer, context)
+    let open = typeof first === 'boolean' ? first : null
+    const refuse = () => { open = false; counters.refused += 1; channels.delete(channel); channel.close('not an ingress this pod serves') }
+    if (open === false) { counters.refused += 1; channel.close('not an ingress this pod serves'); return }
     counters.channels += 1
     channels.add(channel)
+    if (open === null) first.then((ok) => { if (ok) open = true; else refuse() })
     // One cap per layer, for both directions: the larger of the two. The request body's own cap is enforced where it is read.
     const streams = createStreamLayer(channel, { maxStreams: limits.maxInflight * 2, maxStreamBytes: Math.max(limits.maxRequestBodyBytes, limits.maxResponseBytes) })
     const bodies = new Map() // rid -> { reader } | { waiter }
     let inflight = 0
 
     streams.onStream((reader, { meta }) => {
-      if (!allowed(peer)) throw new IngressError(403, 'forbidden', 'not served')
+      if (open === false) throw new IngressError(403, 'forbidden', 'not served')
       validateStreamMeta(meta, KIND_REQUEST)
       if (bodies.size >= limits.maxInflight * 2) throw new IngressError(503, 'busy', 'too many bodies waiting')
       const have = bodies.get(meta.rid)
@@ -97,7 +120,14 @@ export function serveHttpOnMesh(service, handler, { allowFrom, limits: limitOpti
     }
 
     channel.onRequest(FETCH_METHOD, async (params, ctx) => {
-      if (!allowed(peer)) { counters.refused += 1; throw new MeshChannelError(ChannelErrorCode.UNAUTHORIZED, 'not-authorized', 'not served') }
+      if (open === false) { counters.refused += 1; throw new MeshChannelError(ChannelErrorCode.UNAUTHORIZED, 'not-authorized', 'not served') }
+      // Asked again for every request, so a function that stops saying yes stops the next request, and a decision still
+      // pending at the open is settled before any work (a list is a plain lookup).
+      if ((await decide(peer, context)) !== true) {
+        if (open !== false) refuse()
+        else counters.refused += 1
+        throw new MeshChannelError(ChannelErrorCode.UNAUTHORIZED, 'not-authorized', 'not served')
+      }
       if (inflight >= limits.maxInflight) throw new MeshChannelError(ChannelErrorCode.BUSY, 'busy', 'too many requests in flight')
       let head
       try { head = validateRequestHead(params, limits) } catch (e) { counters.errors += 1; throw asChannelError(e) }
@@ -118,8 +148,22 @@ export function serveHttpOnMesh(service, handler, { allowFrom, limits: limitOpti
         counters.inflight -= 1
       }
       try {
-        const request = await buildRequest(head, ac, claimBody, limits.maxRequestBodyBytes, counters)
+        const { request, body: bodyBytes } = await buildRequest(head, ac, claimBody, limits.maxRequestBodyBytes, counters)
+        if (verifyRequest) {
+          const bytes = signedRequestBytes({
+            rid: head.rid, nonce: head.nonce, host: head.host, method: head.method, target: head.target, headers: head.headers, client: head.client,
+            digest: await sha256Hex(bodyBytes ?? new Uint8Array(0)),
+          })
+          let ok = false
+          try { ok = (await verifyRequest(request.clone(), { peer, sig: head.sig, bytes, rid: head.rid, nonce: head.nonce })) === true } catch { ok = false }
+          if (!ok) { counters.refused += 1; throw new MeshChannelError(ChannelErrorCode.UNAUTHORIZED, 'request-unverified', 'the request was not accepted') }
+        }
         const response = await fn(request, { peer, signal: ac.signal, client: head.client })
+        if (response && typeof response === 'object' && DECLINED.has(response)) {
+          // "Not me, try another": nothing of the response is sent, and no body was produced.
+          counters.declined += 1
+          return { status: 421, headers: [], body: false, declined: true }
+        }
         if (!response || typeof response !== 'object' || !Number.isInteger(response.status) || !response.headers || typeof response.headers.entries !== 'function') {
           throw new MeshChannelError(ChannelErrorCode.INTERNAL, 'bad-handler-result', 'the handler did not return a Response')
         }
@@ -186,7 +230,22 @@ async function buildRequest(head, ac, claimBody, maxBytes, counters) {
     }
     counters.requestBytes += body.byteLength
   }
-  return new Request(`http://${head.host}${head.target}`, { method: head.method, headers, body, signal: ac.signal, redirect: 'manual' })
+  return { request: new Request(`http://${head.host}${head.target}`, { method: head.method, headers, body, signal: ac.signal, redirect: 'manual' }), body }
+}
+
+const DECLINED = new WeakSet()
+
+/**
+ * A handler's way to say "not me, try another": return this instead of a response when this pod cannot answer the
+ * request and has done no work for it. The ingress surfaces it as the named failure `provider-declined` (never as this
+ * pod's own response) and, if it was given a `retry` option, resolves the request again with this pod's id in `tried`.
+ * Only the object this returns declines: a response that merely has status 421 is an ordinary answer.
+ * @returns {Response}
+ */
+export function declineRequest() {
+  const response = new Response(null, { status: 421 })
+  DECLINED.add(response)
+  return response
 }
 
 async function collect(stream, max, signal) {
