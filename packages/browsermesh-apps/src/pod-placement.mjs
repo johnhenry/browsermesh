@@ -354,9 +354,11 @@ const TRANSIENT = new Set(['capacity', 'health', 'draining', 'avoided'])
  * @param {ReturnType<typeof planPlacement>} plan
  * @returns {PodHostDriverError}
  */
-function planError(plan) {
+export function planError(plan) {
   const details = { rejected: plan.rejected, plan: plan.code }
   switch (plan.code) {
+    case 'budget':
+      return new PodHostDriverError(POD_HOST_ERROR.EACCES, `the podspec's budget was refused: ${plan.reason ?? 'no budget source'}`, details)
     case 'invalid-spec':
       return new PodHostDriverError(POD_HOST_ERROR.EINVAL, (plan.errors ?? []).join('; ') || 'invalid podspec', details)
     case 'quota':

@@ -15,7 +15,7 @@ export { DEFAULT_IDENTITY_PATH, DEFAULT_IDENTITY_LABEL, loadOrCreateIdentity } f
 export { connect } from './connect.mjs'
 export { createLoopbackSession, DEFAULT_LOOPBACK_HOSTS } from './loopback.mjs'
 export { createRealMeshSession } from './real-mesh.mjs'
-export { selectAutoHost } from './auto-placement.mjs'
+export { selectAutoHost, selectPlannedHost } from './auto-placement.mjs'
 export { runVmCommand, VM_COMMANDS } from './vm-bridge.mjs'
 export {
   EXIT_CODE, UsageError, exitCodeForError, resolveFormat, formatDocument, okEnvelope, errorEnvelope, createLogger,

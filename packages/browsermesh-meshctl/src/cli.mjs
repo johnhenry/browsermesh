@@ -56,7 +56,8 @@ function usageDocument() {
       'pods list <host>',
       'pods spawn <host|auto> --name <n> --lane <l> --kind skill|module|rootfs|command --ref <r> '
         + '[--entry <e>] [--input <json>] [--limits <json>] [--caps a,b] [--env K=V...] '
-        + '[--restart never|on-failure|always] [--spec <file.json>]',
+        + '[--restart never|on-failure|always] [--spec <file.json>] '
+        + '[auto only: --requester <pubKey> --min-boundary none|process|language|hardware]',
       'pods status <host> <name>',
       'pods send <host> <name> --payload <json> [--to <podId>]',
       'pods exec <host> <name> -- <argv...>',
