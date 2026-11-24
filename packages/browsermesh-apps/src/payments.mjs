@@ -1189,6 +1189,9 @@ export class PaymentRouter {
   /** @type {object|null} Optional conditional EscrowManager (peer-escrow.mjs), see attachEscrowManager(). */
   #escrowManager = null;
 
+  /** @type {boolean} Hand inbound ESCROW_CREATE to the manager (attachEscrowManager `delegateWire`). */
+  #delegateWireEscrow = false;
+
   /** @type {function|null} */
   #broadcastFn = null;
 
@@ -1342,15 +1345,30 @@ export class PaymentRouter {
    * ledger. After attaching, `listEscrows()` / `getEscrowById()` show both, and
    * the escrow sweeper also expires (and refunds) the manager's due contracts.
    *
+   * With `{ delegateWire: true }` an inbound `ESCROW_CREATE` is handed to
+   * `manager.create()` instead of being recorded in the wire book: the sending
+   * pod is the payer, so the manager must debit a per-pod balance. Give it a
+   * `MultiPartyCreditLedger`, or a `mutateLedger` hook that debits that pod; a
+   * single-owner `CreditLedger` would debit the local balance whoever sent the
+   * message. Off by default, so nothing changes for an existing caller. An
+   * escrow the payer cannot fund (or a malformed message) creates nothing.
+   *
    * @param {object} manager - An `EscrowManager`
+   * @param {object} [opts]
+   * @param {boolean} [opts.delegateWire=false]
    * @returns {this}
    */
-  attachEscrowManager(manager) {
+  attachEscrowManager(manager, opts = {}) {
     if (!manager || typeof manager.create !== 'function' || typeof manager.listContracts !== 'function'
         || typeof manager.checkExpired !== 'function' || typeof manager.getContract !== 'function') {
       throw new TypeError('attachEscrowManager requires an EscrowManager');
     }
+    const delegateWire = opts?.delegateWire ?? false;
+    if (typeof delegateWire !== 'boolean') {
+      throw new TypeError('attachEscrowManager: delegateWire must be a boolean');
+    }
     this.#escrowManager = manager;
+    this.#delegateWireEscrow = delegateWire;
     return this;
   }
 
@@ -1546,9 +1564,33 @@ export class PaymentRouter {
     subscribeFn(ESCROW_CREATE, (payload, fromPodId) => {
       try {
         const { payeePodId, amount, conditions } = payload;
+        if (this.#delegateWireEscrow && this.#escrowManager) {
+          // Returns the promise so a caller (or test) can await the outcome;
+          // a failure (insufficient balance, bad input) creates nothing.
+          return this.#createManagerEscrow(fromPodId, payeePodId, amount, conditions);
+        }
         this.#escrow.create(fromPodId, payeePodId, amount, conditions);
       } catch (e) { silentCatch('clawser-mesh-payments', 'ignore-invalid-escrow', e) }
     });
+  }
+
+  /** Validate an inbound ESCROW_CREATE and create it in the attached manager. */
+  async #createManagerEscrow(payerPodId, payeePodId, amount, conditions) {
+    try {
+      if (typeof payerPodId !== 'string' || !payerPodId
+          || typeof payeePodId !== 'string' || !payeePodId
+          || typeof amount !== 'number' || !Number.isFinite(amount) || amount <= 0) {
+        return;
+      }
+      const timeout = conditions?.timeout;
+      await this.#escrowManager.create({
+        payerPodId,
+        payeePodId,
+        amount,
+        description: typeof conditions?.description === 'string' ? conditions.description : undefined,
+        timeoutMs: typeof timeout === 'number' && timeout > 0 ? timeout : undefined,
+      });
+    } catch (e) { silentCatch('clawser-mesh-payments', 'manager-escrow-create', e) }
   }
 
   /**

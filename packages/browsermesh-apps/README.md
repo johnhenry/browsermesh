@@ -474,8 +474,15 @@ mirror and is a separate book from an `EscrowManager` you create, but the router
 can see both: `router.attachEscrowManager(manager)` makes `router.listEscrows(podId?)`
 and `router.getEscrowById(id)` return one normalized view (`source: 'wire'` or
 `'manager'`), and the escrow sweeper also expires the manager's due contracts.
-An inbound `ESCROW_CREATE` is still only recorded in the book; it does not debit
-anything (the payer is a remote pod).
+By default an inbound `ESCROW_CREATE` is still only recorded in the book; it does
+not debit anything (the payer is a remote pod). To have it create a real,
+funded contract, opt in with `router.attachEscrowManager(manager, { delegateWire: true })`:
+the sending pod becomes the payer and the manager debits it, so the manager
+needs a per-pod ledger (a `MultiPartyCreditLedger`, or a `mutateLedger` hook
+that debits that pod; a single-owner `CreditLedger` would debit the local
+balance whoever sent the message). A payer who cannot fund the amount, or a
+malformed message, creates nothing, and the escrow is not also mirrored into the
+book (`listEscrows()` shows it once, as `source: 'manager'`).
 
 ## Putting it all together: sync + kernel-gated mesh + relay on one connection
 
@@ -575,6 +582,55 @@ envelope's own `from` field, which a remote peer could set to anything.
 
 `test/real-peer/wire-envelope.test.mjs` runs all three over a real
 `RTCPeerConnection` pair (`npm run test:real-peer`).
+
+## Message channel: `createMeshChannelService`
+
+`mesh-rpc` is HTTP-shaped (`{ method, path, headers, body }` in, a status out,
+a JSON body of at most 1 MiB) and stays exactly as it is. A second service,
+`createMeshChannelService()` (`mesh-channel.mjs`, also `@johnhenry/browsermesh-apps/mesh-channel`),
+sits beside it on its own envelope type for protocols that need a message
+layer. Over one link per peer it gives both sides:
+
+- requests in both directions (ids are per direction), `notify`, and
+  `ctx.progress(value)` per request;
+- cancel per request: the callee's handler gets `ctx.signal`; the caller's
+  late results are dropped;
+- native `Uint8Array` values anywhere in a message (a small self-contained
+  codec; base64 only carries chunks inside the JSON envelope and is not part
+  of the API);
+- a negotiated maximum message size, enforced from a message's first chunk
+  (its announced length), before anything is assembled, and locally before
+  anything is sent;
+- credit-based flow control in bytes: a sender may have at most the receiver's
+  `window` of unconsumed bytes in flight, so a slow reader bounds a sender's
+  memory (and a reader that stops stops the sender);
+- `maxInflight` requests per peer, a `close()` that rejects every pending
+  request, and the caller's verified identity (`ctx.peer`, the key the session
+  is bound to; never a field of the message) in every handler.
+
+```js
+const a = attachService(nodeA, undefined, createMeshChannelService())
+const b = attachService(nodeB, undefined, createMeshChannelService({
+  // Runs the moment the link exists, before any request can arrive on it.
+  onLink(link) {
+    link.onRequest('read', async ({ path }, { peer, signal, progress }) => {
+      // authorise `peer` yourself, e.g. ctx.registry.checkAccess(peer, ...)
+      await progress({ chunk: new Uint8Array(4) })
+      return { data: new Uint8Array(10) }
+    })
+  },
+}))
+const link = await a.api.open(nodeB.podId)
+const { data } = await link.request('read', { path: 'x' }, { signal, onProgress })
+```
+
+Like `mesh-rpc`, it does not authorise anything itself. Compatibility: the
+first thing sent to a peer is one `hello`; a peer that does not run the
+service ignores it and `open()` rejects with `MeshChannelError`
+(`code -32000`, `reason 'unsupported'`) after `handshakeTimeoutMs`; pass
+`peerSupports(peer)` to refuse without sending even that. See
+`examples/17-mesh-channel.mjs` and the module comment in `mesh-channel.mjs`
+for the wire frames, the memory model and the error codes.
 
 ## `fetch()`/`WebSocket`-shaped mesh access: `browserMeshFetch` and `BrowserMeshWebSocket`
 
