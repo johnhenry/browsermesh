@@ -1,6 +1,6 @@
 {
   "name": "@johnhenry/browsermesh-objects",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "wsh's remote-object layer (values, events, handles, callbacks) over a BrowserMesh protocol channel, authorised per root and per action for the channel's verified peer",
   "type": "module",
   "main": "./src/index.mjs",
@@ -40,8 +40,8 @@
   "devDependencies": {
     "@johnhenry/browsermesh-apps": "^0.21.1",
     "@johnhenry/browsermesh-core": "^0.13.0",
-    "@johnhenry/browsermesh-primitives": "^0.6.0",
-    "@johnhenry/browsermesh-transport": "^0.8.0",
+    "@johnhenry/browsermesh-primitives": "^0.6.1",
+    "@johnhenry/browsermesh-transport": "^0.9.0",
     "@johnhenry/wsh": "^0.50.0",
     "node-datachannel": "^0.33.4"
   }

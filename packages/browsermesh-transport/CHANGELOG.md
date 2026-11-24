@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.9.0
+
+### Minor Changes
+
+- 64ac674: `WshServices` can be served to a mesh peer over a protocol channel (wsh 0.50's `@johnhenry/wsh/duplex`), not only through a pipe relay: `services.serveChannel(channel)`, `services.serveOnMesh(service, { protocol })` and, for the dialling side, `connectWshServicesOverMesh(service, peer, credentials)` (the real wsh client, the pod id pinned as the host key, sealed). Off unless called; objects and MCP only, as over a relay. Opening the channel is `protocol:wsh:open` in the registry (default deny); the existing services grants are asked on top; the key that logs in must be the channel's verified peer's own (a login for another key is refused as `not-the-channel-peer`). Nothing is added to the mesh link: `wsh` is one more protocol name.
+
+  `WshServices` now needs `@johnhenry/wsh` 0.50 (it was 0.49): the registry, not a capability named on the key, opens its two channels (`authorizesItself`), so the `mcp:*` capability it used to give every key at wsh's level is gone. The peer range of the package is unchanged (the rest of it still works from 0.45).
+
+### Patch Changes
+
+- 1363a42: Adopt `@johnhenry/wsh` 0.49.0.
+
+  - transport: `WshServices` starts a session (audit, `sessions`, indicator) when wsh reports the session sealed, not at login. A plain client that passes login on the sealed-only host was audited as a session and shown to the person although it was served nothing; now it is only a `refused` audit. The per-tool grants go through wsh's `permits` hook (`mcp-tool` for listing, `mcp-call` for running) instead of a wrapper around the handler, and the duplicate calls-per-minute count is gone (wsh's own bound applies). `WshServices` needs wsh 0.49 or later (the rest of the package still works from 0.45); results carry wsh's `wsh/untrusted` label only. The tests use `@johnhenry/wsh/testing`'s in-process relay; the `wsh-in-process` subpath is unchanged.
+  - primitives: no behaviour change. `ssh-keys.mjs` is now run against `@johnhenry/wsh/identity` in a test (valid inputs, strictness cases and the written differences).
+  - netway: no behaviour change. `GATEWAY_ERROR` is checked against wsh's exported `GATEWAY_FAIL_TABLE` and its doc says code 5 is a timeout in the Node gateway and "gateway disabled" in the Rust server.
+
 ## 0.8.0
 
 ### Minor Changes
