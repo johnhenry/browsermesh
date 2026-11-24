@@ -38,6 +38,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url))
 const REPO = path.resolve(HERE, '..', '..')
 const PACKAGES = path.join(REPO, 'packages')
 const HARNESS = path.join(HERE, 'harness')
+const WSH_SRC = path.join(REPO, 'node_modules', '@johnhenry', 'wsh', 'src')
 
 const MIME = {
   '.mjs': 'text/javascript; charset=utf-8',
@@ -70,6 +71,9 @@ export async function buildImportMap() {
   }
   // The examples are written for Node and import `node:assert/strict`.
   imports['node:assert/strict'] = '/harness/assert-shim.mjs'
+  // The one third-party dependency a package under test needs in the page: wsh's browser-safe page entry
+  // (the WebMCP bridge), served from the installed package's source, nothing else of it.
+  imports['@johnhenry/wsh/page'] = '/vendor/wsh/page-host.mjs'
   return { imports }
 }
 
@@ -355,6 +359,9 @@ export async function startServer({ port = 0, hub = new Hub() } = {}) {
       const [, , dir, ...rest] = pathname.split('/')
       if (!dir || dir === 'node_modules') return res.writeHead(404, securityHeaders(nonce)).end('not found')
       return sendFile(res, nonce, path.join(PACKAGES, dir, 'src'), rest.join('/').replace(/^src\//, ''))
+    }
+    if (pathname.startsWith('/vendor/wsh/')) {
+      return sendFile(res, nonce, WSH_SRC, pathname.slice('/vendor/wsh/'.length))
     }
     if (pathname.startsWith('/examples/')) {
       return sendFile(res, nonce, path.join(REPO, 'examples'), pathname.slice('/examples/'.length))

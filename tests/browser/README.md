@@ -68,6 +68,13 @@ Locally you may point Playwright at a browser you already have with
   messages, progress, notifications, cancel (the callee's handler sees its `AbortSignal`), revocation closing
   the channel at once and a later grant reopening it, and credit-based flow control (a reader that stops
   reading holds the sender at one window; catching up delivers every message).
+- MCP across the mesh (`mcp-over-mesh.spec.mjs`, `docs/design/mcp-over-mesh.md`): one page registers WebMCP
+  tools through wsh's capture shim and serves them on a protocol channel, another browser context lists and
+  calls them over the real data channel. Default deny, per-tool list/call grants, revocation at once, a
+  consequential tool asking the serving page (not the caller), a hostile result delivered as inert text with
+  the untrusted label, cancel reaching the tool's signal, list-changed. wsh's browser-safe `page` entry is
+  served from `node_modules` for this (`/vendor/wsh/`), the one third-party module the harness serves; the
+  default DOM dialog of that bridge is not used (the harness answers with its own `prompt`).
 - Examples 01, 02 and 05 unmodified in a page (their own transports stay
   simulated).
 - The packages load and run under the strict policy above.
