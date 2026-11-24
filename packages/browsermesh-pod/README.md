@@ -370,6 +370,31 @@ Key properties, driven directly by the relay server's shape:
 - **Wire encoding** follows the same rule as `@johnhenry/browsermesh-transport`'s `encodeWireData()`: each relay/signaling frame is sent as exactly one JSON text, with the pod message nested inside as an object (never as a pre-encoded string, so nothing is double-encoded). Inbound frames may be text or binary (`ArrayBuffer`/typed array, read as UTF-8); a `Blob` frame cannot be read synchronously and is ignored.
 - **Protocol note**: the relay/signaling servers' wire protocol uses `target`/`source` field names for forwarding, not `to`/`from` — `WebSocketTransport` speaks the servers' real field names and only remaps to `from` on the Pod message shape when delivering to `onMessage()`.
 
+### Authenticated signalling (protocol 2)
+
+The `browsermesh-servers` signalling server can run in `AUTH_MODE=authenticated`: it sends each connection a single-use challenge and registers a pod only when the pod id is the hash of the Ed25519 key that signs the server's origin, the pod id and the nonce. A client that does not speak that protocol is refused (`protocol-unsupported`). In open mode (the default) any id is accepted and every peer is stamped `verified: false`.
+
+Give the transport an `identity` and it speaks both:
+
+```js
+import { PodIdentity } from '@johnhenry/browsermesh-primitives'
+const identity = await PodIdentity.generate()
+const transport = new WebSocketTransport({
+  url: 'wss://signal.example.org',
+  protocol: 'signaling',
+  podId: identity.podId,   // must equal identity.podId
+  identity,
+})
+await transport.open()
+transport.registration     // { mode: 'authenticated', verified: true }
+```
+
+- **Against an authenticated server** it answers the challenge with a signature over the origin of the URL it was configured with (`origin` overrides it for a server reached under another name; the origin named in the challenge is never used), so a proof cannot be relayed to another server. Reconnects answer a fresh challenge.
+- **Against an open-mode or older server** (no challenge ever arrives) it registers as before after `challengeWaitMs` (default 2000). `authentication: 'required'` never falls back and rejects `open()` with a `SignalingAuthError` (`code: 'no-challenge'`); `'off'` never signs.
+- **Without an identity** against an authenticated server `open()` rejects with `SignalingAuthRequiredError` (`code: 'auth-required'`) and the transport does not retry a refusal that cannot change (`protocol-unsupported`, `no-challenge`, `bad-signature`, `pod-id-mismatch`, ...). Other refusals carry the server's own `code` (`bad-nonce`, `challenge-expired`, ...).
+- **Server stamps.** `serverVerifiedPeers` lists the pods the server itself stamped verified, and each delivered message carries `relaySourceVerified` (true only for a literal `true` from the server). This is the server's word about a link: such a pod is still a hint, not a broadcast recipient (`verifiedPeers` still needs the pod's own signed hello or ack). Open-mode and older servers read as unverified.
+- Only the signalling dialect (`protocol: 'signaling'` and the `signalingUrl` connection) is affected; the relay dialect is unchanged. Security note: a client in `auto` mode can be pushed into the open flow by something that strips the challenge from an unprotected `ws://` link; use `wss://` and `authentication: 'required'` where that matters.
+
 See `examples/12-hosted-pod-over-websocket.mjs` in the monorepo root for a full runnable example (two pods discovering each other and exchanging a message over a simulated relay, no network required).
 
 ## Running a Pod outside the browser

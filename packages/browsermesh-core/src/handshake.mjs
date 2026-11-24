@@ -140,6 +140,112 @@ const DEFAULT_MAX_CONSUMED_NONCES = 10_000
 const DEFAULT_TIMEOUT_MS = 30_000
 
 // ---------------------------------------------------------------------------
+// Signalling protocol 2 (authenticated registration) and the ICE-server fetch
+// ---------------------------------------------------------------------------
+
+/** The registration protocol this client speaks when a server offers it. */
+export const SIGNALING_PROTOCOL = 2
+const SIGNALING_SIGNED_PREFIX = 'browsermesh-signaling/2'
+export const DEFAULT_CHALLENGE_WAIT_MS = 2000
+
+/**
+ * A registration the signalling server refused, or one this client could not
+ * complete. `code` is the server's own code where it sent one
+ * (`protocol-unsupported`, `bad-nonce`, `challenge-expired`, `bad-pod-id`,
+ * `bad-key`, `bad-signature`, `pod-id-mismatch`) or one of this client's
+ * (`no-challenge`, `auth-required`).
+ */
+export class SignalingAuthError extends Error {
+  constructor(code, message) {
+    super(message)
+    this.name = 'SignalingAuthError'
+    this.code = code
+  }
+}
+
+/**
+ * The server requires protocol 2 (a signed registration) and this client has no
+ * identity to sign with (or was told not to).
+ */
+export class SignalingAuthRequiredError extends SignalingAuthError {
+  constructor(message = 'the signalling server requires authenticated registration (protocol 2): pass { identity } (a PodIdentity) to SignalingClient') {
+    super('auth-required', message)
+    this.name = 'SignalingAuthRequiredError'
+  }
+}
+
+/** The ws:// / wss:// origin a registration is signed for, from the URL the client was configured with. */
+function signalingOrigin(url) {
+  const u = new URL(String(url))
+  if (u.protocol === 'http:') u.protocol = 'ws:'
+  else if (u.protocol === 'https:') u.protocol = 'wss:'
+  if (u.protocol !== 'ws:' && u.protocol !== 'wss:') throw new TypeError(`signalling URL must be ws:// or wss:// (got ${u.protocol})`)
+  return u.origin
+}
+
+function registrationMessage({ origin, podId, nonce }) {
+  for (const [k, v] of Object.entries({ origin, podId, nonce })) {
+    if (typeof v !== 'string' || !v || /[\r\n]/.test(v)) throw new TypeError(`${k} must be a non-empty string without line breaks`)
+  }
+  return `${SIGNALING_SIGNED_PREFIX}\npurpose:register\norigin:${origin}\npodId:${podId}\nnonce:${nonce}`
+}
+
+/**
+ * Fetch time-limited ICE (STUN/TURN) servers from the signalling server's
+ * `GET /ice-servers`. The server answers only a caller that sends
+ * `Authorization: Bearer <token>` or that is the same origin as the server.
+ *
+ * @param {object} opts
+ * @param {string} [opts.url] - the endpoint, absolute or (same-origin pages) relative
+ * @param {string} [opts.signalingUrl] - or the signalling URL (`wss://host`); the endpoint is derived from it
+ * @param {string} [opts.token] - the server's ICE API token; sent as a Bearer header, never in the URL
+ * @param {Function} [opts.fetch] - injectable fetch (default `globalThis.fetch`)
+ * @param {AbortSignal} [opts.signal]
+ * @returns {Promise<object[]>} RTCIceServer list, ready for `iceServers`
+ */
+export async function fetchIceServers({ url, signalingUrl, token, fetch: fetchImpl, signal } = {}) {
+  const doFetch = fetchImpl ?? globalThis.fetch
+  if (typeof doFetch !== 'function') throw new Error('fetchIceServers: no fetch available')
+  let target = url
+  if (!target) {
+    if (!signalingUrl) throw new TypeError('fetchIceServers: pass { url } or { signalingUrl }')
+    const u = new URL(String(signalingUrl))
+    u.protocol = u.protocol === 'wss:' ? 'https:' : u.protocol === 'ws:' ? 'http:' : u.protocol
+    u.pathname = '/ice-servers'
+    u.search = ''
+    u.hash = ''
+    target = u.href
+  }
+  const headers = { Accept: 'application/json' }
+  if (token) {
+    // A bearer token must not cross the network in the clear.
+    let parsed = null
+    try { parsed = new URL(String(target)) } catch { /* relative URL: same origin as the page */ }
+    if (parsed && parsed.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname)) {
+      const e = new Error('fetchIceServers: refusing to send the ICE token over plain http to a non-loopback host')
+      e.code = 'ice-insecure-token'
+      throw e
+    }
+    headers.Authorization = `Bearer ${token}`
+  }
+  // redirect: 'error' so the token is never replayed to another host.
+  const res = await doFetch(target, { headers, redirect: 'error', cache: 'no-store', signal })
+  if (!res.ok) {
+    const e = new Error(`fetchIceServers: server answered ${res.status}`)
+    e.status = res.status
+    e.code = res.status === 401 || res.status === 403 ? 'ice-unauthorized' : res.status === 429 ? 'ice-rate-limited' : 'ice-failed'
+    throw e
+  }
+  const body = await res.json()
+  if (!Array.isArray(body) || !body.every((s) => s && typeof s === 'object' && (typeof s.urls === 'string' || Array.isArray(s.urls)))) {
+    const e = new Error('fetchIceServers: response is not a list of ICE servers')
+    e.code = 'ice-bad-response'
+    throw e
+  }
+  return body
+}
+
+// ---------------------------------------------------------------------------
 // SignalingClient
 // ---------------------------------------------------------------------------
 
@@ -149,6 +255,11 @@ const DEFAULT_TIMEOUT_MS = 30_000
  *
  * Provides sendOffer, sendAnswer, sendIceCandidate plus event callbacks
  * onOffer, onAnswer, onIceCandidate for signaling exchange.
+ *
+ * Against a signalling server in authenticated mode (protocol 2) it answers
+ * the server's challenge with a signature from `identity`, so the server can
+ * tie the pod id to the key that proves it. Against an open-mode or older
+ * server it registers as before.
  */
 export class SignalingClient {
   /** @type {object|null} WebSocket instance */
@@ -169,21 +280,82 @@ export class SignalingClient {
   /** @type {Function|null} */
   #WebSocketCtor
 
+  #identity
+  #authentication
+  #origin
+  #challengeWaitMs
+  #waitForRegistration
+
+  /** @type {{ mode: string, verified: boolean }|null} */
+  #registration = null
+
+  /** @type {Error|null} */
+  #lastAuthError = null
+
+  /** In-flight registration: settles connect() when `waitForRegistration`. */
+  #reg = null
+
   /**
    * @param {object} opts
    * @param {string} [opts.url] - WebSocket signaling server URL
    * @param {string} opts.localPodId - Local pod identifier
+   * @param {object} [opts.identity] - A `PodIdentity` (or anything with `podId`, `rawPublicKey()` and `sign(bytes)`). Lets the client answer an authenticated server's challenge; its `podId` must equal `localPodId`.
+   * @param {'auto'|'required'|'off'} [opts.authentication='auto'] - `auto`: use protocol 2 when the server offers it, otherwise register as before. `required`: never fall back to the open flow (needs `identity`). `off`: never sign.
+   * @param {string} [opts.origin] - The server origin to sign, when it differs from `url` (a server reached through a proxy or an internal name). Defaults to the origin of `url`.
+   * @param {number} [opts.challengeWaitMs=2000] - With an identity in `auto` mode: how long to wait for the server's challenge before registering the open way (an open-mode or older server sends none).
+   * @param {boolean} [opts.waitForRegistration] - `connect()` resolves on `registered` and rejects with the refusal. Default: true when an `identity` is given, false otherwise (then it resolves on open, as before, and a refusal is announced as an `auth-error` event).
    * @param {Function} [opts.onLog] - Logging callback (level, msg)
    * @param {Function} [opts._WebSocket] - Injectable WebSocket constructor
    */
-  constructor({ url = null, localPodId, onLog, _WebSocket } = {}) {
+  constructor({ url = null, localPodId, identity = null, authentication = 'auto', origin, challengeWaitMs = DEFAULT_CHALLENGE_WAIT_MS, waitForRegistration, onLog, _WebSocket } = {}) {
     if (!localPodId || typeof localPodId !== 'string') {
       throw new Error('localPodId is required and must be a non-empty string')
     }
+    if (authentication !== 'auto' && authentication !== 'required' && authentication !== 'off') {
+      throw new TypeError("authentication must be 'auto', 'required' or 'off'")
+    }
+    if (identity) {
+      if (typeof identity.sign !== 'function' || typeof identity.rawPublicKey !== 'function') {
+        throw new TypeError('identity must provide podId, rawPublicKey() and sign(bytes) (a PodIdentity)')
+      }
+      if (identity.podId !== localPodId) {
+        throw new TypeError('identity.podId must equal localPodId: the server binds the pod id to the key')
+      }
+    }
+    if (authentication === 'required' && !identity) throw new SignalingAuthRequiredError()
     this.#url = url
     this.#localPodId = localPodId
+    this.#identity = identity || null
+    this.#authentication = authentication
+    this.#origin = origin ?? null
+    this.#challengeWaitMs = challengeWaitMs
+    this.#waitForRegistration = waitForRegistration ?? !!identity
     this.#onLog = onLog || (() => {})
     this.#WebSocketCtor = _WebSocket || globalThis.WebSocket || null
+  }
+
+  /**
+   * What the server said when it accepted the registration:
+   * `{ mode: 'open'|'authenticated', verified }`. `verified` is true only when
+   * the server proved the pod id against a key. An older server that sends
+   * neither reads as `{ mode: 'open', verified: false }`. Null until registered.
+   */
+  get registration() { return this.#registration }
+
+  /** The last authentication refusal, if any (also fired as an `auth-error` event). */
+  get lastAuthError() { return this.#lastAuthError }
+
+  /**
+   * Whether the server vouched for the sender of a forwarded message: true only
+   * for `sourceVerified: true` set by the server (it overwrites whatever the
+   * sender put there). Open-mode and older servers read as false. This is the
+   * server's statement about the link, not proof the peer will not lie in the
+   * payload; check peer signatures where it matters.
+   * @param {object} data - a message as delivered to a listener
+   * @returns {boolean}
+   */
+  isSourceVerified(data) {
+    return !!data && data.sourceVerified === true
   }
 
   // -- Lifecycle ------------------------------------------------------------
@@ -210,10 +382,8 @@ export class SignalingClient {
         this.#ws = ws
         ws.addEventListener('message', this.#handleMessage)
         ws.addEventListener('close', this.#handleClose)
-        // Register with the signaling server
-        this.send(null, 'register', { podId: this.#localPodId })
         this.#onLog(2, `SignalingClient connected to ${this.#url}`)
-        resolve()
+        this.#beginRegistration(resolve, reject)
       }
 
       const onError = (err) => {
@@ -231,10 +401,122 @@ export class SignalingClient {
     })
   }
 
+  // -- Registration (open flow and protocol 2) ------------------------------
+
+  #canSign() {
+    return !!this.#identity && this.#authentication !== 'off'
+  }
+
+  #beginRegistration(resolve, reject) {
+    const reg = { resolve, reject, done: false, openSent: false, signed: false, timer: null, waits: this.#waitForRegistration }
+    this.#reg = reg
+    this.#registration = null
+    // Without waiting, connect() resolves on open, exactly as before.
+    if (!reg.waits) resolve()
+    if (!this.#canSign()) {
+      // No identity: register the open way at once. An authenticated server
+      // answers with its challenge / `protocol-unsupported`, which is reported by name.
+      this.#sendOpenRegister(reg)
+      return
+    }
+    // With an identity: an authenticated server sends its challenge on connect;
+    // an open-mode or older server sends nothing, so wait a bounded time for it.
+    reg.timer = setTimeout(() => {
+      reg.timer = null
+      if (reg.done || reg.openSent || reg.signed) return
+      if (this.#authentication === 'required') {
+        this.#failRegistration(reg, new SignalingAuthError('no-challenge', 'the server sent no authentication challenge and authentication is required'))
+        return
+      }
+      this.#sendOpenRegister(reg)
+    }, this.#challengeWaitMs)
+  }
+
+  #sendOpenRegister(reg) {
+    reg.openSent = true
+    this.send(null, 'register', { podId: this.#localPodId })
+  }
+
+  #failRegistration(reg, err) {
+    if (reg.done) return
+    reg.done = true
+    clearTimeout(reg.timer)
+    if (this.#reg === reg) this.#reg = null
+    if (err instanceof SignalingAuthError) {
+      this.#lastAuthError = err
+      this.#fire('auth-error', err)
+    }
+    this.disconnect()
+    if (reg.waits) reg.reject(err)
+  }
+
+  #observeRegistration(data) {
+    const reg = this.#reg
+    if (!reg || reg.done) return
+    if (data.type === 'registered') {
+      reg.done = true
+      clearTimeout(reg.timer)
+      this.#reg = null
+      this.#registration = { mode: data.mode === 'authenticated' ? 'authenticated' : 'open', verified: data.verified === true }
+      if (reg.waits) reg.resolve()
+    } else if (data.type === 'challenge') {
+      this.#answerChallenge(reg, data)
+    } else if (data.type === 'error') {
+      const message = typeof data.message === 'string' ? data.message : 'registration refused'
+      if (typeof data.code === 'string') {
+        // `protocol-unsupported` from a client that could not have signed is the
+        // "needs an identity" case; with an identity it is a real mismatch.
+        const err = data.code === 'protocol-unsupported' && !this.#canSign()
+          ? new SignalingAuthRequiredError()
+          : new SignalingAuthError(data.code, message)
+        this.#failRegistration(reg, err)
+      } else if (reg.waits) {
+        this.#failRegistration(reg, new Error(message))
+      }
+    }
+  }
+
+  #answerChallenge(reg, data) {
+    if (reg.openSent || reg.signed) return // late or repeated: the server spends one per connection
+    if (!this.#canSign()) {
+      this.#failRegistration(reg, new SignalingAuthRequiredError())
+      return
+    }
+    if (data.protocol !== SIGNALING_PROTOCOL || data.purpose !== 'register' || typeof data.nonce !== 'string') {
+      this.#failRegistration(reg, new SignalingAuthError(
+        'protocol-unsupported',
+        `the server offered signalling protocol ${String(data.protocol)}; this client speaks ${SIGNALING_PROTOCOL}`,
+      ))
+      return
+    }
+    reg.signed = true
+    clearTimeout(reg.timer)
+    ;(async () => {
+      // The origin is the one this client was configured with: never the
+      // challenge's own `origin`, so a proof relayed to another server fails there.
+      const origin = this.#origin ?? signalingOrigin(this.#url)
+      const text = registrationMessage({ origin, podId: this.#localPodId, nonce: data.nonce })
+      const pubKey = await this.#identity.rawPublicKey()
+      const signature = await this.#identity.sign(new TextEncoder().encode(text))
+      if (reg.done || !this.#ws) return
+      this.#ws.send(JSON.stringify({
+        type: 'register',
+        protocol: SIGNALING_PROTOCOL,
+        podId: this.#localPodId,
+        pubKey: toBase64Url(pubKey),
+        nonce: data.nonce,
+        signature: toBase64Url(signature),
+      }))
+    })().catch((e) => {
+      this.#failRegistration(reg, new SignalingAuthError('sign-failed', `could not sign the registration: ${e?.message ?? e}`))
+    })
+  }
+
   /**
    * Disconnect from the signaling server.
    */
   disconnect() {
+    this.#abandonRegistration('SignalingClient disconnected before registration')
     if (!this.#ws) return
     try {
       this.#ws.removeEventListener('message', this.#handleMessage)
@@ -369,12 +651,25 @@ export class SignalingClient {
     try {
       const data = typeof ev.data === 'string' ? JSON.parse(ev.data) : ev.data
       if (!data || !data.type) return
+      this.#observeRegistration(data)
       this.#fire(data.type, data)
     } catch (e) { silentCatch('handshake', 'ignore-malformed-messages', e) }
   }
 
+  /** Stop a registration that is still in flight (the socket went away). */
+  #abandonRegistration(reason) {
+    const reg = this.#reg
+    if (!reg) return
+    clearTimeout(reg.timer)
+    this.#reg = null
+    if (reg.done) return
+    reg.done = true
+    if (reg.waits) reg.reject(new Error(reason))
+  }
+
   /** @type {() => void} */
   #handleClose = () => {
+    this.#abandonRegistration('SignalingClient WebSocket closed before registration')
     this.#ws = null
     this.#onLog(2, 'SignalingClient WebSocket closed')
   }

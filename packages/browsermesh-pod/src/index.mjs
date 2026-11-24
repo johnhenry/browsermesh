@@ -17,7 +17,7 @@ export {
 export { InjectedPod } from './injected-pod.mjs'
 export { installPodRuntime, createRuntime, createClient, createServer } from './runtime.mjs'
 export { BroadcastChannelTransport, EventEmitterTransport, NullTransport } from './transport.mjs'
-export { WebSocketTransport } from './ws-transport.mjs'
+export { WebSocketTransport, SignalingAuthError, SignalingAuthRequiredError, SIGNALING_PROTOCOL } from './ws-transport.mjs'
 export { TransportDiscovery, NullDiscovery } from './discovery.mjs'
 export {
   POD_HOST_VERB, POD_HOST_VERBS, POD_LANE, POD_LANES, POD_LANE_VERBS, laneSupports,
