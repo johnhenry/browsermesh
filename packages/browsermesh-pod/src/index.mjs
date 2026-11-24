@@ -10,6 +10,10 @@ export {
   createHello, createHelloAck, createGoodbye, createMessage,
   createRpcRequest, createRpcResponse,
 } from './messages.mjs'
+export {
+  MessageSigner, ReplayGuard, ReplayWindow, verifyMessage, signedBytes,
+  SIGNED_FIELDS, SIGNATURE_DOMAIN, REPLAY_WINDOW, DROP_REASONS,
+} from './signed-message.mjs'
 export { InjectedPod } from './injected-pod.mjs'
 export { installPodRuntime, createRuntime, createClient, createServer } from './runtime.mjs'
 export { BroadcastChannelTransport, EventEmitterTransport, NullTransport } from './transport.mjs'

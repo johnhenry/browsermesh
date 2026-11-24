@@ -15,6 +15,12 @@
 import { MeshTransport } from './transport.mjs'
 import { silentCatch } from './silent-catch.mjs'
 import { encodeWireData } from './wire-data.mjs'
+import {
+  BINDING_FRAME_TYPE, extractDtlsFingerprints, createBindingProof, verifyBindingProof,
+} from './identity-binding.mjs'
+
+/** Default time to wait for the peer's identity proof once the control channel is open. */
+const DEFAULT_BINDING_TIMEOUT_MS = 10_000
 
 // ---------------------------------------------------------------------------
 // Feature detection
@@ -275,10 +281,32 @@ export class WebRTCPeerConnection {
   #disconnectedGraceMs
   #disconnectedTimer = null
 
+  // -- Identity binding (see identity-binding.mjs); all inert unless `identity` is given
+  #identity = null
+  #bindingRequired = false
+  #bindingTimeoutMs = DEFAULT_BINDING_TIMEOUT_MS
+  #bindingTimer = null
+  #role = null          // 'offerer' | 'answerer'
+  #offerSdp = null
+  #answerSdp = null
+  #bound = false
+  #bindingFailure = null
+  #droppedUnbound = 0
+
   /**
    * @param {object} opts
    * @param {string} opts.localPodId  - This pod's identifier
    * @param {string} opts.remotePodId - Target pod's identifier
+   * @param {{ podId: string, sign: Function, rawPublicKey: Function }} [opts.identity] - This pod's
+   *   identity (a `PodIdentity`). When given, each side proves possession of its pod key over the
+   *   DTLS fingerprints of BOTH session descriptions, on the control channel, and the peer's proof
+   *   must verify against `remotePodId`. Nothing is on by default. See `identity-binding.mjs`.
+   * @param {boolean} [opts.requirePeerBinding=true] - With `identity`: the connection only becomes
+   *   `connected`, and application messages are only accepted, once the peer's proof verified;
+   *   a peer that sends none is closed after `bindingTimeoutMs`. With `false`, a peer that sends
+   *   no proof (an older build) is accepted unbound (`bound` stays false); a proof that fails is
+   *   fatal either way.
+   * @param {number} [opts.bindingTimeoutMs=10000]
    * @param {RTCIceServer[]} [opts.iceServers]
    * @param {'all'|'relay'} [opts.iceTransportPolicy] - Forwarded verbatim to
    *   `RTCPeerConnection`. `'relay'` gathers TURN candidates only, so host and
@@ -291,9 +319,21 @@ export class WebRTCPeerConnection {
    *   through `onError()`. `failed` is reported immediately and is not
    *   subject to this delay.
    */
-  constructor({ localPodId, remotePodId, iceServers, iceTransportPolicy, onLog, disconnectedGraceMs = 5000 } = {}) {
+  constructor({
+    localPodId, remotePodId, iceServers, iceTransportPolicy, onLog, disconnectedGraceMs = 5000,
+    identity, requirePeerBinding = true, bindingTimeoutMs = DEFAULT_BINDING_TIMEOUT_MS,
+  } = {}) {
     if (!localPodId) throw new Error('localPodId is required')
     if (!remotePodId) throw new Error('remotePodId is required')
+    if (identity) {
+      if (typeof identity.sign !== 'function' || typeof identity.rawPublicKey !== 'function') {
+        throw new Error('identity must be able to sign (a PodIdentity)')
+      }
+      if (identity.podId !== localPodId) throw new Error('identity.podId must equal localPodId')
+      this.#identity = identity
+      this.#bindingRequired = requirePeerBinding !== false
+      this.#bindingTimeoutMs = bindingTimeoutMs
+    }
     this.#localPodId = localPodId
     this.#remotePodId = remotePodId
     this.#iceServers = iceServers || [...DEFAULT_ICE_SERVERS]
@@ -315,6 +355,18 @@ export class WebRTCPeerConnection {
 
   /** Byte-level stats (copy). */
   get stats() { return { ...this.#stats } }
+
+  /**
+   * True once the peer proved possession of the key behind `remotePodId` over
+   * this connection's own DTLS fingerprints. Always false without `identity`.
+   */
+  get bound() { return this.#bound }
+
+  /** Why identity binding failed (the connection was closed), or null. */
+  get bindingFailure() { return this.#bindingFailure }
+
+  /** Messages dropped because they arrived before the peer was verified. */
+  get droppedUnbound() { return this.#droppedUnbound }
 
   /** True when the DataChannel is open and usable. */
   get isOpen() {
@@ -371,6 +423,7 @@ export class WebRTCPeerConnection {
 
     const offer = await this.#pc.createOffer()
     await this.#pc.setLocalDescription(offer)
+    this.#resetBinding('offerer', offer.sdp, null)
     this.#setState('connecting')
     this.#log(`Created offer for ${this.#remotePodId}`)
     return { type: 'offer', sdp: offer.sdp }
@@ -468,6 +521,7 @@ export class WebRTCPeerConnection {
     await this.#flushPendingCandidates()
     const answer = await this.#pc.createAnswer()
     await this.#pc.setLocalDescription(answer)
+    this.#resetBinding('answerer', offer.sdp, answer.sdp)
     this.#setState('connecting')
     this.#log(`Created answer for ${this.#remotePodId}`)
     return { type: 'answer', sdp: answer.sdp }
@@ -482,6 +536,8 @@ export class WebRTCPeerConnection {
     if (!this.#pc) throw new Error('No peer connection — call createOffer() first')
     if (!answer || !answer.sdp) throw new Error('Invalid answer: missing sdp')
     await this.#pc.setRemoteDescription({ type: 'answer', sdp: answer.sdp })
+    this.#answerSdp = answer.sdp
+    this.#maybeStartBinding()
     await this.#flushPendingCandidates()
     this.#log(`Applied answer from ${this.#remotePodId}`)
   }
@@ -631,6 +687,9 @@ export class WebRTCPeerConnection {
    *   unknown, or the channel that was actually selected is not open.
    */
   send(data, { channel = 'control' } = {}) {
+    if (this.#identity && this.#bindingRequired && !this.#bound) {
+      throw new Error('Peer identity not verified yet')
+    }
     const extra = (channel !== 'control' && channel !== 'bulk') ? this.#extraChannels.get(channel) : undefined
     if (channel !== 'control' && channel !== 'bulk' && !extra) {
       throw new Error(`Unknown channel: ${channel}`)
@@ -846,6 +905,8 @@ export class WebRTCPeerConnection {
     // real browser and surfaces against a synchronous mock or binding.
     if (this.#closing) return
     this.#closing = true
+    clearTimeout(this.#bindingTimer)
+    this.#bindingTimer = null
     try {
       if (this.#dataChannel) {
         try { this.#dataChannel.close() } catch (e) { silentCatch('clawser-mesh-webrtc', 'this', e) }
@@ -1136,7 +1197,15 @@ export class WebRTCPeerConnection {
    */
   #setupDataChannel(dc, kind, name = kind) {
     dc.onopen = () => {
-      if (kind === 'control') this.#setState('connected')
+      if (kind === 'control') {
+        // With identity binding required the connection is not usable until
+        // the peer's proof has verified (see #onBindingFrame).
+        if (this.#identity && this.#bindingRequired) this.#maybeStartBinding()
+        else {
+          this.#setState('connected')
+          this.#maybeStartBinding()
+        }
+      }
       this.#log(`DataChannel (${kind}) open with ${this.#remotePodId}`)
     }
     dc.onmessage = (event) => {
@@ -1145,6 +1214,17 @@ export class WebRTCPeerConnection {
       this.#stats.messagesIn += 1
       let parsed = event.data
       try { parsed = JSON.parse(event.data) } catch { /* keep as string */ }
+      if (this.#identity) {
+        if (kind === 'control' && parsed && typeof parsed === 'object' && parsed.type === BINDING_FRAME_TYPE) {
+          this.#onBindingFrame(parsed)
+          return
+        }
+        if (this.#bindingRequired && !this.#bound) {
+          // Nothing but the proof is accepted before the peer is verified.
+          this.#droppedUnbound++
+          return
+        }
+      }
       for (const cb of this.#messageCbs) {
         try { cb(parsed, name) } catch (e) { silentCatch('clawser-mesh-webrtc', 'swallow', e) }
       }
@@ -1185,6 +1265,101 @@ export class WebRTCPeerConnection {
         this.#fireClose()
       }
     }
+  }
+
+  // -- Identity binding -----------------------------------------------------
+
+  /** @param {'offerer'|'answerer'} role @param {string|null} offerSdp @param {string|null} answerSdp */
+  #resetBinding(role, offerSdp, answerSdp) {
+    if (!this.#identity) return
+    clearTimeout(this.#bindingTimer)
+    this.#bindingTimer = null
+    this.#role = role
+    this.#offerSdp = offerSdp
+    this.#answerSdp = answerSdp
+    this.#bound = false
+    this.#bindingFailure = null
+    this.#bindingStarted = false
+    this.#pendingProof = null
+  }
+
+  #bindingStarted = false
+  #pendingProof = null
+
+  /** The transcript inputs, or null until both descriptions are known. */
+  #bindingParams() {
+    if (!this.#offerSdp || !this.#answerSdp) return null
+    const offerer = this.#role === 'offerer'
+    return {
+      offererPodId: offerer ? this.#localPodId : this.#remotePodId,
+      answererPodId: offerer ? this.#remotePodId : this.#localPodId,
+      offerFingerprints: extractDtlsFingerprints(this.#offerSdp),
+      answerFingerprints: extractDtlsFingerprints(this.#answerSdp),
+    }
+  }
+
+  /** Send our proof once both descriptions are known and the control channel is open. */
+  #maybeStartBinding() {
+    if (!this.#identity || this.#bindingStarted || this.#state === 'closed') return
+    const params = this.#bindingParams()
+    if (!params || this.#dataChannel?.readyState !== 'open') return
+    this.#bindingStarted = true
+    if (!params.offerFingerprints.length || !params.answerFingerprints.length) {
+      this.#failBinding('no-fingerprint')
+      return
+    }
+    if (this.#bindingRequired) {
+      this.#bindingTimer = setTimeout(() => {
+        if (!this.#bound) this.#failBinding('timeout')
+      }, this.#bindingTimeoutMs)
+      if (typeof this.#bindingTimer?.unref === 'function') this.#bindingTimer.unref()
+    }
+    const dc = this.#dataChannel
+    createBindingProof(this.#identity, { ...params, signer: this.#role })
+      .then((proof) => {
+        if (this.#state !== 'closed' && dc.readyState === 'open') dc.send(JSON.stringify(proof))
+      })
+      .catch((err) => this.#failBinding(`could not sign: ${err?.message || err}`))
+    if (this.#pendingProof) {
+      const held = this.#pendingProof
+      this.#pendingProof = null
+      this.#onBindingFrame(held)
+    }
+  }
+
+  async #onBindingFrame(frame) {
+    if (this.#bound || this.#state === 'closed') return
+    const params = this.#bindingParams()
+    if (!params) {
+      this.#pendingProof = frame // the descriptions are not both applied yet
+      return
+    }
+    const verdict = await verifyBindingProof(frame, {
+      ...params,
+      expectedPodId: this.#remotePodId,
+      peerRole: this.#role === 'offerer' ? 'answerer' : 'offerer',
+    })
+    if (this.#state === 'closed' || this.#bound) return
+    if (!verdict.ok) {
+      this.#failBinding(verdict.reason)
+      return
+    }
+    this.#bound = true
+    clearTimeout(this.#bindingTimer)
+    this.#bindingTimer = null
+    this.#log(`Verified identity of ${this.#remotePodId}`)
+    if (this.#state === 'connecting') this.#setState('connected')
+  }
+
+  /** A connection that fails the proof is closed and reported. */
+  #failBinding(reason) {
+    if (this.#state === 'closed') return
+    this.#bindingFailure = reason
+    clearTimeout(this.#bindingTimer)
+    this.#bindingTimer = null
+    this.#log(`Identity binding with ${this.#remotePodId} failed: ${reason}`)
+    this.#fireError(new Error(`identity binding failed: ${reason}`))
+    this.close()
   }
 
   #fireClose() {
@@ -1239,6 +1414,9 @@ export class WebRTCMeshManager {
   #maxReconnectAttempts
   #reconnectBaseDelayMs
   #disconnectedGraceMs
+  #identity
+  #requirePeerBinding
+  #bindingTimeoutMs
   #lastStats = []
 
   /**
@@ -1254,12 +1432,20 @@ export class WebRTCMeshManager {
    * @param {number} [opts.disconnectedGraceMs=5000] - Passed to every connection:
    *   how long a peer connection may sit in the transient `disconnected` state
    *   before it counts as an error worth reconnecting over.
+   * @param {object} [opts.identity] - This pod's `PodIdentity`; passed to every connection to
+   *   enable identity binding (see `WebRTCPeerConnection`). `requirePeerBinding` and
+   *   `bindingTimeoutMs` are passed along with it.
    */
   constructor({
     localPodId, iceServers, iceTransportPolicy, onLog,
     maxReconnectAttempts = 5, reconnectBaseDelayMs = 1000, disconnectedGraceMs = 5000,
+    identity, requirePeerBinding = true, bindingTimeoutMs = DEFAULT_BINDING_TIMEOUT_MS,
   } = {}) {
     if (!localPodId) throw new Error('localPodId is required')
+    if (identity && identity.podId !== localPodId) throw new Error('identity.podId must equal localPodId')
+    this.#identity = identity ?? null
+    this.#requirePeerBinding = requirePeerBinding
+    this.#bindingTimeoutMs = bindingTimeoutMs
     this.#localPodId = localPodId
     this.#iceServers = iceServers || [...DEFAULT_ICE_SERVERS]
     this.#iceTransportPolicy = resolveIceTransportPolicy(iceTransportPolicy, this.#iceServers)
@@ -1334,6 +1520,11 @@ export class WebRTCMeshManager {
       iceTransportPolicy: this.#iceTransportPolicy,
       onLog: this.#onLog,
       disconnectedGraceMs: this.#disconnectedGraceMs,
+      ...(this.#identity ? {
+        identity: this.#identity,
+        requirePeerBinding: this.#requirePeerBinding,
+        bindingTimeoutMs: this.#bindingTimeoutMs,
+      } : {}),
     })
     // Forward messages to manager-level listeners
     conn.onMessage((data) => {

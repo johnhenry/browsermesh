@@ -24,6 +24,7 @@ import {
 } from './messages.mjs'
 import { BroadcastChannelTransport, NullTransport } from './transport.mjs'
 import { TransportDiscovery, NullDiscovery } from './discovery.mjs'
+import { MessageSigner, ReplayGuard, verifyMessage, DROP_REASONS } from './signed-message.mjs'
 
 const POD_RUNTIME_KEY = Symbol.for('pod.runtime')
 const DEFAULT_HANDSHAKE_TIMEOUT = 1000
@@ -45,6 +46,12 @@ export class Pod {
   #discovery = null
   #messageHandler = null
   #g = null
+  #signer = null
+  #guard = new ReplayGuard()
+  #allowUnsigned = undefined
+  #trust = 'untrusted'
+  #rx = Promise.resolve()
+  #dropped = Object.fromEntries(DROP_REASONS.map((r) => [r, 0]))
 
   // ── Getters ──────────────────────────────────────────────────
 
@@ -66,6 +73,14 @@ export class Pod {
   /** @returns {PodState} */
   get state() { return this.#state }
 
+  /**
+   * Messages refused so far, by reason (`unsigned`, `unsigned-rpc`, `malformed`,
+   * `sender-mismatch`, `bad-signature`, `replay`). Each is also announced as a
+   * `message:dropped` event `{ reason, type }`.
+   * @returns {Record<string, number>}
+   */
+  get dropped() { return { ...this.#dropped } }
+
   /** @returns {Map<string, object>} podId → peer info */
   get peers() { return new Map(this.#peers) }
 
@@ -85,6 +100,15 @@ export class Pod {
    * @param {number} [opts.handshakeTimeout] - ms to wait for parent ACK
    * @param {number} [opts.discoveryTimeout] - ms to wait for peer responses
    * @param {object} [opts.globalThis] - Override globalThis for testing
+   * @param {boolean} [opts.sign=true] - Sign outgoing `pod:message`/`pod:rpc-*` messages with this pod's key.
+   *   `send()` then returns a promise that settles once the message is on the transport.
+   * @param {boolean} [opts.allowUnsigned] - Accept unsigned `pod:message` / `pod:rpc-response`
+   *   from older peers. Default: `true` when the transport reports `trust === 'same-origin'`
+   *   (BroadcastChannel, in-process) and for messages posted to the window; `false` for every
+   *   other transport (WebSocket relay, custom adapters). Unsigned `pod:rpc-request`s are never
+   *   accepted. A message that carries a signature must verify whatever this is set to.
+   * @param {'same-origin'|'untrusted'} [opts.trust] - Overrides the transport's own `trust`.
+   * @param {{ maxSenders?: number, maxSessionsPerSender?: number }} [opts.replay] - Bounds of the replay window state.
    */
   async boot(opts = {}) {
     if (this.#state !== 'idle') {
@@ -97,6 +121,11 @@ export class Pod {
       // Phase 0: Install Runtime
       this._emit('phase', { phase: 0, name: 'install-runtime' })
       this.#identity = opts.identity || await PodIdentity.generate()
+      this.#signer = opts.sign !== false && MessageSigner.canSign(this.#identity)
+        ? new MessageSigner(this.#identity)
+        : null
+      this.#allowUnsigned = opts.allowUnsigned
+      this.#guard = new ReplayGuard(opts.replay)
       this.#kind = detectPodKind(this.#g)
       this.#capabilities = detectCapabilities(this.#g)
       this.#g[POD_RUNTIME_KEY] = {
@@ -179,8 +208,14 @@ export class Pod {
   /**
    * Send a message to a specific peer via the transport.
    *
+   * Messages are signed by default (see `signed-message.mjs`), which needs a
+   * JSON-compatible payload and makes sending asynchronous: await the
+   * returned promise before relying on the message having been handed to the
+   * transport.
+   *
    * @param {string} targetPodId
    * @param {*} payload
+   * @returns {Promise<void>}
    */
   send(targetPodId, payload) {
     if (this.#state !== 'ready') {
@@ -189,18 +224,25 @@ export class Pod {
     if (!this.#transport) {
       throw new Error('No transport available')
     }
-    this.#transport.send(
-      createMessage({ from: this.podId, to: targetPodId, payload })
-    )
+    const msg = createMessage({ from: this.podId, to: targetPodId, payload })
+    const transport = this.#transport
+    if (!this.#signer) {
+      transport.send(msg)
+      return Promise.resolve()
+    }
+    return this.#signer.sign(msg).then((signed) => {
+      if (this.#transport === transport) transport.send(signed)
+    })
   }
 
   /**
    * Broadcast a message to all peers via the transport.
    *
    * @param {*} payload
+   * @returns {Promise<void>}
    */
   broadcast(payload) {
-    this.send('*', payload)
+    return this.send('*', payload)
   }
 
   // ── Events ───────────────────────────────────────────────────
@@ -267,7 +309,7 @@ export class Pod {
     this.#messageHandler = (event) => {
       const data = event.data
       if (!data || !data.type) return
-      this.#handleIncoming(data)
+      this.#handleIncoming(data, 'window')
     }
     this.#g.addEventListener('message', this.#messageHandler)
   }
@@ -342,8 +384,9 @@ export class Pod {
     this.#discovery.onPeerLost((info) => {
       this.#removePeer(info.podId)
     })
-    this.#discovery.onMessage((msg) => {
-      this.#handleIncoming(msg)
+    this.#trust = opts.trust ?? opts.discovery?.trust ?? this.#transport?.trust ?? 'untrusted'
+    this.#discovery.onMessage((msg, meta) => {
+      this.#handleIncoming(msg, 'transport', meta)
     })
 
     // Run discovery
@@ -362,7 +405,12 @@ export class Pod {
 
   // ── Private: message routing ─────────────────────────────────
 
-  #handleIncoming(data) {
+  /**
+   * @param {object} data
+   * @param {'window'|'transport'} [source]
+   * @param {{ peerId?: string }} [meta] - `peerId`: the peer identity the link itself authenticated
+   */
+  #handleIncoming(data, source = 'transport', meta) {
     switch (data.type) {
       case POD_HELLO: {
         if (data.podId !== this.podId) {
@@ -389,12 +437,48 @@ export class Pod {
       case POD_RPC_REQUEST:
       case POD_RPC_RESPONSE: {
         if (data.to === this.podId || data.to === '*') {
-          this._onMessage(data)
-          this._emit('message', data)
+          // Verification is asynchronous; one queue keeps arrival order.
+          this.#rx = this.#rx.then(() => this.#receive(data, source, meta)).catch(() => {})
         }
         break
       }
     }
+  }
+
+  /**
+   * Decide whether a message that targets this pod is delivered, and as
+   * whom. The sender is never read from a field the sender or a relay wrote:
+   * it is the identity the link authenticated, or the key that signed.
+   */
+  async #receive(data, source, meta) {
+    const drop = (reason) => {
+      this.#dropped[reason]++
+      this._emit('message:dropped', { reason, type: data.type })
+    }
+    if (this.#state === 'shutdown') return
+
+    const linkPeer = typeof meta?.peerId === 'string' ? meta.peerId : null
+    let delivered
+
+    if (linkPeer !== null) {
+      // The link authenticates the peer: the sender is the link's identity,
+      // and a message that claims another one is dropped.
+      if (data.from !== linkPeer) return drop('sender-mismatch')
+      delivered = { ...data, authenticated: true }
+    } else if (data.sig !== undefined || data.pk !== undefined) {
+      const verdict = await verifyMessage(data, { guard: this.#guard })
+      if (!verdict.ok) return drop(verdict.reason)
+      delivered = { ...verdict.message, authenticated: true }
+    } else {
+      if (data.type === POD_RPC_REQUEST) return drop('unsigned-rpc')
+      const allowed = this.#allowUnsigned ?? (source === 'window' || this.#trust === 'same-origin')
+      if (!allowed) return drop('unsigned')
+      delivered = { ...data, authenticated: false }
+    }
+
+    if (this.#state === 'shutdown') return
+    this._onMessage(delivered)
+    this._emit('message', delivered)
   }
 
   #addPeer(podId, info) {

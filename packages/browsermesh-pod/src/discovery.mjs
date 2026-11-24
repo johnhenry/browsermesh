@@ -69,7 +69,8 @@ export class TransportDiscovery {
 
   /**
    * Register handler for non-discovery messages that come through the transport.
-   * @param {(msg: object) => void} handler
+   * @param {(msg: object, meta?: { peerId?: string }) => void} handler - `meta.peerId` is set by a
+   *   transport whose link authenticates the peer (see `Pod`'s `allowUnsigned` notes).
    */
   onMessage(handler) {
     this.#onNonDiscoveryMessage = handler
@@ -81,9 +82,9 @@ export class TransportDiscovery {
    */
   async start() {
     // Wire message routing
-    this.#transport.onMessage((msg) => {
+    this.#transport.onMessage((msg, meta) => {
       if (!msg || !msg.type) return
-      this.#handleMessage(msg)
+      this.#handleMessage(msg, meta)
     })
 
     // Open transport if not already open
@@ -120,7 +121,7 @@ export class TransportDiscovery {
     await this.#transport.close()
   }
 
-  #handleMessage(msg) {
+  #handleMessage(msg, meta) {
     switch (msg.type) {
       case POD_HELLO: {
         if (msg.podId === this.#localPodId) return
@@ -153,7 +154,7 @@ export class TransportDiscovery {
       default: {
         // Non-discovery message — pass through
         if (this.#onNonDiscoveryMessage) {
-          this.#onNonDiscoveryMessage(msg)
+          this.#onNonDiscoveryMessage(msg, meta)
         }
         break
       }
