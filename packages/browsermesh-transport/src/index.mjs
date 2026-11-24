@@ -12,6 +12,7 @@ export * from './wsh-bridge.mjs';
 export * from './wsh-frames.mjs';
 export * from './wsh-links.mjs';
 export * from './wsh-services.mjs';
+export * from './wsh-relay.mjs';
 export * from './wsh-pod-transport.mjs';
 // `wsh-in-process.mjs` (the in-process test relay) is deliberately NOT exported
 // here: it imports wsh's pipe relay, which reaches for Node modules, and a

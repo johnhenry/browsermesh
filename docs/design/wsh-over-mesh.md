@@ -4,24 +4,19 @@ Item 7 of [#334](https://github.com/johnhenry/browsermesh/issues/334): a pod ser
 channel between two pods instead of over a relay. Built on wsh 0.50's `@johnhenry/wsh/duplex` (`createDuplexSocket`,
 `serveWshOverDuplex`, `connectWshOverDuplex`) and its design note `spec/duplex-binding.md`, which this page does not repeat.
 
-## The owner's question (part b is not built)
+## Decided (owner, 2026-11-24)
 
-**Should a pod be able to relay a wsh session for a mesh peer (a mesh `--via`), and if so under which scope and bounds?**
-Part (a) below is built. Part (b) is only designed, because three choices in it are the owner's and none has a conservative
-default that is also useful:
+The question this note asked was: should a pod relay a wsh session for a mesh peer (a mesh `--via`), and under which scope and
+bounds? The owner's answer: **yes, with a per-target grant.** Part (b) is specified below ("The relaying pod") and built in
+`packages/browsermesh-transport/src/wsh-relay.mjs`.
 
-1. **Whether relaying exists in this repository at all.** A relaying pod carries bytes it cannot read for a peer to a target
-   it can reach. That makes it a proxy for whoever it admits: whatever the target does to a caller, the relay's address is
-   the one the target sees, and a relay that is granted widely is an open door to the pod's network. Nothing else here
-   offers a pod's network position to a mesh peer (a mesh grant never gives a machine right).
-2. **The scope.** The proposal is `wsh-relay:<target>:open` through the registry, where `<target>` is a name the relaying pod
-   chose and listed (never an address the caller sends), default deny, no wildcard that the registry would not already give
-   (`wsh-relay:*:open` is the operator's explicit "every target I listed"). The alternative is one scope for all targets
-   (`wsh-relay:open`), simpler and coarser.
-3. **The bounds.** Proposed: a count of relayed sessions (default 2), a byte and time budget per session, and a refusal to
-   relay to a target that is itself a mesh peer (no chains of relays). These are the numbers someone has to pick.
-
-Until those are answered nothing is built: a pod that does not construct the relay offers no relay.
+- Off by default; nothing in the repository constructs it. A pod relays only when the embedder creates and starts a `WshRelay`
+  AND the requesting peer holds the registry grant `wsh-relay:<target>:open` for THAT target.
+- The target is named exactly: a **pod id** (that pod's wsh services host, reached over the mesh) or a **name the relaying pod's
+  operator mapped** to a pipe relay URL and rendezvous id. Never an address the requester supplies: the relaying pod is not an
+  open proxy and not an SSRF tool.
+- A wildcard is refused unless acknowledged (`wideTargets: true`, as `wideEntries` is for wsh's object roots).
+- Bounds, no chains, audit and revocation: below.
 
 ## What is built (part a)
 
@@ -73,11 +68,62 @@ own account of a duplex hop; the tests below make a hostile hop do each of those
 
 ### What is not built
 
-- The relaying pod (above), and any `--via` form.
-- A **machine** host over a mesh link (the machine side would need a wsh host reachable through a pod: part b).
-- Exec, pty, files, the gateway, endpoints, targets over the mesh channel: never, by this design; the same host serves it.
-- A browser run of the new path (the in-memory bus and real WebRTC in Node are tested; the browser suite is unchanged).
+- Chains of relays: refused, by design (below).
+- A machine host served BY a pod over a mesh link: a machine host is reached through a relaying pod's mapped name (below), not served by the pod.
+- Exec, pty, files, the gateway, endpoints, targets over the mesh channel to a pod's services: never, by this design; the same host serves it.
+- A browser run of the new paths (the in-memory bus and real WebRTC in Node are tested; the browser suite is unchanged).
 - Reconnecting a session over a new channel: a new channel is a new session.
+
+## The relaying pod (`WshRelay`)
+
+A pod that is linked to both a requester A and a target T carries A's wsh session to T without being able to read it. The
+relaying pod never terminates wsh: it moves opaque byte messages between two duplexes and nothing else.
+
+**Protocol.** A opens the protocol channel `wsh-relay` to the relaying pod R (the protocol host's own `protocol:wsh-relay:open`,
+default deny: the mesh question), and sends ONE control message `{ t: 'open', target, hops: 0 }`. R answers
+`{ t: 'ok' }` or `{ t: 'refused', reason }` (and closes). After `ok`, every message of the channel is a `Uint8Array`, the
+duplex of wsh's `connectWshOverDuplex`, and R forwards it unchanged to the **leg**; whatever the leg sends goes back the same way.
+A message that is not bytes after `ok` ends the session.
+
+**The leg.** For a target that is a pod id R opens the protocol `wsh` on T (T's `WshServices.serveOnMesh`) from its own mesh service;
+for a named target R dials the pipe relay URL and rendezvous id its operator mapped to that name (`targets: { name: { relay, id } }`)
+and the bytes are carried on that socket as they are. T must be linked to R, and T's own rules still apply: R needs
+`protocol:wsh:open` at T, and because the key that logs in is A's and not R's, T lists R in `acceptVia` (a `WshServices` option, empty by
+default; the key must still hold `wsh-services:open` at T). T therefore decides which relays may carry keys to it.
+
+**Who may ask.** Two grants, both default deny: `protocol:wsh-relay:open` (the control channel) and
+**`wsh-relay:<target>:open`** for the exact target of THIS session, asked of the registry per session and again whenever the
+registry says the requester's access changed: revoking it ends the relayed session at once. `<target>` is a pod id (43 characters)
+or a configured name (`[A-Za-z0-9][A-Za-z0-9._-]{0,63}`, never shaped like a pod id). A target the operator did not
+configure by name, and that is not a pod id, is `unknown-target`. A grant with a wildcard target (`wsh-relay:*:open`) would let a
+peer name any pod, so it is refused (`wildcard-grant`, checked by asking the registry about the literal target `*`) unless the relay
+was created with `wideTargets: true`; `targets` entries named `*` are refused at creation the same way.
+
+**Bounds** (each refusal and end is named): at most `maxSessions` relayed sessions at once (default 2, `too-many-sessions`),
+one per requesting pod (structural: the protocol host allows one `wsh-relay` channel per peer, a second open is `already-open`), `maxBytes` per session in both directions together (default
+64 MiB, ends with `byte-budget`), `maxDurationMs` per session (default one hour, `time-budget`) and `idleMs` without traffic (default
+five minutes, `idle`).
+
+**No chains.** A relayed session cannot be relayed onward. By construction: R's outbound leg only ever opens the protocol `wsh` on a
+pod or dials a mapped URL: never `wsh-relay`, so there is no way to name another relaying pod as a hop. By marker: the control
+message carries `hops`, which a requester sends as 0; a relaying pod refuses anything else, and a missing marker (`chain`), so a
+forwarded request (which would carry a hop count) never relays again. The grant model backs it: a requester needs a
+`wsh-relay:<target>:open` grant for the exact target, and an operator grants none for a pod that only relays. A request that names the
+relaying pod itself or the requester is refused (`loop`). A relay has ONE `wsh` channel per target pod at a time (the protocol host's
+rule), so a second session to the same pod through the same relay is refused `target-busy` until the first ends.
+
+**What it sees and can do.** It sees who asks (pod id), the target, that a session exists, when it starts and ends, the size and timing
+of every message, and the plain handshake (the host's public key, the user name, the client's key and features). It cannot read or
+alter anything after sealing without the session ending, replay, log in as the client, or serve as the target to a client that pinned the
+target's key: the client names the target's host key (a pod id for a pod; the operator-given fingerprint for a named machine), so a relay
+that answers for the target is refused by the client. It can drop, delay, end the session, or refuse it. It cannot tell a sealed session
+from a plain one by looking; it can enforce only that it forwards `wsh` duplex bytes between exactly two legs and never terminates wsh. A
+client that asks for a plain session through a relay gets one: the sealed-only rule is the TARGET's (`WshServices` serves nothing
+unsealed), and `connectWshServicesViaRelay` never asks for anything else.
+
+**Audit and indicator.** `onAudit` events `relay-open` (requester, target), `relay-refused` (reason), `relay-close` (requester,
+target, bytes, duration, reason): pod ids, never content. As with the services, `start()` needs an `indicator` (`connected(who, control)`
+/ `disconnected(who)`, `control.stop()` ends that session) or `unattended: true`, so a page that relays shows that it does.
 
 ## Compatibility
 
