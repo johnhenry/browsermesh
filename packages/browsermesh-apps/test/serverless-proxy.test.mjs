@@ -120,6 +120,60 @@ describe('createProxyHandler', () => {
     assert.equal(dec.decode(res.body), '<html>spa shell</html>')
   })
 
+  it('refuses a path that would leave the target origin, sending nothing', async () => {
+    const seen = []
+    const second = http.createServer((req, res) => { seen.push(req.url); res.end('x') })
+    await new Promise((r) => second.listen(0, '127.0.0.1', r))
+    const o = second.address().port
+    try {
+      const handler = createProxyHandler({ targetOrigin: origin })
+      const paths = [
+        `//127.0.0.1:${o}/x`, `@127.0.0.1:${o}/x`, `127.0.0.1:${o}/x`, `http://127.0.0.1:${o}/x`,
+        `/\\127.0.0.1:${o}/x`, `\\\\127.0.0.1:${o}/x`, '/x\r\ny', '/x\u0000', '/a b', 5, {},
+      ]
+      for (const path of paths) {
+        const res = await handler({ path, method: 'GET' })
+        assert.equal(res.status, 400, `path ${JSON.stringify(path)} must be refused`)
+      }
+      assert.deepEqual(seen, [])
+    } finally {
+      await new Promise((r) => { second.closeAllConnections(); second.close(r) })
+    }
+  })
+
+  it('does not follow a redirect, including one to another origin', async () => {
+    const seen = []
+    const second = http.createServer((req, res) => { seen.push(req.url); res.end('x') })
+    await new Promise((r) => second.listen(0, '127.0.0.1', r))
+    const o = second.address().port
+    const redirecting = http.createServer((req, res) => {
+      res.writeHead(302, { location: `http://127.0.0.1:${o}/landed` })
+      res.end()
+    })
+    await new Promise((r) => redirecting.listen(0, '127.0.0.1', r))
+    try {
+      const handler = createProxyHandler({ targetOrigin: `http://127.0.0.1:${redirecting.address().port}` })
+      const res = await handler({ path: '/go', method: 'GET' })
+      assert.equal(res.status, 302)
+      assert.deepEqual(seen, [])
+    } finally {
+      await new Promise((r) => { second.closeAllConnections(); second.close(r) })
+      await new Promise((r) => { redirecting.closeAllConnections(); redirecting.close(r) })
+    }
+  })
+
+  it('bounds the response body', async () => {
+    const big = http.createServer((req, res) => { res.writeHead(200); res.write(Buffer.alloc(64 * 1024)); res.end(Buffer.alloc(64 * 1024)) })
+    await new Promise((r) => big.listen(0, '127.0.0.1', r))
+    try {
+      const handler = createProxyHandler({ targetOrigin: `http://127.0.0.1:${big.address().port}`, maxResponseBytes: 1024 })
+      const res = await handler({ path: '/', method: 'GET' })
+      assert.equal(res.status, 502)
+    } finally {
+      await new Promise((r) => { big.closeAllConnections(); big.close(r) })
+    }
+  })
+
   it('returns a clean 502 (never throws) when the target is unreachable', async () => {
     const handler = createProxyHandler({ targetOrigin: 'http://127.0.0.1:1' }) // port 1: nothing listens, connection refused
     const res = await handler({ path: '/', method: 'GET' })

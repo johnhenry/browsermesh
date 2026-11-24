@@ -841,7 +841,9 @@ describe('createMeshRoutingService: ServerSharing wiring (opt-in via fetchFn)', 
 
     const fetchCalls = [];
     const events = [];
+    bob.registry.grantCapabilities(alice.podId, ['server-share:api:request']);
     const { api: bobApi, on: bobOn } = attachService(nodeB, undefined, createMeshRoutingService({
+      registry: bob.registry,
       fetchFn: async (url, init) => {
         fetchCalls.push({ url, init });
         return {
@@ -874,7 +876,8 @@ describe('createMeshRoutingService: ServerSharing wiring (opt-in via fetchFn)', 
     const mesh = wireRestrictedMesh([alice, bob], [[alice.podId, bob.podId]]);
     const { [alice.podId]: nodeA, [bob.podId]: nodeB } = mesh;
 
-    attachService(nodeB, undefined, createMeshRoutingService({ fetchFn: null }));
+    bob.registry.grantCapabilities(alice.podId, ['server-share:*:request']);
+    attachService(nodeB, undefined, createMeshRoutingService({ fetchFn: null, registry: bob.registry }));
     const { api: aliceApi } = attachService(nodeA, undefined, createMeshRoutingService({ fetchFn: null }));
 
     const res = await aliceApi.requestProxy(bob.podId, { name: 'nonexistent' });
@@ -907,7 +910,9 @@ describe('createMeshRoutingService: ServerSharing wiring (opt-in via fetchFn)', 
     const mesh = wireRestrictedMesh([alice, bob], [[alice.podId, bob.podId]]);
     const { [alice.podId]: nodeA, [bob.podId]: nodeB } = mesh;
 
+    bob.registry.grantCapabilities(alice.podId, ['server-share:whatever:request']);
     const { api: bobApi } = attachService(nodeB, undefined, createMeshRoutingService({
+      registry: bob.registry,
       fetchFn: () => new Promise(() => {}), // bob's fetchFn never resolves
     }));
     bobApi.expose(3000, 'whatever'); // must be exposed, or handleRequest() 404s instantly instead of hanging
@@ -921,6 +926,105 @@ describe('createMeshRoutingService: ServerSharing wiring (opt-in via fetchFn)', 
     await teardown();
 
     await assert.rejects(() => pending, /torn down/);
+  });
+
+  it('refuses a peer that holds no grant for the share, without calling fetchFn', async () => {
+    const alice = await createRoutingTestPeer('alice');
+    const bob = await createRoutingTestPeer('bob');
+    const mesh = wireRestrictedMesh([alice, bob], [[alice.podId, bob.podId]]);
+    const { [alice.podId]: nodeA, [bob.podId]: nodeB } = mesh;
+
+    let fetchCalls = 0;
+    const { api: bobApi } = attachService(nodeB, undefined, createMeshRoutingService({
+      registry: bob.registry,
+      fetchFn: async () => { fetchCalls++; return { status: 200, headers: new Map(), text: async () => 'ok' }; },
+    }));
+    bobApi.expose(3000, 'api');
+    const { api: aliceApi } = attachService(nodeA, undefined, createMeshRoutingService({ fetchFn: null }));
+
+    const res = await aliceApi.requestProxy(bob.podId, { name: 'api', path: '/data' });
+    assert.equal(res.status, 403);
+    assert.equal(fetchCalls, 0);
+
+    bob.registry.grantCapabilities(alice.podId, ['server-share:api:request']);
+    assert.equal((await aliceApi.requestProxy(bob.podId, { name: 'api', path: '/data' })).status, 200);
+    assert.equal(fetchCalls, 1);
+
+    bob.registry.revokeCapabilities(alice.podId, ['server-share:api:request']);
+    assert.equal((await aliceApi.requestProxy(bob.podId, { name: 'api', path: '/data' })).status, 403);
+    assert.equal(fetchCalls, 1);
+  });
+
+  it('refuses every request when the host has no registry', async () => {
+    const alice = await createRoutingTestPeer('alice');
+    const bob = await createRoutingTestPeer('bob');
+    const mesh = wireRestrictedMesh([alice, bob], [[alice.podId, bob.podId]]);
+    const { [alice.podId]: nodeA, [bob.podId]: nodeB } = mesh;
+    delete nodeB.registry;
+
+    let fetchCalls = 0;
+    const { api: bobApi } = attachService(nodeB, undefined, createMeshRoutingService({
+      fetchFn: async () => { fetchCalls++; return { status: 200, headers: new Map(), text: async () => 'ok' }; },
+    }));
+    bobApi.expose(3000, 'api');
+    const { api: aliceApi } = attachService(nodeA, undefined, createMeshRoutingService({ fetchFn: null }));
+
+    assert.equal((await aliceApi.requestProxy(bob.podId, { name: 'api' })).status, 403);
+    assert.equal(fetchCalls, 0);
+  });
+
+  it('takes the caller from the session the message arrived on, not from fields of the message', async () => {
+    const alice = await createRoutingTestPeer('alice');
+    const bob = await createRoutingTestPeer('bob');
+    const carol = await createRoutingTestPeer('carol');
+    const mesh = wireRestrictedMesh([alice, bob, carol], [[alice.podId, bob.podId], [carol.podId, bob.podId]]);
+    const { [bob.podId]: nodeB, [carol.podId]: nodeC } = mesh;
+
+    let fetchCalls = 0;
+    bob.registry.grantCapabilities(alice.podId, ['server-share:api:request']);
+    const { api: bobApi } = attachService(nodeB, undefined, createMeshRoutingService({
+      registry: bob.registry,
+      fetchFn: async () => { fetchCalls++; return { status: 200, headers: new Map(), text: async () => 'ok' }; },
+    }));
+    bobApi.expose(3000, 'api');
+
+    const replies = [];
+    nodeC.onIncomingData((from, data) => { if (data?.kind === 'proxy-response') replies.push(data); });
+    await nodeC.sendTo(bob.podId, {
+      type: 'mesh-server-share',
+      kind: 'proxy-request',
+      requestId: 'r1',
+      name: 'api',
+      method: 'GET',
+      path: '/data',
+      from: alice.podId,
+      fromPubKey: alice.podId,
+      source: alice.podId,
+    });
+    await waitFor(() => replies.length > 0, 1000, 'a reply to carol');
+    assert.equal(replies[0].status, 403);
+    assert.equal(fetchCalls, 0);
+  });
+
+  it('accepts a proxy response only from the peer the request was sent to', async () => {
+    const alice = await createRoutingTestPeer('alice');
+    const bob = await createRoutingTestPeer('bob');
+    const carol = await createRoutingTestPeer('carol');
+    const mesh = wireRestrictedMesh([alice, bob, carol], [[alice.podId, bob.podId], [alice.podId, carol.podId]]);
+    const { [alice.podId]: nodeA, [bob.podId]: nodeB, [carol.podId]: nodeC } = mesh;
+
+    let requestId = null;
+    nodeB.onIncomingData((from, data) => { if (data?.kind === 'proxy-request') requestId = data.requestId; });
+    const { api: aliceApi } = attachService(nodeA, undefined, createMeshRoutingService({ fetchFn: null, proxyTimeoutMs: 200 }));
+
+    const pending = aliceApi.requestProxy(bob.podId, { name: 'api' });
+    const settled = pending.then((v) => ({ v }), (e) => ({ e }));
+    await waitFor(() => requestId !== null, 1000, 'bob to see the request');
+    await nodeC.sendTo(alice.podId, { type: 'mesh-server-share', kind: 'proxy-response', requestId, status: 200, headers: {}, body: 'forged' });
+
+    const outcome = await settled;
+    assert.equal(outcome.v, undefined, 'the forged response was not delivered');
+    assert.match(outcome.e.message, /timed out/);
   });
 });
 
