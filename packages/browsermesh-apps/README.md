@@ -645,6 +645,36 @@ balance whoever sent the message). A payer who cannot fund the amount, or a
 malformed message, creates nothing, and the escrow is not also mirrored into the
 book (`listEscrows()` shows it once, as `source: 'manager'`).
 
+**Ledger hook (`attachEscrowLedger`).** The preferred way to take real escrows
+from the wire is to give the router the ledger as a hook, the shape
+`EscrowManager` already accepts: `router.attachEscrowLedger((op, amount, podId, memo) => ..., opts)`
+(`'debit'` must throw or reject when the balance is short, so nothing is held;
+`'credit'` pays or refunds). The documented default shape is a per-pod ledger:
+`attachEscrowLedger(createMultiPartyLedgerHook(multiPartyLedger))` (see
+`examples/20-escrow-over-the-wire.mjs`). Nothing is on by default, and with no
+hook the `SimpleEscrowBook` mirror behaves exactly as before. With a hook:
+
+- the payer is the **authenticated sender** (the `fromPodId` your transport wiring
+  passes, which must be the link's verified identity or a routed envelope's
+  verified originator, never a message field); a `payerPodId` in the message that
+  differs is refused (`payer-mismatch`) before any ledger call;
+- the message's `escrowId` is the request id: a repeat from the same sender is
+  answered with the first outcome and not charged again (ids remembered:
+  `maxRemembered`, default 10000; a failed attempt is not remembered, so it can be
+  retried);
+- an escrow is taken only for this pod as payee unless `acceptPayee` says
+  otherwise (a broadcast addressed to another pod debits nobody here);
+- bounds: `maxAmount` (1,000,000), `maxMemoBytes` (256), `maxTimeoutMs` (30 days),
+  escrow id `[A-Za-z0-9_.:-]{1,128}`;
+- the subscriber resolves `{ ok: true, escrowId }` or `{ ok: false, code }`, and
+  `router.handleEscrowCreate(payload, peer)` rejects with an `EscrowWireError`
+  carrying the same named `code` (`payer-mismatch`, `bad-amount`,
+  `amount-too-large`, `memo-too-large`, `ledger-refused`, ...);
+- every refusal is reported to `onAudit` as `{ type: 'escrow-create-refused', reason, peer, escrowId }`
+  (a repeat as `escrow-create-duplicate`). Events carry no amount and the router
+  logs none; note that `EscrowManager` itself logs the amount of a created
+  contract through its `onLog` at `info`, which this router leaves unset.
+
 ## Putting it all together: sync + kernel-gated mesh + relay on one connection
 
 Every composition layer above (`enableSync`, a `Kernel` wired via
