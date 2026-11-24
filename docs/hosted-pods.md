@@ -25,6 +25,17 @@ a supervisor) are all projections of it. Item 7, the **browser lane**, adds
 a third lane with three drivers of its own (in-page, CDP, extension) —
 see [§8b](#8b-lane-c--browser-pods).
 
+Later work is in `docs/design/`: the
+[Firecracker lane driver specification](design/hosted-pods-firecracker.md)
+(what is built, what has only run against a fake API, and what needs a
+Linux/KVM host) and the
+[security review of what a hosted pod can reach](design/hosted-pods-security-review.md)
+(per lane, with the denials that are tested and a "not defended" list).
+Placement logic across lanes (`planPlacement()`, `createHostPool()`) is in
+`packages/browsermesh-apps/src/pod-placement.mjs`; the `PodRuntime` adapter
+and the `worker_threads` / permission-model runtimes (the honest in-process
+stand-ins for the isolate lane) are in `packages/browsermesh-pod`.
+
 ## Motivation
 
 `Pod` (`@johnhenry/browsermesh-pod`) is defined as "any execution context," but
