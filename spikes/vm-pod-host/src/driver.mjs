@@ -46,6 +46,7 @@ import {
   createUnsupportedDriverMethod,
   validatePodSpec,
 } from '../../../packages/browsermesh-pod/src/index.mjs'
+import { tapDeviceName } from './network-policy.mjs'
 
 /** Verbs this driver serves. `send` is absent on purpose — see the module doc comment. */
 const VERBS = Object.freeze([
@@ -85,7 +86,11 @@ function translateError(err, name) {
  * @param {object} vmPodHost - A `VmPodHost` (host-pod.mjs).
  * @param {object} [opts]
  * @param {string} [opts.kernelImage='/boot/vmlinux'] - Host path to the guest kernel.
- * @param {string} [opts.rootfs='/vm/rootfs.ext4'] - Default rootfs image.
+ * @param {string} [opts.rootfs='/vm/rootfs.ext4'] - Default BASE image. Never
+ *   attached to a VM: each pod gets its own copy under `runDir`.
+ * @param {object} [opts.network] - `buildNetworkPlan()` options applied to
+ *   every pod: `{uplink, egress: {mode, allowCidrs}}`. Default egress is
+ *   public addresses only.
  * @param {Record<string, string>} [opts.rootfsCatalog] - Maps a podspec's
  *   `run.ref` (for `run.kind: 'rootfs'`) to a host path. A ref with no
  *   catalog entry is rejected `EINVAL`: a remote requester never names a
@@ -112,6 +117,7 @@ export function createVmPodDriver(vmPodHost, opts = {}) {
     snapshotDir = '/vm/snapshots',
     runDir = '/vm/run',
     firstGuestCid = 3,
+    network,
     idleTimeoutMs,
     dryRun,
     spawnOptions,
@@ -197,10 +203,10 @@ export function createVmPodDriver(vmPodHost, opts = {}) {
         )
       }
 
-      let rootfs = defaultRootfs
+      let rootfsBase = defaultRootfs
       if (value.run.kind === 'rootfs') {
-        rootfs = rootfsCatalog ? rootfsCatalog[value.run.ref] : undefined
-        if (!rootfs) {
+        rootfsBase = rootfsCatalog && Object.hasOwn(rootfsCatalog, value.run.ref) ? rootfsCatalog[value.run.ref] : undefined
+        if (!rootfsBase) {
           throw new PodHostDriverError(
             POD_HOST_ERROR.ENOENT,
             `no rootfs registered under '${value.run.ref}'`,
@@ -215,9 +221,13 @@ export function createVmPodDriver(vmPodHost, opts = {}) {
 
       const spawnOpts = {
         kernelImage,
-        rootfs,
-        tap: { hostDevName: `tap-${name}` },
+        // The catalog entry is a shared, read-only base; each pod boots its
+        // own copy, so one pod's writes are never another pod's disk.
+        rootfsBase,
+        rootfs: `${runDir}/${name}/rootfs.ext4`,
+        tap: { hostDevName: tapDeviceName(name) },
         vsock: { guestCid, udsPath: `${runDir}/${name}.vsock` },
+        ...(network === undefined ? {} : { network }),
         limits: value.limits ?? {},
         snapshotDir,
         ...(idleTimeoutMs === undefined ? {} : { idleTimeoutMs }),

@@ -31,10 +31,43 @@ describe('VmPodHost', () => {
     const vmPod = await host.spawn('demo', DEMO_OPTS)
 
     assert.equal(vmPod.state, 'booting')
-    assert.equal(vmPod.plannedCommands[0].description, 'spawn jailer (fronting firecracker)')
+    assert.equal(vmPod.plannedCommands[0].description, 'start a fresh jailed firecracker process')
     assert.deepEqual(vmPod.plannedCommands[0].argv.slice(0, 5), ['jailer', '--id', 'demo', '--exec-file', '/usr/bin/firecracker'])
-    // TAP setup commands follow the jailer spawn.
+    assert.ok(vmPod.plannedCommands[0].argv.includes('--daemonize'), 'VmPod starts the VMM, so it must return')
+    // Network setup follows the jailer spawn.
     assert.equal(vmPod.plannedCommands[1].argv[0], 'ip')
+  })
+
+  it('runs each VMM as its own non-root identity unless the operator names one', async () => {
+    const host = new VmPodHost({ dryRun: true })
+    await host.start()
+    const a = await host.spawn('a', { ...DEMO_OPTS, vsock: { guestCid: 3, udsPath: '/vm/a.sock' } })
+    const b = await host.spawn('b', { ...DEMO_OPTS, vsock: { guestCid: 4, udsPath: '/vm/b.sock' } })
+    const ids = (pod) => {
+      const argv = pod.plannedCommands[0].argv
+      return [argv[argv.indexOf('--uid') + 1], argv[argv.indexOf('--gid') + 1]]
+    }
+    assert.deepEqual(ids(a), ['100003', '100003'])
+    assert.deepEqual(ids(b), ['100004', '100004'])
+  })
+
+  it('refuses an operator-supplied root uid or gid for the jailer', async () => {
+    for (const jailer of [{ uid: 0, gid: 100 }, { uid: 100, gid: 0 }]) {
+      const host = new VmPodHost({ dryRun: true, jailer })
+      await host.start()
+      await assert.rejects(() => host.spawn('demo', DEMO_OPTS), /non-zero/)
+    }
+    // A base that would land a VM on uid 0 is refused too (cid >= 3 keeps this unreachable, but check the rule).
+    const host = new VmPodHost({ dryRun: true, jailer: { uidBase: -3, gidBase: 100 } })
+    await host.start()
+    await assert.rejects(() => host.spawn('demo', DEMO_OPTS), /non-zero/)
+  })
+
+  it('refuses a name the jailer would reject, before running anything', async () => {
+    const host = new VmPodHost({ dryRun: true })
+    await host.start()
+    await assert.rejects(() => host.spawn('has.dot', DEMO_OPTS), /cannot be a VM id/)
+    await assert.rejects(() => host.spawn('under_score', DEMO_OPTS), /cannot be a VM id/)
   })
 
   it('refuses to spawn the same name twice', async () => {

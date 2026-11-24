@@ -35,7 +35,7 @@ what didn't:
 | `src/cli.mjs` | **Yes, `--dry-run` only** | `node src/cli.mjs spawn demo --dry-run` runs end-to-end and prints the full planned command/call sequence (see below) |
 | `guest/init`, `guest/vsock-exec-responder.mjs` | **No** | Written and reviewed against the Firecracker docs; never executed (no guest kernel, no guest userland to run them in) |
 | `guest/build-rootfs.sh` | **No** | Written and reviewed; never executed (needs root, loop-mount, `mkfs.ext4`, none of which this spike attempted on macOS) |
-| Real `firecracker`/`jailer` binaries | **No** | Never installed or invoked. Every "host command" (`ip`, `nft`, `jailer`, `pkill`) that `vm-pod.mjs` would run is either skipped (`dryRun: true`) or routed through an injectable `exec(argv)` the caller controls — nothing in this spike shells out directly |
+| Real `firecracker`/`jailer` binaries | **No** | Never installed or invoked. Every "host command" (`ip`, `nft`, `jailer`, `cp`, and the pid-checked stop of the VMM) that `vm-pod.mjs` would run is either skipped (`dryRun: true`) or routed through an injectable `exec(argv)` the caller controls — nothing in this spike shells out directly |
 
 Two independent execution modes exist in `vm-pod.mjs`/`host-pod.mjs`,
 always available on every instance:
@@ -106,7 +106,7 @@ layer and nothing more — no second state machine:
 node --test spikes/vm-pod-host/test/*.test.mjs
 ```
 
-88 tests, all passing on macOS (Node v26), in well under a second —
+119 tests, all passing on macOS (Node v26), in well under a second —
 no network, no KVM, no sudo.
 
 ## Try it: `cli.mjs --dry-run`
@@ -120,10 +120,13 @@ cold boot:
 
 ```
 planned host commands:
-  $ jailer --id demo --exec-file /usr/bin/firecracker --uid 0 --gid 0 --chroot-base-dir /srv/jailer -- --api-sock /run/firecracker.socket   # spawn jailer (fronting firecracker)
-  $ ip tuntap add tap-demo mode tap   # create TAP device
-  $ ip link set tap-demo up   # bring TAP device up
-  $ nft add rule firecracker filter iifname tap-demo oifname eth0 accept   # nftables: allow TAP -> uplink forwarding (masquerade)
+  $ jailer --id demo --exec-file /usr/bin/firecracker --uid 100003 --gid 100003 --chroot-base-dir /srv/jailer --daemonize -- --api-sock /run/firecracker.socket   # start a fresh jailed firecracker process
+  $ ip tuntap add tap-demo mode tap
+  $ ip addr add 10.200.0.1/30 dev tap-demo
+  $ ip link set tap-demo up
+  $ nft add table inet fc-demo        # one table per pod: input drop, spoof drop,
+  ...                                 # private/link-local destinations dropped,
+                                      # public egress via masquerade, replies in only
 
 planned Firecracker API calls:
   putMachineConfig({"vcpu_count":1,"mem_size_mib":128,"track_dirty_pages":true})
@@ -167,17 +170,16 @@ intended path to turn "planned calls" into real ones.
      sudo spikes/vm-pod-host/guest/build-rootfs.sh ./rootfs.ext4
    ```
 
-4. **Create a TAP device + NAT** (see `docs/network-setup.md` on the
-   Firecracker `main` branch for the authoritative version):
+4. **Network.** `VmPod` creates the TAP, its address and its per-pod nft
+   table itself (`src/network-policy.mjs`; the exact commands are printed by
+   `--dry-run`), so the only host prerequisite is forwarding:
    ```sh
-   sudo ip tuntap add tap-demo mode tap
-   sudo ip addr add 172.16.0.1/30 dev tap-demo
-   sudo ip link set tap-demo up
    echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward
-   sudo nft add table firecracker
-   sudo nft 'add chain firecracker postrouting { type nat hook postrouting priority srcnat; policy accept; }'
-   sudo nft add rule firecracker postrouting ip saddr 172.16.0.2 oifname eth0 counter masquerade
    ```
+   The default egress policy forwards to public addresses only. A guest that
+   must reach a private address (for example a signaling server on the LAN)
+   needs `network: { egress: { allowCidrs: ['10.1.2.3/32'] } }` on the driver.
+   None of these rules has been applied to a real kernel yet.
 
 5. **Run it.**
    ```sh
