@@ -56,5 +56,16 @@ Locally you may point Playwright at a browser you already have with
 - Anything needing STUN/TURN, NAT traversal, or a non-loopback network.
 - The real `browsermesh-servers` relay/signalling (a test double stands in).
 - WebTransport, GPU, service workers, IndexedDB-backed storage.
-- Firefox and WebKit run in CI as allowed-to-fail legs and have not been run
-  locally.
+- Firefox and WebKit run in CI as allowed-to-fail legs.
+- WebKit and WebRTC: WebKit replaces a host ICE candidate's address with a
+  random `<uuid>.local` name that only multicast DNS can resolve, so two
+  contexts could not connect (ICE never started) and the four data-channel
+  tests timed out. Playwright's WebKit has no switch for this (Chromium and
+  Firefox get one in `playwright.config.mjs`); WebKit stops hiding addresses
+  while media capture is active, so under WebKit the harness grants the
+  microphone and keeps a capture stream open while a connection is negotiated
+  (`exposeHostCandidates()` in `fixtures.mjs`). That relies on Playwright's
+  WebKit mock capture device, not on a real microphone, and it makes WebKit's
+  candidates plain addresses rather than the obfuscated ones a real page
+  would send, so what the WebKit legs prove is the data channel, not WebKit's
+  default candidate privacy.

@@ -31,7 +31,10 @@ export const test = base.extend({
     const open = async (origin, { isolated = false, probe = false } = {}) => {
       let ctx = context
       if (isolated) {
-        ctx = await browser.newContext()
+        // WebKit hides host candidates behind mDNS names (`<uuid>.local`) unless
+        // media capture is active, and two pages of one browser cannot resolve
+        // each other's names here (no multicast): see `exposeHostCandidates`.
+        ctx = await browser.newContext(isWebKit(browser) ? { permissions: ['microphone'] } : {})
         extra.push(ctx)
       }
       const page = await ctx.newPage()
@@ -57,6 +60,27 @@ export const test = base.extend({
   },
 })
 
+const isWebKit = (browser) => browser.browserType().name() === 'webkit'
+
+/**
+ * WebKit replaces a host ICE candidate's address with a random `<uuid>.local`
+ * name and resolves such names by multicast DNS, which two pages of one
+ * browser cannot do here: ICE never starts (no state change at all), so a data
+ * channel between two WebKit contexts never opens. Chromium and Firefox have a
+ * switch for this (playwright.config.mjs); Playwright's WebKit has none, but
+ * WebKit stops hiding addresses while media capture is active. The context is
+ * granted the microphone and the page opens (and keeps) a capture stream
+ * (Playwright's WebKit provides a mock device), which makes the candidates
+ * plain loopback/LAN addresses. Nothing is captured or sent; the stream only
+ * has to be live while the connection is negotiated. A no-op elsewhere.
+ */
+async function exposeHostCandidates(page) {
+  if (page.context().browser().browserType().name() !== 'webkit') return
+  await page.evaluate(async () => {
+    window.bmCapture = await navigator.mediaDevices.getUserMedia({ audio: true })
+  })
+}
+
 /** Wait for a synchronous in-page predicate (never an async one: a Promise is truthy). */
 export const until = (page, fn, arg) => page.waitForFunction(fn, arg)
 
@@ -68,6 +92,8 @@ export const until = (page, fn, arg) => page.waitForFunction(fn, arg)
 export async function connectRtc(open, origin, ids = { a: 'pod-alice', b: 'pod-bob' }) {
   const alice = await open(origin, { isolated: true })
   const bob = await open(origin, { isolated: true })
+  await exposeHostCandidates(alice)
+  await exposeHostCandidates(bob)
   await alice.evaluate((i) => window.bm.rtcRegister({ local: i.a, remote: i.b }), ids)
   await bob.evaluate((i) => window.bm.rtcRegister({ local: i.b, remote: i.a }), ids)
   await alice.evaluate(() => window.bm.rtcOffer())
