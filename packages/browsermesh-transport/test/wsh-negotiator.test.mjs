@@ -78,6 +78,11 @@ describe('wsh `require` never falls back', () => {
     assert.deepEqual(calls, ['wsh', 'webrtc']);
   });
 
+  it('reports what it requires, so PeerNode can fail closed too', () => {
+    assert.equal(new MeshTransportNegotiator().required, null);
+    assert.equal(new MeshTransportNegotiator({ require: 'wsh' }).required, 'wsh');
+  });
+
   it('rejects a `require` that names an unknown type', () => {
     assert.throws(() => new MeshTransportNegotiator({ require: 'telnet' }), /Unknown transport type/);
   });

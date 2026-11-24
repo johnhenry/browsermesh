@@ -376,6 +376,9 @@ export class PeerNode {
           pubKey,
           error: err.message,
         })
+        // A negotiator told to require one transport (`require: 'wsh'`) must
+        // never fall through to a session on something else.
+        if (this.#transportNeg.required) throw err
         // Fall through to direct registry connection
       }
     }

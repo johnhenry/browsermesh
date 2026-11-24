@@ -367,6 +367,17 @@ export class MeshTransportNegotiator {
   }
 
   /**
+   * The transport type this negotiator was told to require, or `null`.
+   * `PeerNode.connectToPeer()` reads it: with a required transport a failed
+   * negotiation is a failed connect, never a session on something else.
+   *
+   * @returns {string|null}
+   */
+  get required() {
+    return this.#require;
+  }
+
+  /**
    * List transport types that have a registered adapter.
    *
    * @returns {string[]}

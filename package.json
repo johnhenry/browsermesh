@@ -35,7 +35,8 @@
     "example:14": "node examples/14-pod-host-over-mesh-fetch.mjs",
     "example:15": "node examples/15-agent-spawns-hosted-pod.mjs",
     "example:16": "node examples/16-supervised-hosted-pods.mjs",
-    "example:17": "node examples/17-mesh-channel.mjs"
+    "example:17": "node examples/17-mesh-channel.mjs",
+    "example:18": "node examples/18-wsh-sealed-peer-link.mjs"
   },
   "devDependencies": {
     "@changesets/cli": "^2.27.0",
