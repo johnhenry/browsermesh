@@ -10,9 +10,10 @@
 export const DEFAULT_IDENTITY = {
   version: '1.1',
   names: {
-    display: 'Clawser',
-    full: 'Clawser Agent Runtime',
-    aliases: ['claw', 'C'],
+    display: 'BrowserMesh',
+    full: 'BrowserMesh Agent Runtime',
+    // The earlier short names stay: an alias is something an identity answers to.
+    aliases: ['mesh', 'claw', 'C'],
   },
   bio: 'A browser-native AI agent that persists across sessions, manages tools, and adapts to your workflow.',
   psychology: {
