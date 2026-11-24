@@ -1206,6 +1206,15 @@ writes a `placement_denied` audit record. Verbs are independent: granting
 tenants gives each its own resource (`resource: 'pod-host:tenant-a'`)
 rather than trying to express tenancy inside one scope.
 
+A scope applies to every pod under the resource, so within one resource a
+requester holding `pod-host:status` or `pod-host:list` can read the others'
+pods. What it reads is limited: `env` values and `run.input` in a pod's
+`spec` are returned as `"[redacted]"` (the names stay) to every requester
+except the one that spawned that pod through this service; a pod the service
+did not spawn is redacted for everyone. Verbs on another requester's pod
+(`drain`, `exec`, `send`) are still allowed by the scope: separate resources
+are how tenants are kept apart.
+
 `describe()` is **not** gated, and travels on its own `pod-host:describe`
 envelope rather than as a ninth verb: it returns only what the host would
 publish in its announce metadata anyway, and a peer has to be able to find
