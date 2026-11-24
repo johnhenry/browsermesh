@@ -64,6 +64,10 @@ export declare class PodIdentity {
   readonly isExternalSigner: boolean;
   /** Raw 32-byte public key (public key export only). */
   rawPublicKey(): Promise<Uint8Array>;
+  /** The public key as an OpenSSH line (`ssh-ed25519 AAAA...`). Explicit; nothing calls it by default. */
+  toOpenSSHPublicKey(opts?: { comment?: string }): Promise<string>;
+  /** A wsh / OpenSSH authorized_keys line (`capabilities="..."` is required, even empty). Explicit; see docs/security.md "One key in both worlds". */
+  toAuthorizedKeysLine(opts: { capabilities: string[]; expires?: Date | number | string; comment?: string }): Promise<string>;
   /** Rejects unless the identity is exportable. */
   exportPrivateKey(format?: 'jwk' | 'pkcs8'): Promise<object | Uint8Array>;
   sign(data: BufferSource): Promise<Uint8Array>;
@@ -147,6 +151,15 @@ export interface RevocationStore {
 
 export declare function verifyWithRawPublicKey(rawPublicKey: Uint8Array, signature: Uint8Array, data: BufferSource): Promise<boolean>;
 export declare function podIdFromRawKey(rawPublicKey: Uint8Array): Promise<string>;
+/** pod id (base64url SHA-256 of the raw key) to wsh's fingerprint (the same hash in hex). Strict: 32 bytes. */
+export declare function podIdToFingerprint(podId: string): string;
+export declare function fingerprintToPodId(fingerprint: string): string;
+/** `ssh-ed25519 AAAA...` for a raw 32-byte key. */
+export declare function openSSHPublicKeyFromRaw(rawPublicKey: Uint8Array, opts?: { comment?: string }): string;
+/** The raw key of an `ssh-ed25519` public key line; refuses options, other key types and non-canonical encodings. */
+export declare function rawPublicKeyFromOpenSSH(line: string): Uint8Array;
+export declare function podIdFromOpenSSHPublicKey(line: string): Promise<string>;
+export declare function authorizedKeysLine(opts: { rawPublicKey: Uint8Array; capabilities: string[]; expires?: Date | number | string; comment?: string }): string;
 export declare function encodeSessionCertificateBody(c: SessionCertificateFields): Uint8Array;
 export declare function decodeSessionCertificate(credential: Uint8Array | string): DecodedSessionCertificate;
 export declare function issueSessionCertificate(identity: PodIdentity, opts: IssueOptions & { sessionPublicKey: Uint8Array | CryptoKey }): Promise<IssuedSessionCertificate>;

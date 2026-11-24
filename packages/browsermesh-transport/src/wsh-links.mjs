@@ -23,7 +23,7 @@
  * `listen()` / `connect()`.
  */
 
-import { encodeBase64url, decodeBase64url } from '@johnhenry/browsermesh-primitives';
+import { encodeBase64url, podIdToFingerprint, fingerprintToPodId, podIdFromRawKey } from '@johnhenry/browsermesh-primitives';
 import { encodeFrame, FrameDecoder, WshFrameError, DEFAULT_MAX_FRAME_BYTES } from './wsh-frames.mjs';
 
 // ---------------------------------------------------------------------------
@@ -58,43 +58,10 @@ const FATAL = new Set(['WSH_HOSTKEY_MISMATCH', 'WSH_REFUSED', 'WSH_NOT_SEALED', 
 // Identity
 // ---------------------------------------------------------------------------
 
-const POD_ID_RE = /^[A-Za-z0-9_-]{43}$/;
-const HEX_FP_RE = /^[0-9a-fA-F]{64}$/;
-
-const toHex = (bytes) => Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
-const fromHex = (hex) => Uint8Array.from(hex.match(/../g), (h) => parseInt(h, 16));
-
-/**
- * pod id (base64url of SHA-256 of the raw key) to the wsh fingerprint (the
- * same hash, hex).
- * @param {string} podId
- * @returns {string}
- */
-export function podIdToFingerprint(podId) {
-  if (typeof podId !== 'string' || !POD_ID_RE.test(podId)) throw new TypeError('podIdToFingerprint: expected a 43 character base64url pod id');
-  const bytes = decodeBase64url(podId);
-  if (bytes.length !== 32) throw new TypeError('podIdToFingerprint: a pod id is 32 bytes');
-  return toHex(bytes);
-}
-
-/**
- * wsh fingerprint (hex SHA-256 of the raw key) to a pod id.
- * @param {string} fingerprint
- * @returns {string}
- */
-export function fingerprintToPodId(fingerprint) {
-  if (typeof fingerprint !== 'string' || !HEX_FP_RE.test(fingerprint)) throw new TypeError('fingerprintToPodId: expected a 64 character hex fingerprint');
-  return encodeBase64url(fromHex(fingerprint.toLowerCase()));
-}
-
-/**
- * The pod id of a raw 32-byte Ed25519 public key.
- * @param {Uint8Array} raw
- * @returns {Promise<string>}
- */
-export async function podIdFromRawKey(raw) {
-  return encodeBase64url(new Uint8Array(await crypto.subtle.digest('SHA-256', raw)));
-}
+// The conversion between a pod id and wsh's hex fingerprint (and the pod id of a
+// raw key) lives in ONE place, `@johnhenry/browsermesh-primitives`; the names stay
+// exported from here for the callers that already import them from this package.
+export { podIdToFingerprint, fingerprintToPodId, podIdFromRawKey };
 
 const RENDEZVOUS_LABEL = 'browsermesh-wsh-link/1:';
 
