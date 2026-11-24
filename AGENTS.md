@@ -56,6 +56,7 @@ npm test               # turbo run test --concurrency=4, all workspaces
 npm run test:real-peer  # real WebRTC peers — serialised, see below
 npm run test:real-gpu   # real headless-Chrome GPU tests, browsermesh-apps only
 npm run examples        # run the runnable examples/ (see examples/README.md)
+npm run test:browser    # real Chromium, real WebRTC/WebSocket, strict CSP (tests/browser/README.md)
 ```
 
 There is no `npm run build` — packages ship source directly.

@@ -34,6 +34,8 @@ export function createMeshRpcService({
     name: 'mesh-rpc',
     attach(peerNode, ctx) {
       let seq = 0, closed = false
+      // Per-attach random part: ids stay unique across restarts and reconnects, not only within one process.
+      const nonce = Array.from(crypto.getRandomValues(new Uint8Array(8)), b => b.toString(16).padStart(2, '0')).join('')
       const pending = new Map()
       const incoming = new Map()
       const incomingCounts = new Map()
@@ -126,7 +128,7 @@ export function createMeshRpcService({
         if (pending.size >= maxInflight) return Promise.reject(new Error('mesh-rpc: too many requests in flight'))
         let encoded
         try { encoded = encodeBody(body, maxBodyBytes) } catch (error) { return Promise.reject(error) }
-        const requestId = `${peerNode?.podId || 'local'}:${Date.now()}:${++seq}`
+        const requestId = `${peerNode?.podId || 'local'}:${Date.now()}:${nonce}:${++seq}`
         return new Promise((resolve, reject) => {
           const onAbort = () => cancel(requestId, abortError(signal.reason))
           const timer = setTimeout(() => {

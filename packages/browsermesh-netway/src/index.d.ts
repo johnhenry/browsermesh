@@ -159,8 +159,10 @@ export class UnknownSchemeError extends NetwayError {
 /** Thrown when attempting to write to or send through a closed socket. */
 export class SocketClosedError extends NetwayError {
   readonly code: 'ECLOSED';
+  /** Why the socket was closed, when known. */
+  readonly reason: string | null;
 
-  constructor();
+  constructor(reason?: string);
 }
 
 /** Thrown when a gateway operation does not receive a response within the configured timeout. */
@@ -231,12 +233,22 @@ export class OperationQueue {
 /** Options for creating a StreamSocket pair. */
 export interface StreamSocketPairOptions {
   /**
-   * Maximum queue depth per buffer before the socket is closed.
+   * Maximum queued chunks per direction. A windowed direction makes the writer
+   * wait at this depth; an unwindowed one closes instead.
    * Set to 0 for unlimited (not recommended for production use).
    * @default 1024
    */
   highWaterMark?: number;
+  /**
+   * Receive window in bytes of [socketA, socketB]; one number applies to both.
+   * 0 means no window: the peer's writes are served as before (never waits).
+   * @default DEFAULT_WINDOW_BYTES
+   */
+  windowBytes?: number | [number, number];
 }
+
+/** Default per-direction receive window (256 KiB). */
+export const DEFAULT_WINDOW_BYTES: number;
 
 /**
  * A reliable, ordered, bidirectional byte stream socket (TCP-like).
@@ -252,18 +264,42 @@ export class StreamSocket {
    * Write a chunk of data to the stream.
    *
    * @param data - The data to send.
-   * @throws SocketClosedError if the socket has already been closed.
+   * @throws SocketClosedError if the socket has already been closed (see `reason`).
    */
   write(data: Uint8Array): Promise<void>;
 
+  /** Half-close: no more writes; the peer reads what was sent, then EOF. Reads stay open. */
+  end(): Promise<void>;
+
   /**
-   * Close the socket, shutting down both directions.
+   * Close the socket. The peer can still read what it was already given, then
+   * sees EOF; a write still waiting for credit rejects.
    * Calling close on an already-closed socket is a no-op.
+   *
+   * @param reason - Recorded as `closeReason` on both endpoints.
    */
-  close(): Promise<void>;
+  close(reason?: string): Promise<void>;
+
+  /** Abort both directions; the peer's reads reject with `err`. */
+  destroy(err?: Error): void;
+
+  /** This socket's receive window in bytes (0 = none). */
+  readonly windowBytes: number;
+  /** The window the peer advertises to this socket's writes (0 = none). */
+  readonly peerWindowBytes: number;
+  /** Unread bytes buffered for this socket's reader. */
+  readonly readableLength: number;
+  /** Bytes from write() calls the peer has not yet taken into its window. */
+  readonly writableLength: number;
+  /** Web Streams views. */
+  readonly readable: ReadableStream<Uint8Array>;
+  readonly writable: WritableStream<Uint8Array>;
 
   /** Whether this socket has been closed. */
   readonly closed: boolean;
+
+  /** Why the socket was closed (by either side), or null. */
+  readonly closeReason: string | null;
 
   /**
    * Create a connected pair of StreamSockets for in-memory communication.

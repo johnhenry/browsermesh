@@ -1,4 +1,10 @@
 /**
+ * SPIKE. `exec()` below evaluates a JavaScript string in the page. That cannot
+ * work under a strict Content-Security-Policy and cannot be allow-listed by
+ * path; do not build on it. Layered access to a page's objects belongs on the
+ * protocol-channel seam (docs/protocol-channel.md), which carries paths and
+ * handles instead of source text. Not imported by any published package.
+ *
  * driver.mjs — `PodHostDriver` for the browser lane's **extension**
  * driver (issue #185 item 7, deliverable C). An installed MV3 extension's
  * background service worker (`background.mjs`) runs this, driving pod

@@ -61,6 +61,64 @@ parses it (`@johnhenry/browsermesh-apps`' `ctx.onIncomingData()` does). A custom
 `WebRTCTransport.send(data, { channel })` takes `'control'` (default) or
 `'bulk'` and falls back to control when the bulk channel is not open.
 
+## Binding a WebRTC connection to the pod identities (opt-in)
+
+Offer and answer travel through signalling, and a server on that path can swap
+them. Pass `identity` (a `PodIdentity`) to `WebRTCPeerConnection` (or to
+`WebRTCMeshManager`, which hands it to every connection) and each side proves
+possession of its pod key, on the control data channel, over a transcript that
+contains both pod ids and the DTLS fingerprints of **both** session
+descriptions (`identity-binding.mjs`: `extractDtlsFingerprints`,
+`bindingTranscript`, `createBindingProof`, `verifyBindingProof`; signed bytes
+are `"browsermesh/webrtc-binding/v1\n"` plus canonical JSON, with the signer's
+role included so a proof cannot be reflected). The proof carries the public
+key, which must hash to `remotePodId`, the pod id claimed in signalling.
+
+- The connection becomes `connected` (and `send()` works) only after the peer's
+  proof verified; before that only the proof frame is accepted, and anything
+  else is dropped and counted (`droppedUnbound`). `bound` is true afterwards.
+- A proof that does not verify (swapped description, key that is not the claimed
+  pod, reflected or replayed proof) closes the connection and reports an
+  `identity binding failed: <reason>` error through `onError()`;
+  `bindingFailure` holds the reason.
+- A peer that sends no proof is closed after `bindingTimeoutMs` (default
+  10000). With `requirePeerBinding: false` such a peer (an older build) is
+  accepted unbound (`bound` stays false), while a proof that fails is still
+  fatal.
+- Nothing changes without `identity`. An older peer that receives the proof
+  frame sees one extra JSON message of type `mesh:bind` on the control channel.
+  `createMeshNode()` does not enable this yet.
+
+This is verified here with an in-memory duplex and fixed vectors; it has not
+been run over a real `RTCPeerConnection` in a browser (see issue #270).
+
+## ICE servers: none by default, and why
+
+`DEFAULT_ICE_SERVERS` is empty. With no STUN or TURN server a peer gathers
+host candidates only, which is enough for two devices on the same network and
+contacts nobody. A public STUN server learns the peer's public IP address, and
+that it is about to pair with someone, on every connection attempt; a library
+should not make that choice for an application, so it is opt-in.
+
+Peers on different networks (behind NAT) usually need a STUN server, and
+restrictive NATs need TURN. Supply your own:
+
+```js
+const mesh = new WebRTCMeshManager({
+  localPodId,
+  iceServers: [
+    { urls: 'stun:stun.example.com:3478' },
+    { urls: 'turn:turn.example.com:3478', username, credential },
+  ],
+});
+```
+
+If you accept the disclosure, `PUBLIC_STUN_SERVERS` is a ready-made public
+list (`iceServers: [...PUBLIC_STUN_SERVERS]`). An explicit `iceServers: []`
+is honoured as "none". When a connection with no ICE servers fails, a note
+explaining the above is logged once per process (through `onLog` if given,
+otherwise `console.warn`).
+
 ## TURN-only pods: `iceTransportPolicy`
 
 By default a pod that has configured a TURN server still gathers host and
