@@ -4,7 +4,11 @@ Small, self-contained, runnable demonstrations of real browsermesh behavior.
 Every example runs headless under plain Node (>= 26) with no browser, no
 network, and no server — peers, transports, and sockets are simulated
 in-process, but the actual protocol/CRDT/capability logic exercised is
-exactly what runs in production.
+exactly what runs in production. The simulated transports are not a browser
+check: what is verified over a real browser link (real WebRTC, WebSocket,
+BroadcastChannel, strict CSP) is listed in
+[`tests/browser/README.md`](../tests/browser/README.md), and examples 01, 02
+and 05 also run unmodified in a page there.
 
 Run one with `npm run example:01` (etc.), or all of them with `npm run examples`.
 
