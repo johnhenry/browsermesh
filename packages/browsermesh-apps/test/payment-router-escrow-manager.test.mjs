@@ -6,7 +6,7 @@
 // view, and the sweeper expires manager contracts too.
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { PaymentRouter, CreditLedger, EscrowManager, ESCROW_CREATE } from '../src/index.mjs'
+import { PaymentRouter, CreditLedger, EscrowManager, MultiPartyCreditLedger, ESCROW_CREATE } from '../src/index.mjs'
 
 function wired(router) {
   const handlers = new Map()
@@ -97,5 +97,64 @@ describe('PaymentRouter + EscrowManager (#229)', () => {
   it('getEscrow() still returns the wire book (back-compat)', () => {
     const router = new PaymentRouter('alice')
     assert.equal(typeof router.getEscrow().pruneExpired, 'function')
+  })
+})
+
+// #239: opt-in delegation of the wire ESCROW_CREATE into the manager.
+describe('PaymentRouter delegates wire ESCROW_CREATE to the EscrowManager (#239)', () => {
+  function setup({ delegate = true, funds = 100 } = {}) {
+    const router = new PaymentRouter('alice')
+    const ledger = new MultiPartyCreditLedger({ initialCredits: 0 })
+    if (funds) ledger.credit('bob', funds, 'seed')
+    const mgr = new EscrowManager({ creditLedger: ledger })
+    router.attachEscrowManager(mgr, delegate ? { delegateWire: true } : undefined)
+    const h = wired(router)
+    return { router, ledger, mgr, send: h.get(ESCROW_CREATE) }
+  }
+
+  it('by default (no delegateWire) a wire ESCROW_CREATE stays a book-only mirror and moves nothing', async () => {
+    const { router, ledger, mgr, send } = setup({ delegate: false })
+    await send({ payeePodId: 'alice', amount: 30 }, 'bob')
+    assert.equal(mgr.listContracts().length, 0)
+    assert.equal(ledger.getBalance('bob'), 100)
+    assert.equal(router.listEscrows('alice')[0].source, 'wire')
+  })
+
+  it('with delegateWire, the payer is the sending pod and its balance funds the contract', async () => {
+    const { router, ledger, mgr, send } = setup()
+    await send({ payeePodId: 'alice', amount: 30, conditions: { description: 'job', timeout: 60000 } }, 'bob')
+    const [c] = mgr.listContracts()
+    assert.deepEqual([c.payer, c.payee, c.amount, c.status, c.description], ['bob', 'alice', 30, 'funded', 'job'])
+    assert.equal(ledger.getBalance('bob'), 70)
+    const all = router.listEscrows('alice')
+    assert.equal(all.length, 1, 'one view, one record: not mirrored into the wire book as well')
+    assert.equal(all[0].source, 'manager')
+    assert.equal(all[0].escrowId, c.id)
+  })
+
+  it('a payer without the funds creates nothing, and nothing is mirrored', async () => {
+    const { router, ledger, mgr, send } = setup({ funds: 10 })
+    await send({ payeePodId: 'alice', amount: 30 }, 'bob')
+    assert.equal(mgr.listContracts().length, 0)
+    assert.equal(ledger.getBalance('bob'), 10)
+    assert.equal(router.listEscrows().length, 0)
+  })
+
+  it('malformed payloads create nothing and do not throw', async () => {
+    const { router, ledger, mgr, send } = setup()
+    for (const bad of [null, {}, { payeePodId: 'alice' }, { payeePodId: 'alice', amount: -5 },
+      { payeePodId: 'alice', amount: NaN }, { payeePodId: '', amount: 5 }, { payeePodId: 7, amount: 5 }]) {
+      await send(bad, 'bob')
+    }
+    await send({ payeePodId: 'alice', amount: 5 }, undefined)
+    assert.equal(mgr.listContracts().length, 0)
+    assert.equal(ledger.getBalance('bob'), 100)
+    assert.equal(router.listEscrows().length, 0)
+  })
+
+  it('attachEscrowManager(manager, { delegateWire }) rejects a non-boolean flag', () => {
+    const router = new PaymentRouter('alice')
+    const mgr = new EscrowManager({ creditLedger: new MultiPartyCreditLedger() })
+    assert.throws(() => router.attachEscrowManager(mgr, { delegateWire: 'yes' }), /delegateWire/)
   })
 })
