@@ -1,9 +1,11 @@
 /**
- * SPIKE. `exec()` below evaluates a JavaScript string in the page. That cannot
- * work under a strict Content-Security-Policy and cannot be allow-listed by
- * path; do not build on it. Layered access to a page's objects belongs on the
- * protocol-channel seam (docs/protocol-channel.md), which carries paths and
- * handles instead of source text. Not imported by any published package.
+ * FROZEN SPIKE: do not extend, do not build on it. `exec()` below evaluates a
+ * JavaScript string in the page. That cannot work under a strict
+ * Content-Security-Policy and cannot be allow-listed by path. Layered access to a
+ * page's objects is remote objects over a protocol channel
+ * (`@johnhenry/wsh/objects`; examples/19-wsh-objects-over-protocol-channel.mjs and
+ * docs/protocol-channel.md), which carries paths and plain values instead of source
+ * text. Not imported by any published package (scripts/spike-frozen.test.mjs pins that).
  *
  * driver.mjs — `PodHostDriver` for the browser lane's **extension**
  * driver (issue #185 item 7, deliverable C). An installed MV3 extension's
