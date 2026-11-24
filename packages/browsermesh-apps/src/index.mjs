@@ -78,6 +78,7 @@ export {
   BOUNDARY as PLACEMENT_BOUNDARY,
   TRUST as REQUESTER_TRUST,
 } from './pod-placement.mjs';
+export { DEFAULT_TRUST_THRESHOLD, decidePlacement, resolveRequesterTrust } from './pod-placement-wiring.mjs';
 export { decideRestart, restartDelayMs, policyWantsRestart } from './restart-policy.mjs';
 export * from './peer-payments.mjs';
 export * from './peer-registry.mjs';

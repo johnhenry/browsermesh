@@ -147,6 +147,9 @@ const LANE_SHELL_BACKEND = Object.freeze({
  * @property {string[]} capabilities
  * @property {string} resource - The ACL resource verbs are checked against.
  * @property {string|null} hostLabel
+ * @property {string|null} [boundary] - The host's own claim of how strongly it
+ *   separates a pod from itself (`none|process|language|hardware`); absent or
+ *   null from an older host, which the planner treats as `none`.
  */
 
 /**
@@ -178,7 +181,11 @@ export function podHostRuntimePeer(description, extra = {}) {
     metadata: {
       runtimeClasses: [...description.runtimeClasses],
       deploymentSupport: { ...description.deploymentSupport },
-      podHost: { verbs: [...description.verbs], resource: description.resource },
+      podHost: {
+        verbs: [...description.verbs],
+        resource: description.resource,
+        ...(typeof description.boundary === 'string' ? { boundary: description.boundary } : {}),
+      },
       ...(extra.resources ? { resources: extra.resources } : {}),
       ...(extra.hostedBy ? { hostedBy: extra.hostedBy } : {}),
     },
@@ -240,7 +247,9 @@ export function createPodHostService({
 
     attach(peerNode, ctx) {
       /** @type {string[]} The verbs this host answers; everything else is ELANE/ENOTSUP. */
-      const verbs = (driver.capabilities().verbs || []).filter((verb) => POD_HOST_VERBS.includes(verb))
+      const driverCapabilities = driver.capabilities()
+      const verbs = (driverCapabilities.verbs || []).filter((verb) => POD_HOST_VERBS.includes(verb))
+      const driverBoundary = driverCapabilities.boundary
 
       /**
        * Which requesters are interested in which pod, for event fan-out.
@@ -269,6 +278,34 @@ export function createPodHostService({
         if (!status || typeof status !== 'object' || !status.spec) return status
         if (owners.get(status.name) === pubKey) return status
         return { ...status, spec: redactSpec(status.spec) }
+      }
+
+      /**
+       * Whether `pubKey` may apply `verb` to the existing pod `name`.
+       *
+       * The verb on the host resource (checked before this) is not enough:
+       * the requester must also have spawned the pod, or hold an explicit
+       * grant on the pod itself (`<resource>/<name>:<verb>`, e.g. through
+       * `registry.grantCapabilities()`). A pod this service did not spawn has
+       * no owner, so it needs such a grant too. A name the driver does not
+       * know passes through so the driver reports it missing.
+       *
+       * @param {string} pubKey
+       * @param {string} verb
+       * @param {string} name
+       * @returns {Promise<'owner'|'granted'|'unknown'|'status-only'|'denied'>}
+       */
+      async function podStanding(pubKey, verb, name) {
+        if (owners.get(name) === pubKey) return 'owner'
+        if (!owners.has(name)) {
+          try {
+            await driver.status(name)
+          } catch {
+            return 'unknown'
+          }
+        }
+        if (ctx.registry.checkAccess(pubKey, `${resource}/${name}`, verb).allowed) return 'granted'
+        return verb === POD_HOST_VERB.STATUS ? 'status-only' : 'denied'
       }
 
       /**
@@ -311,6 +348,10 @@ export function createPodHostService({
           ],
           resource,
           hostLabel: hostLabel ?? null,
+          // How strongly the driver says it separates a pod from the host
+          // (`none|process|language|hardware`), or null when it says nothing.
+          // It is the host's own claim: the planner reads it, it proves nothing.
+          boundary: typeof driverBoundary === 'string' ? driverBoundary : null,
         }
       }
 
@@ -480,13 +521,28 @@ export function createPodHostService({
           throw refusal
         }
 
+        // 3b. Tenancy: a pod belongs to the requester that spawned it.
+        const podName = validated.value.name
+        let mayWatch = true
+        if (podName && verb !== POD_HOST_VERB.SPAWN) {
+          const standing = await podStanding(pubKey, verb, podName)
+          if (standing === 'denied') {
+            log('pod-host:denied', { from: pubKey, verb, reason: 'not-owner' })
+            ctx.emit('pod-host:denied', { from: pubKey, verb, requestId, reason: 'not-owner' })
+            await recordAudit(PLACEMENT_AUDIT.DENIED, { requester: pubKey, requestId, verb, name: podName, reason: 'not-owner' })
+            throw new PodHostDriverError(POD_HOST_ERROR.EACCES, `not the owner of pod '${podName}' and not granted '${verb}' on it`, { verb, lane })
+          }
+          // `status` of a pod that is not yours is allowed (redacted) but says nothing of its events.
+          mayWatch = standing !== 'status-only'
+        }
+
         ctx.emit('pod-host:request', { from: pubKey, verb, requestId })
         // Registered BEFORE the driver runs, not after: `spawn` emits its
         // own `cold -> booting -> registered` transitions from inside
         // `dispatch()`, and a requester that only became "interested" once
         // the call returned would miss every event about the pod it just
         // created.
-        if (validated.value.name) noteInterest(validated.value.name, pubKey)
+        if (podName && mayWatch) noteInterest(podName, pubKey)
         if (verb === POD_HOST_VERB.SPAWN) {
           await recordAudit(PLACEMENT_AUDIT.STARTED, {
             requester: pubKey, requestId, name: validated.value.name,

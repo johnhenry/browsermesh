@@ -360,11 +360,14 @@ Summary:
 | node permission-model process | modules from the host's catalog only | `process` (not a sandbox) | read of the entry file, module and catalog `readPaths`; no write, network or process creation; only the podspec's environment | unit, including denied-access tests |
 | node `worker_threads` | catalog modules | `none` | **everything the host can**: files, network, processes, memory (asserted by a test so documentation cannot drift) | unit |
 | isolate (Worker / Durable Object spike) | **no**: runs a fixed echo pod | V8 isolate | the Worker's bindings and storage (which holds the pod key); control routes loopback-only with an optional bearer token | unit; no deployment |
-| isolate `isolated-vm` / `workerd` | specified only | language | not built | never |
+| isolate, `isolated-vm` (`createIsolatedVmRuntime()`, optional dependency) | modules from the host's catalog only | language, **in the host's own process** | no `require`, `process`, filesystem, network, timers or `WebAssembly`; one frozen context (`name`, `env`, `input`, `log`); only JSON strings and one log callback cross; heap and per-call time limits that dispose the isolate and report `oom` or `timeout`. A V8 or `isolated-vm` memory-safety bug is a bug in the host process (it can reach everything the host can); the heap limit is a guideline (2 to 3 times is possible); there is no cumulative CPU budget | unit, including escape tests (constructor chains, prototype walks, thenables, re-entrancy, memory and CPU exhaustion); never against a real V8 exploit |
+| isolate `workerd` | specified only | language | not built | never |
 | browser in-page / CDP / extension | yes (a page) | tab / browser context / extension world | in-page: no sandbox attribute, a same-origin pod shares the parent's storage; CDP: the browser's network position; extension: the extension's permissions | unit and fakes; one e2e with headless Chrome for CDP |
 
-Across lanes: scopes are per resource, not per pod (a requester granted `drain`,
-`exec` or `send` can use it on any pod under that resource); `env` values and
+Across lanes: a pod belongs to the requester that spawned it (`send`, `exec`,
+`snapshot`, `restore` and `drain` need ownership or an explicit grant on the pod,
+`<resource>/<name>:<verb>`, not only the verb on the host resource; ownership is
+in memory); `env` values and
 `run.input` are shown only to the requester that spawned the pod; `describe()`
 is ungated; placement refuses an untrusted requester on a weak boundary. Not
 defended: hypervisor, kernel and V8 vulnerabilities, side channels, the host
@@ -388,7 +391,7 @@ twice (two pods, one identity), resource exhaustion beyond configured limits.
 | Message channel, protocol seam | yes | in-memory duplex | | | real WebRTC, browser |
 | Sync | yes | | | CRDT convergence over a data channel | file transfer over a real link |
 | Discovery, DHT, StealthAgent | yes | | | | any network |
-| Hosted pods | yes (fakes) | | | | real microVM, Firecracker host, `isolated-vm`/`workerd` |
+| Hosted pods | yes (fakes) | | | | real microVM, Firecracker host, `workerd`; `isolated-vm` against a real V8 exploit |
 
 Not verified anywhere here: anything needing STUN/TURN or a non-loopback
 network, the real `browsermesh-servers` relay and signaling, service workers,

@@ -44,6 +44,8 @@ import { isAbsolute } from 'node:path'
 import { POD_LANE } from './host-protocol.mjs'
 import { RUNTIME_BOUNDARY } from './pod-runtime.mjs'
 
+export { ISOLATED_VM_UNAVAILABLE, createIsolatedVmRuntime, isolatedVmAvailability } from './isolate-runtime.mjs'
+
 const ENTRY_PATH = fileURLToPath(new URL('./node-runtime-entry.mjs', import.meta.url))
 
 /** How long `start()` waits for the module to load. */

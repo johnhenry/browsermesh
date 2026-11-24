@@ -642,7 +642,7 @@ describe('createOrchestratorToolRegistry(): exposes the five new hosted-pods too
     const raw = new MeshOrchestrator({ peerNode: nodes.get(bob.podId), podHostClient: client })
     const registry = createOrchestratorToolRegistry(raw)
 
-    await registry.get('meshctl_spawn').execute({ host: alice.podId, name: 'alpha', run: { kind: 'command', ref: '/bin/echo' } })
+    await registry.get('meshctl_spawn').execute({ host: alice.podId, name: 'alpha', lane: 'node', run: { kind: 'command', ref: '/bin/echo' } })
     const result = await registry.get('meshctl_hosted_pods').execute({ host: alice.podId })
     assert.equal(result.success, true)
     assert.match(result.output, /alpha/)
