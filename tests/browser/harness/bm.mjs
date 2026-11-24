@@ -325,6 +325,113 @@ const bm = {
     return { status: res.status, contentType: res.headers.get('content-type'), body: await res.json() }
   },
 
+  // -- a protocol channel (message channel + protocol seam) over the live WebRTC data channel --
+
+  proto: null,
+  /**
+   * Host side: serve the `counter` protocol, authorised by this page's own PeerRegistry (default deny).
+   * `limits` are the message channel's (`window`, `maxMessageBytes`, `chunkBytes`).
+   */
+  async protoServe(limits = {}) {
+    const apps = await import('@johnhenry/browsermesh-apps')
+    const node = meshNode(bm.rtc)
+    // The registry's own in-package defaults (no core import: its vault dependency is not in the page's import map).
+    node.registry = new apps.PeerRegistry({ localPodId: node.podId })
+    const st = { node, registry: node.registry, value: 0, subs: new Set(), received: 0, gate: Promise.resolve(), openGate: null, aborted: 0, who: [], closed: 0 }
+    bm.proto = st
+    st.svc = apps.attachService(node, undefined, apps.createMeshProtocolService(limits))
+    st.svc.api.serveProtocol('counter', (ch) => {
+      ch.onRequest('get', () => st.value)
+      ch.onRequest('inc', ({ n = 1 }) => {
+        st.value += n
+        for (const cb of [...st.subs]) cb(st.value)
+        return st.value
+      })
+      ch.onRequest('whoami', (_params, ctx) => { st.who.push(ctx.peer); return { peer: ctx.peer, channelPeer: ch.peer } })
+      ch.onRequest('bytes', ({ size }) => Uint8Array.from({ length: size }, (_, i) => (i * 31) % 251))
+      ch.onRequest('steps', async ({ n }, { progress }) => {
+        for (let i = 1; i <= n; i++) await progress({ step: i, bytes: new Uint8Array(3).fill(i) })
+        return 'done'
+      })
+      ch.onRequest('slow', (_params, { signal }) => new Promise((_resolve, reject) => {
+        signal.addEventListener('abort', () => { st.aborted += 1; reject(signal.reason) })
+      }))
+      ch.onRequest('subscribe', () => {
+        const cb = (value) => ch.notify('changed', { value }).catch(() => {})
+        st.subs.add(cb)
+        ch.onClose(() => st.subs.delete(cb))
+        return true
+      })
+      ch.onMessage(async () => { st.received += 1; await st.gate })
+      ch.onClose(() => { st.closed += 1 })
+    })
+  },
+  protoGrant(peer, scopes) { bm.proto.registry.grantCapabilities(peer, scopes) },
+  protoRevoke(peer, scopes) { bm.proto.registry.revokeCapabilities(peer, scopes) },
+  /** Hold the host's raw-message reader (a reader that is not reading). */
+  protoGateClose() { bm.proto.gate = new Promise((resolve) => { bm.proto.openGate = resolve }) },
+  protoGateOpen() { bm.proto.openGate() },
+  protoHostState() {
+    const link = bm.proto.svc.api.channel.link(bm.rtc.remote)
+    return { received: bm.proto.received, heldBytes: link ? link.stats().heldBytes : -1, aborted: bm.proto.aborted, closed: bm.proto.closed, who: bm.proto.who, value: bm.proto.value }
+  },
+  /** Client side: attach the protocol service. */
+  async protoClient(limits = {}) {
+    const apps = await import('@johnhenry/browsermesh-apps')
+    const st = { changes: [], progress: [], sends: [], sendResults: null, closed: 0, ch: null }
+    bm.proto = st
+    st.svc = apps.attachService(meshNode(bm.rtc), undefined, apps.createMeshProtocolService(limits))
+  },
+  /** Open a protocol: `{ name, version }` or `{ error: { code, reason } }`. */
+  async protoOpen(name) {
+    const st = bm.proto
+    try {
+      st.ch = await st.svc.api.openProtocol(bm.rtc.remote, name, { timeoutMs: 15000 })
+      st.ch.onClose(() => { st.closed += 1 })
+      st.ch.onNotification('changed', ({ value }) => st.changes.push(value))
+      return { name: st.ch.name, version: st.ch.version, peer: st.ch.peer }
+    } catch (e) { return { error: { code: e.code, reason: e.reason } } }
+  },
+  /** One request; bytes come back as `{ bytes, digest }` (the page hashes them, the test compares). */
+  async protoRequest(method, params) {
+    try {
+      const res = await bm.proto.ch.request(method, params, { timeoutMs: 15000 })
+      if (res instanceof Uint8Array) return { value: { bytes: res.length, digest: b64(await crypto.subtle.digest('SHA-256', res)) } }
+      return { value: res }
+    } catch (e) { return { error: { code: e.code, reason: e.reason } } }
+  },
+  protoSteps(n) {
+    const st = bm.proto
+    st.progress = []
+    return st.ch.request('steps', { n }, { onProgress: (p) => st.progress.push({ step: p.step, bytes: [...p.bytes] }) })
+  },
+  protoSlowStart() {
+    const st = bm.proto
+    st.slowAbort = new AbortController()
+    st.slowResult = null
+    st.ch.request('slow', {}, { signal: st.slowAbort.signal }).then(
+      () => { st.slowResult = { ok: true } },
+      (e) => { st.slowResult = { code: e.code, reason: e.reason } },
+    )
+  },
+  protoSlowAbort() { bm.proto.slowAbort.abort() },
+  protoNotify(method, params) { return bm.proto.ch.notify(method, params) },
+  /** Send `count` raw messages of `size` bytes at once, without waiting. */
+  protoFlood(count, size) {
+    const st = bm.proto
+    st.sendsDone = 0
+    st.sends = Array.from({ length: count }, (_, i) => st.ch.send({ i, pad: new Uint8Array(size) }).then(() => { st.sendsDone += 1 }, () => {}))
+  },
+  protoClientState() {
+    const st = bm.proto
+    const link = st.svc.api.channel.link(bm.rtc.remote)
+    return { queuedBytes: link ? link.stats().queuedBytes : -1, creditBytes: link ? link.stats().creditBytes : -1, sendsDone: st.sendsDone ?? 0, changes: st.changes, closed: st.closed, slowResult: st.slowResult ?? null, progress: st.progress }
+  },
+  async protoExpectedDigest(size) {
+    const bytes = Uint8Array.from({ length: size }, (_, i) => (i * 31) % 251)
+    return b64(await crypto.subtle.digest('SHA-256', bytes))
+  },
+
   // -- CRDT sync over the live WebRTC data channel --------------------------
 
   crdt: null,

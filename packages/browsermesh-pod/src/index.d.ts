@@ -199,11 +199,37 @@ export interface WebSocketTransportOptions {
   peersFromSignaling?: boolean;
   reconnect?: WebSocketTransportReconnectOptions;
   onLog?: (msg: string) => void;
+  /** A PodIdentity (or `{ podId, rawPublicKey(), sign(bytes) }`): answers a signalling server's protocol 2 challenge. `identity.podId` must equal `podId`. */
+  identity?: { podId: string; rawPublicKey(): Promise<Uint8Array>; sign(data: Uint8Array): Promise<Uint8Array> };
+  /** `auto` (default): protocol 2 when offered, else the open flow. `required`: never fall back. `off`: never sign. */
+  authentication?: "auto" | "required" | "off";
+  /** The server origin to sign when it differs from the URL's. */
+  origin?: string;
+  /** With an identity in `auto` mode: ms to wait for the challenge before registering the open way (default 2000). */
+  challengeWaitMs?: number;
+}
+
+export declare const SIGNALING_PROTOCOL: 2;
+
+/** A signalling registration the server refused, or one that could not be completed. */
+export declare class SignalingAuthError extends Error {
+  constructor(code: string, message: string);
+  /** The server's code (`protocol-unsupported`, `bad-nonce`, `challenge-expired`, `bad-pod-id`, `bad-key`, `bad-signature`, `pod-id-mismatch`) or `no-challenge`, `auth-required`, `sign-failed`. */
+  code: string;
+}
+
+/** The server requires protocol 2 and there is no identity to sign with. */
+export declare class SignalingAuthRequiredError extends SignalingAuthError {
+  constructor(message?: string);
 }
 
 export declare class WebSocketTransport implements TransportAdapter {
   constructor(opts: WebSocketTransportOptions);
   get ready(): boolean;
+  /** Pod ids the signalling server itself stamped verified: a hint with the server's word, not broadcast recipients. */
+  get serverVerifiedPeers(): Set<string>;
+  /** What the signalling server said on registration; null before, and for the relay dialect. */
+  get registration(): { mode: string; verified: boolean } | null;
   /** Pod ids the server named (hints of whom to greet) plus the confirmed ones. */
   get knownPeers(): Set<string>;
   /** Pod ids whose signed hello or ack verified: the recipients of broadcasts. */

@@ -71,6 +71,8 @@ import { withSupervisor } from './session-supervisor.mjs'
  * @param {string} opts.signalingUrl - `--signaling`.
  * @param {string} [opts.relayUrl] - `--relay`.
  * @param {RTCIceServer[]} [opts.iceServers]
+ * @param {'auto'|'required'|'off'} [opts.signalingAuthentication='auto'] - How to register with the signalling server: `auto` signs when the server asks, `required` never falls back to the open flow, `off` never signs.
+ * @param {number} [opts.signalingChallengeWaitMs=1000] - How long to wait for the server's challenge before registering the open way (an open-mode server sends none).
  * @param {Function} [opts.WebSocketCtor] - Injectable `WebSocket`, for tests.
  * @param {number} [opts.timeoutMs]
  * @param {Function} [opts.onLog]
@@ -78,6 +80,7 @@ import { withSupervisor } from './session-supervisor.mjs'
  */
 export async function createRealMeshSession({
   cliIdentity, signalingUrl, relayUrl, iceServers = [], WebSocketCtor, timeoutMs, onLog = () => {},
+  signalingAuthentication = 'auto', signalingChallengeWaitMs = 1000,
 } = {}) {
   if (!signalingUrl) {
     throw new UsageError('--signaling <ws://...> is required for the real mesh path (or pass --loopback instead)')
@@ -91,11 +94,24 @@ export async function createRealMeshSession({
     acl: new MeshACL({ owner: podId, onLog }),
   })
 
+  // The signalling server can require a signed registration (protocol 2): the
+  // pod id must be the hash of the key that proves it. meshctl's persisted
+  // identity is that key, so a server in authenticated mode accepts it, and an
+  // open-mode or older server (which sends no challenge) is joined as before.
+  const manager = cliIdentity.identityManager
   const signalingTransport = new WebSocketTransport({
     url: signalingUrl,
     podId,
     protocol: 'signaling',
     WebSocket: WebSocketCtor,
+    // The manager signs for the persisted identity; the key never leaves it.
+    identity: {
+      podId,
+      rawPublicKey: () => manager.getPublicKeyBytes(podId),
+      sign: (data) => manager.sign(podId, data),
+    },
+    authentication: signalingAuthentication,
+    challengeWaitMs: signalingChallengeWaitMs,
     onLog,
   })
 

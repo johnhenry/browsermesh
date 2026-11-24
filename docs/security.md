@@ -31,9 +31,12 @@ Verification levels used below:
 - **unit**: tests in the package with mocks or in-process objects.
 - **duplex**: an in-memory duplex of two real objects (for example two
   `WebRTCPeerConnection`s joined by a fake channel), no network.
-- **real peer**: `npm run test:real-peer`, a native WebRTC binding in Node.
-- **real browser**: `npm run test:browser` (Playwright, strict CSP; Chromium, Firefox and WebKit run in CI, and
-  the WebKit job is allowed to fail). The relay and
+- **real peer**: `npm run test:real-peer`, a native WebRTC binding in Node; also
+  the signalling-server suites, which start the real `browsermesh-servers`
+  signalling server as a child process on loopback and skip, with a stated
+  reason, where that checkout is absent.
+- **real browser**: `npm run test:browser` (Playwright, strict CSP; Chromium, Firefox and WebKit run in CI,
+  and all three are required checks). The relay and
   signaling servers there are in-repo test doubles. See `tests/browser/README.md`.
 - **never**: not exercised by any test.
 
@@ -50,7 +53,7 @@ table; they come from the READMEs, source headers and test directories.
 | `browsermesh-core` | implemented, with partial modules | identity managers and vault storage, keyring, capability tokens, group keys, ACL, trust: implemented (unit). `handshake.mjs`: partial (connection token is unsigned and the pod id is not checked against the key; mock transports). `hardening.mjs` and `peer.mjs`: marked experimental in source. `compat.mjs`: shim whose `BrowserTool#execute()` throws not-implemented by design. |
 | `browsermesh-pod` | implemented | pod, messaging and signing, discovery, host protocol, runtimes (worker_threads, permission-model), `WebSocketTransport` and BroadcastChannel transports (unit and real browser). `browser-host-driver`: partial (`exec` is deliberately not offered in the browser lane; `snapshot` and `restore` not implemented). |
 | `browsermesh-transport` | implemented, with partial modules | WebSocket, WebRTC (unit, real peer, real browser); wsh links (real wsh handshake over an in-process relay; not a browser); identity binding (duplex, real peer, real browser). WebTransport, relay client, wisp (mocks only). `channel-relay`, `gateway`, `cross-origin`, `streams` (unit). `NATTraversal` in `websocket.mjs`: placeholder values, partial. |
-| `browsermesh-apps` | implemented, with partial modules | registry, grant log, audit, mesh-rpc, mesh-fetch, message channel, protocol seam, relay host and backend, sync, cloud storage, key distribution, KV, escrow, pod-host service, placement, supervisor: implemented (mostly in process; a few over real peers). Partial: `mesh-bootstrap` (one real-peer test file), torrent (single-process fallback; real WebTorrent only under `test/real-torrent`), `peer-ipfs` (a local SHA-256 store, not IPFS), `peer-terminal` (no default shell), serverless executors (not an adversarial sandbox), GPU (real WebGPU only in a dedicated test), `mesh-dht` (no authentication), `compat.mjs`. Spec only: `wsh-objects` over the protocol seam. |
+| `browsermesh-apps` | implemented, with partial modules | registry, grant log, audit, mesh-rpc, mesh-fetch, message channel, protocol seam, relay host and backend, sync, cloud storage, key distribution, KV, escrow, pod-host service, placement, supervisor: implemented (mostly in process; a few over real peers). Partial: `mesh-bootstrap` (one real-peer test file), torrent (single-process fallback; real WebTorrent only under `test/real-torrent`), `peer-ipfs` (a local SHA-256 store, not IPFS), `peer-terminal` (no default shell), serverless executors (not an adversarial sandbox), GPU (real WebGPU only in a dedicated test), `mesh-dht` (no authentication), `compat.mjs`. `wsh-objects` (built in wsh, not here) runs over the protocol seam in `examples/19` and its test, an example-only dependency. |
 | `browsermesh-sync` | implemented, with partial modules | CRDT, delta sync, memory sync, file chunks, CIDv1, IndexedDB storage (unit, `fake-indexeddb`); CRDT convergence also over a real data channel in a browser. `collab` and `collab-bridge`: partial (marked experimental; stub document when Yjs is absent). |
 | `browsermesh-discovery` | partial | DHT has no iterative lookup (below); discovery strategies unsigned; naming, swarm, service-worker routing implemented (unit, unauthenticated); StealthAgent plain path documented as plaintext, encrypted/keyring path implemented; threshold key sharing is spec only (`docs/design/stealth-threshold.md`). |
 | `browsermesh-netway` | implemented | loopback, virtual network, policy, queue, sockets (byte-level backpressure), listener, router, service and fs backends, chaos wrapper (unit). `gateway-backend`: partial (mock wsh transport only). `backend.mjs`: abstract base. |
@@ -75,13 +78,13 @@ hand-written.
 | Package | Published | Entry points | Unit tests | Real-peer tests | Real-browser tests |
 | --- | --- | --- | --- | --- | --- |
 | `browsermesh-apps` | yes | `.` `./compat` `./mesh-rpc` `./mesh-channel` `./protocol-channel` `./protocol-stream` `./protocol-roots` `./channel-advertisement` `./mesh-fetch` `./mesh-service` `./peer-registry` | yes | yes | yes |
-| `browsermesh-core` | yes | `.` `./compat` | yes | no | no |
+| `browsermesh-core` | yes | `.` `./compat` | yes | yes | no |
 | `browsermesh-discovery` | yes | `.` | yes | no | no |
 | `browsermesh-embed` | yes | `.` | yes | no | no |
 | `browsermesh-kernel` | yes | `.` | yes | no | no |
 | `browsermesh-meshctl` | private | `.` | yes | no | no |
 | `browsermesh-netway` | yes | `.` | yes | no | no |
-| `browsermesh-pod` | yes | `.` `./node-runtimes` | yes | no | yes |
+| `browsermesh-pod` | yes | `.` `./node-runtimes` | yes | yes | yes |
 | `browsermesh-primitives` | yes | `.` | yes | no | yes |
 | `browsermesh-priority-mux` | yes | `.` | yes | no | no |
 | `browsermesh-sync` | yes | `.` | yes | no | yes |
@@ -197,10 +200,47 @@ Package: `browsermesh-pod` (`Pod`, `signed-message.mjs`). For `pod:message`,
 | Link | Encrypted against the network | Encrypted against a relay | Who the peer is, as far as this code checks | On by default | Verified |
 | --- | --- | --- | --- | --- | --- |
 | `BroadcastChannelTransport` (pod) | the browser's same-origin isolation | no relay | any same-origin context on that channel name | yes (pod default) | unit; real browser (also across two origins: invisible) |
-| `WebSocketTransport` (pod, relay protocol) | TLS only if the URL is `wss://` | **no**: the relay reads every envelope | pod messages and discovery messages are signed (see above); the relay's `source` and its peer lists are hints, not membership, and are not believed; the `register` frame sends no proof of key | pods sign by default; `allowUnsigned` false here | unit; real browser against a test-double relay |
+| `WebSocketTransport` (pod, relay protocol) | TLS only if the URL is `wss://` | **no**: the relay reads every envelope | pod messages and discovery messages are signed (see above); the relay's `source` and its peer lists are hints, not membership, and are not believed; the relay dialect's `register` frame sends no proof of key. With the signalling dialect and an `identity`, the registration is signed for the server (see [signalling registration](#signalling-server-registration-protocol-2)) | pods sign by default; `allowUnsigned` false here; the signed registration is used when the server offers it and an `identity` is given | unit; real browser against a test-double relay; signalling registration also against the real server (opt-in real-peer, where its checkout is present) |
 | `WebSocketTransport` / `WebTransportTransport` (transport package) | as above | no | none by the transport itself; optional `padding` and `jitterMs` hide sizes and timing from a network observer, not from the relay | padding and jitter off | WebSocket: unit and real browser (text, 1 MiB binary); WebTransport: mock only |
 | WebRTC (`WebRTCPeerConnection`, `WebRTCMeshManager`) | DTLS (standard data channel encryption) | the signaling relay carries offers and answers, including DTLS fingerprints | signaling names the peer's pod id. With `identity` set, each side proves possession of its pod key over both descriptions' DTLS fingerprints (a swapped description is detected, the connection is closed); a peer sending no proof is closed after `bindingTimeoutMs` (10 s) unless `requirePeerBinding: false`. A renegotiation whose fingerprint changes is rejected | **`createMeshNode()` wires the node identity in: binding on, peer proof required** (`webrtcIdentityBinding: false` turns it off; `webrtcAllowUnboundPeers: true` is the opt-out for peers on transport older than 0.6.0, which send no proof and are otherwise closed after the timeout with reason `timeout`: the caller's `connectToPeer()` rejects with it and the node emits `peer:binding-failed`). A bare `WebRTCMeshManager` is unbound unless given `identity` | DTLS channel: unit, real peer, real browser. Binding: duplex, real peer (node-datachannel, `createMeshNode`), and real browser (Chromium, Firefox) incl. a signalling server that swaps the descriptions |
 | **wsh link** (`WshPeerLinks`, `WshPodTransport`) | sealed end to end (authenticated encryption, X25519 + ML-KEM-768) | **sealed: ciphertext only** | the key wsh authenticated, which must hash to the pod id claimed; the dialler pins the host to the pod id it meant to reach; the listener's `authorize` decides (default: nobody) | **off**; `createMeshNode({ wsh })` or an explicit transport; never in a default preference order | real wsh handshake and sealed session over an in-process pipe relay; not a browser; not a real relay deployment |
+
+### Signalling server registration (protocol 2)
+
+The signalling server (`browsermesh-servers/signaling`) runs in one of two
+modes. In **open** mode any pod id is accepted: nothing proves who a client is,
+so the server stamps every peer `verified: false` (and `sourceVerified: false`
+on each forwarded message). In **authenticated** mode (protocol 2) the server
+sends each connection a single-use challenge, and a client registers only by
+signing it: the pod id must be the hash of the Ed25519 key that signs, and the
+signature covers the server's own origin, the pod id and the nonce, so a proof
+cannot be replayed on another connection or relayed to another server. A client
+that does not speak protocol 2 is refused with `protocol-unsupported`.
+
+What the clients here do:
+
+- `WebSocketTransport` (pod, signalling dialect and the `signalingUrl`
+  connection) and `SignalingClient` (core) take an `identity`. With one, they
+  answer a challenge with a signature over the origin of the URL they were
+  configured with (never the origin the challenge names; `origin` overrides it
+  for a server reached under another name), and against an open-mode or older
+  server, which sends no challenge, they register as before after a bounded wait
+  (`challengeWaitMs`). `authentication: 'required'` never falls back; `'off'`
+  never signs. Without an identity, against an authenticated server, they fail
+  with a named `SignalingAuthRequiredError` and do not retry.
+- What the server says is a statement about the link, not about the peer:
+  `serverVerifiedPeers` and `relaySourceVerified` (pod) and `isSourceVerified()`
+  (core) report the server's stamp, true only for a literal `true` set by the
+  server. A server-verified pod is still a hint: it is not a broadcast recipient
+  (`verifiedPeers` still requires the pod's own signed hello or ack), and an
+  attacker who can strip the challenge from an unprotected (`ws://`) link can
+  push an `auto` client into the open flow, which `registration` reports as
+  `{ mode: 'open', verified: false }`. Use `wss://` and `'required'` where that
+  matters.
+- `GET /ice-servers` needs `Authorization: Bearer <token>` or a same-origin
+  caller. `fetchIceServers({ url | signalingUrl, token })` (core) sends the token
+  as a header only, refuses to send it over plain `http` to a non-loopback host,
+  and never follows a redirect with it.
 
 ### The wsh link
 
@@ -391,13 +431,21 @@ Package: `browsermesh-apps`.
   `authorize(meta, { peer })`, run before the open is answered. A stalled stream
   holds neither the link nor other requests on the channel (stream frames are
   notifications, whose link credit is returned at dispatch).
-- **Not built.** The remote-object layer itself lives in wsh
-  (`@johnhenry/wsh/objects`), not in this repository.
+- **Not built.** The remote-object layer lives in wsh (`@johnhenry/wsh/objects`,
+  not a dependency of any package here); it runs over the seam in
+  `examples/19-wsh-objects-over-protocol-channel.mjs` and
+  `test/wsh-objects-over-channel.test.mjs`, authorised per root through
+  `createRootAuthorizer` (`objects:<root>:<action>`, for the channel's verified peer).
 - **Verified.** `mesh-rpc`/`browserMeshFetch`: unit, and echo/404 routing over a
   real WebRTC data channel in two browsers (the harness node has no registry or
-  identity, so authorization is not exercised there). Message channel, seam,
-  streams and root authorisation: unit and in-memory duplex only; never over
-  real WebRTC or in a browser.
+  identity, so authorization is not exercised there). Message channel and seam:
+  unit and in-memory duplex, and over a real WebRTC data channel in two
+  browsers (`tests/browser/protocol-channel.spec.mjs`: default deny, the open
+  scope, the verified peer seen by handlers, a 900 KB binary result chunked
+  across messages, progress, notifications, cancel, revocation closing the
+  channel at once, and a reader that stops reading holding the sender at one
+  window). Streams and root authorisation: unit, in-memory duplex and the real
+  mesh channel in process; not yet over real WebRTC in a browser.
 - **Identifiers.** An id that matches a response to a request (rpc, proxy,
   dispatch, join, submit, witness, chunk, escrow, hosted-pod verbs) or names a
   connection (`mesh-websocket`, `mesh-relay`, wire streams) is 128 random bits
@@ -505,7 +553,8 @@ twice (two pods, one identity), resource exhaustion beyond configured limits.
 | Layer | unit | duplex / in-memory | real peer | real browser (CI) | never |
 | --- | --- | --- | --- | --- | --- |
 | Identity | yes | | | generate, sign, verify | handshake token with a real signaling server |
-| Pod messages | yes | | | BroadcastChannel (and cross-origin invisibility), WebSocket relay (test double) | real `browsermesh-servers` |
+| Pod messages | yes | | | BroadcastChannel (and cross-origin invisibility), WebSocket relay (test double) | real `browsermesh-servers` relay |
+| Signalling registration (protocol 2), server stamps, ICE fetch | yes (a double that verifies the proof) | | yes, against the real signalling server as a child process, both modes (opt-in; skipped where its checkout is absent) | | browser; TURN credentials actually used |
 | BroadcastChannel / WebSocket links | yes | | | yes | |
 | WebRTC channel | yes | | yes | yes (loopback, no STUN) | NAT traversal, TURN |
 | WebRTC identity binding | yes | yes (fake peer connections) | yes (`createMeshNode`, node-datachannel) | yes: a real `RTCPeerConnection` in Chromium and Firefox (WebKit does not open a data channel in the local run), including a signalling server that swaps the descriptions | |
@@ -514,11 +563,12 @@ twice (two pods, one identity), resource exhaustion beyond configured limits.
 | Relay | yes | in-memory services | yes | | browser |
 | Shared servers | yes (real loopback upstreams) | | | | browser |
 | mesh-rpc / `browserMeshFetch` | yes | JSON-boundary network | | echo and 404 over a data channel | with a registry and identity in a browser |
-| Message channel, protocol seam | yes | in-memory duplex | | | real WebRTC, browser |
+| Message channel, protocol seam | yes | in-memory duplex | | yes (two browsers, real WebRTC) | |
 | Sync | yes | | | CRDT convergence over a data channel | file transfer over a real link |
 | Discovery, DHT, StealthAgent | yes | | | | any network |
 | Hosted pods | yes (fakes) | | | | real microVM, Firecracker host, `workerd`; `isolated-vm` against a real V8 exploit |
 
 Not verified anywhere here: anything needing STUN/TURN or a non-loopback
-network, the real `browsermesh-servers` relay and signaling, service workers,
-GPU and IndexedDB in a real browser. The WebKit CI job is allowed to fail.
+network, the real `browsermesh-servers` relay (the signalling server is run for
+real only by the opt-in signalling-server suites, not in CI), service workers,
+GPU and IndexedDB in a real browser.

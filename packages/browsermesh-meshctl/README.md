@@ -142,6 +142,14 @@ Every command except `identity` and `vm` (see below) needs exactly one of:
   opened and closed correctly but **not yet wired into the pod-host
   request path** -- see [Known limitations](#known-limitations).
 
+  The signalling server may run in authenticated mode (it requires the pod id
+  to be the hash of the key that signs a challenge). `meshctl` registers with
+  its persisted identity, so such a server accepts it; against an open-mode or
+  older server (which sends no challenge) it joins as before after waiting up
+  to one second for one. `createRealMeshSession` takes `signalingAuthentication`
+  (`'auto'`, `'required'` -- never fall back, `'off'`) and
+  `signalingChallengeWaitMs`.
+
   Real-mode `<host>` arguments are always the host's podId (pubKey) --
   there is no label indirection, and no built-in discovery. Pass
   `--host <pubKey>` (repeatable) for any command that considers every
