@@ -17,6 +17,26 @@ export {
   authorizedKeysLine,
 } from "./ssh-keys.mjs";
 
+// Share code: a short code plus the fingerprint of the key that made it, and label sanitising
+export {
+  SHARE_CODE_CHARS,
+  SHARE_FINGERPRINT_CHARS,
+  SHARE_FINGERPRINT_BITS,
+  MAX_LABEL_CHARS,
+  generateShareCode,
+  shareFingerprintOfPodId,
+  shareFingerprintOfPublicKey,
+  podIdMatchesShareFingerprint,
+  publicKeyMatchesShareFingerprint,
+  normalizeShareCode,
+  normalizeShareFingerprint,
+  formatShareCode,
+  formatShareFingerprint,
+  formatShare,
+  parseShareInput,
+  sanitizeLabel,
+} from "./share-code.mjs";
+
 // Session certificates and signed revocation
 export {
   CERT_VERSION,

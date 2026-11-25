@@ -67,3 +67,24 @@ async function checkOpenSSH(id: PodIdentity, raw: Uint8Array): Promise<void> {
   void [authorized, back, built];
 }
 void checkOpenSSH;
+
+// Share code: a short code plus the fingerprint of the key that made it.
+import {
+  SHARE_FINGERPRINT_BITS, generateShareCode, shareFingerprintOfPodId, shareFingerprintOfPublicKey, podIdMatchesShareFingerprint,
+  publicKeyMatchesShareFingerprint, normalizeShareCode, normalizeShareFingerprint, formatShare, parseShareInput, sanitizeLabel,
+} from "@johnhenry/browsermesh-primitives";
+
+async function checkShareCode(podId: string, key: Uint8Array): Promise<void> {
+  const bits: number = SHARE_FINGERPRINT_BITS;
+  const code: string = generateShareCode();
+  const fp: string = shareFingerprintOfPodId(podId);
+  const fp2: string = await shareFingerprintOfPublicKey(key);
+  const same: boolean = podIdMatchesShareFingerprint(podId, fp) && (await publicKeyMatchesShareFingerprint(key, fp2));
+  const n: string | null = normalizeShareCode(code) ?? normalizeShareFingerprint(fp);
+  const shared = formatShare({ code, fingerprint: fp, origin: "https://app.example" });
+  const parsed = parseShareInput(shared.url);
+  if (parsed.ok) { const c: string = parsed.code; void c; } else { const r: "empty" | "invalid" | "no-fingerprint" | "bad-fingerprint" = parsed.reason; void r; }
+  const label: string = sanitizeLabel("x", 10);
+  void [bits, same, n, label];
+}
+void checkShareCode;
