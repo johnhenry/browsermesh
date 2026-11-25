@@ -1,5 +1,28 @@
 # Hosted pods: running `Pod` outside the browser
 
+## What only a KVM host can settle
+
+Nothing on this list can run on a machine without `/dev/kvm` (it is absent in Docker Desktop's VM, checked), and each
+step is the owner's. [`runbook-firecracker-kvm.md`](runbook-firecracker-kvm.md) has the commands, the expected output
+and what to look for at each step; everything short of KVM already runs and is listed in its section 0.
+
+1. Get a Linux/KVM host (x86_64 or arm64, root, cgroup v2) and set it up as the runbook's section 1 says.
+2. Install the pinned Firecracker and jailer (section 2).
+3. Get a guest kernel (section 3).
+4. Build the guest rootfs on that host with Alpine 3.23 (`ALPINE_VERSION=3.23`) and note which Node it installs; move the
+   script's default if it works (section 4; decision 6 of
+   [the open-decisions note](design/hosted-pods-open-decisions.md)). The packages declare Node 26.
+5. Run a signalling server the guest can reach (section 5).
+6. Run `REQUIRE_REAL_FIRECRACKER=1 npm run test:real-firecracker` (section 6): a jailed boot with an exec over vsock,
+   guest state kept across snapshot and restore (this is also the first check of `VmPod.restore()` against a real VMM),
+   no route to the metadata address or the host, and nothing left behind after drain. Record the three numbers it prints
+   (boot to exec, VMM memory, restore to exec) against issue #185 section 9's targets.
+7. Check that the guest registers over signalling and its pod id shows in `peers` (section 7; the test does not assert it).
+8. Report as section 8 lists, with the failing command and its output for anything the first run finds.
+
+Not KVM, also the owner's: the one real `meshctl` run and the first publish of its name, and the Durable Object wake
+measurement (decisions note, sections 1 and 2).
+
 ## Status
 
 This document tracks [issue #185](https://github.com/johnhenry/browsermesh/issues/185)
@@ -40,7 +63,7 @@ stand-ins for the isolate lane) are in `packages/browsermesh-pod`.
 
 | Item | State |
 | --- | --- |
-| Firecracker on a real host, full lifecycle | Needs a Linux/KVM host (none here; `/dev/kvm` is absent in Docker Desktop's VM, checked). Everything short of KVM now runs on Linux: the network policy against a real kernel, the guest's exec responder as a process, the whole spike suite. One checklist for the rest: [`runbook-firecracker-kvm.md`](runbook-firecracker-kvm.md). |
+| Firecracker on a real host, full lifecycle | Needs a Linux/KVM host (none here; `/dev/kvm` is absent in Docker Desktop's VM, checked). Everything short of KVM now runs on Linux: the network policy against a real kernel, the guest's exec responder as a process, the whole spike suite. The steps for the rest are the list at the top of this document, with the commands in [`runbook-firecracker-kvm.md`](runbook-firecracker-kvm.md). |
 | `VmPod.restore()` bugs | Fixed in #243 against the fake API; confirmation against a real VMM is part of the runbook. |
 | Durable Object hibernation topology | Owner decision; options in [`design/hosted-pods-open-decisions.md`](design/hosted-pods-open-decisions.md) section 1. |
 | End to end across a relay | Done for the sealed path: `meshctl --wsh-relay` reaches a host through a pipe relay over a sealed, key-authenticated wsh link, with no signalling server or WebRTC, tested against the in-process pipe relay and a real pod-host service. The unsealed relay dialect is deliberately not used for pod-host traffic. Not run against a deployed relay. |
