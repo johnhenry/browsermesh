@@ -1,6 +1,6 @@
 # Discovery records: shard checksum, shard parity, who may store, on-demand share release
 
-Status: designed in this note; built in `@johnhenry/browsermesh-discovery` as the items below land (each item's status is in
+Status: designed in this note; all four items are built in `@johnhenry/browsermesh-discovery` (each item's status is in
 "Staged order"). Tracking issue: #359 (left over from #328 / PR #357). The owner decided (2026-11-25) to build all four, each with
 version negotiation so older peers keep working. Everything here is **off by default**: with no option set, every record, key,
 message and refusal is exactly what the package produced before.
@@ -208,13 +208,19 @@ Canonical JSON is key-sorted and rejects what JSON cannot carry.
 
 | Key kind | How it is recognised | Binding |
 | --- | --- | --- |
-| pod key | `key == podId(w)` (base64url SHA-256 of `w`) | strict: only the holder of that pod's private key can store; no first-writer race |
-| stealth key, agent named | `stealth:<id>:shard3:<n>` where `id == podId(w)` | strict, as above; if `id` is not a pod id the key is `pinned` |
+| pod key | 43 base64url characters (the shape of a pod id); owned by `podId(w)` (base64url SHA-256 of `w`) | strict: only the holder of that pod's private key can store; no first-writer race. A proof for such a key from any other writer is refused `not-key-owner` |
+| stealth key, agent named | `stealth:<id>:shard3:<n>`; if `id` has the shape of a pod id it must equal `podId(w)` (else `not-key-owner`) | strict, as above; if `id` is some other string the key is `pinned` |
 | stealth key, anonymous | 64 lowercase hex characters | `pinned` |
-| anything else | | `open` |
+| anything else | | `open` in `open` mode (a proof is verified, nothing is owned); `pinned` in `owned` mode |
 
 *Strict*: an authenticated store is accepted only from the pod the key names. *Pinned*: the first valid authenticated store to a
 node pins `w` to the key until its `exp`; later stores must carry the same `w` and a higher `seq`. *Open*: as today.
+
+*Asynchronous answers.* Checking a proof is an Ed25519 verification, which is asynchronous in WebCrypto, so a node **with a
+policy** answers a store with a promise (`handleMessage`) and `store()` returns a promise of `{ stored }` or `{ stored: false,
+refused }`; a node **without** a policy is byte-for-byte and call-for-call what it was (`handleMessage` synchronous; `store()` now
+returns `{ stored: true }` where it returned nothing). `browsermesh-apps`' `mesh-dht` ignores the reply, so it works unchanged
+with a policy node.
 
 **Reconciling with anonymous keys (#329).** The writer key for an anonymous record is **per record and secret**: `w_i` is the
 Ed25519 key whose seed is `SHA-256("browsermesh-dht/write-key/1" || sign_identity(domain || lookupNonce || i))`. An Ed25519
@@ -237,8 +243,8 @@ do not write. A second replica of the agent that signs with a different identity
   writer out.
 - `owned`: every store must carry valid `auth` and the key must be strict or pinned (`unsigned-store`, `unbound-key`); apps list
   `openPrefixes` they keep open.
-- Limits (defaults unlimited in `open`, bounded in `owned`: 64 KiB value, 4096 entries, 256 per writer, 24 h lifetime, 120
-  stores/min per sending peer): `value-too-large`, `store-full`, `writer-quota`, `lifetime-too-long`, `rate-limited`, `expired`
+- Limits (defaults unlimited in `open`, bounded in `owned`: 64 KiB value, 4096 entries, 256 per writer, 7 days of lifetime, 120
+  stores/min per sending peer; the `StealthAgent` writer's own default proof lifetime is 24 h): `value-too-large`, `store-full`, `writer-quota`, `lifetime-too-long`, `rate-limited`, `expired`
   (an `exp` in the past, or a record whose `exp` has passed; a stored entry never outlives `exp`). Expired entries are purged when
   the node needs room.
 - A refused store replies `{ stored: false, refused: "<name>" }`. Counters per name are exposed (`stats`); log lines carry the
@@ -344,6 +350,9 @@ In the style of `docs/security.md`: the scenario, and what the code does. Nothin
 - **Authenticity of the sender at the DHT**: `fromId` is the transport's claim; rate limits and quotas per peer are only as good as that.
 - **A first-write race on a pinned key**: a peer that sees a store message in transit to one node can claim that key at *another*
   node before the owner's message gets there. Strict keys (pod ids) have no such race; anonymous keys are secret until first stored.
+- **Replay after early eviction**: a captured store is refused while the entry lives (`stale-seq`) and after its `exp`; if the entry
+  was evicted earlier (for example to make room) the same captured message can be applied again until `exp`. The node keeps no
+  tombstones.
 - **Availability against overwrite**: refusing an overwrite protects the entry on the nodes that enforce; a node that does not
   (older, or `open` for legacy keys) can still be filled with garbage; readers still verify what they read.
 - **Parity does not hide or authenticate** anything; **rollback** to an older complete set while stale records remain in the other
@@ -362,4 +371,4 @@ In the style of `docs/security.md`: the scenario, and what the code does. Nothin
    that signs its stores for the new namespaces needs format 3, so that last step builds on item 1+2.
 3. **Item 4**: independent of all of them (a new module over the existing threshold module).
 
-Status (updated as each lands): items 1 and 2: **built** (shard format 3, opt-in); item 3: designed; item 4: **built** (`stealth-release.mjs`, opt-in).
+Status (updated as each lands): items 1 and 2: **built** (shard format 3, opt-in); item 3: **built** (`storePolicy`, `StealthAgent` `ownedStores`, opt-in); item 4: **built** (`stealth-release.mjs`, opt-in).

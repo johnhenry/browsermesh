@@ -7,4 +7,5 @@ export * from './sw-routing.mjs';
 export * from './stealth.mjs';
 export * from './stealth-threshold.mjs';
 export * from './stealth-release.mjs';
+export { canonicalJson, dhtStoreSigningBytes, signDhtStore, verifyDhtStore, deriveWriteSigner, classifyStoreKey, podIdOfPublicKey, DHT_STORE_REFUSALS, DhtAuthError } from './dht-auth.mjs';
 export { rsEncode, rsDecode, ParityError, MAX_RS_SHARDS } from './shard-parity.mjs';

@@ -948,7 +948,27 @@ Package: `browsermesh-discovery`.
   and sends to the local closest contacts, and nothing follows responses.
   Distance is computed over character codes, not a 160-bit hash. A `store` is
   accepted for any key with no signature or ownership check and no entry cap
-  (`k` = 20 per bucket; TTL optional, default none). Tests are single-process.
+  (`k` = 20 per bucket; TTL optional, default none) **unless the node is given a
+  `storePolicy`** (opt-in; below). Tests are single-process.
+  - **Owned stores** (opt-in, `storePolicy`; `design/discovery-records.md`, item 3): a
+    `DHT_STORE` may carry a proof (`auth`: writer key, `seq`, absolute expiry, Ed25519
+    signature over key, value digest, `seq`, expiry). A node with a policy verifies it
+    and enforces: a pod-id-shaped key can be stored only by that pod; the first valid
+    signer owns an agent-anonymous or `shard3` key (`open` mode) or any key outside
+    `openPrefixes` (`owned` mode, which also refuses unsigned stores) until the entry's
+    expiry; an owned key is replaced only by its owner with a higher `seq`. Bounded and
+    named refusals: `value-too-large`, `store-full`, `writer-quota`, `rate-limited`
+    (per sending peer), `lifetime-too-long`, `expired`, `stale-seq`, `owned-key`,
+    `not-key-owner`, `unsigned-store`, `bad-auth`, `malformed`; counted, logged with a
+    short hash of the key, never the value. A node without a policy ignores the field
+    (older nodes too), so nothing an older peer does changes; `owned` mode refuses an
+    older writer's unsigned store by name. `StealthAgent` `ownedStores` gives each shard of
+    an anonymous agent its own writer key derived from the agent identity (deterministic
+    Ed25519 signature), so the shard keys are unchanged and unlinkable, group members who
+    hold the lookup nonce read but cannot store, and a signer that is not deterministic is
+    refused. Not defended: the sending peer id is the transport's claim; a first-write
+    race on a pinned key at a node that has not yet seen the owner's store; replay of a
+    captured store after early eviction and before its expiry; nodes without a policy.
 - **Announcements.** Discovery records are unsigned. `RelayStrategy` accepts an
   optional `signFn` (off by default; checking is the server's job). Names
   (`MeshNameResolver`) are first-come-first-served, at most 64 characters, 1 h
@@ -974,9 +994,9 @@ Package: `browsermesh-discovery`.
     synchronous `hide()` / `reconstitute()` / `isViable()` (they throw
     `async-required`) so it never writes or reads unsigned by accident; agents
     without an identity are unchanged. Signatures do not stop someone
-    overwriting a key: the DHT still accepts a `store` from anyone, so a
+    overwriting a key: by default the DHT still accepts a `store` from anyone, so a
     forged overwrite makes the shard unusable (refused, counted) rather than
-    accepted.
+    accepted (owned stores, above, stop it on nodes that opt in).
   - with a `lookupNonce` (at least 16 base64url characters; derive it from the
     group secret with `deriveStealthLookupNonce(secret, agentId, epoch)` so every
     member can find the shards, or keep a random one wherever the agent's
