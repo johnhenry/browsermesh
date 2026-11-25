@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { on, off, set, snapshot, use, release } from '@johnhenry/wsh/objects'
+import { on, off, set, snapshot, use, release, rootDescription } from '@johnhenry/wsh/objects'
 import { protocolScope, ChannelErrorCode, attachService, createMeshChannelService, createRootAuthorizer } from '@johnhenry/browsermesh-apps'
 import { exposeObjectsOnMesh, openObjectsOnMesh, ObjectsOnMeshError, actionFor, OBJECT_ACTIONS, whoFor, podIdOf } from '../src/index.mjs'
 import { threePods, makeApp, allow, until, holdable, fakeClock, createNodes } from './helpers/mesh.mjs'
@@ -78,11 +78,13 @@ test('the host judges every operation for the channel\'s verified peer and nobod
     const { roots } = await openObjectsOnMesh(pods.a, pods.bob.podId)
     calls.length = 0
     assert.equal(await roots.app.title, 'inbox')
-    assert.deepEqual(calls, [{ peer: pods.alice.podId, root: 'app', action: 'get' }])
-    // Not even the allow-list lets this through, so the registry is not asked.
+    // The layer's own question (may this peer read on this root) and the operation's: always about the verified peer, only `get` here.
+    assert.ok(calls.length >= 1)
+    for (const call of calls) assert.deepEqual(call, { peer: pods.alice.podId, root: 'app', action: 'get' })
+    // The allow-list does not name this, so it is refused whatever the registry says (and the registry only ever hears of the verified peer).
     calls.length = 0
     await assert.rejects(async () => roots.app.secret, (e) => e.code === UNAUTHORIZED && e.reason === 'not-allowed')
-    assert.deepEqual(calls, [])
+    for (const call of calls) assert.equal(call.peer, pods.alice.podId)
   } finally { objects.stop(); pods.teardown() }
 })
 
@@ -253,6 +255,94 @@ test('handles: release gives the place back, the table is bounded, and the end o
     assert.equal(await use(three).items.length, 3)
     close()
     await assert.rejects(async () => use(two).items.length)
+  } finally { teardown() }
+})
+
+// ── events through a handle, and typed remotes (wsh 0.51) ───────────────────
+
+test('events through a handle: delivered as plain data, need objects:ROOT:on, end with the handle', async () => {
+  const { app, open, teardown } = await setup({ grants: ['objects:app:get', 'objects:app:on'] })
+  try {
+    const { roots } = await open()
+    const cart = await roots.app.cart
+    const seen = []
+    await on(use(cart), 'changed', (data) => seen.push(data.args))
+    assert.equal(app.cart.listeners.size, 1)
+    app.cart.emit('changed', 'one')
+    await until(() => seen.length === 1)
+    assert.deepEqual(seen, [['one']])
+    await release(cart)
+    assert.equal(app.cart.listeners.size, 0, 'the subscription ends with the handle')
+  } finally { teardown() }
+})
+
+test('events through a handle: a peer granted only get is refused, and nothing is attached to the host\'s source', async () => {
+  const { app, open, teardown } = await setup({ grants: ['objects:app:get'] })
+  try {
+    const { roots } = await open()
+    const cart = await roots.app.cart
+    await assert.rejects(on(use(cart), 'changed', () => {}), refused())
+    assert.equal(app.cart.listeners.size, 0)
+  } finally { teardown() }
+})
+
+test('events through a handle: revoking objects:ROOT:on ends the session with the next event, which is not delivered', async () => {
+  const { alice, bob, app, objects, open, teardown } = await setup({ grants: ['objects:app:get', 'objects:app:on'] })
+  try {
+    const { roots } = await open()
+    const cart = await roots.app.cart
+    const seen = []
+    await on(use(cart), 'changed', (data) => seen.push(data))
+    bob.registry.revokeCapabilities(alice.podId, ['objects:app:on'])
+    app.cart.emit('changed', 'secret news')
+    await until(() => objects.sessions() === 0)
+    assert.deepEqual(seen, [])
+    assert.equal(app.cart.listeners.size, 0)
+  } finally { teardown() }
+})
+
+test('events through a handle: a grant that expires ends the subscription at once when watched', async () => {
+  const clock = fakeClock()
+  const { alice, bob, app, objects, open, teardown } = await setup({ clock, watch: true })
+  try {
+    bob.registry.grantCapabilities(alice.podId, [protocolScope('objects'), 'objects:app:get'])
+    bob.registry.grantCapabilities(alice.podId, ['objects:app:on'], { expiresAt: clock.now() + 1000 })
+    const { roots } = await open()
+    const cart = await roots.app.cart
+    await on(use(cart), 'changed', () => {})
+    assert.equal(objects.sessions(), 1)
+    clock.advance(1001)
+    await until(() => objects.sessions() === 0)
+    assert.equal(app.cart.listeners.size, 0)
+  } finally { teardown() }
+})
+
+test('typed remotes: a description is given for what the peer may do on a root, nothing for a root it has no grant on', async () => {
+  const { alice, bob, open, teardown } = await setup({ grants: ['objects:app:get'] })
+  try {
+    const { roots } = await open()
+    const description = await rootDescription(roots.app)
+    assert.deepEqual(description.ops, ['get'], 'only the actions the registry grants')
+    assert.deepEqual(description.allow.call, [], 'no call entry is told to a peer without objects:app:call')
+    assert.deepEqual(description.allow.on, [])
+    assert.ok(description.allow.get.includes('app.title'))
+    bob.registry.revokeCapabilities(alice.podId, ['objects:app:get'])
+    await assert.rejects(rootDescription(roots.app), refused())
+  } finally { teardown() }
+})
+
+test('typed remotes: the description of a root the peer has no grant on is refused, asked for by name', async () => {
+  const vault = { key: 'k' }
+  const { open, teardown } = await setup({
+    grants: ['objects:app:get'],
+    expose: { roots: { app: makeApp(), vault }, allow: { ...allow, get: [...allow.get, 'vault.key'] } },
+  })
+  try {
+    const { roots, peer } = await open()
+    assert.equal(roots.vault, undefined, 'the root is not listed to this peer')
+    await assert.rejects(peer.request('types', { root: 'vault' }), refused())
+    const own = await peer.request('types', { root: 'app' })
+    assert.deepEqual(own.ops, ['get'])
   } finally { teardown() }
 })
 

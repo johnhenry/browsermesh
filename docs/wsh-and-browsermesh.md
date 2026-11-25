@@ -103,9 +103,11 @@ The grants are the same scopes as above. Design: [`design/wsh-services-on-a-pod.
 
 ## Not verified
 
-* Built and run against wsh 0.49.0 and 0.50.0 (tested range of `browsermesh-objects` and `browsermesh-mcp`: 0.49.0 to
-  0.50.0, the peer range starts at 0.49.0; the first was run when 0.49 was the newest, the second is what the repository
-  now installs). They use its transport-neutral caller identity (`who: { username, fingerprint, podId }`, strict about 32
+* Built and run against wsh 0.49.0, 0.50.0 and 0.51.0 (tested range of `browsermesh-objects` and `browsermesh-mcp`:
+  0.49.0 to 0.51.0, the peer range starts at 0.49.0; the first two were run when they were the newest, the last is what
+  the repository now installs). wsh 0.51 adds events through a handle and typed remotes (`rootDescription`) to the object
+  layer; `browsermesh-objects` judges both through the registry. The object layer's MCP face (`exposeObjects({ mcp })`)
+  is not exposed by `browsermesh-objects`: a page's tools go through `browsermesh-mcp`. They use its transport-neutral caller identity (`who: { username, fingerprint, podId }`, strict about 32
   bytes and canonical spelling, so a peer that is not named by a real pod id is refused), `serveMcpOverDuplex` with its
   `mcp-tool` / `mcp-call` hook, and `@johnhenry/wsh/testing` in the transport tests. `WshServices` needs 0.50 (its sessions
   begin at `onSealed`, the registry opens its channels through `authorizesItself`, and it can serve a mesh channel); the rest of `browsermesh-transport` still runs against wsh 0.45.0 and 0.49.0 (its tests pass on
