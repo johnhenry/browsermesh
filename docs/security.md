@@ -162,7 +162,11 @@ What listing a pod's key in a machine's `authorized_keys` means, plainly:
 - **Machine rights are never granted from mesh trust.** Being trusted, granted a
   capability or reachable on the mesh gives no access to a machine, and no code
   here derives one from the other. A machine's own `authorized_keys` decides
-  who reaches it, in its own notation and by its owner.
+  who reaches it, in its own notation and by its owner. (The one registry grant
+  that names outbound network access is the egress package's own `egress:*`
+  scope family, written by the operator of a pod that lends its network, never
+  derived from trust, and not a wsh `gateway:` capability: see
+  [Egress](#egress) and `capability-notation.md`.)
 - **A non-extractable key can still be used by whatever runs in the page.** Not
   being able to copy the key out does not stop the page from asking for
   signatures.
