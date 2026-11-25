@@ -16,8 +16,8 @@ const cleanups = [];
 afterEach(async () => {
   while (cleanups.length) { try { await cleanups.pop()(); } catch { /* best effort */ } }
 });
-async function rig(n = 2, hubOpts = {}) {
-  const env = await makeEnv();
+async function rig(n = 2, hubOpts = {}, envOpts = undefined) {
+  const env = await makeEnv(envOpts);
   cleanups.push(() => env.close());
   const ids = await makeIdentities(n);
   const hubs = ids.map((id, i) => {
@@ -120,6 +120,74 @@ describe('wsh link: a waiting host half', () => {
     assert.equal(sockets.filter((s) => s.closed).length, 0, 'the host halves are still waiting');
     assert.equal(sockets.length, waiting, 'and none was replaced');
   });
+});
+
+// The same two deadlines against the real pipe relay (wsh's own, in this process) with a mocked setTimeout: a half that waits is not
+// closed; a peer that pairs and then never logs in is closed `loginTimeoutMs` after it arrived, not after the half was accepted.
+const pump = async (n = 50) => { for (let i = 0; i < n; i++) await new Promise((r) => setImmediate(r)); };
+const pumpUntil = async (predicate, label) => {
+  for (let i = 0; !predicate(); i++) {
+    if (i > 10_000) throw new Error(`gave up waiting for ${label}`);
+    await new Promise((r) => setImmediate(r));
+  }
+};
+const LONG_RELAY = { relayOptions: { rendezvousTimeoutMs: 3_600_000, idleTimeoutMs: 3_600_000 } };
+
+describe('wsh link: a peer that pairs and never logs in', () => {
+  for (const [name, stripPairedRequest] of [['a relay that reports the pairing', false], ['a relay that predates the pairing signal (first byte applies)', true]]) {
+    it(`is closed at the login deadline counted from its arrival, and the wait before it is free (${name})`, async () => {
+      const env = await makeEnv(LONG_RELAY);
+      cleanups.push(() => env.close());
+      const [id] = await makeIdentities(1);
+      // An older relay ignores `paired=1`: the same relay with the request taken off the URL behaves as one.
+      // The host speaks first as soon as it has accepted the half, so a write on a host half says the host is attached (its clock may run).
+      let hostWrites = 0;
+      const socketFactory = (url) => {
+        const ws = new env.WebSocket(stripPairedRequest ? url.replace(/&paired=1$/, '') : url);
+        const send = ws.send.bind(ws);
+        ws.send = (data) => { hostWrites++; return send(data); };
+        return ws;
+      };
+      const A = makeHub(env, id, { allow: [], socketFactory });
+      cleanups.push(() => A.close());
+      const rid = await rendezvousId(id.podId);
+      let operator = null;
+      let operatorClosed = false;
+      mock.timers.enable({ apis: ['setTimeout'] });
+      try {
+        await A.listen();
+        await pumpUntil(() => env.stats().waiting >= 1 && hostWrites >= 1, 'the host half to reach the relay and be accepted');
+        mock.timers.tick(50_000);
+        await pump();
+        assert.deepEqual(A.of('refused'), [], 'a half that has waited 50 s is not refused');
+        assert.equal(env.stats().waiting >= 1, true, 'and is still at the relay');
+
+        // The operator arrives and says nothing. With the paired signal the host's clock starts now; without it, it starts at the first
+        // byte, which never comes: that relay leaves this half unbounded by the login deadline (wsh documents the gap).
+        operator = new env.WebSocket(`${RELAY.replace(/\/$/, '')}/r/${rid}`);
+        operator.addEventListener('close', () => { operatorClosed = true; });
+        await pumpUntil(() => env.stats().pipes >= 1, 'the pipe to pair');
+        await pump();
+        mock.timers.tick(59_000);
+        await pump();
+        assert.deepEqual(A.of('refused'), [], '59 s after arriving is inside the deadline (109 s after the accept)');
+        assert.equal(operatorClosed, false);
+        mock.timers.tick(2_000);
+        if (stripPairedRequest) {
+          await pump();
+          assert.deepEqual(A.of('refused'), [], 'no signal and no byte: nothing starts the clock');
+        } else {
+          await pumpUntil(() => A.of('refused').length > 0, 'the login deadline to close the silent peer');
+          assert.equal(A.of('refused')[0].reason, 'login-timeout');
+          mock.timers.tick(5_000); // wsh lets the AuthFail drain before it closes
+          await pumpUntil(() => operatorClosed, 'the pipe to end');
+        }
+      } finally {
+        mock.timers.reset();
+        try { operator?.close(); } catch { /* already closed */ }
+      }
+    });
+  }
 });
 
 describe('wsh link: identity', () => {
