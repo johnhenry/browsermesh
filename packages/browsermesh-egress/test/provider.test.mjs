@@ -381,6 +381,23 @@ describe('the address policy, after resolution, at the seam', () => {
     assert.ok(e.code === 'connect-failed' && e.detail === 'timeout' && e.posix === 'ETIMEDOUT')
   })
 
+  it('a destination that fails the connection before the provider has answered is heard at once: a failed connect, nothing left open, no crash', async () => {
+    const origin = await echoOrigin()
+    cleanups.push(() => origin.close())
+    const net = simNetwork({ names: { 'pkg.test': [PUBLIC] }, origins: { [`${PUBLIC}:443`]: origin.port } })
+    const { link, provider } = await rig(cleanups, {
+      origin, grants: [EGRESS_SCOPES.tcp('pkg.test', 443)],
+      deliver: setImmediate, // every hop of the link is a macrotask, so the provider's stream open takes real turns of the event loop
+      // A socket the way wsh's guard returns one: connected, with no error listener of its own. The destination resets it one turn
+      // after the provider received it, while the provider is still opening the answer's stream.
+      egress: { dial: async (r) => { const d = await net.dial(r); d.socket.removeAllListeners('error'); setImmediate(() => d.socket.emit('error', new Error('reset by the destination'))); return d } },
+    })
+    const e = await link.connect('pkg.test', 443).catch((x) => x)
+    assert.ok(e instanceof EgressError && e.code === 'connect-failed' && e.detail === 'failed', String(e))
+    await until(() => provider.stats().open === 0, 'the connection to be gone')
+    await until(() => origin.sockets.size === 0, 'the dialled socket to be closed')
+  })
+
   it('a dial that returns no socket is a failed connect, never a crash', async () => {
     const { link, provider } = await rig(cleanups, { grants: [EGRESS_SCOPES.tcp('pkg.test', 443)], egress: { dial: async () => ({ socket: 'nope' }) } })
     const e = await link.connect('pkg.test', 443).catch((x) => x)

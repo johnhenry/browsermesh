@@ -52,8 +52,10 @@ function refusalOf(e, phase) {
   return refusalAnswer('connect-failed', { detail: 'failed' })
 }
 
-/** The answer for a connection that was ended while it was still being made: the grant went, or the provider stopped. */
-const endedAnswer = (conn) => refusalAnswer(conn.endReason === 'shutdown' ? 'shutting-down' : 'no-grant')
+/** The answer for a connection that was ended while it was still being made: the provider stopped, the grant went, or the destination reset it. */
+const endedAnswer = (conn) => (conn.endReason === 'shutdown' ? refusalAnswer('shutting-down')
+  : conn.endReason === 'revoked' ? refusalAnswer('no-grant')
+    : refusalAnswer('connect-failed', { detail: 'failed' }))
 
 /**
  * @param {object} opts
@@ -250,8 +252,6 @@ export function createMeshEgress({
       conn.originEnded = true
       down.end().then(() => { if (conn.upDone) endConnection(conn, 'closed') }, () => endConnection(conn, 'consumer-left'))
     })
-    socket.on('error', () => endConnection(conn, 'origin-error'))
-    socket.on('close', () => endConnection(conn, conn.originEnded ? 'closed' : 'origin-error'))
   }
 
   /** Consumer to origin: the stream's credit is returned as each chunk is written, so a slow origin slows the consumer. */
@@ -393,6 +393,9 @@ export function createMeshEgress({
         try { dialed = await Promise.race([dial({ host: conn.host, port: conn.port, wide: grant.via === 'wide', signal: conn.ac.signal, timeoutMs }), guard.promise]) } finally { clearTimeout(timer) }
         if (!dialed || typeof dialed !== 'object' || !dialed.socket || typeof dialed.socket.on !== 'function') throw Object.assign(new Error('dial returned no socket'), { code: 'FAILED' })
         conn.socket = dialed.socket
+        // Listened to from the moment it exists: a destination that resets before the answer must end the connection, never go unheard.
+        conn.socket.on('error', () => endConnection(conn, 'origin-error'))
+        conn.socket.on('close', () => endConnection(conn, conn.originEnded ? 'closed' : 'origin-error'))
         conn.address = text(dialed.address, 64)
         conn.addressClass = text(dialed.class, 32)
         if (conn.ended) { conn.socket.destroy(); return refuse(req, 'tcp', endedAnswer(conn), { detail: conn.endReason }) }

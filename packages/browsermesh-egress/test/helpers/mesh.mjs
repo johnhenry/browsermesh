@@ -11,7 +11,8 @@ import { MeshPeerManager, TrustGraph, MeshACL } from '@johnhenry/browsermesh-cor
 import { attachService, createMeshProtocolService, PeerRegistry } from '@johnhenry/browsermesh-apps'
 import { AddressGuardError, resolveChecked } from '@johnhenry/wsh/address-guard'
 
-export async function createNodes(count) {
+/** `deliver` is how a message crosses the bus: a microtask by default; `setImmediate` makes every hop a macrotask, as a real link's is. */
+export async function createNodes(count, { deliver = queueMicrotask } = {}) {
   const nodes = new Map()
   for (let i = 0; i < count; i++) {
     const { podId } = await PodIdentity.generate()
@@ -24,7 +25,7 @@ export async function createNodes(count) {
         const target = nodes.get(to)
         if (!target) throw new Error('unreachable peer')
         const text = JSON.stringify(data)
-        queueMicrotask(() => { for (const cb of target.listeners) cb(podId, text) })
+        deliver(() => { for (const cb of target.listeners) cb(podId, text) })
       },
     }
     node.registry = new PeerRegistry({ localPodId: podId, peerManager: new MeshPeerManager({}), trustGraph: new TrustGraph(), acl: new MeshACL({ owner: podId }) })
@@ -34,8 +35,8 @@ export async function createNodes(count) {
 }
 
 /** A consumer pod, a provider pod, and a stranger, each with a protocol service. `channelOptions` are the mesh channel's limits. */
-export async function threePods({ channelOptions } = {}) {
-  const [consumer, provider, stranger] = await createNodes(3)
+export async function threePods({ channelOptions, deliver } = {}) {
+  const [consumer, provider, stranger] = await createNodes(3, { deliver })
   const svc = (node) => attachService(node, undefined, createMeshProtocolService(channelOptions))
   const c = svc(consumer)
   const p = svc(provider)
@@ -153,9 +154,9 @@ export const PUBLIC = '93.184.216.34'
  * Three pods, an echo origin, a simulated network that maps `pkg.test:443` (at the simulated public address) to it, a started
  * provider with audit and meter sinks, and (unless `link: false`) a consumer link. `cleanups` runs after each test.
  */
-export async function rig(cleanups, { names, origins, sets, grants = [], egress = {}, link = {}, simOptions = {}, origin } = {}) {
+export async function rig(cleanups, { names, origins, sets, grants = [], egress = {}, link = {}, simOptions = {}, origin, deliver } = {}) {
   const { connectEgress, createMeshEgress } = await import('../../src/index.mjs')
-  const pods = await threePods()
+  const pods = await threePods({ deliver })
   cleanups.push(() => pods.teardown())
   const local = origin ?? await echoOrigin()
   cleanups.push(() => local.close())

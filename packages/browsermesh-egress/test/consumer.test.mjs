@@ -69,11 +69,17 @@ describe('the socket a consumer gets', () => {
 
   it('a destination that resets the connection fails the socket, not hangs it', async () => {
     const origin = await startOrigin((s) => { s.resetAndDestroy ? s.resetAndDestroy() : s.destroy() })
-    const { link } = await rig(cleanups, { origin, grants: [EGRESS_SCOPES.tcp('pkg.test', 443)] })
-    const socket = await link.connect('pkg.test', 443)
-    const e = await outcome(socket)
-    assert.ok(e === null || (e instanceof EgressError && e.code === 'connection-ended'), String(e))
-    await until(async () => { try { await socket.write(bytes('x')); return false } catch { return true } }, 'a write to fail')
+    const { link, provider } = await rig(cleanups, { origin, grants: [EGRESS_SCOPES.tcp('pkg.test', 443)] })
+    // The reset may land before the provider has answered (the connect is refused `connect-failed`) or after (the socket fails):
+    // either way it is heard, and nothing is left open.
+    for (let i = 0; i < 12; i++) {
+      const socket = await link.connect('pkg.test', 443).catch((e) => e)
+      if (socket instanceof EgressError) { assert.equal(socket.code, 'connect-failed', String(socket)); continue }
+      const e = await outcome(socket)
+      assert.ok(e === null || (e instanceof EgressError && e.code === 'connection-ended'), String(e))
+      await until(async () => { try { await socket.write(bytes('x')); return false } catch { return true } }, 'a write to fail')
+    }
+    await until(() => provider.stats().open === 0, 'every connection to be gone')
   })
 
   it('an aborted signal during connect ends the attempt', async () => {
