@@ -109,6 +109,10 @@ test('format: grouped in fours, joined by a dot; the link carries exactly that',
   assert.equal(s.code, `K7QM-2XPD-9TNR.${FP.match(/.{4}/g).join('-')}`);
   assert.equal(s.url, `https://app.example/?join=${s.code}`);
   assert.equal(formatShare({ code: CODE, fingerprint: FP, linkBase: 'https://h.example/app' }).url, `https://h.example/app/?join=${s.code}`);
+  assert.equal(formatShare({ code: CODE, fingerprint: FP, origin: 'https://a.example///' }).url, `https://a.example/?join=${s.code}`);
+  assert.equal(formatShare({ code: CODE, fingerprint: FP, linkBase: 'https://h.example/app///' }).url, `https://h.example/app/?join=${s.code}`);
+  assert.equal(formatShare({ code: CODE, fingerprint: FP }).url, `/?join=${s.code}`);
+  assert.equal(formatShare({ code: CODE, fingerprint: FP, linkBase: '/'.repeat(100_000) }).url, `/?join=${s.code}`);
   assert.throws(() => formatShare({ code: 'short', fingerprint: FP }), TypeError);
   assert.throws(() => formatShare({ code: CODE, fingerprint: 'short' }), TypeError);
 });

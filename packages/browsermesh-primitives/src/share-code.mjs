@@ -170,6 +170,13 @@ export function formatShareCode(code) { return group(String(code).replace(/-/g, 
 /** `XXXX-XXXX-...` (seven groups) */
 export function formatShareFingerprint(fingerprint) { return group(String(fingerprint).replace(/-/g, ''), 4); }
 
+/** `s` without its trailing slashes (a loop, not a pattern: the text is the caller's). */
+function withoutTrailingSlashes(s) {
+  let end = s.length;
+  while (end > 0 && s.charCodeAt(end - 1) === 47) end--;
+  return s.slice(0, end);
+}
+
 /**
  * What a sharer hands out: the full share code (`CODE.FINGERPRINT`, grouped) and the link that carries it.
  * @param {{ code: string, fingerprint: string, origin?: string, linkBase?: string }} parts
@@ -182,9 +189,7 @@ export function formatShare(parts) {
   if (code === null) throw new TypeError(`formatShare: code must be ${SHARE_CODE_CHARS} characters of the share alphabet`);
   if (fingerprint === null) throw new TypeError(`formatShare: fingerprint must be ${SHARE_FINGERPRINT_CHARS} characters of the share alphabet`);
   const text = `${formatShareCode(code)}.${formatShareFingerprint(fingerprint)}`;
-  const prefix = parts.linkBase !== undefined
-    ? `${String(parts.linkBase).replace(/\/*$/, '')}/`
-    : `${String(parts.origin ?? '').replace(/\/+$/, '')}/`;
+  const prefix = `${withoutTrailingSlashes(String(parts.linkBase !== undefined ? parts.linkBase : (parts.origin ?? '')))}/`;
   return { code: text, url: `${prefix}?join=${text}` };
 }
 
