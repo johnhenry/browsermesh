@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.12.1
+
+### Patch Changes
+
+- fd64dd0: Adopt wsh 0.54.0. wsh now closes a host connection that has not completed its login 60 seconds after the host accepted
+  it. The wsh link (`WshPeerLinks`) and `WshServices` accept a host half at a pipe relay when it connects, long before a peer
+  pairs with it, so with that default every idle half would have been closed and re-opened each minute; their hosts for
+  those halves are now created with `loginTimeoutMs: 0` (no deadline between connecting to the relay and the peer's first
+  message, which is what they had before). A mesh protocol channel keeps wsh's default, since its peer logs in as soon as it
+  opens it. Nothing new is sent on the wire and an older wsh ignores the option. `browsermesh-mcp` and `browsermesh-objects`
+  are tested against wsh 0.54.0 (documentation only).
+- 3f46714: Use wsh 0.54.1's `accept(socket, { waitForPeer })` for the host halves that wait at a pipe relay. `WshPeerLinks` and
+  `WshServices` accept a waiting half when it reaches the relay, long before a peer pairs with it. They no longer switch the
+  login deadline off for those hosts: each half is accepted with `waitForPeer`, so wsh's 60 second login deadline starts when
+  the peer arrives (the relay's paired signal, requested by dialling the half with `?paired=1`, or the peer's first byte when
+  that comes first or the relay predates the signal). A half that waits is neither refused nor closed however long it waits,
+  and a peer that pairs and then does not log in is closed at the deadline. A relay that predates the signal ignores
+  `?paired=1`; the first byte then starts the clock, and a peer that arrives and sends nothing is not bounded by the login
+  deadline there. With an older wsh (`@johnhenry/wsh/pipe-relay` has no `watchPairing`) the hosts for those halves keep
+  `loginTimeoutMs: 0`, as before; the optional peer range stays `*`. Nothing new is required of the peer. The in-process test
+  relay (`@johnhenry/browsermesh-transport/wsh-in-process`) passes the paired signal on. `browsermesh-mcp` and
+  `browsermesh-objects` are tested against wsh 0.54.1 (documentation only).
+
 ## 0.12.0
 
 ### Minor Changes
