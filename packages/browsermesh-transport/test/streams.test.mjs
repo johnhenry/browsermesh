@@ -779,3 +779,171 @@ describe('StreamMultiplexer toJSON/fromJSON', () => {
     assert.equal(streams[0].state, 'HALF_CLOSED_LOCAL');
   });
 });
+
+// ---------------------------------------------------------------------------
+// StreamMultiplexer — receive-side rules and a violation budget (opt-in)
+// ---------------------------------------------------------------------------
+
+describe('StreamMultiplexer violation budget', () => {
+  const OPEN = 0xaf, DATA = 0x13, END = 0x14, ERROR = 0x15, WINDOW = 0x16;
+  const id = (n) => n.toString(16).padStart(2, '0').repeat(16);
+  const bytes = (n = 4) => new Uint8Array(n);
+
+  /** A multiplexer that has accepted one inbound stream (`credits` announced), recording what it sent and delivered. */
+  function setup({ credits = 2, ordered = true, opts = { maxViolations: 3 } } = {}) {
+    const mux = new StreamMultiplexer(opts);
+    const sent = [];
+    const delivered = [];
+    const abuse = [];
+    const streams = [];
+    mux.onSend((m) => sent.push(m));
+    mux.onStream((s) => { streams.push(s); s.onData((d, seq) => delivered.push(seq)); });
+    mux.onAbuse((reason, count) => abuse.push({ reason, count }));
+    const sid = id(1);
+    mux.dispatch({ t: OPEN, p: { streamId: sid, method: 'm', ordered, initialCredits: credits } });
+    return { mux, sent, delivered, abuse, streams, sid, stream: streams[0] };
+  }
+
+  it('without maxViolations nothing changes: data past the announced credit is delivered and nothing is counted', () => {
+    const { mux, delivered, sid } = setup({ credits: 1, opts: {} });
+    for (let seq = 1; seq <= 5; seq++) mux.dispatch({ t: DATA, p: { streamId: sid, data: bytes(), seq } });
+    mux.dispatch({ t: DATA, p: { streamId: sid, data: bytes(), seq: 99 } }); // out of sequence too
+    mux.dispatch({ t: DATA, p: { streamId: 'ee'.repeat(16), data: bytes(), seq: 1 } }); // unknown id: still answered
+    assert.deepEqual(delivered, [1, 2, 3, 4, 5, 99])
+    assert.equal(mux.violations, 0)
+    assert.equal(mux.abused, false)
+  });
+
+  it('a well-behaved peer is never counted: it spends credit, is granted more, and ends', () => {
+    const { mux, delivered, stream, sid } = setup({ credits: 2 });
+    let seq = 0;
+    for (let round = 0; round < 20; round++) {
+      mux.dispatch({ t: DATA, p: { streamId: sid, data: bytes(1000), seq: ++seq } });
+      mux.dispatch({ t: DATA, p: { streamId: sid, data: bytes(1000), seq: ++seq } });
+      stream.grantCredits(2); // the reader consumed both
+    }
+    mux.dispatch({ t: END, p: { streamId: sid } });
+    assert.equal(delivered.length, 40);
+    assert.equal(mux.violations, 0);
+  });
+
+  it('data beyond the credit that was granted is dropped and counted', () => {
+    const { mux, delivered, sid } = setup({ credits: 2 });
+    for (let seq = 1; seq <= 3; seq++) mux.dispatch({ t: DATA, p: { streamId: sid, data: bytes(), seq } });
+    assert.deepEqual(delivered, [1, 2]);
+    assert.equal(mux.violations, 1);
+  });
+
+  it('granting credit makes room again', () => {
+    const { mux, delivered, stream, sid } = setup({ credits: 1 });
+    mux.dispatch({ t: DATA, p: { streamId: sid, data: bytes(), seq: 1 } });
+    stream.grantCredits(1);
+    mux.dispatch({ t: DATA, p: { streamId: sid, data: bytes(), seq: 2 } });
+    assert.deepEqual(delivered, [1, 2]);
+    assert.equal(mux.violations, 0);
+  });
+
+  it('out-of-sequence data on an ordered stream is dropped and counted; an unordered stream is not held to it', () => {
+    const a = setup({ credits: 8 });
+    a.mux.dispatch({ t: DATA, p: { streamId: a.sid, data: bytes(), seq: 1 } });
+    a.mux.dispatch({ t: DATA, p: { streamId: a.sid, data: bytes(), seq: 5 } });
+    assert.deepEqual(a.delivered, [1]);
+    assert.equal(a.mux.violations, 1);
+
+    const b = setup({ credits: 8, ordered: false });
+    b.mux.dispatch({ t: DATA, p: { streamId: b.sid, data: bytes(), seq: 3 } });
+    b.mux.dispatch({ t: DATA, p: { streamId: b.sid, data: bytes(), seq: 2 } });
+    assert.deepEqual(b.delivered, [3, 2]);
+    assert.equal(b.mux.violations, 0);
+  });
+
+  it('a frame larger than the chunk limit, or without bytes, is dropped and counted', () => {
+    const { mux, delivered, sid } = setup({ credits: 8 });
+    mux.dispatch({ t: DATA, p: { streamId: sid, data: bytes(STREAM_DEFAULTS.maxChunkSize + 1), seq: 1 } });
+    mux.dispatch({ t: DATA, p: { streamId: sid, data: 'not bytes', seq: 1 } });
+    mux.dispatch({ t: DATA, p: { streamId: sid, data: undefined, seq: 1 } });
+    assert.deepEqual(delivered, []);
+    assert.equal(mux.violations, 3);
+  });
+
+  it('a stream that carries more than its size limit is dropped and counted', () => {
+    const mux = new StreamMultiplexer({ maxViolations: 5, maxStreamSize: 10 });
+    const got = [];
+    mux.onStream((s) => s.onData((d) => got.push(d.length)));
+    const sid = id(2);
+    mux.dispatch({ t: OPEN, p: { streamId: sid, method: 'm', initialCredits: 8 } });
+    mux.dispatch({ t: DATA, p: { streamId: sid, data: bytes(8), seq: 1 } });
+    mux.dispatch({ t: DATA, p: { streamId: sid, data: bytes(8), seq: 2 } });
+    assert.deepEqual(got, [8]);
+    assert.equal(mux.violations, 1);
+  });
+
+  it('a credit grant that is not a positive whole number, or overflows the cap, is ignored and counted', () => {
+    const mux = new StreamMultiplexer({ maxViolations: 9 });
+    const s = mux.open('m', { initialCredits: 2 });
+    for (const n of [0, -1, 1.5, NaN, Infinity, '4', undefined, STREAM_DEFAULTS.maxCredits]) {
+      mux.dispatch({ t: WINDOW, p: { streamId: s.hexId, additionalCredits: n } });
+    }
+    assert.equal(s.sendCredits, 2);
+    assert.equal(mux.violations, 8);
+    mux.dispatch({ t: WINDOW, p: { streamId: s.hexId, additionalCredits: 3 } });
+    assert.equal(s.sendCredits, 5);
+    assert.equal(mux.violations, 8);
+  });
+
+  it('a stream opened beyond the concurrency limit is refused as before, and the refusal is counted', () => {
+    const mux = new StreamMultiplexer({ maxViolations: 5, maxConcurrentStreams: 1 });
+    const sent = [];
+    mux.onSend((m) => sent.push(m));
+    mux.dispatch({ t: OPEN, p: { streamId: id(1), method: 'a', initialCredits: 2 } });
+    mux.dispatch({ t: OPEN, p: { streamId: id(2), method: 'b', initialCredits: 2 } });
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].t, ERROR);
+    assert.equal(sent[0].p.code, 'FLOW_CONTROL');
+    assert.equal(mux.violations, 1);
+    assert.equal(mux.activeCount, 1);
+  });
+
+  it('a duplicate open, an open announcing more credit than the limit, and frames for unknown streams are counted (unknown ones still answered)', () => {
+    const { mux, sent } = setup({ credits: 2 });
+    const before = sent.length;
+    mux.dispatch({ t: OPEN, p: { streamId: id(1), method: 'again', initialCredits: 2 } }); // duplicate
+    assert.equal(mux.violations, 1);
+    mux.dispatch({ t: OPEN, p: { streamId: id(3), method: 'greedy', initialCredits: STREAM_DEFAULTS.maxCredits * 10 } });
+    assert.equal(mux.violations, 2);
+    mux.dispatch({ t: DATA, p: { streamId: id(9), data: bytes(), seq: 1 } });
+    assert.equal(mux.violations, 3);
+    assert.equal(sent.length, before + 1); // the unknown-id error, exactly as without a budget
+    assert.equal(sent[before].p.code, 'INTERNAL');
+  });
+
+  it('beyond the budget the peer is cut off: abuse is reported once, every stream is cancelled, later frames are ignored', () => {
+    const { mux, sent, abuse, stream, sid } = setup({ credits: 1, opts: { maxViolations: 2 } });
+    const second = mux.open('mine');
+    mux.dispatch({ t: DATA, p: { streamId: sid, data: bytes(), seq: 1 } }); // ok, spends the only credit
+    for (let i = 0; i < 2; i++) mux.dispatch({ t: DATA, p: { streamId: sid, data: bytes(), seq: 2 + i } });
+    assert.equal(mux.abused, false); // at the budget, not beyond it
+    assert.equal(mux.violations, 2);
+    mux.dispatch({ t: DATA, p: { streamId: sid, data: bytes(), seq: 4 } });
+    assert.equal(mux.abused, true);
+    assert.equal(abuse.length, 1);
+    assert.match(abuse[0].reason, /credit/);
+    assert.equal(abuse[0].count, 3);
+    assert.equal(stream.state, 'CLOSED');
+    assert.equal(second.state, 'CLOSED');
+    const sentBefore = sent.length;
+    mux.dispatch({ t: OPEN, p: { streamId: id(7), method: 'late', initialCredits: 2 } });
+    mux.dispatch({ t: DATA, p: { streamId: id(8), data: bytes(), seq: 1 } });
+    assert.equal(sent.length, sentBefore, 'nothing is answered to a peer that was cut off');
+    assert.equal(mux.activeCount, 0);
+    assert.equal(abuse.length, 1);
+  });
+
+  it('maxViolations must be a positive whole number when given', () => {
+    for (const bad of [0, -1, 1.5, '3', NaN, Infinity]) {
+      assert.throws(() => new StreamMultiplexer({ maxViolations: bad }), TypeError);
+    }
+    assert.doesNotThrow(() => new StreamMultiplexer({ maxViolations: 1 }));
+    assert.doesNotThrow(() => new StreamMultiplexer({}));
+  });
+});
