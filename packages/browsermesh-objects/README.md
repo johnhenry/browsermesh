@@ -9,7 +9,7 @@ them by path (`await remote.app.counter.value`), under two authorisations: wsh's
 offers, by path) and the host's `PeerRegistry` grants for the channel's verified peer (what this peer may do,
 per root and per action).
 
-Peer dependencies: `@johnhenry/wsh` `>=0.48.0` (the first version with events, handles and callbacks) and
+Peer dependencies: `@johnhenry/wsh` `>=0.49.0` (tested at 0.49.0 to 0.51.0) and
 `@johnhenry/browsermesh-apps` `>=0.21.0` (the protocol channel and `createRootAuthorizer`).
 Nothing is served unless `exposeObjectsOnMesh` is called, and nothing is allowed without a grant.
 
@@ -58,7 +58,8 @@ await on(roots.app.bus, 'ready', (data) => {})   // refused: the grant has no ob
 | `call`, `construct`, a call that passes callbacks (they are arguments of the call) | `call` | `objects:ROOT:call` |
 | `set` | `set` | `objects:ROOT:set` |
 | subscribe to an event source | `on` | `objects:ROOT:on` |
-| an operation through a handle | the action of the operation, on the path that produced the handle | as above |
+| an operation through a handle, including a subscription to an event source reached through one (wsh 0.51) | the action of the operation, on the path that produced the handle | as above |
+| `rootDescription` (typed remotes, wsh 0.51) | any action on the root; what is described is narrowed to the actions held | none of the root's actions: refused |
 | anything this table does not name | refused | |
 
 Opening the protocol needs `protocol:objects:open`. The scopes use the registry's wildcards (`objects:*:get`,

@@ -64,8 +64,12 @@ export async function threePods({ channelOptions, clock } = {}) {
 }
 
 export class Cart {
-  constructor() { this.items = [1, 2, 3]; this.note = 'private' }
+  constructor() { this.items = [1, 2, 3]; this.note = 'private'; this.listeners = new Set() }
   add(n) { this.items.push(n); return this.items.length }
+  // An emitter-style source: through a handle, a subscription to it is an event through a handle (wsh 0.51).
+  on(type, fn) { if (type === 'changed') this.listeners.add(fn) }
+  off(type, fn) { if (type === 'changed') this.listeners.delete(fn) }
+  emit(type, ...args) { for (const fn of [...this.listeners]) fn(...args) }
 }
 
 /** The host's object graph. */
@@ -101,7 +105,7 @@ export const allow = {
   get: ['app.title', 'app.text', 'app.counter.**', 'app.cart', 'app.cart.items', 'app.cart.items.length', 'app.makeCart().items', 'app.makeCart().items.length'],
   call: ['app.counter.inc', 'app.bytes', 'app.makeCart', 'app.makeCart().add', 'app.cart.add', 'app.subscribe(callback)'],
   set: ['app.counter.value'],
-  on: ['app.bus@ping', 'app.bus@tick'],
+  on: ['app.bus@ping', 'app.bus@tick', 'app.cart@changed'],
 }
 
 /** Wait for a condition without a wall-clock budget in the assertion: it is the test's own timeout that ends a hang. */

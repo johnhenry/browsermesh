@@ -44,7 +44,7 @@
   },
   "devDependencies": {
     "@changesets/cli": "^2.27.0",
-    "@johnhenry/wsh": "^0.50.0",
+    "@johnhenry/wsh": "^0.51.0",
     "@playwright/test": "1.65.1",
     "turbo": "^2.0.0"
   },
