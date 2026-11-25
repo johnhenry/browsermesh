@@ -30,8 +30,8 @@
  *     `createPodHostService()` — nothing in this driver bypasses that.
  *   - `snapshot`/`restore` → `ENOTSUP`. Not implemented this wave (no
  *     durable serialization of a page's heap over CDP exists here); see
- *     the extension driver's `chrome.tabs.discard`/reload pair for a
- *     weaker but real pause/resume this lane could grow toward.
+ *     a tab discard and reload is a weaker but real pause/resume this
+ *     lane could grow toward.
  *   - `drain`  → `Target.closeTarget` + (if `contextPerPod`)
  *     `Target.disposeBrowserContext`.
  */

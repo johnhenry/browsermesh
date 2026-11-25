@@ -151,8 +151,7 @@ export function canTransition(from, to) {
  *   Object hibernation is automatic, not a verb a caller drives.
  * - A **browser** pod host is a tab, not a shell — but unlike an isolate it
  *   DOES have a JS realm a sufficiently privileged driver can evaluate code
- *   in (`Runtime.evaluate` over CDP; `chrome.scripting.executeScript` from
- *   an extension's isolated world). Issue #185 item 7 (the browser lane)
+ *   in (`Runtime.evaluate` over CDP). Issue #185 item 7 (the browser lane)
  *   settled this explicitly: `exec` on the browser lane means **"evaluate
  *   an expression in the page's JS context," not a shell command** — the
  *   `command` argv's first element is treated as a JS expression string by
@@ -162,19 +161,18 @@ export function canTransition(from, to) {
  *   question: the in-page driver (`browser-host-driver.mjs`) answers
  *   `ENOTSUP` for it on purpose — a parent tab evaluating code in a
  *   cross-origin child has no trust boundary to speak of, so that driver
- *   never implements it, while the CDP and extension drivers
- *   (`spikes/browser-pod-host`, `spikes/browser-extension-host`) do, because
- *   their drivers run with an external operator's full control over the
- *   browser (remote debugging port / extension privileges) rather than
+ *   never implements it, while the CDP driver
+ *   (`spikes/browser-pod-host`) does, because
+ *   it runs with an external operator's full control over the
+ *   browser (remote debugging port) rather than
  *   borrowing the hosted page's own non-boundary. `ENOTSUP` is the correct
  *   code for that gap (a driver choice, not a lane law) — see
  *   `POD_HOST_ERROR`'s doc comment for the `ELANE`/`ENOTSUP` distinction.
  * - `snapshot`/`restore` stay `ELANE` on the browser lane: no driver in
  *   this wave durably freezes a page's JS heap to storage and thaws it
- *   byte-for-byte the way a microVM snapshot does. (The extension driver's
- *   `chrome.tabs.discard`/reload pair is a real, useful pause/resume
- *   primitive, but it is a *different, weaker* promise — see that spike's
- *   README — so it is kept out of the standard gated verb set rather than
+ *   byte-for-byte the way a microVM snapshot does. (A tab discard and
+ *   reload is a real, useful pause/resume primitive, but it is a
+ *   *different, weaker* promise, so it is kept out of the standard gated verb set rather than
  *   stretching `snapshot` to mean two different things across drivers.)
  * - **microvm** and **node** hosts can do all eight.
  */

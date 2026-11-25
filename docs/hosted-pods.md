@@ -22,7 +22,7 @@ lanes answer to — the eight-verb pod host protocol, the mesh service that
 serves it, and the per-lane drivers. See [§8a](#8a-control-surface);
 items 3-6 of that work (`mesh://` routes, `meshctl` tools, an external CLI,
 a supervisor) are all projections of it. Item 7, the **browser lane**, adds
-a third lane with three drivers of its own (in-page, CDP, extension) —
+a third lane with two drivers of its own (in-page, CDP) —
 see [§8b](#8b-lane-c--browser-pods).
 
 Later work is in `docs/design/`: the
@@ -46,7 +46,7 @@ stand-ins for the isolate lane) are in `packages/browsermesh-pod`.
 | End to end across a relay | Done for the sealed path: `meshctl --wsh-relay` reaches a host through a pipe relay over a sealed, key-authenticated wsh link, with no signalling server or WebRTC, tested against the in-process pipe relay and a real pod-host service. The unsealed relay dialect is deliberately not used for pod-host traffic. Not run against a deployed relay. |
 | Isolate hosts and the compute scorer | Done in #277. |
 | Publish meshctl | Owner decision; section 2 of the decisions note. The package now starts without a repository checkout (#361). |
-| MV3 extension in a real browser | Loaded in real Chromium: it does not run (its worker imports files outside the extension and dies at once). Owner decision (#272); section 3 of the decisions note. |
+| MV3 extension in a real browser | Retired. Loaded in real Chromium it did not run (its worker imported files outside the extension root and exited at once), so the spike was removed; why, and what a working extension would need, is [recorded below](#what-was-learned-from-the-mv3-extension-spike). |
 | Raw `onIncomingData()` subscribers; `WebSocketTransport` and Blob frames | Done (#208, #212, #243). |
 
 ## Motivation
@@ -643,8 +643,8 @@ records.
 \* Issue #185 item 7's decision, made while building the browser lane's
 drivers (see [§8b](#8b-lane-c--browser-pods)): `exec` on the browser lane
 means **"evaluate an expression in the page's JS context,"** not "spawn a
-shell command" — a tab has no shell, but it does have a JS realm, and two
-of the browser lane's three drivers (CDP, extension) can genuinely drive
+shell command" — a tab has no shell, but it does have a JS realm, and
+the browser lane's CDP driver can genuinely drive
 that safely from outside the page. So `exec` is lane-capable (`true`), not
 `ELANE`; the in-page driver, which has no safe way to do this from inside
 the page it hosts, answers `ENOTSUP` for it instead — a driver gap, not a
@@ -696,7 +696,6 @@ A `PodHostDriver` is a JSDoc typedef, not a base class: any object with
 | `createIsolatePodDriver({baseUrl})` | `isolate` | `spikes/isolate-pod-host/src/driver.mjs`, over WP2's Worker routes |
 | `createInPageDriver({podUrl, ...})` | `browser` | `browsermesh-pod/src/browser-host-driver.mjs` — in-page, zero deps, see [§8b](#8b-lane-c--browser-pods) |
 | `createCdpDriver({cdp, podUrl})` | `browser` | `spikes/browser-pod-host/src/driver.mjs` — remote debugging protocol |
-| `createExtensionDriver({chrome})` | `browser` | `spikes/browser-extension-host/src/driver.mjs` — MV3 extension |
 
 The isolate lane's HTTP routes (`spikes/isolate-pod-host/src/routes.mjs`)
 are a 1:1 projection of the same verbs: `GET /pods`,
@@ -827,8 +826,9 @@ item 7) is the opposite case: the host and the hosted pod are both inside
 *someone's own browser* — a tab spawning and controlling windows, iframes,
 and workers that each boot a `Pod`. The verb set, the podspec, and the
 gated/audited service are identical; only the driver changes, and this
-lane has **three** of them, trading how much of the browser they can touch
-for how much setup they need.
+lane has **two** of them, trading how much of the browser they can touch
+for how much setup they need. (A third, a Manifest V3 extension, was a spike
+and has been retired; see [what was learned](#what-was-learned-from-the-mv3-extension-spike).)
 
 ```mermaid
 flowchart TB
@@ -846,12 +846,6 @@ flowchart TB
       HostTab -. "BroadcastChannel: browser-host:ready" .- Worker
     end
 
-    subgraph ExtHost["Extension driver (spikes/browser-extension-host)"]
-      SW["MV3 service worker<br/>createExtensionDriver()"]
-      Tab1["chrome.tabs pod"]
-      SW -- "chrome.tabs.create / sendMessage" --> Tab1
-      SW -. "chrome.scripting.executeScript (exec)" .- Tab1
-    end
   end
 
   subgraph Remote["Anywhere with a debugging port"]
@@ -877,21 +871,18 @@ flowchart TB
   Remote -. "Lane B host agent could run the CDP driver\ninside the guest instead of on the host" .-> MicroVM
 ```
 
-### The three drivers
+### The two drivers
 
 | Driver | Needs | Trust model | `exec` | `snapshot`/`restore` |
 | --- | --- | --- | --- | --- |
 | **In-page** (`browser-host-driver.mjs`) | Nothing — a page's own JS | None: the driver IS a page, with no privilege over what it spawns | `ENOTSUP` — no safe way to evaluate in a child from inside the page that hosts it | `ENOTSUP` (IndexedDB soft-snapshot is a documented follow-up) |
 | **CDP** (`spikes/browser-pod-host`) | A `--remote-debugging-port`, raw `WebSocket` | An external operator with full remote control of the browser | **Supported** — `Runtime.evaluate(expression)`, gated by `checkAccess()` like any exec | `ENOTSUP` (not implemented this wave) |
-| **Extension** (`spikes/browser-extension-host`) | An installed MV3 extension | Extension privileges (host permissions, `scripting`) over pages it is allowed to touch | **Supported** — `chrome.scripting.executeScript` in the page's isolated world, gated | `snapshot` ≈ `chrome.tabs.discard` / `restore` ≈ reload — a real pause, but a WEAKER promise than a microVM snapshot (documented honestly in that spike's README, not wired into the standard gated verb set) |
 
-All three answer `spawn`/`status`/`send`/`drain`/`list` and share the same
+Both answer `spawn`/`status`/`send`/`drain`/`list` and share the same
 lifecycle (`cold → booting → registered → … → draining → gone`). What
 differs is `exec`'s availability — see `host-protocol.mjs`'s
 `POD_LANE_VERBS` doc comment for the full "why `exec` is lane-capable but
-driver-optional" reasoning — and, for the extension driver only, an
-honestly-weaker `snapshot`/`restore` pair kept out of the gated verb set
-on purpose.
+driver-optional" reasoning.
 
 ### Nesting with Lane B
 
@@ -920,9 +911,39 @@ For actually-untrusted hosted-pod code, do not reach for the browser
 lane's in-page driver at all: use the **CDP driver inside a microVM**
 (Lane B's isolation, with a real headless Chrome inside it) so a hostile
 pod page is contained by the guest/host boundary Firecracker already
-provides, not by browser same-origin policy. The extension driver sits in
-between — it has no sandbox either, but at least confines itself to pages
-the extension's `host_permissions` were explicitly scoped to.
+provides, not by browser same-origin policy.
+
+### What was learned from the MV3 extension spike
+
+A third browser-lane driver, a Manifest V3 extension (a service worker driving
+`chrome.tabs` and `chrome.scripting.executeScript`), was written as a spike and
+only ever ran against a fake `chrome` object. It was retired on the owner's
+decision (#272, decision 3 of [the open-decisions note](design/hosted-pods-open-decisions.md))
+and removed, with no archive copy.
+
+- **It did not run.** Loaded unpacked into a real Chromium (driven with
+  Playwright), its service worker started and exited at once, with no error on
+  the extensions page. A worker with a trivial `background.mjs` stayed up; a
+  worker whose `background.mjs` imported a file outside the extension directory
+  (the spike imported the pod package by a relative path into `packages/`) died
+  the same way. An unpacked extension can only import files inside its own root
+  (the extension root), and the pod package also imports by bare package name,
+  which an extension worker cannot resolve. So nothing written about its
+  behaviour was ever observed in a browser.
+- **What a working extension would need.** A build step this repository does not
+  have: bundle the worker and the pod package into the extension directory
+  (one self-contained file with no bare imports), set `host_permissions` to a
+  real origin, and add a test that loads it in a real browser and drives
+  `spawn` and `exec`.
+- **Why that was not done.** Its `exec` evaluated a string with the extension's
+  `scripting` access, which cannot work under a strict Content-Security-Policy
+  and is the capability the spike was frozen for. If an extension is wanted at
+  all later, the better design is to serve the remote-object layer from the page
+  (`@johnhenry/wsh/objects`, `examples/19-wsh-objects-over-protocol-channel.mjs`)
+  and let the extension only inject that.
+- **What was lost.** The browser lane has two drivers (in-page and CDP) instead of
+  three. The extension's weaker pause and resume (a tab discard and reload) was
+  never part of the gated verb set, so no verb changed.
 
 ## 9. Work packages
 
