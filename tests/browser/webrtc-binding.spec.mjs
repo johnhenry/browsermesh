@@ -5,7 +5,7 @@ import { test, expect, until, exposeHostCandidates } from './fixtures.mjs'
 // session descriptions it applied (identity-binding.mjs).
 
 /** Two isolated pages, each with a pod identity, registered with the signalling server. */
-async function pair(open, origin, { identity }) {
+async function pair(open, origin, { identity, requireSignedDescription = false }) {
   const alice = await open(origin, { isolated: true })
   const bob = await open(origin, { isolated: true })
   await exposeHostCandidates(alice)
@@ -13,8 +13,8 @@ async function pair(open, origin, { identity }) {
   const ids = identity
     ? { a: await alice.evaluate(() => window.bm.rtcIdentityCreate()), b: await bob.evaluate(() => window.bm.rtcIdentityCreate()) }
     : { a: 'pod-alice', b: 'pod-bob' }
-  await alice.evaluate((i) => window.bm.rtcRegister({ local: i.a, remote: i.b, identity: i.identity }), { ...ids, identity })
-  await bob.evaluate((i) => window.bm.rtcRegister({ local: i.b, remote: i.a, identity: i.identity }), { ...ids, identity })
+  await alice.evaluate((i) => window.bm.rtcRegister({ local: i.a, remote: i.b, identity: i.identity, requireSignedDescription: i.requireSignedDescription }), { ...ids, identity, requireSignedDescription })
+  await bob.evaluate((i) => window.bm.rtcRegister({ local: i.b, remote: i.a, identity: i.identity, requireSignedDescription: i.requireSignedDescription }), { ...ids, identity, requireSignedDescription })
   return { alice, bob, ids }
 }
 
@@ -28,7 +28,7 @@ test('identity binding succeeds on a real RTCPeerConnection', async ({ servers, 
 
   // Both sides verified the other's proof over fingerprints read from real browser SDP.
   for (const page of [alice, bob]) {
-    expect(await status(page)).toMatchObject({ state: 'connected', bound: true, failure: null })
+    expect(await status(page)).toMatchObject({ state: 'connected', bound: true, failure: null, descriptionVerified: true, refusals: [] })
   }
   // And traffic flows once bound, in both directions.
   await alice.evaluate(() => window.bm.rtcSend({ hello: 'bob' }))
@@ -47,7 +47,8 @@ test('a bound connection stays bound and usable through an ICE-restart renegotia
 
   await alice.evaluate(() => window.bm.rtcRenegotiate())
   await until(alice, () => window.bm.rtc.answered === 2)
-  for (const page of [alice, bob]) expect(await status(page)).toMatchObject({ state: 'connected', bound: true, failure: null })
+  // The restart offer and its answer were signed and verified before they were applied, too.
+  for (const page of [alice, bob]) expect(await status(page)).toMatchObject({ state: 'connected', bound: true, failure: null, descriptionVerified: true, refusals: [] })
   await bob.evaluate(() => window.bm.rtcSend({ after: 'restart' }))
   await until(alice, () => window.bm.rtc.inbox.length === 1)
   expect(await alice.evaluate(() => window.bm.rtc.inbox)).toEqual([{ after: 'restart' }])
@@ -75,13 +76,13 @@ test('a peer that sends no proof is closed after the binding timeout, with the r
  * with two RTCPeerConnections of its own, relaying whatever crosses the data channel (the proofs
  * included). Without binding the connection comes up through the attacker and nobody notices.
  */
-async function withAttacker({ servers, open }, identity, body) {
+async function withAttacker({ servers, open }, identity, body, extra = {}) {
   const attacker = await open(servers.a, { isolated: true })
   await exposeHostCandidates(attacker)
   await attacker.evaluate(() => window.bm.mitmStart('__mitm__'))
   servers.a.hub.intercept = '__mitm__'
   try {
-    return await body(attacker, await pair(open, servers.a, { identity }))
+    return await body(attacker, await pair(open, servers.a, { identity, ...extra }))
   } finally {
     servers.a.hub.intercept = null
   }
@@ -114,4 +115,17 @@ test('with identity binding, descriptions swapped by the signalling server are d
     expect(await alice.evaluate(() => window.bm.rtc.inbox)).toEqual([])
     expect(await bob.evaluate(() => window.bm.rtc.inbox)).toEqual([])
   })
+})
+
+test('with signed descriptions required, descriptions swapped by the signalling server are refused before they are applied', async ({ servers, open }) => {
+  await withAttacker({ servers, open }, true, async (attacker, { alice, bob }) => {
+    // Both sides require a signature; the attacker's descriptions have none.
+    await alice.evaluate(() => window.bm.rtcOffer())
+    await until(alice, () => window.bm.rtc.refusals.length > 0)
+    const a = await status(alice)
+    expect(a.refusals[0]).toMatch(/answer .*unsigned/)
+    expect(a).toMatchObject({ bound: false, descriptionFailure: 'unsigned' })
+    expect(await alice.evaluate(() => window.bm.rtc.inbox)).toEqual([])
+    expect(await bob.evaluate(() => window.bm.rtc.inbox)).toEqual([])
+  }, { requireSignedDescription: true })
 })

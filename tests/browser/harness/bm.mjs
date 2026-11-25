@@ -214,9 +214,9 @@ const bm = {
     return bm.rtcIdentity.podId
   },
   /** `identity: true` proves this page's pod key on every connection (see `rtcIdentityCreate`). */
-  async rtcRegister({ local, remote, identity = false, bindingTimeoutMs }) {
+  async rtcRegister({ local, remote, identity = false, bindingTimeoutMs, requireSignedDescription = false }) {
     const { WebRTCPeerConnection } = await import('@johnhenry/browsermesh-transport')
-    const st = { local, remote, ws: null, conn: null, inbox: [], events: [], listeners: new Set(), answered: 0 }
+    const st = { local, remote, ws: null, conn: null, inbox: [], events: [], listeners: new Set(), answered: 0, refusals: [] }
     bm.rtc = st
 
     const signal = (payload) => st.ws.send(JSON.stringify({ type: 'signal', target: remote, envelope: payload }))
@@ -226,7 +226,7 @@ const bm = {
         localPodId: local,
         remotePodId: remote,
         iceServers: [],
-        ...(identity ? { identity: bm.rtcIdentity, ...(bindingTimeoutMs ? { bindingTimeoutMs } : {}) } : {}),
+        ...(identity ? { identity: bm.rtcIdentity, ...(bindingTimeoutMs ? { bindingTimeoutMs } : {}), ...(requireSignedDescription ? { requireSignedDescription } : {}) } : {}),
       })
       conn.onIceCandidate((candidate) => signal({ kind: 'ice', candidate }))
       conn.onMessage((data) => { st.inbox.push(data); for (const cb of st.listeners) cb(data) })
@@ -244,12 +244,16 @@ const bm = {
       const { kind, description, candidate, renegotiation } = msg.envelope
       if (kind === 'offer') {
         const conn = renegotiation && st.conn ? st.conn : fresh()
-        signal({ kind: 'answer', description: await conn.handleOffer(description) })
+        // A description the connection refuses (it does not verify) is recorded, not applied.
+        try { signal({ kind: 'answer', description: await conn.handleOffer(description) }) } catch (e) { st.refusals.push(e.message) }
       } else if (kind === 'answer') {
-        await st.conn.handleAnswer(description)
-        st.answered += 1
+        try {
+          await st.conn.handleAnswer(description)
+          st.answered += 1
+        } catch (e) { st.refusals.push(e.message) }
       } else if (kind === 'ice') {
-        await st.conn?.addIceCandidate(candidate)
+        // Candidates for a description this side refused have no connection to go to.
+        try { await st.conn?.addIceCandidate(candidate) } catch (e) { if (!st.refusals.length) throw e }
       }
     })
     await new Promise((resolve, reject) => {
@@ -274,7 +278,10 @@ const bm = {
     st.signal({ kind: 'offer', description: offer, renegotiation: true })
   },
   rtcOpen() { return !!bm.rtc?.conn?.isOpen },
-  rtcStatus() { const c = bm.rtc.conn; return { state: c.state, bound: c.bound, failure: c.bindingFailure } },
+  rtcStatus() {
+    const c = bm.rtc.conn
+    return { state: c.state, bound: c.bound, failure: c.bindingFailure, descriptionVerified: c.descriptionVerified, descriptionFailure: c.descriptionFailure, refusals: bm.rtc.refusals }
+  },
 
   /**
    * An attacker that holds the signalling server: the test double hands it every offer, answer and ICE

@@ -136,6 +136,37 @@ key, which must hash to `remotePodId`, the pod id claimed in signalling.
   frame sees one extra JSON message of type `mesh:bind` on the control channel.
   `createMeshNode()` does not enable this yet.
 
+### Signed session descriptions, verified before they are applied
+
+The proof above is checked once the connection is up, so a description the
+signalling path changed has already been applied by then. With an `identity`,
+every offer and answer this side produces (the first one and an ICE-restart
+renegotiation alike) also carries `auth`, a signature made with the pod key
+(`signDescription`, `verifyDescription`, `descriptionTranscript`; signed bytes
+are `"browsermesh/webrtc-description/v1\n"` plus canonical JSON of the kind,
+the signer's and the addressee's pod ids, the SHA-256 of the exact text, its
+DTLS fingerprints and, for an answer, the SHA-256 of the offer it answers). A
+description that arrives with `auth` is verified against `remotePodId`
+**before** `setRemoteDescription` is called; one that does not verify makes
+`handleOffer()` / `handleAnswer()` throw (`offer from <pod> refused:
+bad-signature`), leaves the RTCPeerConnection untouched, and sets
+`descriptionFailure`. `descriptionVerified` is `true` after a verified
+description.
+
+- Additive: `auth` is one extra field next to `type` and `sdp`, which an older
+  peer ignores; a peer without an `identity` adds nothing. A description that
+  arrives **unsigned** (an older peer) is applied and `descriptionVerified` is
+  `false`; the proof on the connection still binds it.
+- `requireSignedDescription: true` (also accepted by `WebRTCMeshManager`)
+  refuses an unsigned description (`unsigned`). Off by default, since it would
+  refuse every peer that predates the field.
+- The signalling path must forward the whole description object, not just
+  `sdp`; `browsermesh-apps`' signalling channel already does.
+- Not covered: freshness. A recorded offer can be replayed to the pod it was
+  addressed to; it names ICE credentials and a certificate only its maker can
+  complete, so the most that follows is an answer to a connection that cannot
+  come up.
+
 This is verified here with an in-memory duplex and fixed vectors; it has not
 been run over a real `RTCPeerConnection` in a browser (see issue #270).
 

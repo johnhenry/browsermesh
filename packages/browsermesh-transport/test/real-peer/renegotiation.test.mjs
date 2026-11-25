@@ -167,6 +167,37 @@ describeIfReal('WebRTC renegotiation against real peers', () => {
     }
   })
 
+  it('with identities, the renegotiation offer and answer are signed and verified before they are applied', async () => {
+    const { PodIdentity } = await import('@johnhenry/browsermesh-primitives')
+    const ia = await PodIdentity.generate()
+    const ib = await PodIdentity.generate()
+    const alice = new webrtc.WebRTCPeerConnection({ localPodId: ia.podId, remotePodId: ib.podId, iceServers: [], identity: ia })
+    const bob = new webrtc.WebRTCPeerConnection({ localPodId: ib.podId, remotePodId: ia.podId, iceServers: [], identity: ib })
+    alice.onIceCandidate((c) => { try { bob.addIceCandidate(c)?.catch?.(() => {}) } catch { /* early candidate */ } })
+    bob.onIceCandidate((c) => { try { alice.addIceCandidate(c)?.catch?.(() => {}) } catch { /* early candidate */ } })
+    try {
+      const first = await alice.createOffer()
+      assert.ok(first.auth, 'the first offer is signed')
+      await alice.handleAnswer(await bob.handleOffer(first))
+      await waitFor(() => alice.bound && bob.bound, 15_000, 'both sides bound')
+      assert.equal(alice.descriptionVerified, true)
+
+      const offer = await alice.reconnect({ force: true })
+      assert.ok(offer.auth, 'the renegotiation offer is signed')
+      // A renegotiation offer whose text was changed is refused and the live connection is untouched.
+      await assert.rejects(() => bob.handleOffer({ ...offer, sdp: offer.sdp.replace(/a=ice-ufrag:.*/, 'a=ice-ufrag:evil') }), /bad-signature/)
+      assert.equal(bob.isOpen, true)
+      const answer = await bob.handleOffer(offer)
+      assert.ok(answer.auth, 'the renegotiation answer is signed')
+      await assert.rejects(() => alice.handleAnswer({ ...answer, sdp: answer.sdp.replace(/a=ice-ufrag:.*/, 'a=ice-ufrag:evil') }), /bad-signature/)
+      await alice.handleAnswer(answer)
+      assert.equal(alice.isOpen && bob.isOpen, true)
+      assert.equal(alice.descriptionVerified && bob.descriptionVerified, true)
+    } finally {
+      alice.close(); bob.close()
+    }
+  })
+
   it('reconnect() on a healthy connection changes nothing at all', async () => {
     const peers = pair()
     try {

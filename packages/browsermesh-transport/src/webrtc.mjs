@@ -17,6 +17,7 @@ import { silentCatch } from './silent-catch.mjs'
 import { encodeWireData } from './wire-data.mjs'
 import {
   BINDING_FRAME_TYPE, extractDtlsFingerprints, createBindingProof, verifyBindingProof,
+  signDescription, verifyDescription,
 } from './identity-binding.mjs'
 
 /** Default time to wait for the peer's identity proof once the control channel is open. */
@@ -292,6 +293,10 @@ export class WebRTCPeerConnection {
   #bound = false
   #bindingFailure = null
   #droppedUnbound = 0
+  #requireSignedDescription = false
+  #descriptionVerified = null   // null: no identity or nothing received yet; false: received unsigned; true: verified
+  #descriptionFailure = null
+  #sentOfferSdp = null          // the offer this side last sent: an answer to it must name it
 
   /**
    * @param {object} opts
@@ -307,6 +312,13 @@ export class WebRTCPeerConnection {
    *   no proof (an older build) is accepted unbound (`bound` stays false); a proof that fails is
    *   fatal either way.
    * @param {number} [opts.bindingTimeoutMs=10000]
+   * @param {boolean} [opts.requireSignedDescription=false] - With `identity`, every offer and answer this
+   *   side produces carries `auth`, a signature over the description made with the pod key, and a
+   *   description that arrives with one is verified against `remotePodId` BEFORE it is applied (a
+   *   description that fails is refused: `handleOffer`/`handleAnswer` throw and `descriptionFailure`
+   *   says why). A description that arrives without one (an older peer) is applied and reported with
+   *   `descriptionVerified === false`, since the proof on the connection still binds it; with `true` it
+   *   is refused (`unsigned`). Off by default: it would refuse every peer that predates the field.
    * @param {RTCIceServer[]} [opts.iceServers]
    * @param {'all'|'relay'} [opts.iceTransportPolicy] - Forwarded verbatim to
    *   `RTCPeerConnection`. `'relay'` gathers TURN candidates only, so host and
@@ -322,8 +334,10 @@ export class WebRTCPeerConnection {
   constructor({
     localPodId, remotePodId, iceServers, iceTransportPolicy, onLog, disconnectedGraceMs = 5000,
     identity, requirePeerBinding = true, bindingTimeoutMs = DEFAULT_BINDING_TIMEOUT_MS,
+    requireSignedDescription = false,
   } = {}) {
     if (!localPodId) throw new Error('localPodId is required')
+    this.#requireSignedDescription = requireSignedDescription === true
     if (!remotePodId) throw new Error('remotePodId is required')
     if (identity) {
       if (typeof identity.sign !== 'function' || typeof identity.rawPublicKey !== 'function') {
@@ -361,6 +375,16 @@ export class WebRTCPeerConnection {
    * this connection's own DTLS fingerprints. Always false without `identity`.
    */
   get bound() { return this.#bound }
+
+  /**
+   * Whether the last description received was signed and verified before it was applied: `true`,
+   * `false` (it arrived unsigned, an older peer; or it was refused), or `null` (no identity, or
+   * none received yet).
+   */
+  get descriptionVerified() { return this.#descriptionVerified }
+
+  /** Why the last description was refused (`unsigned`, `bad-signature`, ...), or null. */
+  get descriptionFailure() { return this.#descriptionFailure }
 
   /** Why identity binding failed (the connection was closed), or null. */
   get bindingFailure() { return this.#bindingFailure }
@@ -424,9 +448,11 @@ export class WebRTCPeerConnection {
     const offer = await this.#pc.createOffer()
     await this.#pc.setLocalDescription(offer)
     this.#resetBinding('offerer', offer.sdp, null)
+    this.#sentOfferSdp = offer.sdp
+    const auth = await this.#signOutgoing('offer', offer.sdp)
     this.#setState('connecting')
     this.#log(`Created offer for ${this.#remotePodId}`)
-    return { type: 'offer', sdp: offer.sdp }
+    return { type: 'offer', sdp: offer.sdp, ...auth }
   }
 
   /**
@@ -464,6 +490,8 @@ export class WebRTCPeerConnection {
   async handleOffer(offer) {
     this.#ensureNotClosed()
     if (!offer || !offer.sdp) throw new Error('Invalid offer: missing sdp')
+    // Before anything is applied: a description that does not verify never reaches the RTCPeerConnection.
+    await this.#checkIncoming('offer', offer)
 
     if (this.#isRenegotiation(offer)) {
       if (!this.#pc) {
@@ -481,7 +509,7 @@ export class WebRTCPeerConnection {
       const answer = await this.#pc.createAnswer()
       await this.#pc.setLocalDescription(answer)
       this.#log(`Created renegotiation answer for ${this.#remotePodId}`)
-      return { type: 'answer', sdp: answer.sdp, renegotiation: true }
+      return { type: 'answer', sdp: answer.sdp, renegotiation: true, ...(await this.#signOutgoing('answer', answer.sdp, offer.sdp)) }
     }
 
     // A fresh offer supersedes anything we were holding. Release it rather
@@ -522,9 +550,10 @@ export class WebRTCPeerConnection {
     const answer = await this.#pc.createAnswer()
     await this.#pc.setLocalDescription(answer)
     this.#resetBinding('answerer', offer.sdp, answer.sdp)
+    const auth = await this.#signOutgoing('answer', answer.sdp, offer.sdp)
     this.#setState('connecting')
     this.#log(`Created answer for ${this.#remotePodId}`)
-    return { type: 'answer', sdp: answer.sdp }
+    return { type: 'answer', sdp: answer.sdp, ...auth }
   }
 
   /**
@@ -535,6 +564,7 @@ export class WebRTCPeerConnection {
   async handleAnswer(answer) {
     if (!this.#pc) throw new Error('No peer connection — call createOffer() first')
     if (!answer || !answer.sdp) throw new Error('Invalid answer: missing sdp')
+    await this.#checkIncoming('answer', answer, this.#sentOfferSdp)
     await this.#pc.setRemoteDescription({ type: 'answer', sdp: answer.sdp })
     this.#answerSdp = answer.sdp
     this.#maybeStartBinding()
@@ -833,8 +863,10 @@ export class WebRTCPeerConnection {
 
     const offer = await this.#pc.createOffer({ iceRestart: true })
     await this.#pc.setLocalDescription(offer)
+    this.#sentOfferSdp = offer.sdp
+    const auth = await this.#signOutgoing('offer', offer.sdp)
     this.#log(`ICE restart offer created for ${this.#remotePodId}`)
-    return { type: 'offer', sdp: offer.sdp, renegotiation: true }
+    return { type: 'offer', sdp: offer.sdp, renegotiation: true, ...auth }
   }
 
   /**
@@ -1269,6 +1301,31 @@ export class WebRTCPeerConnection {
 
   // -- Identity binding -----------------------------------------------------
 
+  /** The `auth` field for a description this side produced; nothing without an identity. */
+  async #signOutgoing(kind, sdp, offerSdp) {
+    if (!this.#identity) return {}
+    const auth = await signDescription(this.#identity, { kind, peerPodId: this.#remotePodId, sdp, offerSdp })
+    return { auth }
+  }
+
+  /** Verify a description received BEFORE it is applied; throws when it must be refused. */
+  async #checkIncoming(kind, desc, offerSdp) {
+    if (!this.#identity) return
+    const verdict = await verifyDescription(desc.auth, {
+      kind, expectedPodId: this.#remotePodId, localPodId: this.#localPodId, sdp: desc.sdp, offerSdp,
+    })
+    if (verdict.ok) {
+      this.#descriptionVerified = true
+      this.#descriptionFailure = null
+      return
+    }
+    this.#descriptionVerified = false
+    if (verdict.reason === 'unsigned' && !this.#requireSignedDescription) return // an older peer
+    this.#descriptionFailure = verdict.reason
+    this.#log(`Refused ${kind} from ${this.#remotePodId}: ${verdict.reason}`)
+    throw new Error(`${kind} from ${this.#remotePodId} refused: ${verdict.reason}`)
+  }
+
   /** @param {'offerer'|'answerer'} role @param {string|null} offerSdp @param {string|null} answerSdp */
   #resetBinding(role, offerSdp, answerSdp) {
     if (!this.#identity) return
@@ -1417,6 +1474,7 @@ export class WebRTCMeshManager {
   #identity
   #requirePeerBinding
   #bindingTimeoutMs
+  #requireSignedDescription
   #lastStats = []
 
   /**
@@ -1434,14 +1492,16 @@ export class WebRTCMeshManager {
    *   before it counts as an error worth reconnecting over.
    * @param {object} [opts.identity] - This pod's `PodIdentity`; passed to every connection to
    *   enable identity binding (see `WebRTCPeerConnection`). `requirePeerBinding` and
-   *   `bindingTimeoutMs` are passed along with it.
+   *   `bindingTimeoutMs` and `requireSignedDescription` are passed along with it.
    */
   constructor({
     localPodId, iceServers, iceTransportPolicy, onLog,
     maxReconnectAttempts = 5, reconnectBaseDelayMs = 1000, disconnectedGraceMs = 5000,
     identity, requirePeerBinding = true, bindingTimeoutMs = DEFAULT_BINDING_TIMEOUT_MS,
+    requireSignedDescription = false,
   } = {}) {
     if (!localPodId) throw new Error('localPodId is required')
+    this.#requireSignedDescription = requireSignedDescription
     if (identity && identity.podId !== localPodId) throw new Error('identity.podId must equal localPodId')
     this.#identity = identity ?? null
     this.#requirePeerBinding = requirePeerBinding
@@ -1538,6 +1598,7 @@ export class WebRTCMeshManager {
         identity: this.#identity,
         requirePeerBinding: this.#requirePeerBinding,
         bindingTimeoutMs: this.#bindingTimeoutMs,
+        requireSignedDescription: this.#requireSignedDescription,
       } : {}),
     })
     // Forward messages to manager-level listeners

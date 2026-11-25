@@ -112,6 +112,114 @@ export function bindingTranscript({ offererPodId, answererPodId, offerFingerprin
   }))
 }
 
+// ---------------------------------------------------------------------------
+// Signed session descriptions: verified before they are applied
+// ---------------------------------------------------------------------------
+//
+// The proof above is checked once the connection is up. A description the
+// signalling path changed is applied first and found out later. Signing each
+// description lets the receiver check it against the sender's key *before*
+// it touches the RTCPeerConnection:
+//
+//   transcript = "browsermesh/webrtc-description/v1\n" + canonical JSON of
+//     { kind, signer, peer, sdp, fp, [offer] }
+//
+// `kind` is `'offer'` or `'answer'`, `signer` the sender's pod id, `peer` the
+// pod id it is addressed to (so a description cannot be re-addressed), `sdp`
+// the hex SHA-256 of the exact text, `fp` its sorted DTLS fingerprints, and,
+// for an answer, `offer` the hex SHA-256 of the offer it answers (so an
+// answer cannot be moved onto another attempt). The signed value travels
+// next to the description as `auth` = `{ v: 1, podId, pk, sig }`, an extra
+// field an older peer ignores.
+//
+// Not covered: freshness. A recorded offer can be replayed to its addressee;
+// it names ICE credentials and a certificate only its maker can complete, so
+// the most that follows is an answer to a connection that cannot come up.
+
+export const DESCRIPTION_DOMAIN = 'browsermesh/webrtc-description/v1\n'
+
+/** @param {string} text @returns {Promise<string>} hex SHA-256 of the UTF-8 text */
+async function sha256Hex(text) {
+  const d = new Uint8Array(await crypto.subtle.digest('SHA-256', encoder.encode(text)))
+  return [...d].map((b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+/**
+ * The bytes a sender signs over one description.
+ *
+ * @param {object} p
+ * @param {'offer'|'answer'} p.kind
+ * @param {string} p.signerPodId
+ * @param {string} p.peerPodId - the pod the description is addressed to
+ * @param {string} p.sdp
+ * @param {string} [p.offerSdp] - required for an answer: the offer it answers
+ * @returns {Promise<Uint8Array>}
+ */
+export async function descriptionTranscript({ kind, signerPodId, peerPodId, sdp, offerSdp }) {
+  if (kind !== 'offer' && kind !== 'answer') throw new TypeError('kind must be offer or answer')
+  if (!signerPodId || !peerPodId || typeof signerPodId !== 'string' || typeof peerPodId !== 'string') {
+    throw new TypeError('both pod ids are required')
+  }
+  if (typeof sdp !== 'string' || !extractDtlsFingerprints(sdp).length) throw new TypeError('the description must name a DTLS fingerprint')
+  if (kind === 'answer' && typeof offerSdp !== 'string') throw new TypeError('an answer must name the offer it answers')
+  const body = { kind, signer: signerPodId, peer: peerPodId, sdp: await sha256Hex(sdp), fp: extractDtlsFingerprints(sdp) }
+  if (kind === 'answer') body.offer = await sha256Hex(offerSdp)
+  return encoder.encode(DESCRIPTION_DOMAIN + canonical(body))
+}
+
+/**
+ * Sign a description this side produced.
+ *
+ * @param {{ podId: string, sign: Function, rawPublicKey: Function }} identity - a `PodIdentity`
+ * @param {object} p
+ * @param {'offer'|'answer'} p.kind
+ * @param {string} p.peerPodId
+ * @param {string} p.sdp
+ * @param {string} [p.offerSdp]
+ * @returns {Promise<{ v: 1, podId: string, pk: string, sig: string }>}
+ */
+export async function signDescription(identity, { kind, peerPodId, sdp, offerSdp }) {
+  const bytes = await descriptionTranscript({ kind, signerPodId: identity.podId, peerPodId, sdp, offerSdp })
+  const [raw, sig] = [await identity.rawPublicKey(), await identity.sign(bytes)]
+  return { v: 1, podId: identity.podId, pk: toBase64url(raw), sig: toBase64url(new Uint8Array(sig)) }
+}
+
+/**
+ * Verify a description received, against the key behind the pod id it was
+ * expected from, before applying it.
+ *
+ * @param {*} auth - the `auth` field next to the description (may be absent)
+ * @param {object} p
+ * @param {'offer'|'answer'} p.kind
+ * @param {string} p.expectedPodId - the pod the description must come from
+ * @param {string} p.localPodId - this side (the addressee)
+ * @param {string} p.sdp
+ * @param {string} [p.offerSdp] - for an answer, the offer this side sent
+ * @returns {Promise<{ ok: true } | { ok: false, reason: 'unsigned'|'malformed'|'wrong-pod-id'|'no-fingerprint'|'bad-signature' }>}
+ */
+export async function verifyDescription(auth, { kind, expectedPodId, localPodId, sdp, offerSdp }) {
+  if (auth === undefined || auth === null) return { ok: false, reason: 'unsigned' }
+  if (typeof auth !== 'object' || auth.v !== 1) return { ok: false, reason: 'malformed' }
+  const raw = fromBase64url(auth.pk)
+  const sig = fromBase64url(auth.sig)
+  if (!raw || raw.length !== 32 || !sig || sig.length !== 64) return { ok: false, reason: 'malformed' }
+  if ((await podIdOfRawKey(raw)) !== expectedPodId || auth.podId !== expectedPodId) return { ok: false, reason: 'wrong-pod-id' }
+  let bytes
+  try {
+    bytes = await descriptionTranscript({ kind, signerPodId: expectedPodId, peerPodId: localPodId, sdp, offerSdp })
+  } catch {
+    return { ok: false, reason: typeof sdp === 'string' && !extractDtlsFingerprints(sdp).length ? 'no-fingerprint' : 'malformed' }
+  }
+  let valid = false
+  try {
+    const key = await crypto.subtle.importKey('raw', raw, 'Ed25519', false, ['verify'])
+    valid = await crypto.subtle.verify('Ed25519', key, sig, bytes)
+  } catch {
+    valid = false
+  }
+  return valid ? { ok: true } : { ok: false, reason: 'bad-signature' }
+}
+
 /** @param {Uint8Array} raw @returns {Promise<string>} pod id */
 export async function podIdOfRawKey(raw) {
   return toBase64url(new Uint8Array(await crypto.subtle.digest('SHA-256', raw)))
