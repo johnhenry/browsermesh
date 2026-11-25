@@ -223,19 +223,23 @@ leaves no VMM and no nft table. **It has never been run.**
 | Firecracker API client | yes | against the fake API | yes (1.16.1, once, no jailer) |
 | API call order and bodies for boot, snapshot, restore | yes | against the fake API over a unix socket (`lifecycle-fake-api.test.mjs`) | no |
 | jailer argv, uid policy, cgroups, chroot layout and staging | yes | as argv/commands | no |
-| network policy (nft) | yes | as argv/commands | no |
+| network policy (nft) | yes | as argv/commands, and applied to a real Linux kernel in a container (`test/real/network-policy.real.test.mjs`): the grammar loads; a guest namespace behind it cannot reach metadata, private or host addresses nor spoof its IP or MAC; allow-list, `allowlist` and `none` modes; teardown scoped to the pod's table; a real TAP created and removed | not with a real TAP carrying a real guest |
 | stopping the VMM by pid with an id check | yes | with a fake process table | no |
-| vsock `exec` | yes | against a fake vsock socket | no |
-| guest `init`, exec responder, `build-rootfs.sh` | yes | syntax/shell function only | no |
+| vsock `exec` | yes | the host's exec client against the guest's responder run as a process, through a stand-in for the vsock proxy (`test/guest-responder.test.mjs`); a guest that closes without a result is an error | no (the `socat` AF_VSOCK bridge has not run) |
+| guest `init`, `build-rootfs.sh` | yes | they parse as `sh` | no |
 | guest registering over signaling | n/a | no | no |
 | snapshot/restore of a real guest, timings | n/a | no | partly (API only) |
 
 ## 12. What remains, and needs a Linux/KVM host
 
+Items 1 and 2 are one checklist, with exact commands and expected output:
+[`../runbook-firecracker-kvm.md`](../runbook-firecracker-kvm.md). (The nft
+grammar and the `ether saddr` match on the forward hook, listed here before, now
+run on a real kernel; see section 11.)
+
 1. Run `test:real-firecracker` and fix what it finds (jailer pid file name and
    location; whether the jailer accepts a chroot left by a previous run on
-   restore; the `cp`/`chown` staging against real mounts; the nft grammar;
-   `ether saddr` matching on the forward hook).
+   restore; the `cp`/`chown` staging against real mounts; cgroup v2 limits).
 2. Build the rootfs and boot the guest to `registered` over signaling;
    measure boot-to-registered and restore-to-registered.
 3. A resolver for the guest.

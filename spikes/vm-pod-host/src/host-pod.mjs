@@ -23,7 +23,7 @@
 import { Pod, EventEmitterTransport, NullDiscovery } from '../../../packages/browsermesh-pod/src/index.mjs'
 import { VmPod } from './vm-pod.mjs'
 import { FirecrackerClient } from './firecracker-client.mjs'
-import { connectToGuest } from './vsock-bridge.mjs'
+import { execOverVsock } from './vsock-bridge.mjs'
 import { buildJailerArgv, jailerApiSocketPath, jailerPidFilePath, jailerRootPath } from './jailer.mjs'
 import { cgroupsFor } from './vm-config.mjs'
 
@@ -220,23 +220,7 @@ export class VmPodHost extends Pod {
 
     vmPod.beginServing()
     try {
-      const { socket } = await connectToGuest({ udsPath: vmPod.vsockUdsPath ?? '', port: EXEC_VSOCK_PORT })
-      const payload = Buffer.from(JSON.stringify(command)).toString('base64')
-      return await new Promise((resolve, reject) => {
-        let buf = ''
-        socket.on('data', (chunk) => {
-          buf += chunk.toString('utf8')
-          const nl = buf.indexOf('\n')
-          if (nl === -1) return
-          const line = buf.slice(0, nl)
-          const match = /^RESULT (.+)$/.exec(line)
-          if (!match) { reject(new Error(`unexpected vsock exec response: ${line}`)); return }
-          socket.end()
-          resolve(JSON.parse(Buffer.from(match[1], 'base64').toString('utf8')))
-        })
-        socket.on('error', reject)
-        socket.write(`EXEC ${payload}\n`)
-      })
+      return await execOverVsock({ udsPath: vmPod.vsockUdsPath ?? '', port: EXEC_VSOCK_PORT, command })
     } finally {
       vmPod.endServing()
     }

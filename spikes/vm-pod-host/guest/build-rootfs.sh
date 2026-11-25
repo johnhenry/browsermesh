@@ -1,6 +1,6 @@
 #!/bin/sh
 # guest/build-rootfs.sh — build rootfs.ext4 for the vm-pod-host demo
-# guest: Alpine Linux minirootfs + Node 26 + browsermesh-servers/kernel.
+# guest: Alpine Linux minirootfs + Alpine's nodejs + browsermesh-servers/kernel.
 #
 # NOT executed by this spike (requires root, loop devices, and Linux —
 # none available on the macOS dev machine this was written on; see the
@@ -25,12 +25,17 @@
 #   /init                                        (this dir's init script, PID 1)
 #   /opt/vsock-exec-responder.mjs                (this dir's responder)
 #   /opt/browsermesh-servers/kernel/*.mjs         (copied from the sibling repo)
-#   /usr/bin/node                                 (Node 26, via Alpine's nodejs-current)
+#   /usr/bin/node                                 (Alpine's `nodejs` package, see ALPINE_VERSION)
 #   busybox userland + iproute2 + socat
 
 set -eu
 
-ALPINE_VERSION="3.20"
+# Alpine's `nodejs` package is what ends up in the image: 20.x on 3.20, 22.x on
+# 3.22, 24.x on 3.23 (only `edge` has 26). Pick the release with ALPINE_VERSION
+# (and ALPINE_RELEASE if its minirootfs is not <version>.0); the script prints
+# the Node version it installed at the end.
+ALPINE_VERSION="${ALPINE_VERSION:-3.20}"
+ALPINE_RELEASE="${ALPINE_RELEASE:-${ALPINE_VERSION}.0}"
 ALPINE_ARCH="$(uname -m)"
 OUTPUT="${1:-./rootfs.ext4}"
 SIZE_MB="${ROOTFS_SIZE_MB:-512}"
@@ -55,7 +60,7 @@ trap 'umount "${WORK}/mnt" 2>/dev/null || true; rm -rf "${WORK}"' EXIT
 echo "==> fetching Alpine minirootfs ${ALPINE_VERSION} (${ALPINE_ARCH})"
 ALPINE_MINOR="$(echo "$ALPINE_VERSION" | cut -d. -f1-2)"
 curl -fsSL -o "${WORK}/alpine-minirootfs.tar.gz" \
-  "https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_MINOR}/releases/${ALPINE_ARCH}/alpine-minirootfs-${ALPINE_VERSION}.0-${ALPINE_ARCH}.tar.gz"
+  "https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_MINOR}/releases/${ALPINE_ARCH}/alpine-minirootfs-${ALPINE_RELEASE}-${ALPINE_ARCH}.tar.gz"
 
 echo "==> creating ${SIZE_MB}MB ext4 image at ${OUTPUT}"
 dd if=/dev/zero of="${OUTPUT}" bs=1M count="${SIZE_MB}" status=none
@@ -71,6 +76,7 @@ echo "==> installing packages (nodejs, iproute2, socat) in chroot"
 cp /etc/resolv.conf "${WORK}/mnt/etc/resolv.conf"
 chroot "${WORK}/mnt" /sbin/apk update
 chroot "${WORK}/mnt" /sbin/apk add --no-cache nodejs iproute2 socat
+echo "    node in the image: $(chroot "${WORK}/mnt" /usr/bin/node --version)"
 
 echo "==> installing init and vsock exec responder"
 install -m 755 "$(dirname "$0")/init" "${WORK}/mnt/init"

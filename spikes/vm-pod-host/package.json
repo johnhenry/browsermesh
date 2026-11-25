@@ -6,7 +6,8 @@
   "type": "module",
   "scripts": {
     "test": "node --test test/*.test.mjs",
-    "test:real-firecracker": "node --test --test-concurrency=1 test/real/*.test.mjs"
+    "test:real-firecracker": "node --test --test-concurrency=1 test/real/firecracker.real.test.mjs",
+    "test:real-linux-network": "node --test --test-concurrency=1 test/real/network-policy.real.test.mjs"
   },
   "engines": {
     "node": ">=26.0.0"

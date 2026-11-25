@@ -19,8 +19,10 @@
  * single `nft delete table` that cannot touch another pod's rules, and a
  * pod's rules never match another pod's TAP.
  *
- * NOT RUN against a real host: these are argv arrays checked in unit tests
- * for the nft grammar they emit; they have not been applied to a kernel.
+ * Checked two ways: as argv arrays in unit tests, and applied to a real Linux
+ * kernel by `test/real/network-policy.real.test.mjs` (a guest network
+ * namespace behind the rules: what is dropped, what is accepted). Not yet
+ * applied on a KVM host with a real TAP carrying a real guest.
  * Every interpolated value is validated against a strict pattern first,
  * because the values end up inside nft's own grammar.
  */

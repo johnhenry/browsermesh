@@ -126,6 +126,40 @@ jobs:
             tests/browser/playwright-report/
           retention-days: 7
 
+  # The microVM lane's host side on a real Linux kernel, without KVM (nothing here
+  # boots a VM; docs/runbook-firecracker-kvm.md is the part that needs one): the
+  # spike's own suite, and the network policy applied for real (nft rules and a
+  # TAP device, with a guest network namespace behind them). The second step
+  # needs root and changes host networking, which is fine on a throwaway runner;
+  # REQUIRE_REAL_LINUX_NET makes a missing prerequisite fail instead of skip.
+  microvm-lane:
+    name: microVM lane (Linux, no KVM)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '26'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Spike tests
+        run: node --test spikes/vm-pod-host/test/*.test.mjs
+
+      - name: Install nftables and iproute2
+        run: sudo apt-get install -y --no-install-recommends nftables iproute2
+
+      - name: Network policy on a real kernel
+        env:
+          REQUIRE_REAL_LINUX_NET: '1'
+        run: sudo env "PATH=$PATH" REQUIRE_REAL_LINUX_NET="$REQUIRE_REAL_LINUX_NET" npm run test:real-linux-network
+
   workflow-lint:
     name: Workflow Lint
     uses: johnhenry/workflows/.github/workflows/workflow-lint.yml@v1
