@@ -1,6 +1,6 @@
 {
   "name": "@johnhenry/browsermesh-mcp",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "A page's WebMCP tools (or any tool list) served over a browsermesh protocol channel, and a client for them, with per-tool grants and the approval kept with the page",
   "type": "module",
   "main": "./src/index.mjs",
