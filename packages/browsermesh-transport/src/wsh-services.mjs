@@ -395,6 +395,10 @@ export class WshServices {
       dataStreams: false,
       sealSession: 'require',
       requireChannelBinding: true,
+      // wsh counts its login deadline (60 s by default) from the moment the host accepts a socket. A host half at a pipe relay is accepted
+      // when it reaches the relay, long before a client pairs with it, so the default would close every idle half each minute: no deadline
+      // there. A mesh channel is served from the moment its peer opens it, and keeps wsh's default.
+      ...(slot.peer === undefined ? { loginTimeoutMs: 0 } : {}),
       auth: (who) => this.#login(who, slot),
       onSealed: () => this.#sealed(slot),
       // Only these rpc channels exist on this host: no exec, pty, fs, targets, endpoints or gateway.

@@ -310,7 +310,7 @@ changes for code that does not ask for it. Design and threat model:
 is not protected: [`docs/security.md`](../../docs/security.md).
 
 Import the link code from `@johnhenry/browsermesh-transport/wsh` and install the optional peer,
-`npm install @johnhenry/wsh` (0.45 or later for links, 0.50 or later for the services; developed against 0.52). It is
+`npm install @johnhenry/wsh` (0.45 or later for links, 0.50 or later for the services; developed against 0.54). wsh 0.54 closes a host connection that has not logged in 60 s after the host accepted it; a host half waiting at a relay is accepted long before anyone pairs with it, so the link and services hosts are created with `loginTimeoutMs: 0` for those halves (a mesh channel keeps wsh's 60 s default). It is
 imported lazily on the first `listen()` / `connect()`, so a page that never
 uses a wsh link loads none of it. See [Bundling for the browser](#bundling-for-the-browser).
 

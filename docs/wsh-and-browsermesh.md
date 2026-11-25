@@ -8,12 +8,11 @@ the version built and tested against. wsh's own view of the same boundary is
 [`spec/wsh-and-browsermesh.md`](https://github.com/johnhenry/wsh/blob/main/spec/wsh-and-browsermesh.md) in the wsh
 repository (written against wsh 0.52.0); the two pages describe one boundary and should agree.
 
-**Versions.** The repository installs `@johnhenry/wsh` `^0.52.0` as a dev dependency (the root and `browsermesh-mcp`,
+**Versions.** The repository installs `@johnhenry/wsh` `^0.54.0` as a dev dependency (the root and `browsermesh-mcp`,
 `browsermesh-netway`, `browsermesh-objects`, `browsermesh-primitives` and `browsermesh-transport`), so what its tests ran
-against is wsh **0.52.0**. The peer ranges are `>=0.49.0 <1.0.0` for `browsermesh-objects` and `browsermesh-mcp`, and an
+against is wsh **0.54.0**. The peer ranges are `>=0.49.0 <1.0.0` for `browsermesh-objects` and `browsermesh-mcp`, and an
 optional `*` for `browsermesh-transport` (its floors are listed under "Not verified"); `browsermesh-netway` and
-`browsermesh-primitives` have no wsh dependency beyond the dev one. wsh 0.53.0 is the current release and has not been
-run against this repository.
+`browsermesh-primitives` have no wsh dependency beyond the dev one.
 
 ## What each is
 
@@ -112,9 +111,24 @@ The grants are the same scopes as above. Design: [`design/wsh-services-on-a-pod.
 
 ## Not verified
 
-* Built and run against wsh 0.49.0, 0.50.0, 0.51.0 and 0.52.0 (tested range of `browsermesh-objects` and `browsermesh-mcp`:
-  0.49.0 to 0.52.0, the peer range starts at 0.49.0; the earlier ones were run when they were the newest, the last is what
-  the repository now installs). wsh 0.51 adds events through a handle and typed remotes (`rootDescription`) to the object
+* Built and run against wsh 0.49.0, 0.50.0, 0.51.0, 0.52.0 and 0.54.0 (tested range of `browsermesh-objects` and
+  `browsermesh-mcp`: 0.49.0 to 0.54.0, the peer range starts at 0.49.0; the earlier ones were run when they were the newest,
+  the last is what the repository now installs; 0.53.0 was never installed on its own, the repository went from 0.52.0 to
+  0.54.0, so what 0.53.0 changed was run only as part of 0.54.0).
+* wsh 0.53.0 and 0.54.0 put two deadlines on a wsh host: a connection that has not completed its login `loginTimeoutMs`
+  (60 s) after the host accepted it is closed (refusal reason `login-timeout`), and with `sealSession: 'require'` a login that
+  does not seal within `sealTimeoutMs` (30 s) is closed (`seal-timeout`). Here: `WshServices` and `WshPeerLinks` accept a host
+  half at the relay when it connects, long before anyone pairs with it, so for those halves the host is created with
+  `loginTimeoutMs: 0` (with the default every idle half would be closed and re-opened each minute); a half is not bounded
+  between pairing and login, as before 0.54 (a silent paired half holds its relay pipe, which the relay's own idle limit
+  bounds). A mesh protocol channel is served from the moment the peer opens it and keeps the 60 s default. Neither package
+  waits for a person inside the login (the registry decision is synchronous; the `authorize` callback of `WshPeerLinks`
+  may be asynchronous, but a login that waits longer than the client's own `connectTimeoutMs` of 15 s is given up by the
+  client first), so the 30 s seal limit is not reached by a legitimate peer on a healthy link; `sealTimeoutMs` is left at
+  wsh's default. A deployment whose clients take longer than that to seal needs wsh's options, which these packages do not
+  pass through. The deadlines were run against the in-process relay with a mocked clock (two tests), and a real wait of
+  60 s was not run. The relay option `retirePaired` is not used: the mesh link re-registers the same rendezvous id after a
+  pairing and when it reconnects, which `retirePaired` would refuse. wsh 0.51 adds events through a handle and typed remotes (`rootDescription`) to the object
   layer; `browsermesh-objects` judges both through the registry. The object layer's MCP face (`exposeObjects({ mcp })`)
   is not exposed by `browsermesh-objects`: a page's tools go through `browsermesh-mcp`. They use its transport-neutral caller identity (`who: { username, fingerprint, podId }`, strict about 32
   bytes and canonical spelling, so a peer that is not named by a real pod id is refused), `serveMcpOverDuplex` with its
@@ -144,6 +158,6 @@ The grants are the same scopes as above. Design: [`design/wsh-services-on-a-pod.
   both directions, close from either end, refusal by policy, connection refused, name not found, resolve, too many
   connections and listen (bound and refused); against `createMemoryHost` it checks that TCP, DNS and listen are refused.
   The two hosts are the Node implementations joined to the client by an in-memory socket pair, not a network connection,
-  and the test skips when `@johnhenry/wsh` is not installed. It was written against wsh 0.52.0 and not run against 0.53.0;
+  and the test skips when `@johnhenry/wsh` is not installed. It was written against wsh 0.52.0 and now runs against 0.54.0;
   the Rust `wsh-server` was not run, and a gateway timeout (code 8) and an older gateway's 5 are checked only against the
   mock and wsh's exported code table (`gateway-parity.test.mjs`), not through a real host.

@@ -2,7 +2,7 @@
 //
 // Two pods linked over wsh through an in-process pipe relay: no network, no
 // sockets, the real wsh handshake, key login and sealed session end to end.
-import { describe, it, afterEach } from 'node:test';
+import { describe, it, afterEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { WshLinkError, rendezvousId, usernameForPodId } from '../src/wsh.mjs';
@@ -83,6 +83,42 @@ describe('wsh link: two pods, both ways', () => {
     assert.equal(B.isConnected(ids[0].podId), false);
     await B.close();
     await waitFor(() => env.stats().waiting === 0, { label: 'relay empty' });
+  });
+});
+
+describe('wsh link: a waiting host half', () => {
+  // wsh 0.54 ends a connection that has not logged in `loginTimeoutMs` (default 60 s) after the host accepted it. A host half is
+  // accepted when it reaches the relay, long before an operator pairs with it, so it must not carry that deadline.
+  it('is not closed by wsh\'s login deadline while nobody has paired with it', async () => {
+    // A socket that stands in for the relay's: it never receives anything, and says when the host wrote to it (the host speaks first,
+    // as soon as it has accepted the socket) and when it was closed.
+    const sockets = [];
+    const socketFactory = () => {
+      const s = new EventTarget();
+      Object.assign(s, { readyState: 1, binaryType: 'arraybuffer', sent: 0, closed: false, send() { s.sent++; }, close() { s.closed = true; s.readyState = 3; s.dispatchEvent(new Event('close')); } });
+      sockets.push(s);
+      return s;
+    };
+    const { hubs: [A] } = await rig(1, { socketFactory });
+    let waiting = 0;
+    mock.timers.enable({ apis: ['setTimeout'] });
+    try {
+      await A.listen();
+      for (let i = 0; sockets.length === 0 || sockets.some((s) => s.sent === 0); i++) {
+        if (i > 10_000) throw new Error('the host never accepted the waiting half');
+        await new Promise((r) => setImmediate(r));
+      }
+      waiting = sockets.length;
+      mock.timers.tick(61_000);
+      for (let i = 0; i < 50; i++) await new Promise((r) => setImmediate(r));
+      mock.timers.tick(1_000);
+      for (let i = 0; i < 50; i++) await new Promise((r) => setImmediate(r));
+    } finally {
+      mock.timers.reset();
+    }
+    assert.deepEqual(A.of('refused'), [], 'no login-timeout refusal was reported');
+    assert.equal(sockets.filter((s) => s.closed).length, 0, 'the host halves are still waiting');
+    assert.equal(sockets.length, waiting, 'and none was replaced');
   });
 });
 

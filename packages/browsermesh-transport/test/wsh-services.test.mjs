@@ -3,7 +3,7 @@
 // wsh services on a pod (docs/design/wsh-services-on-a-pod.md): a STOCK wsh client (the real `WshClient`) uses a
 // pod's objects and MCP tools through an in-process pipe relay, with the real key login and the real sealed session.
 // Permission is the pod's registry grants for the key's pod id, nothing else; off by default; objects and MCP only.
-import { describe, it, afterEach } from 'node:test';
+import { describe, it, afterEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { PodIdentity } from '@johnhenry/browsermesh-primitives';
 
@@ -504,5 +504,39 @@ describe('wsh services: indicator, audit, stop', () => {
     await waitFor(() => w.audit.some((e) => e.event === 'session-close'));
     const mine = w.audit.filter((e) => e.podId === s.podId);
     assert.deepEqual(mine.map((e) => e.event), ['session-open', 'session-close']);
+  });
+});
+
+describe('wsh services: a waiting host half', () => {
+  // wsh 0.54 ends a connection that has not logged in `loginTimeoutMs` (default 60 s) after the host accepted it. A host half is
+  // accepted when it reaches the relay, long before a client pairs with it, so it must not carry that deadline.
+  it('is not closed by wsh\'s login deadline while nobody has paired with it', async () => {
+    const sockets = [];
+    const socketFactory = () => {
+      const s = new EventTarget();
+      Object.assign(s, { readyState: 1, binaryType: 'arraybuffer', sent: 0, closed: false, send() { s.sent++; }, close() { s.closed = true; s.readyState = 3; s.dispatchEvent(new Event('close')); } });
+      sockets.push(s);
+      return s;
+    };
+    let waiting = 0;
+    const w = await world({ start: false, extra: { socketFactory } });
+    mock.timers.enable({ apis: ['setTimeout'] });
+    try {
+      await w.services.start();
+      for (let i = 0; sockets.length === 0 || sockets.some((s) => s.sent === 0); i++) {
+        if (i > 10_000) throw new Error('the host never accepted the waiting half');
+        await new Promise((r) => setImmediate(r));
+      }
+      waiting = sockets.length;
+      mock.timers.tick(61_000);
+      for (let i = 0; i < 50; i++) await new Promise((r) => setImmediate(r));
+      mock.timers.tick(1_000);
+      for (let i = 0; i < 50; i++) await new Promise((r) => setImmediate(r));
+    } finally {
+      mock.timers.reset();
+    }
+    assert.deepEqual(w.audit.filter((e) => e.event === 'refused'), [], 'no login-timeout refusal was audited');
+    assert.equal(sockets.filter((s) => s.closed).length, 0, 'the host halves are still waiting');
+    assert.equal(sockets.length, waiting, 'and none was replaced');
   });
 });
