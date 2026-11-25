@@ -604,6 +604,12 @@ export interface PodHostStatus {
   podId?: string | null;
   inbox?: number;
   execs?: number;
+  /** True for a pod that is asleep (state `cold`) on a hibernating host. */
+  sleeping?: boolean;
+  /** True while a sleeping pod is being woken (state `booting`). */
+  waking?: boolean;
+  sleptAt?: number;
+  wakes?: number;
 }
 
 export interface PodExecResult {
@@ -615,7 +621,7 @@ export interface PodExecResult {
 export interface PodHostDriver {
   lane: string;
   capabilities(): { verbs: string[] };
-  spawn(spec: PodSpec): Promise<PodHostStatus>;
+  spawn(spec: PodSpec, options?: { wake?: { discoveryWindowMs?: number; podId?: string | null } }): Promise<PodHostStatus>;
   status(name: string): Promise<PodHostStatus>;
   send(name: string, msg: { to?: string; payload: unknown }): Promise<object>;
   exec(name: string, argv: string[], opts?: { timeoutMs?: number }): Promise<PodExecResult>;
@@ -625,6 +631,46 @@ export interface PodHostDriver {
   list(): Promise<PodHostStatus[]>;
   onEvent?(fn: (event: PodHostEventEnvelope) => void): () => void;
 }
+
+export declare const HIBERNATION_DEFAULTS: Readonly<{
+  idleMs: number; wakeTimeoutMs: number; discoveryWindowMs: number; maxQueuedPerPod: number; maxConcurrentWakes: number;
+}>;
+export declare const HIBERNATION_REASON: Readonly<{ SLEPT: 'slept'; WAKING: 'waking'; WOKE: 'woke'; WAKE_FAILED: 'wake-failed' }>;
+export declare const WAKE_FAILURE: Readonly<{
+  TIMEOUT: 'wake-timeout'; FAILED: 'wake-failed'; QUEUE_FULL: 'wake-queue-full'; CAPACITY: 'wake-capacity';
+  REFUSED: 'wake-refused'; IDENTITY: 'identity-changed';
+}>;
+export interface HibernationStore {
+  get(name: string): Promise<object | null>;
+  put(name: string, record: object): Promise<void>;
+  delete(name: string): Promise<void>;
+  list(): Promise<object[]>;
+}
+export declare class MemoryHibernationStore implements HibernationStore {
+  get(name: string): Promise<object | null>;
+  put(name: string, record: object): Promise<void>;
+  delete(name: string): Promise<void>;
+  list(): Promise<object[]>;
+}
+export interface HibernatingDriver extends PodHostDriver {
+  deliver(to: string, msg: { to?: string; payload: unknown }): Promise<object>;
+  resolve(podId: string): Promise<string | null>;
+  sweep(): Promise<{ slept: string[]; failed: Array<{ name: string; code: string; message: string }> }>;
+  sleep(name: string): Promise<PodHostStatus>;
+  start(): void;
+  dispose(): void;
+  stats(): { sleeps: number; wakes: number; wakeFailures: number; lastWakeMs: number | null };
+  attachPlacement(placement: { admitWake?: Function; onSleep?: Function; onWakeFailed?: Function }): void;
+}
+export declare function createHibernatingDriver(inner: PodHostDriver, opts?: {
+  store?: HibernationStore; idleMs?: number; wakeTimeoutMs?: number; discoveryWindowMs?: number;
+  maxQueuedPerPod?: number; maxConcurrentWakes?: number; sweepIntervalMs?: number;
+  eligible?: (spec: object) => boolean;
+  admitWake?: (info: { name: string; spec: object }) => Promise<void> | void;
+  onSleep?: (info: { name: string; spec: object }) => void;
+  onWakeFailed?: (info: { name: string; spec: object }) => void;
+  now?: () => number; setTimer?: (fn: () => void, ms: number) => unknown; clearTimer?: (timer: unknown) => void;
+}): HibernatingDriver;
 
 export declare class InMemoryPodHostDriver implements PodHostDriver {
   constructor(opts?: {

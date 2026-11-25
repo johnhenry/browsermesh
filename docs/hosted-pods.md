@@ -42,7 +42,7 @@ stand-ins for the isolate lane) are in `packages/browsermesh-pod`.
 | --- | --- |
 | Firecracker on a real host, full lifecycle | Needs a Linux/KVM host (none here; `/dev/kvm` is absent in Docker Desktop's VM, checked). Everything short of KVM now runs on Linux: the network policy against a real kernel, the guest's exec responder as a process, the whole spike suite. One checklist for the rest: [`runbook-firecracker-kvm.md`](runbook-firecracker-kvm.md). |
 | `VmPod.restore()` bugs | Fixed in #243 against the fake API; confirmation against a real VMM is part of the runbook. |
-| Durable Object hibernation topology | Owner decision; options in [`design/hosted-pods-open-decisions.md`](design/hosted-pods-open-decisions.md) section 1. |
+| Durable Object hibernation topology | Decided: cold boot is the sleep (option B). Built and tested in process behind the existing interfaces, see [4.4 Hibernation](#44-hibernation-cold-boot-as-sleep). Not run: a real Durable Object eviction, and the wake time on a deployed Worker (the owner's account). |
 | End to end across a relay | Done for the sealed path: `meshctl --wsh-relay` reaches a host through a pipe relay over a sealed, key-authenticated wsh link, with no signalling server or WebRTC, tested against the in-process pipe relay and a real pod-host service. The unsealed relay dialect is deliberately not used for pod-host traffic. Not run against a deployed relay. |
 | Isolate hosts and the compute scorer | Done in #277. |
 | Publish meshctl | Owner decision; section 2 of the decisions note. The package now starts without a repository checkout (#361). |
@@ -410,6 +410,39 @@ Self-hosted path: `workerd` with a `config.capnp` that declares the Worker
 and the DO namespace; no Cloudflare account needed for the spike. `cf dev`
 (Cloudflare's Wrangler successor, open beta — the spike migrated off
 Wrangler 4 to it) is the quickest local harness. See WP2.
+
+### 4.4 Hibernation: cold boot as sleep
+
+Decision 1 of [the open-decisions note](design/hosted-pods-open-decisions.md), option B. An outbound WebSocket keeps a
+Durable Object in memory, so a pod cannot "hibernate" in the platform's sense; instead an idle pod is allowed to be
+evicted and the first message boots it again. `createHibernatingDriver(inner, opts)` in `@johnhenry/browsermesh-pod` is a
+`PodHostDriver` decorator that does this for any lane driver. No new verb, no new wire message: a sleeping pod is the
+existing lifecycle state `cold`, with an optional `sleeping: true` on its status.
+
+| Question | Behaviour |
+| --- | --- |
+| What is sleep? | After `idleMs` (default 5 minutes) with no `send`/`exec`/delivery, `sweep()` writes `{name, spec, podId, sleptAt, wakes}` to a `HibernationStore` first, then drains the pod through the inner driver. The inner driver's own drain events are held back: a sleep is not an exit, so a supervisor sees nothing to restart. A `lifecycle` event with `reason: 'slept'` is sent instead. A pod with a verb in flight, or one `eligible()` rejects, is never slept. |
+| What survives? | The record: podspec and `podId`. The wake checks the pod comes back with the same `podId` and fails `identity-changed` if not (a Durable Object keeps its keypair in its storage). Anything only in memory does not: peers, open connections, in-flight work. A lane that can snapshot should use `snapshot`/`restore`, which keep memory. |
+| How is a sleeping pod found? | `status` and `list` answer from the record without waking it: `state: cold`, `sleeping: true`, `podId`, `sleptAt`, `wakes`. `describe()` states the host's `hibernation: {idleMs, wakeTimeoutMs, discoveryWindowMs}` (null elsewhere). A host's front door that receives mesh traffic for a pod id calls `driver.deliver(podIdOrName, msg)`. |
+| What wakes it? | `send`, `exec` (where the lane has it) and `deliver`, after the service's access checks, so only someone allowed to use a pod can wake it. Never `status`, `list` or `drain` (drain of a sleeper removes the record and reports `exit` `drained`, `restartable: false`). `snapshot`/`restore` of a sleeper are refused `EBUSY` (`asleep`). |
+| How long? | A caller waits at most `wakeTimeoutMs` (default 5 s) and then gets `ETIMEDOUT` (`details.reason: 'wake-timeout'`); the boot goes on, so the next call usually finds it awake. The booting pod waits only `discoveryWindowMs` (default 100 ms, passed as `spawn(spec, {wake})`; the isolate driver forwards it to the Durable Object, which may only shorten its 1.5 s window) to hear its peers. That default is a guess: the measurement is the owner's (see below). |
+| What does a caller see meanwhile? | `status` says `booting` with `waking: true`. Concurrent sends share one boot and reach the pod in the order they arrived (up to `maxQueuedPerPod`, default 32, then `EBUSY` `wake-queue-full`); at most `maxConcurrentWakes` (4) boots at once (`EBUSY` `wake-capacity`). The reply to a send that woke the pod carries `woke: true, wakeMs`. The relay does not queue messages for a sleeper, so the queue exists only on the host: a message sent straight to a sleeping pod's id over a relay is lost unless the host's front door calls `deliver`. |
+| A boot that fails? | The pod stays asleep with the failure on its record (`lastWakeError`); the caller gets `EBUSY` `wake-failed`. Nothing retries by itself; the next call tries again. |
+| Host restart? | The record is in the store, so a new driver over the same store lists and wakes its sleepers. Use a durable store (a Durable Object's `ctx.storage` behind the four-method `HibernationStore`); the in-memory one loses them. |
+
+**The placement planner.** A pool (`createHostPool`) notices a driver with `attachPlacement`. By default nothing about
+capacity changes: a sleeping pod keeps its whole reservation. With `overcommitSleeping: true` a sleeping pod frees its
+cpu and memory in the ledger, still counts as a pod and toward its requester's quota (`perRequesterMaxPods`), and a
+wake is admitted only if the host has room again; otherwise it is refused `EBUSY` (`wake-refused`) and the pod stays
+asleep. A boot that fails after admission gives the reservation back.
+
+**The supervisor.** Sleeping sends no `exit` event and reports `cold`, not `gone`, so no restart policy fires and the
+reconcile sweep does not mistake it for a loss; a wake is not a restart (`restarts` stays 0). If the host itself is lost
+the supervisor re-places the pod as before, and the sleeper's record is lost with the host unless its store is shared.
+
+**Not run here.** A real Durable Object eviction and boot (needs a Cloudflare account), the wake time (the issue's
+target is under 50 ms for option C; for B the number to measure is `wakeMs` with a small `discoveryWindowMs`), and the
+memory per idle pod. Everything above is tested in process with a fake clock.
 
 ### 4.3 Threat model for Lane A
 

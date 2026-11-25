@@ -306,7 +306,23 @@ export class PlacementLedger {
   reserve({ hostId, name, requesterId = null, limits }) {
     const key = `${hostId}\0${name}`
     if (this.#entries.has(key)) throw new Error(`'${name}' is already reserved on host '${hostId}'`)
-    this.#entries.set(key, { hostId, name, requesterId, vcpus: limits.vcpus, memMib: limits.memMib })
+    this.#entries.set(key, { hostId, name, requesterId, vcpus: limits.vcpus, memMib: limits.memMib, asleep: false })
+  }
+
+  /**
+   * A sleeping pod holds no cpu or memory but is still a pod: it counts toward the host's pod count and its
+   * requester's quota. Unknown entries are ignored.
+   * @param {string} hostId @param {string} name @param {boolean} asleep
+   */
+  setAsleep(hostId, name, asleep) {
+    const entry = this.#entries.get(`${hostId}\0${name}`)
+    if (entry) entry.asleep = asleep
+  }
+
+  /** @param {string} hostId @param {string} name @returns {{vcpus: number, memMib: number}|null} */
+  chargeOf(hostId, name) {
+    const entry = this.#entries.get(`${hostId}\0${name}`)
+    return entry ? { vcpus: entry.vcpus, memMib: entry.memMib } : null
   }
 
   /** @param {string} hostId @param {string} name */
@@ -321,8 +337,10 @@ export class PlacementLedger {
     for (const entry of this.#entries.values()) {
       const used = out.get(entry.hostId) ?? { pods: 0, vcpus: 0, memMib: 0 }
       used.pods += 1
-      used.vcpus += entry.vcpus
-      used.memMib += entry.memMib
+      if (!entry.asleep) {
+        used.vcpus += entry.vcpus
+        used.memMib += entry.memMib
+      }
       out.set(entry.hostId, used)
     }
     return out
@@ -401,7 +419,7 @@ export function planError(plan) {
  */
 export function createHostPool({
   hosts, policy = {}, now = Date.now, health = new HostHealth(), maxAttempts = 1,
-  failoverCodes = [POD_HOST_ERROR.ETIMEDOUT],
+  failoverCodes = [POD_HOST_ERROR.ETIMEDOUT], overcommitSleeping = false,
 } = {}) {
   if (!Array.isArray(hosts) || hosts.length === 0) throw new Error('createHostPool: hosts are required')
   /** @type {Map<string, PoolHost>} */
@@ -415,6 +433,35 @@ export function createHostPool({
   const draining = new Set()
   /** @type {Map<string, {hostId: string, spec: object, requester: object, restarts: number}>} */
   const pods = new Map()
+
+  // A driver that can put pods to sleep (`createHibernatingDriver()`) lets the pool know. Unless the pool is told to
+  // `overcommitSleeping`, a sleeping pod keeps its whole reservation (nothing it could need on waking is given away).
+  // With it, a sleeping pod frees its cpu and memory (it still counts as a pod and toward its requester's quota) and
+  // a wake is admitted only if the host has room again; otherwise it is refused and the pod stays asleep.
+  for (const host of byId.values()) {
+    if (typeof host.driver.attachPlacement !== 'function') continue
+    const tracked = (name) => pods.get(name)?.hostId === host.id
+    host.driver.attachPlacement({
+      admitWake({ name }) {
+        if (!overcommitSleeping || !tracked(name)) return
+        const charge = ledger.chargeOf(host.id, name)
+        const used = ledger.usage().get(host.id) ?? { vcpus: 0, memMib: 0 }
+        const cap = host.capacity ?? {}
+        const fits = (cap.vcpus === undefined || used.vcpus + charge.vcpus <= cap.vcpus)
+          && (cap.memMib === undefined || used.memMib + charge.memMib <= cap.memMib)
+        if (!fits) {
+          throw new PodHostDriverError(POD_HOST_ERROR.EBUSY, `host '${host.id}' has no room to wake '${name}'`, { reason: 'wake-refused', name, hostId: host.id })
+        }
+        ledger.setAsleep(host.id, name, false)
+      },
+      onSleep({ name }) {
+        if (overcommitSleeping && tracked(name)) ledger.setAsleep(host.id, name, true)
+      },
+      onWakeFailed({ name }) {
+        if (overcommitSleeping && tracked(name)) ledger.setAsleep(host.id, name, true)
+      },
+    })
+  }
 
   /** @returns {PlacementHost[]} */
   function placementHosts() {

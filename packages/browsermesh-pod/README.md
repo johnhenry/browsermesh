@@ -713,6 +713,16 @@ The gated, audited mesh service that speaks this protocol over a `PeerNode`
 is `createPodHostService()` in `@johnhenry/browsermesh-apps` — see that
 package's "Pod host service" README section.
 
+### Hibernating pods: `createHibernatingDriver()`
+
+`createHibernatingDriver(innerDriver, { idleMs, wakeTimeoutMs, discoveryWindowMs, store, ... })` wraps any
+`PodHostDriver`. A pod idle for `idleMs` is drained to a record in a `HibernationStore` (podspec and `podId`) and
+reports `state: 'cold'`, `sleeping: true`; a `send`, `exec` or `deliver()` boots it again (`inner.spawn(spec, {wake})`),
+sharing one boot between concurrent callers, within `wakeTimeoutMs`. `status`, `list` and `drain` never wake it, and a
+sleep sends no `exit` event. Memory does not survive (use `snapshot`/`restore` where the lane has them). Nothing is on
+by default: you construct the wrapper and call `sweep()` (or `start()` with `sweepIntervalMs`). Time is injectable.
+See [hosted pods, 4.4](../../docs/hosted-pods.md#44-hibernation-cold-boot-as-sleep) for the full behaviour and bounds.
+
 ### Browser lane drivers
 
 The browser lane (`POD_LANE.BROWSER`) has three drivers, documented in full

@@ -29,6 +29,9 @@ export {
   InMemoryPodHostDriver,
 } from './host-protocol.mjs'
 export {
+  HIBERNATION_DEFAULTS, HIBERNATION_REASON, WAKE_FAILURE, MemoryHibernationStore, createHibernatingDriver,
+} from './hibernation.mjs'
+export {
   RUNTIME_BOUNDARY, FORBIDDEN_ENV_NAME, createRuntimeLaneDriver,
 } from './pod-runtime.mjs'
 export {
