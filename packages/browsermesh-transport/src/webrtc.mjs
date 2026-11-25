@@ -273,6 +273,7 @@ export class WebRTCPeerConnection {
    * @type {Array<RTCIceCandidate|object>}
    */
   #pendingRemoteCandidates = []
+  #verifyingOffer = false       // a first offer is being verified (no RTCPeerConnection exists yet)
   #closing = false // reentrancy guard for close(); see close()
   #iceCandidateCbs = []
   #messageCbs = []
@@ -516,7 +517,19 @@ export class WebRTCPeerConnection {
     this.#ensureNotClosed()
     if (!offer || !offer.sdp) throw new Error('Invalid offer: missing sdp')
     // Before anything is applied: a description that does not verify never reaches the RTCPeerConnection.
-    await this.#checkIncoming('offer', offer)
+    // The signalling path may hand over the candidates that follow the offer without waiting for this call; with
+    // no connection yet they are held (as they are before a description lands) rather than refused, and dropped
+    // again if the offer does not verify.
+    const holding = !this.#pc
+    if (holding) this.#verifyingOffer = true
+    try {
+      await this.#checkIncoming('offer', offer)
+    } catch (err) {
+      if (holding) this.#pendingRemoteCandidates = []
+      throw err
+    } finally {
+      this.#verifyingOffer = false
+    }
 
     if (this.#isRenegotiation(offer)) {
       if (!this.#pc) {
@@ -625,6 +638,11 @@ export class WebRTCPeerConnection {
    * @throws {Error} Synchronously, if there is no peer connection yet.
    */
   addIceCandidate(candidate) {
+    if (!this.#pc && this.#verifyingOffer) {
+      if (this.#pendingRemoteCandidates.length >= MAX_PENDING_REMOTE_CANDIDATES) return Promise.resolve(false)
+      this.#pendingRemoteCandidates.push(candidate)
+      return Promise.resolve(true)
+    }
     if (!this.#pc) throw new Error('No peer connection')
 
     // "Candidates race the answer" is stated above as an ordinary event, and

@@ -111,7 +111,7 @@ class FakePC {
       })
     }
   }
-  addIceCandidate() {}
+  addIceCandidate() { FakePC.candidatesAdded++ }
   async getStats() {
     if (FakePC.exposure !== 'stats') return new Map()
     const hex = createHash('sha256').update(this.peerPc.cert).digest('hex').toUpperCase()
@@ -125,6 +125,7 @@ class FakePC {
 }
 FakePC.applied = 0 // descriptions applied (setRemoteDescription calls), across all instances
 FakePC.exposure = 'none'
+FakePC.candidatesAdded = 0 // ICE candidates handed to a (fake) RTCPeerConnection
 globalThis.RTCPeerConnection = FakePC
 
 const {
@@ -463,6 +464,35 @@ describe('signed session descriptions: WebRTCPeerConnection', () => {
     assert.equal(a.descriptionVerified, true)
     assert.equal(b.descriptionVerified, true)
     assert.equal(a.bound && b.bound, true)
+    a.close(); b.close()
+  })
+
+  it('a candidate that arrives while the offer is being verified is held and applied with it, not thrown away', async () => {
+    const ida = await PodIdentity.generate()
+    const idb = await PodIdentity.generate()
+    const a = new WebRTCPeerConnection({ localPodId: ida.podId, remotePodId: idb.podId, iceServers: [], identity: ida })
+    const b = new WebRTCPeerConnection({ localPodId: idb.podId, remotePodId: ida.podId, iceServers: [], identity: idb })
+    const offer = await a.createOffer()
+    const before = FakePC.candidatesAdded
+    const answering = b.handleOffer(offer) // the signalling path hands over the next frame without waiting
+    assert.equal(await b.addIceCandidate({ candidate: 'candidate:1 1 udp 1 127.0.0.1 9 typ host', sdpMid: '0' }), true)
+    await answering
+    assert.equal(FakePC.candidatesAdded, before + 1)
+    a.close(); b.close()
+  })
+
+  it('a candidate held for an offer that is then refused is dropped', async () => {
+    const ida = await PodIdentity.generate()
+    const idb = await PodIdentity.generate()
+    const a = new WebRTCPeerConnection({ localPodId: ida.podId, remotePodId: idb.podId, iceServers: [], identity: ida })
+    const b = new WebRTCPeerConnection({ localPodId: idb.podId, remotePodId: ida.podId, iceServers: [], identity: idb })
+    const offer = swapSdp(await a.createOffer())
+    const before = FakePC.candidatesAdded
+    const answering = b.handleOffer(offer)
+    assert.equal(await b.addIceCandidate({ candidate: 'candidate:1 1 udp 1 127.0.0.1 9 typ host', sdpMid: '0' }), true)
+    await assert.rejects(answering, /bad-signature/)
+    assert.equal(FakePC.candidatesAdded, before)
+    assert.throws(() => b.addIceCandidate({ candidate: 'x' }), /No peer connection/)
     a.close(); b.close()
   })
 
