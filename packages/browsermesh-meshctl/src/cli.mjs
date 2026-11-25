@@ -40,7 +40,8 @@ function usageDocument() {
     globalFlags: {
       '--loopback': 'connect via an in-process mesh with its own hosts (tests/examples/dev)',
       '--signaling <ws://...>': 'connect to a real mesh via this signaling server',
-      '--relay <ws://...>': 'optional relay fallback transport, used with --signaling',
+      '--relay <ws://...>': 'optional relay fallback transport, used with --signaling (opened, not yet used for pod-host traffic; it is not sealed -- see --wsh-relay)',
+      '--wsh-relay <wss://...>': 'reach hosts through a pipe relay over a sealed, key-authenticated wsh link (repeatable); works alone (no WebRTC, no --signaling) or with --signaling, where the sealed link is tried first',
       '--identity <file>': `identity file path (default: ${DEFAULT_IDENTITY_PATH})`,
       '--host <ref>': 'a known host pubKey (repeatable); required for hosts/pods spawn auto in real mode',
       '--timeout <ms>': 'pod-host request timeout in ms (default: 10000)',

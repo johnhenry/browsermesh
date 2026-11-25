@@ -87,7 +87,7 @@ into one would mean buffering indefinitely.
 | 0 | ok |
 | 1 | generic failure (anything not listed below -- e.g. `EEXIST`, `EINVAL`, `EBUSY`) |
 | 2 | usage error (bad flags/args, caught before anything touches the mesh) |
-| 3 | `EACCES` -- not authorized for that verb on that host |
+| 3 | `EACCES` -- not authorized for that verb on that host (or, over `--wsh-relay`, the host did not allow this identity to link: `WSH_REFUSED`) |
 | 4 | `ENOENT` -- no such pod (or, for `--spec`, no such file) |
 | 5 | `ELANE` / `ENOTSUP` -- the lane structurally can't do this verb, or this driver doesn't implement it |
 | 6 | `ETIMEDOUT` -- the host never answered within `--timeout` |
@@ -141,9 +141,23 @@ Every command except `identity` and `vm` (see below) needs exactly one of:
   (`@johnhenry/browsermesh-transport`'s `WebRTCMeshManager` +
   `MeshTransportNegotiator`, the same pieces `@johnhenry/browsermesh-apps`'s
   `createMeshNode()` wires together). `--relay` optionally opens a second
-  connection to a relay server as a data-plane fallback transport; it is
-  opened and closed correctly but **not yet wired into the pod-host
-  request path** -- see [Known limitations](#known-limitations).
+  connection to a relay server; it is opened and closed correctly but
+  deliberately **not used for pod-host traffic** (that relay is not sealed)
+  -- see [Known limitations](#known-limitations).
+
+- **`--wsh-relay <wss://...>`** (repeatable) -- reaches a host through a
+  pipe relay over a **sealed, key-authenticated wsh link**
+  (`@johnhenry/browsermesh-transport/wsh`'s `WshPeerLinks`; needs that
+  package, 0.11 or later, and its peer `@johnhenry/wsh`). It works on its own:
+  no signalling server, no WebRTC, so a host behind symmetric NAT with no TURN
+  is reachable through the relay. The pod id the host claims must be the hash
+  of the key wsh authenticated, meshctl pins the host to the pod id it asked
+  for, and the relay sees ciphertext only (who connects to which rendezvous id
+  and when, not what is said). With `--signaling` as well, the sealed link is
+  tried first and WebRTC is the fallback. On its own, a link that cannot be
+  made is the end of the connect: it never becomes a session on anything else.
+  The host decides who may link: a host that has not allowed this identity
+  refuses it (`WSH_REFUSED`, exit 3).
 
   The signalling server may run in authenticated mode (it requires the pod id
   to be the hash of the key that signs a challenge). `meshctl` registers with
@@ -259,13 +273,21 @@ and the spike's own test suite (`spikes/vm-pod-host/test/`) stays green.
 
 ## Known limitations
 
-- **`--relay` is wired, not yet load-bearing.** It opens and closes a
-  second `WebSocketTransport` (relay mode) cleanly, but nothing in the
-  pod-host request path uses it yet -- only the `'webrtc'` adapter is
-  registered on the transport negotiator. A relay-backed transport
-  adapter (so a host unreachable over WebRTC -- symmetric NAT, no TURN --
-  is still reachable) is follow-up work.
-- **The real-mesh path was wired, not exercised end to end.** Real WebRTC
+- **`--relay` is not load-bearing, on purpose.** It opens and closes a
+  second `WebSocketTransport` (relay mode) cleanly, and nothing in the
+  pod-host request path uses it. That relay dialect is readable by the relay
+  and its `register` frame proves no key, so it is not a link meshctl would
+  send pod-host traffic over. The relay path is `--wsh-relay` (above): a
+  sealed, key-authenticated link, and only that. Accepting an unsealed relay
+  path instead would be a decision for the owner, not a default.
+- **`--wsh-relay` is tested against the in-process pipe relay, not a
+  deployed one.** The pipe relay, the wsh handshake and the sealed session are
+  the real ones; the relay's WebSocket is the in-process one from the transport
+  package. The host must be a pod that listens on the same relay
+  (`createMeshNode({ wsh: { relays } })`) and allows this identity to link
+  (`mesh:link:connect` in its registry) as well as granting it the pod-host
+  verbs. meshctl itself never listens: nothing can open a link to it.
+- **The WebRTC path was wired, not exercised end to end.** Real WebRTC
   connectivity needs `node-datachannel`'s native binding.
   `test/real-mesh-wiring.test.mjs` verifies the wiring (a `PeerNode`
   carrying the *persisted* identity's podId, the signaling transport
