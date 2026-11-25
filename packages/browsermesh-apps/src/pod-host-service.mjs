@@ -365,9 +365,9 @@ export function createPodHostService({
        */
       function verbRefusal(verb) {
         // Lane first, driver second: a driver may not widen its lane by
-        // declaring a verb the lane excludes (found by the browser-lane
-        // extension driver, whose chrome.tabs.discard would otherwise have
-        // slipped through as 'snapshot').
+        // declaring a verb the lane excludes (found by a browser-lane
+        // driver whose tab discard would otherwise have slipped through
+        // as 'snapshot').
         if (!laneSupports(lane, verb)) {
           return new PodHostDriverError(POD_HOST_ERROR.ELANE, `lane '${lane}' cannot '${verb}'`, { verb, lane })
         }

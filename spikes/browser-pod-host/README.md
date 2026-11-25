@@ -123,10 +123,9 @@ wired through `createPodHostService()` (`@johnhenry/browsermesh-apps`),
 nothing here bypasses that.
 
 **`snapshot`/`restore` are `ENOTSUP`**, not implemented this wave: no
-durable serialization of a page's JS heap over CDP exists here. See the
-extension driver's `chrome.tabs.discard`/reload pair
-(`spikes/browser-extension-host`) for a real, but honestly weaker,
-pause/resume primitive this lane could grow toward.
+durable serialization of a page's JS heap over CDP exists here. A tab
+discard and reload is a real but weaker pause/resume primitive this lane could
+grow toward (see [the browser lane](../../docs/hosted-pods.md#8b-lane-c--browser-pods)).
 
 ## Nesting with Lane B
 

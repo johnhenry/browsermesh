@@ -739,13 +739,12 @@ await driver.drain('worker-1')
 It answers `spawn`/`status`/`send`/`drain`/`list`; `exec`/`snapshot`/
 `restore` are `ENOTSUP` — a parent tab has no safe way to evaluate code in
 a child it spawned, and no durable freeze/thaw of a page's JS heap exists
-yet. The other two drivers trade that safety story for more setup:
+yet. The other driver trades that safety story for more setup:
 
 | Driver | Where | `exec` |
 | --- | --- | --- |
 | In-page (above) | here | `ENOTSUP` |
 | CDP (remote debugging protocol) | `spikes/browser-pod-host` | real `Runtime.evaluate`, gated like any exec |
-| Extension (Manifest V3) | `spikes/browser-extension-host` | real `chrome.scripting.executeScript`, gated |
 
 **Trust caveat:** a tab is not a privilege boundary against the page it
 hosts. For a hosted pod whose code you do not trust, use the CDP driver
