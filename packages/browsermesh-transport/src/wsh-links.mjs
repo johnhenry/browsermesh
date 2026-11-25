@@ -335,6 +335,9 @@ export class WshPeerLinks {
       dataStreams: false,
       sealSession: 'require',
       requireChannelBinding: true,
+      // wsh counts its login deadline (60 s by default) from the moment the host accepts a socket, and a host half is accepted when it
+      // reaches the relay, long before an operator pairs with it: the default would close every idle half each minute.
+      loginTimeoutMs: 0,
       auth: (who) => this.#authorizePeer(who),
       endpoints: { [ENDPOINT]: (duplex, who) => this.#serve(duplex, who) },
       onRefused: (r) => this.#onWshRefused(r),
