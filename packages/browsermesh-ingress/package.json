@@ -4,9 +4,16 @@
   "description": "Real HTTP in, a mesh peer answers: a bounded request forwarder from an HTTP listener to the one BrowserMesh pod a mapping names, over a protocol channel",
   "type": "module",
   "main": "./src/index.mjs",
+  "types": "./src/index.d.ts",
   "exports": {
-    ".": "./src/index.mjs",
-    "./node": "./src/node.mjs"
+    ".": {
+      "types": "./src/index.d.ts",
+      "default": "./src/index.mjs"
+    },
+    "./node": {
+      "types": "./src/node.d.ts",
+      "default": "./src/node.mjs"
+    }
   },
   "bin": {
     "browsermesh-ingress": "./bin/browsermesh-ingress.mjs"

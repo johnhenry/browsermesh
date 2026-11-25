@@ -61,7 +61,7 @@ table; they come from the READMEs, source headers and test directories.
 | `browsermesh-kernel` | implemented | in-process microkernel with capability checks and resource tables; unit tests per module. No cryptography; isolation is by capability and ownership checks, not process boundaries. |
 | `browsermesh-priority-mux` | implemented | sender-side priority scheduler and framer (fake adapter tests). No authentication or encryption. The reassembler has no limit on pending messages. |
 | `browsermesh-mcp` | implemented | a page's WebMCP tools (or an explicit list) as the protocol `mcp` on the protocol seam, and a client for it; per-tool grants, approval kept with the serving page, bounds. In-memory bus (unit), real peers over WebRTC (Node) and two real browsers; threat model [below](#mcp-across-the-mesh). Depends on wsh's WebMCP bridge (peer dependency) through one adapter file. |
-| `browsermesh-ingress` | implemented | real HTTP in, a mesh pod answers: a bounded request forwarder (`createMeshIngress`, a Node listener on its own entry, a CLI) and the provider side (`serveHttpOnMesh`) over the protocol `http` on the protocol seam. Pinned to the pod a mapping names, default deny on the provider, safe defaults on every dimension (unit over an in-memory bus, hostile provider and hostile client suites on real sockets, real WebRTC peers including the CLI as a child process, and a page as the provider in three real browsers). Plain HTTP only, no WebSocket upgrade, direct links only; see [HTTP ingress](#http-ingress). |
+| `browsermesh-ingress` | implemented | real HTTP in, a mesh pod answers: a bounded request forwarder (`createMeshIngress`, a Node listener on its own entry, a CLI) and the provider side (`serveHttpOnMesh`) over the protocol `http` on the protocol seam. Pinned to the pod a mapping names, default deny on the provider, safe defaults on every dimension (unit over an in-memory bus, hostile provider and hostile client suites on real sockets, real WebRTC peers including the CLI as a child process, and a page as the provider in three real browsers). The hooks are told what the link proved (`peer.verified`: `bound`, `wsh`, `key`, or `none`), and `requireLinkKey` binds a request's signer to the link's key. Plain HTTP only, no WebSocket upgrade, direct links only; see [HTTP ingress](#http-ingress). |
 | `browsermesh-egress` | implemented (TCP and name lookup; the fetch form and UDP are not built) | a pod lends its network access to peers that hold a grant: TCP connections and A lookups to destinations the operator allows (`createMeshEgress`; `connectEgress` and a netway backend for the consumer, browser-safe; `nodeDialer` on its own entry, on wsh's address guard) over the protocol `egress` on the protocol seam. Off unless started, default deny, a grant per destination, every address checked after resolution and the checked address dialled, per-consumer and global budgets, audit and meter without contents, revocation ending live connections. Unit over an in-memory bus, a hostile-consumer suite, the real address guard with local sockets, and two real WebRTC peers moving several MiB each way; not run in a browser; see [Egress](#egress). |
 | `browsermesh-embed` | partial | widget wrapper tested against a DOM stub only. |
 | `browsermesh-meshctl` | partial | loopback mode exercised through all eight verbs; `--wsh-relay` (a sealed, key-authenticated wsh link through a pipe relay, no signalling server or WebRTC) exercised end to end against the in-process pipe relay and a real pod-host service, not a deployed relay; the WebRTC path is wired, not exercised end to end; `--relay` (the unsealed relay dialect) is not used for pod-host traffic, on purpose. |
@@ -808,12 +808,21 @@ Threat model, by what an attacker is and wants:
   ingress fetches: the target is built from parsed parts and the ingress fetches nothing. A provider serves only ingress
   pods it granted: `protocol:http:open` in its registry (default deny) and `allowFrom` (required); revoking the grant
   closes the channel at once.
-- **An ingress whose pod id is new each session.** `allowFrom` may be a function `(podId, context)` (asked on open and for
+- **An ingress whose pod id is new each session.** `allowFrom` may be a function `(podId, context, peer)` (asked on open and for
   every request; only `true` serves; a throw refuses; omitting `allowFrom` is still an error). With a function, **the
   provider's own check carries the weight**: the pod id and the registry grant no longer name the ingress, so the provider
-  verifies another proof, for example a signed request. `verifyRequest(request, { peer, sig, bytes })` on the provider runs
+  verifies another proof, for example a signed request. `verifyRequest(request, { peer, sig, bytes }, peer)` on the provider runs
   before the handler and refuses anything but `true`; the ingress's `signRequest` makes the signature, which covers the
-  request, a fresh nonce, the headers as sent and the body digest. The package picks no cryptography. On a link whose peer
+  request, a fresh nonce, the headers as sent and the body digest. The package picks no cryptography.
+- **What is verified about the link a request came over.** The channel names the pod id a session is addressed by; whether
+  that id was proven is a property of the transport. The extra `peer` argument says: `verified: 'bound'` (a direct WebRTC
+  connection whose peer proved the key behind its pod id over the connection's DTLS fingerprints), `'wsh'` (a wsh peer link:
+  key login, host key pinned to the pod id, sealed), `'key'` (both at once) or `'none'` (nothing was proven: an unbound
+  WebRTC connection, a relayed or otherwise vouched-for link, any other transport, or no node given to the package); the key
+  fields are present only when something was proven, and a source can only narrow. A request signature alone shows that the
+  request was intact and that the holder of the signing key made it; `requireLinkKey` makes the signer's key the link's key,
+  and refuses a link that proved nothing, with a named reason (`link-unverified`, `signer-unverified`, `signer-key-invalid`,
+  `link-key-mismatch`) in the provider's log and `stats().refusals`. Off unless used. On a link whose peer
   identity is only asserted by a third party (a relay that vouches for who is on the other end), the signed-response and
   signed-request hooks should be mandatory in the application, because the pod id alone is only as good as that third
   party; the protocol channel itself needs only a byte duplex with a peer identity.
@@ -851,8 +860,10 @@ Threat model, by what an attacker is and wants:
   in-memory bus; a real HTTP client against the Node listener; hostile provider and hostile client suites (raw sockets);
   two real Node peers over real WebRTC and the CLI as a child process through a real signalling server
   (`packages/browsermesh-ingress/test/real-peer`); a page as the provider, the ingress in Node, in Chromium, Firefox and
-  WebKit (`tests/browser/ingress.spec.mjs`). Not verified: a public deployment, TLS in front, a real CDN or proxy in
-  front, WebRTC through NAT.
+  WebKit (`tests/browser/ingress.spec.mjs`); the link identity (`peer.verified`, `requireLinkKey`) on a real bound WebRTC
+  link, a real unbound one and a real wsh link (`test/real-peer/link-identity.test.mjs`, `test/wsh-link-identity.test.mjs`).
+  Not verified: a public deployment, TLS in front, a real CDN or proxy in front, WebRTC through NAT, the link identity of a
+  relayed transport over a real relay (a double stands in: it must read `none`).
 
 ## Egress
 

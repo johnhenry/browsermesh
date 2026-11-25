@@ -1,0 +1,171 @@
+/**
+ * @johnhenry/browsermesh-ingress: real HTTP in, a mesh pod answers.
+ */
+
+/** How the identity of the pod at the other end of a link was established (`PeerIdentity.verified`). */
+export type PeerVerified = 'bound' | 'wsh' | 'key' | 'none'
+
+/**
+ * What is VERIFIED about the pod at the other end of a link, as opposed to merely claimed.
+ *
+ * - `bound`: a direct WebRTC connection on which the peer proved possession of the key behind its pod id (identity binding).
+ * - `wsh`: a wsh peer link (key-authenticated in both directions, sealed).
+ * - `key`: more than one of those at once.
+ * - `none`: nothing was proven; `keyId` and `publicKey` are absent.
+ */
+export interface PeerIdentity {
+  /** The pod id of the other end (the same string the hooks' `peer` has). */
+  readonly podId: string
+  readonly verified: PeerVerified
+  /** Present when `verified` is not `'none'`: base64url SHA-256 of the pod's public key (equal to `podId`). */
+  readonly keyId?: string
+  /** Present only when the source supplied the 32 raw key bytes and they hash to `podId`. */
+  readonly publicKey?: Uint8Array
+}
+
+/** What a link-identity source says about a link: a proof, or nothing (`undefined`). It can only narrow. */
+export type LinkIdentityResult = { verified: Exclude<PeerVerified, 'none'>; publicKey?: Uint8Array } | undefined
+export type LinkIdentity = (podId: string) => LinkIdentityResult | Promise<LinkIdentityResult>
+
+/** A mesh node, as far as `nodeLinkIdentity` reads it (a `createMeshNode` result has all of this). */
+export interface MeshNodeLike {
+  sessionsFor(podId: string): Array<{ state?: string; transport?: string | null; connectionId?: string }>
+  meshManager?: { getConnection(podId: string, connectionId?: string): { bound?: boolean; isOpen?: boolean } | null }
+  wsh?: { links?: { isConnected(podId: string): boolean } }
+}
+
+/** The link-identity source for a mesh node: a proof only when every live session to the pod carries one. */
+export function nodeLinkIdentity(node: MeshNodeLike): (podId: string) => { verified: 'bound' | 'wsh' | 'key' } | undefined
+
+/** What `requireLinkKey` refuses for. */
+export const LINK_KEY_REFUSALS: Readonly<{
+  linkUnverified: 'link-unverified'
+  signerUnverified: 'signer-unverified'
+  signerKeyInvalid: 'signer-key-invalid'
+  mismatch: 'link-key-mismatch'
+}>
+export const PEER_VERIFIED: readonly PeerVerified[]
+/** What `requireLinkKey` throws to refuse; the provider logs and counts `reason`. */
+export class LinkKeyRefusal extends Error {
+  constructor(reason: string)
+  readonly reason: string
+}
+
+/**
+ * Make a `verifyRequest` (or `verifyResponse`) hook that binds the signer to the link. `verifySigner` does the signature
+ * check and returns the verified signer's raw 32-byte key (or its key id, base64url SHA-256 of the key), or a falsy value. The
+ * hook accepts only when the link proved a key (`peer.verified !== 'none'`) and the signer's key is the link's key. The peer
+ * object is the hook's last argument.
+ */
+export function requireLinkKey<A extends unknown[]>(
+  verifySigner: (...args: A) => Uint8Array | string | false | null | undefined | Promise<Uint8Array | string | false | null | undefined>,
+): (...args: [...A]) => Promise<true>
+
+export interface RequestVerifyContext {
+  peer: string
+  sig: string | undefined
+  bytes: Uint8Array
+  rid: number
+  nonce: string
+}
+
+export interface ProviderOptions {
+  /** The ingress pods served: a non-empty list of pod ids, or a function (asked on open and for every request; only `true` serves). */
+  allowFrom: string[] | ((podId: string, context: { peer: string; protocol: string; version: number }, peer: PeerIdentity) => boolean | Promise<boolean>)
+  limits?: Partial<typeof PROVIDER_LIMIT_DEFAULTS>
+  /** Sign the response (the provider buffers it so the signature covers the body). */
+  sign?: (bytes: Uint8Array, info: { peer: string }) => string | Promise<string>
+  /** Runs before the handler; only `true` lets the request through. `peer` (third argument) says what the link proved. */
+  verifyRequest?: (request: Request, context: RequestVerifyContext, peer: PeerIdentity) => boolean | Promise<boolean>
+  /** A mesh node: what `peer` says about a link is read from its sessions (`nodeLinkIdentity`). Without it or `linkIdentity`, `verified` is always `'none'`. */
+  node?: MeshNodeLike
+  /** A custom source for `peer`, in place of `node`. */
+  linkIdentity?: LinkIdentity
+  protocol?: string
+  onLog?: (event: string, data: object) => void
+}
+
+export const PROVIDER_LIMIT_DEFAULTS: Readonly<{
+  maxInflight: number
+  maxRequestBodyBytes: number
+  maxResponseBytes: number
+  handlerTimeoutMs: number
+  bodyWaitMs: number
+  maxHeaderCount: number
+  maxHeaderBytes: number
+  maxTargetLength: number
+}>
+
+export type Handler = (request: Request, context: { peer: string; signal: AbortSignal; client: string | undefined }) => Response | Promise<Response>
+
+/** Serve `handler` over protocol `http` v1 to the ingress pods `allowFrom` names. */
+export function serveHttpOnMesh(
+  service: object,
+  handler: Handler | { fetch: Handler },
+  options: ProviderOptions,
+): { stop(): void; stats(): Record<string, number | Record<string, number>> & { refusals: Record<string, number> } }
+
+/** A handler's way to say "not me, try another". */
+export function declineRequest(): Response
+
+/** Wrap a serverless site handler as a `(Request) => Response` handler. */
+export function fromSiteHandler(onRequest: (req: { fromPubKey?: string; method: string; path: string; headers: Record<string, string>; body?: unknown }) => Promise<{ status: number; headers: Record<string, string>; body: unknown }>): Handler
+
+export interface IngressMapping {
+  peer: string
+  path?: string
+  headers?: Record<string, string>
+  response?: { contentSecurityPolicy?: string | false; cacheControl?: string | false; allowSetCookie?: boolean; addHeaders?: Record<string, string> }
+}
+
+export interface IngressOptions {
+  service?: object
+  node?: object
+  resolve: (request: Request, attempt: { attempt: number; tried: string[] }) => IngressMapping | null | Promise<IngressMapping | null>
+  retry?: { attempts: number; on?: string[]; nonIdempotent?: boolean }
+  /** Sign each request for the provider's `verifyRequest`. `link` (third argument) says what the link to the provider proved. */
+  signRequest?: (bytes: Uint8Array, info: { peer: string }, link: PeerIdentity) => string | Promise<string>
+  /** Signed responses. `link` (second argument) says what the link to the provider proved. */
+  verifyResponse?: (info: { peer: string; bytes: Uint8Array; sig: string; request: { rid: number; method: string; target: string; host: string } }, link: PeerIdentity) => boolean | Promise<boolean>
+  /** Where `link` comes from, in place of reading `node` (when that is a mesh node). */
+  linkIdentity?: LinkIdentity
+  authorize?: (request: Request, target: IngressMapping) => boolean | Promise<boolean>
+  deny?: (request: Request) => Response | boolean | null | Promise<Response | boolean | null>
+  limits?: Partial<typeof INGRESS_LIMIT_DEFAULTS>
+  methods?: string[]
+  forwardHeaders?: string[]
+  exposeHeaders?: string[]
+  forwardClientAddress?: boolean
+  rpc?: { request: Function }
+  onAudit?: (record: object) => void
+  clock?: { now: () => number }
+  protocol?: string
+}
+
+export interface MeshIngress {
+  handle(request: Request, info?: { clientAddress?: string }): Promise<Response>
+  stats(): Record<string, unknown>
+  close(): Promise<void>
+}
+
+export function createMeshIngress(options: IngressOptions): MeshIngress
+
+export const INGRESS_LIMIT_DEFAULTS: Readonly<Record<string, number | Readonly<{ limit: number; windowMs: number }>>>
+export function parseBytes(text: string): number
+export function parseDuration(text: string): number
+
+export class IngressError extends Error {
+  constructor(status: number, reason: string, message?: string, extra?: { headers?: Record<string, string> })
+  readonly status: number
+  readonly reason: string
+  readonly headers?: Record<string, string>
+}
+export const REASON_HEADER: 'x-browsermesh-ingress-reason'
+
+export const DEFAULT_CSP: string
+export const DEFAULT_FORWARD_REQUEST_HEADERS: readonly string[]
+export const DEFAULT_PASS_RESPONSE_HEADERS: readonly string[]
+export const HTTP_PROTOCOL: 'http'
+export const HTTP_VERSIONS: readonly number[]
+export function signedBytes(parts: { rid: number; nonce: string; host: string; method: string; target: string; status: number; headers: Array<[string, string]>; digest: string }): Uint8Array
+export function signedRequestBytes(parts: { rid: number; nonce: string; host: string; method: string; target: string; headers: Array<[string, string]>; client?: string; digest: string }): Uint8Array

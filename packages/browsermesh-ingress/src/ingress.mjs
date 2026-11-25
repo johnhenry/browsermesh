@@ -14,6 +14,7 @@ import {
   requestHeadersForProvider, responseHeadersForClient,
 } from './headers.mjs'
 import { createInflight, createRateLimiter, resolveLimits } from './limits.mjs'
+import { nodeLinkIdentity, resolvePeer } from './peer-identity.mjs'
 import {
   FETCH_METHOD, HTTP_PROTOCOL, HTTP_VERSIONS, KIND_RESPONSE, KIND_REQUEST, WIRE_METHODS, signedBytes, signedRequestBytes, sha256Hex, validateResponseHead,
   validateStreamMeta,
@@ -68,8 +69,12 @@ function resolveRetry(retry) {
  *   `provider-pin-mismatch`, `provider-declined`; all three by default), `resolve` is called again, up to `attempts` (1 to 5) more
  *   times, with the pods already tried; each attempt is authorised and audited on its own. Never after a provider started answering;
  *   POST and PATCH only with `nonIdempotent: true`.
- * @param {(bytes: Uint8Array, info: { peer: string }) => (string|Promise<string>)} [opts.signRequest]
- *   Sign each request for the provider's `verifyRequest` (the request counterpart of `verifyResponse`). The package picks no cryptography.
+ * @param {(bytes: Uint8Array, info: { peer: string }, link: PeerIdentity) => (string|Promise<string>)} [opts.signRequest]
+ *   Sign each request for the provider's `verifyRequest` (the request counterpart of `verifyResponse`). The package picks no
+ *   cryptography. The third argument (new) says what is verified about the link to the provider (`PeerIdentity`).
+ * @param {(podId: string) => (object|undefined|Promise<object|undefined>)} [opts.linkIdentity]
+ *   What is verified about the link to a provider (`{ verified: 'bound'|'wsh'|'key', publicKey? }`, or nothing). Without it, a
+ *   `node` that is a mesh node (has `sessionsFor`) is read with `nodeLinkIdentity`; otherwise the answer is always `'none'`.
  * @param {(request: Request, target: object) => (boolean|Promise<boolean>)} [opts.authorize] - falsy: 403
  * @param {(request: Request) => (Response|boolean|null|Promise<Response|boolean|null>)} [opts.deny] - a Response is sent as it is; `true` is a 451
  * @param {object} [opts.limits] - see `INGRESS_LIMIT_DEFAULTS`
@@ -77,19 +82,25 @@ function resolveRetry(retry) {
  * @param {string[]} [opts.forwardHeaders] - request headers (beyond the default list) a client may pass to the provider
  * @param {string[]} [opts.exposeHeaders] - response headers (beyond the default list) a provider may set
  * @param {boolean} [opts.forwardClientAddress=false] - tell the provider the client's address (`client` in the head)
- * @param {(info: { peer: string, bytes: Uint8Array, sig: string, request: object }) => (boolean|Promise<boolean>)} [opts.verifyResponse]
+ * @param {(info: { peer: string, bytes: Uint8Array, sig: string, request: object }, link: PeerIdentity) => (boolean|Promise<boolean>)} [opts.verifyResponse]
  *   Signed responses: when given, a response is accepted only if it carries a signature this accepts. The response is buffered.
+ *   The second argument (new) says what is verified about the link the answer came over; `requireLinkKey(verifySigner)` makes a
+ *   hook that also requires the signer to be the provider link's key.
  * @param {{ request: Function }} [opts.rpc] - a mesh-rpc api: the opt-in buffered fallback for a provider that does not serve `http`
  * @param {(record: object) => void} [opts.onAudit]
  * @param {{ now: () => number }} [opts.clock] - the rate limiters' clock (tests advance one)
  */
 export function createMeshIngress({
   service, node, resolve, authorize, deny, limits: limitOptions, methods = ['GET', 'HEAD'], forwardHeaders = [], exposeHeaders = [],
-  forwardClientAddress = false, verifyResponse, signRequest, retry, rpc, onAudit, clock, protocol = HTTP_PROTOCOL,
+  forwardClientAddress = false, verifyResponse, signRequest, retry, rpc, onAudit, clock, protocol = HTTP_PROTOCOL, linkIdentity,
 } = {}) {
   if (typeof resolve !== 'function') throw new TypeError('createMeshIngress: resolve(request) is required: nothing is served without a mapping')
   if (!service && !node) throw new TypeError('createMeshIngress: a mesh service (or a node to attach one to) is required')
   for (const [name, fn] of Object.entries({ authorize, deny, verifyResponse, signRequest, onAudit })) if (fn !== undefined && typeof fn !== 'function') throw new TypeError(`createMeshIngress: ${name} must be a function`)
+  if (linkIdentity !== undefined && typeof linkIdentity !== 'function') throw new TypeError('createMeshIngress: linkIdentity must be a function')
+  // What is verified about the link to a provider (the `peer` object `signRequest` and `verifyResponse` get as an extra
+  // trailing argument). From `linkIdentity`, else read from `node` when it is a mesh node; otherwise nothing is verified.
+  const linkSource = linkIdentity ?? (typeof node?.sessionsFor === 'function' ? nodeLinkIdentity(node) : null)
   const retrying = resolveRetry(retry)
   if (rpc !== undefined && typeof rpc?.request !== 'function') throw new TypeError('createMeshIngress: rpc must be a mesh-rpc api with request()')
   const allowedMethods = new Set(methods.map((m) => String(m).toUpperCase()))
@@ -377,7 +388,7 @@ export function createMeshIngress({
     if (signRequest) {
       try {
         const bytes = signedRequestBytes({ rid, nonce, host: forward.host, method: forward.method, target: forward.target, headers: forward.headers, client: forward.client, digest: await sha256Hex(forward.body) })
-        sig = await signRequest(bytes, { peer })
+        sig = await signRequest(bytes, { peer }, await resolvePeer(linkSource, peer))
       } catch { sig = undefined }
       if (typeof sig !== 'string' || !sig || sig.length > 2048) throw new IngressError(500, 'sign-error', 'The ingress could not sign the request.')
     }
@@ -444,7 +455,10 @@ export function createMeshIngress({
         if (declared !== null && !noBody && bytes.byteLength !== declared) throw new IngressError(502, 'bad-response-length', 'The body is not the length the provider declared.')
         const signedFor = { rid, nonce, host: forward.host, method: forward.method, target: forward.target, status: head.status, headers: head.headers, digest: await sha256Hex(bytes) }
         let ok = false
-        try { ok = (await verifyResponse({ peer, bytes: signedBytes(signedFor), sig: head.sig, request: { rid, method: forward.method, target: forward.target, host: forward.host } })) === true } catch { ok = false }
+        try {
+          const link = await resolvePeer(linkSource, peer)
+          ok = (await verifyResponse({ peer, bytes: signedBytes(signedFor), sig: head.sig, request: { rid, method: forward.method, target: forward.target, host: forward.host } }, link)) === true
+        } catch { ok = false }
         if (!ok) throw new IngressError(502, 'response-signature-invalid', 'The provider\'s signature was not accepted.')
         ac.signal.removeEventListener('abort', onAbort)
         record.responseBytes = bytes.byteLength
