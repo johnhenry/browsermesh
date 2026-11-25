@@ -875,6 +875,22 @@ channel fails every stream (`channel-closed`). Stream frames are ordinary
 notifications and one `stream.open` request, so a peer that does not run the
 layer answers -32601 and nothing else is sent to it.
 
+By default a peer that keeps breaking those rules loses one stream at a time and
+can go on for ever. Pass `maxViolations` (a positive whole number) to give each
+peer a budget, counted across all of its streams: every rule a stream breaks
+(data out of sequence, past its credit, past the chunk or stream size, without
+bytes) and every open this end refuses for a reused or invalid id or for being
+past `maxStreams` is one. More than the budget cuts the peer off: every stream
+fails with `stream-abuse`, `onAbuse(reason, violations)` is called once, later
+opens are refused (`stream-abuse`) and nothing else it sends is processed or
+answered. `streams.violations` and `streams.abused` report the state. Receive-side
+only: no frame on the wire changes, so an older peer is unaffected, and a peer that keeps the
+rules is never counted. Off unless given.
+
+```js
+const streams = createStreamLayer(channel, { maxViolations: 16, onAbuse: () => channel.close() })
+```
+
 **Per-root authorisation** (`protocol-roots.mjs`): a protocol with several named
 roots (`docs`, `logs`, ...) asks the registry about the root a request names, for
 the channel's verified peer, on every request. The scope is
