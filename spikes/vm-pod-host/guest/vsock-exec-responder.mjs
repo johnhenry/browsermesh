@@ -16,16 +16,19 @@
  * per command (the `KERNEL_CAP.STDIO` / `KERNEL_CAP.FS` gates from issue
  * #185 §6 belong here, not just at the orchestrator).
  *
- * NOT executed by this spike — see the top-level README.md. Written and
- * reviewed as source; runs only inside a real guest rootfs on a real
- * KVM host.
+ * Run as a process and spoken to by the host's exec client in
+ * `test/guest-responder.test.mjs` (through a stand-in for Firecracker's vsock
+ * proxy). Not yet run inside a real guest: the `socat` bridge from AF_VSOCK to
+ * this socket in `guest/init` has never run.
  */
 
 import net from 'node:net'
 import { execFile } from 'node:child_process'
 import { unlinkSync, existsSync } from 'node:fs'
 
-const SOCKET_PATH = '/run/vsock-exec.sock'
+// `VSOCK_EXEC_SOCKET` exists so the responder can be run, and tested, outside a
+// guest; inside one it is unset and `guest/init` bridges this exact path.
+const SOCKET_PATH = process.env.VSOCK_EXEC_SOCKET || '/run/vsock-exec.sock'
 
 if (existsSync(SOCKET_PATH)) unlinkSync(SOCKET_PATH)
 
@@ -69,7 +72,8 @@ const server = net.createServer((socket) => {
       const result = {
         stdout: stdout ?? '',
         stderr: stderr ?? (err ? String(err.message) : ''),
-        code: err ? (err.code ?? 1) : 0,
+        // Always a number: Node reports a missing binary as the string 'ENOENT'.
+        code: err ? (typeof err.code === 'number' ? err.code : err.code === 'ENOENT' ? 127 : 1) : 0,
       }
       const payload = Buffer.from(JSON.stringify(result)).toString('base64')
       socket.end(`RESULT ${payload}\n`)

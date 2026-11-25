@@ -99,6 +99,61 @@ export function connectToGuest({ udsPath, port, connect = net.connect, timeoutMs
 }
 
 /**
+ * Run one command in the guest over vsock, with the line protocol
+ * `guest/vsock-exec-responder.mjs` speaks: the host writes
+ * `EXEC <base64 JSON argv>\n`, the guest answers `RESULT <base64 JSON
+ * {stdout, stderr, code}>\n` and ends the connection.
+ *
+ * A guest that closes the connection without a result (a request it could not
+ * parse, a guest that went away) rejects here instead of leaving the caller
+ * waiting; `timeoutMs` bounds a guest that never answers (the responder's own
+ * command timeout is 30 s, so the default leaves it room).
+ *
+ * @param {object} opts
+ * @param {string} opts.udsPath
+ * @param {number} opts.port
+ * @param {string[]} opts.command - argv, run without a shell
+ * @param {number} [opts.timeoutMs=35000]
+ * @param {typeof net.connect} [opts.connect]
+ * @returns {Promise<{stdout: string, stderr: string, code: number}>}
+ */
+export async function execOverVsock({ udsPath, port, command, timeoutMs = 35_000, connect } = {}) {
+  if (!Array.isArray(command) || command.length === 0 || command.some((part) => typeof part !== 'string')) {
+    throw new Error('execOverVsock: command must be a non-empty array of strings')
+  }
+  const { socket } = await connectToGuest({ udsPath, port, ...(connect ? { connect } : {}) })
+  const payload = Buffer.from(JSON.stringify(command)).toString('base64')
+  return new Promise((resolve, reject) => {
+    let buf = ''
+    let settled = false
+    const finish = (fn, value) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      socket.destroy()
+      fn(value)
+    }
+    const timer = setTimeout(() => finish(reject, new Error(`execOverVsock: no result within ${timeoutMs} ms`)), timeoutMs)
+    socket.on('data', (chunk) => {
+      buf += chunk.toString('utf8')
+      const nl = buf.indexOf('\n')
+      if (nl === -1) return
+      const line = buf.slice(0, nl)
+      const match = /^RESULT (.+)$/.exec(line)
+      if (!match) { finish(reject, new Error(`unexpected vsock exec response: ${line}`)); return }
+      try {
+        finish(resolve, JSON.parse(Buffer.from(match[1], 'base64').toString('utf8')))
+      } catch (err) {
+        finish(reject, new Error(`unreadable vsock exec result: ${err.message}`))
+      }
+    })
+    socket.on('error', (err) => finish(reject, err))
+    socket.on('close', () => finish(reject, new Error('execOverVsock: the guest closed the connection without a result')))
+    socket.write(`EXEC ${payload}\n`)
+  })
+}
+
+/**
  * Listen for guest-initiated vsock connections on a given port.
  *
  * Starts a `net.Server` at `<udsPath>_<port>` — the exact path

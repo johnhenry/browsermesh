@@ -34,6 +34,8 @@ import path from 'node:path'
 import { promisify } from 'node:util'
 
 import { VmPodHost } from '../../src/host-pod.mjs'
+import { jailerPidFilePath } from '../../src/jailer.mjs'
+import { readVmmRssKb } from './vmm-rss.mjs'
 
 const run = promisify(execFile)
 const REQUIRED_ENV = ['FIRECRACKER_BIN', 'JAILER_BIN', 'FC_KERNEL', 'FC_ROOTFS']
@@ -104,8 +106,25 @@ if (unmet && required) {
     after(async () => {
       if (host && host.vms.has(NAME)) await host.drain(NAME).catch(() => {})
       if (workDir) await rm(workDir, { recursive: true, force: true })
-      console.log('real Firecracker timings (ms):', JSON.stringify(timings))
+      console.log('real Firecracker timings (ms; vmmRssKb is kB):', JSON.stringify(timings))
     })
+
+    /**
+     * `exec` fails fast while the guest's responder is not listening yet (the vsock proxy closes a connection to a port
+     * nothing listens on). Booting and restoring both take a while, so ask until it answers, up to a deadline: this waits
+     * for an external machine to come up, it is not a retry that hides a failure (a guest that never answers fails).
+     */
+    async function execWhenReady(argv, deadlineMs = 60_000) {
+      const end = Date.now() + deadlineMs
+      for (;;) {
+        try {
+          return await host.exec(NAME, argv)
+        } catch (err) {
+          if (Date.now() > end) throw new Error(`the guest did not answer an exec within ${deadlineMs} ms: ${err.message}`)
+          await new Promise((resolve) => setTimeout(resolve, 100))
+        }
+      }
+    }
 
     it('boots under the jailer and answers an exec over vsock', async () => {
       const started = performance.now()
@@ -120,10 +139,14 @@ if (unmet && required) {
       // The guest's own announcement over signaling is not part of this test:
       // the exec responder starts before the guest's Node process does.
       vm.markRegistered('real-firecracker-test')
-      const result = await host.exec(NAME, ['echo', 'hello from the guest'])
+      const result = await execWhenReady(['echo', 'hello from the guest'])
       timings.bootToExecMs = Math.round(performance.now() - started)
       assert.equal(result.code, 0)
       assert.equal(result.stdout.trim(), 'hello from the guest')
+      // Issue #185 section 9: memory per idle VM (the VMM process; guest RAM is file-backed or lazily touched).
+      timings.vmmRssKb = await readVmmRssKb(jailerPidFilePath({
+        execFile: process.env.FIRECRACKER_BIN, id: NAME, chrootBaseDir: path.join(workDir, 'jail'),
+      }))
     })
 
     it('keeps guest state across snapshot and restore', async () => {
@@ -133,16 +156,18 @@ if (unmet && required) {
       const started = performance.now()
       await host.restore(NAME)
       vm.markRegistered('real-firecracker-test')
-      const result = await host.exec(NAME, ['cat', '/tmp/state'])
+      const result = await execWhenReady(['cat', '/tmp/state'])
       timings.restoreToExecMs = Math.round(performance.now() - started)
       assert.equal(result.stdout.trim(), 'persisted')
     })
 
     it('cannot reach the cloud metadata address or the host itself', async () => {
       // Default egress policy: private, link-local and the host's own TAP
-      // address are unreachable. `nc -w 2 -z` exits non-zero when it cannot connect.
+      // address are unreachable. Node is in the guest (busybox `nc` may lack -z); the probe exits 0 only on a connect.
+      const probe = 'const s = require("node:net").connect({ host: process.argv[1], port: 80, timeout: 2000 });'
+        + 's.on("connect", () => process.exit(0)); s.on("timeout", () => process.exit(1)); s.on("error", () => process.exit(1))'
       for (const target of ['169.254.169.254', '10.200.0.1']) {
-        const result = await host.exec(NAME, ['nc', '-w', '2', '-z', target, '80'])
+        const result = await host.exec(NAME, ['node', '-e', probe, target])
         assert.notEqual(result.code, 0, `the guest reached ${target}`)
       }
     })

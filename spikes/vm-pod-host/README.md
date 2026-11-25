@@ -33,8 +33,10 @@ what didn't:
 | `src/vm-pod.mjs` | **Yes, in `dryRun` only** | Full lifecycle (cold boot → registered → serving → paused → snapshotted → restoring → registered → draining → cold) tested with the exact sequence of planned API calls and host commands asserted |
 | `src/host-pod.mjs` | **Yes, in `dryRun` only** | `spawn`/`exec`/`snapshot`/`restore`/`drain` tested as a `Pod` subclass boot, matching `ServerPod`'s own boot pattern |
 | `src/cli.mjs` | **Yes, `--dry-run` only** | `node src/cli.mjs spawn demo --dry-run` runs end-to-end and prints the full planned command/call sequence (see below) |
-| `guest/init`, `guest/vsock-exec-responder.mjs` | **No** | Written and reviewed against the Firecracker docs; never executed (no guest kernel, no guest userland to run them in) |
-| `guest/build-rootfs.sh` | **No** | Written and reviewed; never executed (needs root, loop-mount, `mkfs.ext4`, none of which this spike attempted on macOS) |
+| `guest/vsock-exec-responder.mjs` | **Yes, as a process** | Run as the process it is in the guest and spoken to by the host's real exec client through a stand-in for Firecracker's vsock proxy (`test/guest-responder.test.mjs`). The `socat` bridge from AF_VSOCK that fronts it in the guest has not run |
+| `guest/init` | **No** (parses as `sh` only) | Written and reviewed against the Firecracker docs; never executed (no guest kernel, no guest userland to run it in) |
+| `guest/build-rootfs.sh` | **No** (parses as `sh` only) | Written and reviewed; never executed (needs root, loop-mount, `mkfs.ext4`) |
+| `src/network-policy.mjs` rules and TAP | **Yes, on a real Linux kernel** | `test/real/network-policy.real.test.mjs`, in a container with `NET_ADMIN` (below). A veth stands in for the TAP's packet path; a real TAP is created and removed too |
 | Real `firecracker`/`jailer` binaries | **No** | Never installed or invoked. Every "host command" (`ip`, `nft`, `jailer`, `cp`, and the pid-checked stop of the VMM) that `vm-pod.mjs` would run is either skipped (`dryRun: true`) or routed through an injectable `exec(argv)` the caller controls — nothing in this spike shells out directly |
 
 Two independent execution modes exist in `vm-pod.mjs`/`host-pod.mjs`,
@@ -112,8 +114,8 @@ layer and nothing more — no second state machine:
 node --test spikes/vm-pod-host/test/*.test.mjs
 ```
 
-142 tests, all passing on macOS (Node v26), in well under a second —
-no network, no KVM, no sudo.
+154 tests, all passing on macOS arm64 and on Linux arm64 (Node 26), in
+about a second — no network, no KVM, no sudo.
 
 ## Try it: `cli.mjs --dry-run`
 
@@ -151,61 +153,25 @@ anywhere, since there is nothing real to call).
 
 ## Runbook: running this for real on a Linux + KVM host
 
-None of the following has been executed by this spike. It is the
-intended path to turn "planned calls" into real ones. The specification of
-the driver (jailer, network, snapshot/restore, limits, the boundary claimed,
-and what is verified) is
+The full checklist, with exact commands, pinned downloads with checksums, expected
+output and what to report, is
+[`docs/runbook-firecracker-kvm.md`](../../docs/runbook-firecracker-kvm.md). The
+specification of the driver (jailer, network, snapshot/restore, limits, the
+boundary claimed, and what is verified) is
 [`docs/design/hosted-pods-firecracker.md`](../../docs/design/hosted-pods-firecracker.md).
 
-Once the prerequisites below exist, `npm run test:real-firecracker` (root or
-this directory) drives one jailed VM through boot, exec, snapshot, restore,
-the egress checks and drain. It skips without them, fails instead with
-`REQUIRE_REAL_FIRECRACKER=1`, and has never been run.
+Two opt-in suites, both skipped without their prerequisites and failing instead
+with their `REQUIRE_*=1` variable:
 
-1. **Install Firecracker + jailer.**
-   ```sh
-   ARCH=$(uname -m)
-   curl -fsSL -o firecracker.tgz \
-     "https://github.com/firecracker-microvm/firecracker/releases/latest/download/firecracker-vX.Y.Z-${ARCH}.tgz"
-   tar xzf firecracker.tgz
-   sudo install -m 755 release-*/firecracker-*-${ARCH} /usr/bin/firecracker
-   sudo install -m 755 release-*/jailer-*-${ARCH} /usr/bin/jailer
-   ```
-   (check the Firecracker releases page for the current version/asset
-   naming — this spike did not pin one).
-
-2. **Fetch a `vmlinux`.** See `guest/README.md` — either a Firecracker
-   CI artifact or your own build from
-   `resources/guest_configs/` in the Firecracker repo.
-
-3. **Build the rootfs.**
-   ```sh
-   git clone git@github.com:johnhenry/browsermesh-servers.git /tmp/browsermesh-servers
-   KERNEL_SRC_DIR=/tmp/browsermesh-servers/kernel \
-     sudo spikes/vm-pod-host/guest/build-rootfs.sh ./rootfs.ext4
-   ```
-
-4. **Network.** `VmPod` creates the TAP, its address and its per-pod nft
-   table itself (`src/network-policy.mjs`; the exact commands are printed by
-   `--dry-run`), so the only host prerequisite is forwarding:
-   ```sh
-   echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward
-   ```
-   The default egress policy forwards to public addresses only. A guest that
-   must reach a private address (for example a signaling server on the LAN)
-   needs `network: { egress: { allowCidrs: ['10.1.2.3/32'] } }` on the driver.
-   None of these rules has been applied to a real kernel yet.
-
-5. **Run it.**
-   ```sh
-   node spikes/vm-pod-host/src/cli.mjs spawn demo \
-     --kernel /path/to/vmlinux --rootfs ./rootfs.ext4
-   # (omit --dry-run; requires root for jailer, a real /usr/bin/firecracker,
-   #  and the TAP device created above — wire a real `exec` and
-   #  `FirecrackerClient` into VmPodHost for this to actually work;
-   #  the shipped cli.mjs intentionally refuses non-dry-run runs
-   #  because this spike never validated that path)
-   ```
+- `npm run test:real-firecracker` (here or at the repository root): one jailed
+  VM through boot, exec, snapshot, restore, the egress checks and drain. Needs a
+  KVM host and root. **Has never been run.** `cli.mjs` itself refuses a run
+  without `--dry-run`; the real path is this test.
+- `npm run test:real-linux-network`: the network policy applied to a real Linux
+  kernel (a guest network namespace behind the rules). Needs Linux and root, not
+  KVM; it runs in a container with `NET_ADMIN` and `SYS_ADMIN` (see the header of
+  `test/real/network-policy.real.test.mjs` for the `docker run` line). Run on
+  Linux arm64 under Docker.
 
 ## Measurements
 

@@ -16,4 +16,6 @@
 - [`design/stealth-threshold.md`](design/stealth-threshold.md): threshold key sharing for StealthAgent (spec only).
 - [`hosted-pods.md`](hosted-pods.md), [`design/hosted-pods-firecracker.md`](design/hosted-pods-firecracker.md),
   [`design/hosted-pods-security-review.md`](design/hosted-pods-security-review.md): running a `Pod` outside the browser.
+- [`runbook-firecracker-kvm.md`](runbook-firecracker-kvm.md): the one checklist left for the microVM lane, for a Linux/KVM
+  host: exact commands, expected output, what to report.
 - Per package: each `packages/*/README.md`; for building services, `packages/browsermesh-apps/docs/`.
