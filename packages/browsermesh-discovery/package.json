@@ -27,5 +27,8 @@
   "homepage": "https://opensource.johnhenry.me/browsermesh/",
   "engines": {
     "node": ">=26.0.0"
+  },
+  "dependencies": {
+    "shamir-secret-sharing": "0.0.4"
   }
 }

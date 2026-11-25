@@ -28,6 +28,7 @@ Extracted from a private monorepo (previously `packages/browsermesh-discovery`),
 | swarm | `SwarmCoordinator`, `LeaderElection`, `TaskDistributor`, `SwimMembership` |
 | sw-routing | `MeshFetchRouter`, `parseMeshRequest` |
 | stealth | `StealthAgent`, `ShardDistributor`, `ShardCollector` |
+| stealth threshold (opt-in) | `dealStealthShares`, `reconstructStealthSecret`, `verifyStealthShare`, `thresholdEpochKeys`, `stealthEpochKeyId`, `stealthShareSigningBytes` |
 
 ## Install
 
@@ -125,10 +126,25 @@ or keep a random one with the agent's other custodial keys. The data inside is
 plaintext unless you use the encrypted methods. The DHT still accepts a `store` from anyone,
 so an overwrite makes a shard unusable (refused) rather than accepted.
 
-**Threshold key sharing is not built.** It is written up in
-[docs/design/stealth-threshold.md](https://github.com/johnhenry/browsermesh/blob/main/docs/design/stealth-threshold.md)
-and tracked in a follow-up issue. Also not done: a real checksum and multi-loss
-parity. The plain
+**Threshold sharing of the group secret** is opt-in and separate from `StealthAgent`
+(nothing on the existing wire changes). The agent's owner pod deals a fresh 32-byte secret
+`t`-of-`n` (Shamir over GF(2^8), the audited `shamir-secret-sharing`, loaded on first use),
+signs every share, and holders recombine it from any `t` valid shares:
+
+```js
+const dealt = await dealStealthShares({ identity: ownerIdentity, agentId, groupId: 'ops', epoch: 0, holders: memberPodIds }); // t defaults to a majority
+// hand dealt.shares[i].share to memberPodIds[i] over a confidential, authenticated channel
+const { secret, epoch } = await reconstructStealthSecret(sharesFromAnyTHolders, { trustedDealers: [ownerPublicKey], agentId, groupId: 'ops', minEpoch: 0, holders: memberPodIds });
+const { lookupNonce } = await thresholdEpochKeys(secret, { agentId, groupId: 'ops', epoch, keyring });
+const agent = new StealthAgent({ agentId, dhtNode, keyring, lookupNonce, identity });
+```
+
+Fewer than `t` shares reveal nothing; a share that was altered, relabelled or dealt by a dealer you do not
+name is refused and counted; shares of different epochs are never mixed. When a member leaves, deal `epoch + 1` to
+the rest, re-seal the latest state and pass `minEpoch`. A compromised dealer, `t` colluding holders, and what a leaving
+member already read are NOT protected, and shares are signed, not encrypted: see
+[docs/design/stealth-threshold.md](https://github.com/johnhenry/browsermesh/blob/main/docs/design/stealth-threshold.md).
+Also not done: a real checksum and multi-loss parity. The plain
 `hide()` / `reconstitute()` below are unchanged and plaintext:
 
 `StealthAgent.hide(stateString)` / `reconstitute()` split a state string into

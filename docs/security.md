@@ -56,7 +56,7 @@ table; they come from the READMEs, source headers and test directories.
 | `browsermesh-apps` | implemented, with partial modules | registry, grant log, audit, mesh-rpc, mesh-fetch, message channel, protocol seam, relay host and backend, sync, cloud storage, key distribution, KV, escrow, pod-host service, placement, supervisor: implemented (mostly in process; a few over real peers). Partial: `mesh-bootstrap` (one real-peer test file), torrent (single-process fallback; real WebTorrent only under `test/real-torrent`), `peer-ipfs` (a local SHA-256 store, not IPFS), `peer-terminal` (no default shell), serverless executors (not an adversarial sandbox), GPU (real WebGPU only in a dedicated test), `mesh-dht` (no authentication), `compat.mjs`. |
 | `browsermesh-objects` | implemented | wsh's remote-object layer (`@johnhenry/wsh/objects`, a peer dependency) over a protocol channel, authorised per root and per action for the channel's verified peer (values, events, handles, callbacks: unit over an in-memory bus, real WebRTC peers, and real browsers). Two authorisations apply to every operation: wsh's allow-lists, then the registry grant. Not a sandbox: a `call` runs the host application's function. |
 | `browsermesh-sync` | implemented, with partial modules | CRDT, delta sync, memory sync, file chunks, CIDv1, IndexedDB storage (unit, `fake-indexeddb`); CRDT convergence also over a real data channel in a browser. `collab` and `collab-bridge`: partial (marked experimental; stub document when Yjs is absent). |
-| `browsermesh-discovery` | partial | DHT has no iterative lookup (below); discovery strategies unsigned; naming, swarm, service-worker routing implemented (unit, unauthenticated); StealthAgent plain path documented as plaintext, encrypted/keyring path implemented; threshold key sharing is spec only (`docs/design/stealth-threshold.md`). |
+| `browsermesh-discovery` | partial | DHT has no iterative lookup (below); discovery strategies unsigned; naming, swarm, service-worker routing implemented (unit, unauthenticated); StealthAgent plain path documented as plaintext, encrypted/keyring path implemented; opt-in threshold sharing of the group secret implemented (dealer model, unit only; `docs/design/stealth-threshold.md`). |
 | `browsermesh-netway` | implemented | loopback, virtual network, policy, queue, sockets (byte-level backpressure), listener, router, service and fs backends, chaos wrapper (unit). `gateway-backend`: implemented, tested against a mock wsh client and against a real wsh server host and a real in-memory host (`test/gateway-real-wsh.test.mjs`); HOST_UNREACHABLE, TIMEOUT and CLOSED are mock-tested only. `backend.mjs`: abstract base. |
 | `browsermesh-kernel` | implemented | in-process microkernel with capability checks and resource tables; unit tests per module. No cryptography; isolation is by capability and ownership checks, not process boundaries. |
 | `browsermesh-priority-mux` | implemented | sender-side priority scheduler and framer (fake adapter tests). No authentication or encryption. The reassembler has no limit on pending messages. |
@@ -918,9 +918,15 @@ Package: `browsermesh-discovery`.
   - not protected: the content of `hideSigned()` shards (plaintext slices),
     that something is stored, availability against overwrites, and a group-key
     holder reading or forging encrypted state (the sender is a label, not a
-    signature, on that path). Multi-loss parity is not done; threshold key
-    sharing is design only (`design/stealth-threshold.md`, issue #230 and its
-    follow-up).
+    signature, on that path). Multi-loss parity is not done.
+  - threshold sharing of the group secret (opt-in, `stealth-threshold.mjs`,
+    `design/stealth-threshold.md`): the dealer (the owner pod) sees the secret; fewer
+    than `t` shares reveal nothing; shares are signed (agent, group, epoch, index,
+    holder, threshold) and a share altered, relabelled or from an unnamed dealer is
+    refused and counted; a dealer-signed key check catches shares of different
+    secrets; epochs are never mixed. Not protected: a compromised dealer, `t`
+    colluding holders, share transport (signed, not encrypted), and what a leaving
+    member already read (a new epoch re-seals the latest state only).
 - **Verified.** Unit, with in-process nodes and a no-op send function. Never over
   a network or in a browser.
 
