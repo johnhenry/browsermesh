@@ -51,12 +51,13 @@ import { createRealMeshSession } from './real-mesh.mjs'
 export async function connect({ flags, cliIdentity, timeoutMs, onLog, WebSocketCtor } = {}) {
   const loopback = Boolean(flags.loopback)
   const signalingUrl = typeof flags.signaling === 'string' ? flags.signaling : undefined
+  const wshRelays = wshRelayUrls(flags['wsh-relay'])
 
-  if (loopback && signalingUrl) {
-    throw new UsageError('--loopback and --signaling are mutually exclusive')
+  if (loopback && (signalingUrl || wshRelays.length > 0)) {
+    throw new UsageError('--loopback and --signaling/--wsh-relay are mutually exclusive')
   }
-  if (!loopback && !signalingUrl) {
-    throw new UsageError('this command needs a connection mode: pass --loopback or --signaling <ws://...>')
+  if (!loopback && !signalingUrl && wshRelays.length === 0) {
+    throw new UsageError('this command needs a connection mode: pass --loopback or --signaling <ws://...> (or --wsh-relay <wss://...>)')
   }
 
   if (loopback) {
@@ -65,6 +66,24 @@ export async function connect({ flags, cliIdentity, timeoutMs, onLog, WebSocketC
 
   const relayUrl = typeof flags.relay === 'string' ? flags.relay : undefined
   return createRealMeshSession({
-    cliIdentity, signalingUrl, relayUrl, timeoutMs, onLog, WebSocketCtor,
+    cliIdentity, signalingUrl, relayUrl, wshRelays, timeoutMs, onLog, WebSocketCtor,
   })
+}
+
+/**
+ * `--wsh-relay` (repeatable) as a list of validated URLs.
+ * @param {*} value
+ * @returns {string[]}
+ */
+function wshRelayUrls(value) {
+  if (value === undefined) return []
+  const list = Array.isArray(value) ? value : [value]
+  for (const url of list) {
+    let parsed = null
+    try { parsed = typeof url === 'string' ? new URL(url) : null } catch { /* reported below */ }
+    if (!parsed || !/^(wss?|https?):$/.test(parsed.protocol)) {
+      throw new UsageError(`--wsh-relay needs a ws(s):// or http(s):// pipe relay URL (got ${JSON.stringify(url)})`)
+    }
+  }
+  return list
 }

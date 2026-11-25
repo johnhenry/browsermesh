@@ -37,6 +37,9 @@ export const EXIT_CODE = Object.freeze({
 const ERROR_CODE_TO_EXIT = Object.freeze({
   EUSAGE: EXIT_CODE.USAGE,
   EACCES: EXIT_CODE.EACCES,
+  // The host did not allow this identity to open a (wsh) link to it: the same
+  // answer as a verb it did not grant.
+  WSH_REFUSED: EXIT_CODE.EACCES,
   ENOENT: EXIT_CODE.ENOENT,
   ELANE: EXIT_CODE.ELANE,
   ENOTSUP: EXIT_CODE.ELANE,
