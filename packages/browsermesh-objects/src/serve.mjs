@@ -103,6 +103,11 @@ export function exposeObjectsOnMesh(target, opts = {}) {
       for (const root of callbacks.values()) if (!can(podId, root, 'call')) return false
       return true
     }
+    /** What the registry lets this peer do on a root, as the layer asks it: `walk` (reading on the way to something) needs some action. */
+    const permits = (root, action) => {
+      if (action === 'walk') return OBJECT_ACTIONS.some((a) => can(podId, root, a))
+      return OBJECT_ACTIONS.includes(action) && can(podId, root, action)
+    }
     const offWatch = watch ? watch((event) => { if (event?.pubKey === podId && !stillHeld()) revoke() }) : null
 
     const guarded = {
@@ -112,13 +117,24 @@ export function exposeObjectsOnMesh(target, opts = {}) {
       onRequest(method, handler) {
         peer.onRequest(method, async (params, ctx) => {
           const wired = trackOpen(method, params)
+          // The layer asks `permit(root, action)` for what it is about to do; a subscription through a handle names no root in
+          // its request, so the root it was judged for is taken from that question (and forgotten if the request fails).
+          let throughHandle = null
+          const permit = (root, action) => {
+            const ok = permits(root, action)
+            if (ok && action === 'on' && method === 'subscribe' && params?.handle !== undefined && Number.isSafeInteger(params.id) && typeof root === 'string') {
+              subs.set(params.id, root)
+              throughHandle = params.id
+            }
+            return ok
+          }
           try {
-            const result = await handler(params, ctx)
+            const result = await handler(params, { ...ctx, permit })
             // A peer is told of the roots it can use on some action, no others.
             return method === 'roots' && Array.isArray(result?.roots)
               ? { ...result, roots: result.roots.filter((root) => OBJECT_ACTIONS.some((action) => can(podId, root, action))) }
               : result
-          } catch (e) { wired?.undo(); throw e }
+          } catch (e) { wired?.undo(); if (throughHandle !== null) subs.delete(throughHandle); throw e }
         })
       },
       /** Events and callbacks leave through the channel's credit, and only while the grant that allowed them still holds. */

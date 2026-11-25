@@ -672,7 +672,13 @@ Package: `browsermesh-apps`.
   every delivery, and a revoked or expired grant ends the session (at once when
   the host passes `watch`). Events and callbacks leave through the channel's
   credit, the layer's bounded queue drops and counts what a slow reader cannot
-  take, and a peer that keeps asking without reading is cut off.
+  take, and a peer that keeps asking without reading is cut off. The layer also
+  asks the registry (`permit`, from wsh 0.51) before it reads on the way to
+  something and before it describes a root: a root the peer holds no action on is
+  not described (the description of a root lists the host's allow-list entries
+  and type map, narrowed to the actions the peer holds). An event subscription
+  made through a handle is judged for the root of the handle's path and needs
+  `on` at every delivery, as a path subscription does.
 - **Verified.** `mesh-rpc`/`browserMeshFetch`: unit, and echo/404 routing over a
   real WebRTC data channel in two browsers (the harness node has no registry or
   identity, so authorization is not exercised there). Message channel and seam:
