@@ -21,7 +21,8 @@
  * `StealthAgent#hideEncrypted()` / `#reconstituteEncrypted()` (async). The
  * state is sealed before sharding, bound to the agent id, so shard holders see
  * only ciphertext. That is the first half of #230; threshold sharing of the
- * key, signed shards and agent-anonymous DHT keys are NOT done (see the issue).
+ * key is `stealth-threshold.mjs` (opt-in; the signed shards and agent-anonymous DHT keys below
+ * came with #230).
  * The plain synchronous `hide()` / `reconstitute()` are unchanged and plaintext.
  *
  * With a `StealthKeyring` (`keyring` option) the sealed state uses the v2
@@ -38,15 +39,16 @@
  * verify, is unsigned (unless `allowUnsigned`), or belongs to an older write is refused
  * and counted. With a `lookupNonce` the DHT keys are hex(SHA-256(agentId, nonce, index)) and the
  * records carry no agent id or key, so a DHT observer cannot name the agent from a key or a
- * record. NOT done: threshold sharing of the key (docs/design/stealth-threshold.md).
+ * record. Threshold sharing of the group secret is separate and opt-in (`stealth-threshold.mjs`,
+ * docs/design/stealth-threshold.md).
  *
  * What it hides, and from whom: the CONTENT of the state from whoever holds
  * the DHT shards (shard-holding nodes and relays). It does NOT hide that an
  * agent exists (keys are `stealth:<agentId>:shard:<i>`), how large its state
  * is, when it is written or read, or who reads it (traffic analysis). Every
  * holder of the group key can read and forge state: the sender in the
- * associated data is a label, not a signature. Threshold sharing of the key is
- * a design only (docs/design/stealth-threshold.md), not built.
+ * associated data is a label, not a signature. To avoid one member holding the whole
+ * secret, deal it t-of-n (docs/design/stealth-threshold.md, `stealth-threshold.mjs`).
  *
  * StateShard represents one fragment.
  * ShardDistributor scatters shards across DHT nodes.

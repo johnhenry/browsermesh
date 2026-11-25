@@ -5,3 +5,4 @@ export * from './naming.mjs';
 export * from './swarm.mjs';
 export * from './sw-routing.mjs';
 export * from './stealth.mjs';
+export * from './stealth-threshold.mjs';
