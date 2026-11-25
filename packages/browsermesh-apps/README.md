@@ -73,6 +73,7 @@ Extracted from a private monorepo (previously `packages/browsermesh-apps`), wher
 | peer-node-transport | `createPeerNodeTransport` |
 | peer-payments | `MultiPartyCreditLedger`, `WebLNProvider` |
 | peer-registry | `PeerRegistry` |
+| peer-join-gate | `createOfferingJoinGate`, `createJoiningJoinGate` (opt-in held join: the offering side approves, the joining side keeps, nothing is added to the registry until both; an approval not kept in 5 minutes runs out; either side can leave. State machines with an injected clock, no UI, no wire) |
 | peer-routing | `MeshRouter` (routed envelopes carry the originator's signature, verified by each hop and by the recipient), `ServerSharing` |
 | peer-services | `ServiceAdvertiser`, `ServiceBrowser` |
 | peer-terminal | `TerminalHost`, `TerminalClient` |
