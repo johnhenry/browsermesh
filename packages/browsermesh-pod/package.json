@@ -43,7 +43,7 @@
     "@johnhenry/browsermesh-primitives": ">=0.2.0 <1.0.0"
   },
   "devDependencies": {
-    "@johnhenry/browsermesh-primitives": "^0.6.0"
+    "@johnhenry/browsermesh-primitives": "^0.7.0"
   },
   "engines": {
     "node": ">=26.0.0"

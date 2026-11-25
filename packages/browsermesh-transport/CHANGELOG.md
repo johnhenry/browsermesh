@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.12.0
+
+### Minor Changes
+
+- e556ca3: With an `identity`, a WebRTC connection now also compares the certificate it actually uses (read from
+  `RTCDtlsTransport.getRemoteCertificates()` or the `certificate` entry of `getStats()`) with the fingerprint the peer's own
+  session description named, before it is reported bound; a different certificate closes it (`bindingFailure`
+  `certificate-mismatch`). `certificateCheck` reports `matched`, `mismatch` or `unavailable` (the browser exposes nothing, so
+  nothing is claimed). New exports `remoteCertificateFingerprints` and `certificateMatches`; new options `checkCertificate`
+  (default on, only with `identity`) and `requireCertificateCheck` (default off). Nothing is sent, so an older peer is
+  unaffected.
+- a99f5b9: With an `identity`, every WebRTC offer and answer (renegotiations included) now carries `auth`, a signature made with the
+  pod key over the kind, both pod ids, the exact description text and its DTLS fingerprints (an answer also covers the offer
+  it answers). A description that arrives with `auth` is verified against the peer's key before it is applied; one that does
+  not verify makes `handleOffer()` / `handleAnswer()` throw and leaves the connection untouched (`descriptionFailure`,
+  `descriptionVerified`). New exports `signDescription`, `verifyDescription`, `descriptionTranscript`; new option
+  `requireSignedDescription` (default off: an unsigned description from an older peer is still applied, and the proof on the
+  connection still binds it). The only wire addition is the extra `auth` field, which an older peer ignores.
+- e5b85e0: `StreamMultiplexer` accepts `maxViolations` (off unless given): the rules a peer must keep on what it sends are then
+  enforced and counted (data within the credit granted, in sequence on ordered streams, within the chunk and stream size
+  limits; credit grants that are positive whole numbers within the credit limit; no duplicate opens, no opens past the
+  concurrency limit, no frames for streams that do not exist), a frame that breaks one is dropped, and a peer that breaks
+  more than the budget is cut off: every stream is cancelled, `onAbuse` is called once, and nothing further from it is
+  processed or answered. New `violations`, `abused` and `onAbuse()`. Receive-side only: no frame on the wire changes, so an
+  older peer is unaffected, and behaviour without `maxViolations` is as before.
+
+### Patch Changes
+
+- bfc4133: Follow wsh 0.52.0's numbering of the gateway failure codes. In netway's `GATEWAY_ERROR`, `TIMEOUT` is now `8` and
+  `GATEWAY_DISABLED: 5` is new (the rest are unchanged: 1 to 4, `CLOSED` 6, `QUEUE_FULL` 7). `GatewayBackend` throws a
+  received 8 as an `OperationTimeoutError`, like its own operation timeout. A received 5 is read as "the gateway is
+  disabled, or a timeout from an older gateway" and its `ConnectionRefusedError` says so, because the Rust server has
+  always sent 5 for a disabled gateway and a Node gateway at wsh 0.51.0 or earlier sent 5 for a timeout. netway itself
+  sends no failure code. Compatibility: a netway peer on the previous version reads an 8 from a gateway as a code it does
+  not know (it throws a `ConnectionRefusedError` with the host's message and `(code: 8)`, no more), and a peer on the
+  previous version, and a gateway at 0.51.0 or earlier, still use 5 for a timeout, which the new version reads as
+  described above (netway has no code of its own to send, so the only senders are gateways).
+  `browsermesh-mcp`, `browsermesh-objects` and `browsermesh-transport` are tested against wsh 0.52.0 (documentation only).
+
 ## 0.11.0
 
 ### Minor Changes
