@@ -44,7 +44,7 @@ function sdpFor(fingerprint) {
   return [
     'v=0', 'o=- 1 2 IN IP4 127.0.0.1', 's=-', 't=0 0',
     'a=group:BUNDLE 0', 'm=application 9 UDP/DTLS/SCTP webrtc-datachannel',
-    `a=fingerprint:${fingerprint}`, 'a=setup:actpass', 'a=mid:0', '',
+    ...(FakePC.noFingerprint ? [] : [`a=fingerprint:${fingerprint}`]), 'a=setup:actpass', 'a=mid:0', '',
   ].join('\r\n')
 }
 
@@ -526,6 +526,26 @@ describe('signed session descriptions: WebRTCPeerConnection', () => {
     await connected
     assert.equal(a.descriptionVerified, false)
     a.close(); old.close()
+  })
+
+  it('a description that names no fingerprint (a mock, or a stack that omits it) is sent unsigned, not thrown on; the binding still refuses it later', async () => {
+    FakePC.noFingerprint = true
+    try {
+      const ida = await PodIdentity.generate()
+      const idb = await PodIdentity.generate()
+      const a = new WebRTCPeerConnection({ localPodId: ida.podId, remotePodId: idb.podId, iceServers: [], identity: ida })
+      const b = new WebRTCPeerConnection({ localPodId: idb.podId, remotePodId: ida.podId, iceServers: [], identity: idb })
+      const offer = await a.createOffer()
+      assert.deepEqual(Object.keys(offer).sort(), ['sdp', 'type'])
+      const answer = await b.handleOffer(offer)
+      assert.deepEqual(Object.keys(answer).sort(), ['sdp', 'type'])
+      await a.handleAnswer(answer)
+      await new Promise((resolve) => b.onStateChange((s) => s === 'closed' && resolve()))
+      assert.equal(b.bindingFailure, 'no-fingerprint')
+      a.close(); b.close()
+    } finally {
+      FakePC.noFingerprint = false
+    }
   })
 
   it('without an identity nothing is signed or checked', async () => {

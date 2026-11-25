@@ -1304,6 +1304,9 @@ export class WebRTCPeerConnection {
   /** The `auth` field for a description this side produced; nothing without an identity. */
   async #signOutgoing(kind, sdp, offerSdp) {
     if (!this.#identity) return {}
+    // A description that names no DTLS fingerprint cannot be signed (a mock, or a stack that omits it); it goes out
+    // unsigned and the proof on the connection refuses it later (`no-fingerprint`), exactly as before.
+    if (!extractDtlsFingerprints(sdp).length) return {}
     const auth = await signDescription(this.#identity, { kind, peerPodId: this.#remotePodId, sdp, offerSdp })
     return { auth }
   }
