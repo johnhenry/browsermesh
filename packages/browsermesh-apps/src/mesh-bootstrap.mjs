@@ -512,6 +512,11 @@ import { registerOrchestratorTools } from './mesh-orchestrator-tools.mjs'
  * @param {object} [options.hardeningOptions.retry] - Passed to each
  *   per-peer `new RetryWithBackoff()` (see `hardening.mjs` for
  *   `maxRetries`/`baseDelayMs`/`maxDelayMs`/`jitterFactor`/`resetTimeoutMs`).
+ * @param {number} [options.maxHalfOpenInbound=64] - How many inbound WebRTC connections may be connecting (answered,
+ *   DataChannel not yet open) at once; passed to `createWebRTCTransportFactory()`, where the oldest unfinished one is
+ *   closed to make room. `Infinity` turns the cap off.
+ * @param {number} [options.halfOpenTimeoutMs=60000] - How long an inbound WebRTC connection may stay half-open before
+ *   it is closed. `Infinity` turns the deadline off. Invalid values throw a `TypeError`, as in the factory.
  * @param {boolean} [options.enableDht=false] - Build a real, wire-connected
  *   `DhtDiscoveryStrategy` (Phase D, issue #87; see `mesh-dht.mjs`) and add
  *   it to `discoveryStrategies`, in addition to any other strategies
@@ -855,6 +860,8 @@ export async function createMeshNode(options = {}) {
     servicesNetwork,
     enableHardening = false,
     hardeningOptions,
+    maxHalfOpenInbound,
+    halfOpenTimeoutMs,
     enableDht = false,
     dhtBootstrapPeers = [],
     dhtK,
@@ -1067,6 +1074,9 @@ export async function createMeshNode(options = {}) {
     meshManager,
     signaling,
     onLog,
+    // Undefined leaves the factory's own defaults (64 connections, 60 s) in place.
+    maxHalfOpenInbound,
+    halfOpenTimeoutMs,
     // A connection closed because the peer did not prove its identity becomes the node event
     // 'peer:binding-failed' (and the caller's connectToPeer() rejects with the reason).
     onBindingFailure: ({ remotePodId, connectionId, reason }) => {
