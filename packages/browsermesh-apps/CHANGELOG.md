@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.22.0
+
+### Minor Changes
+
+- 9846f2a: The WebRTC negotiator now bounds inbound connections that are still connecting: at most `maxHalfOpenInbound` (default 64) answered-but-not-yet-open connections at once, each closed after `halfOpenTimeoutMs` (default 60 s) if it has not
+  opened. A further offer closes the oldest unfinished connection to make room; a renegotiation offer for an open
+  connection takes no slot. `Infinity` turns either bound off, and `createWebRTCTransportFactory(...).halfOpenInbound`
+  reports the live numbers. Nothing on the wire changes, so an older peer is unaffected. An inbound offer whose answer
+  fails now also closes its half-built connection instead of leaving it in the manager.
+- 36d2845: A held join for a peer registry, opt in: `createOfferingJoinGate({ registry })` and `createJoiningJoinGate({ install })`.
+  The offering side approves a request, the joining side keeps it, and nothing is added to the registry (or installed on the
+  joining side) until both have happened. An approval that is not kept runs out (default 5 minutes on both sides, with 10 s
+  more on the offering side for the message to arrive), so does a request nobody answers, and either side can leave at any
+  point. Waiting joins are bounded (`maxWaiting`, default 16). State machines with an injected clock: no UI and no wire
+  messages, and nothing else in the package uses them, so existing behaviour and older peers are unaffected.
+
 ## 0.21.2
 
 ### Patch Changes
