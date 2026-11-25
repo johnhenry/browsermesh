@@ -243,6 +243,36 @@ describe('MeshOrchestrator#placePod and meshctl_spawn constraints', () => {
     assert.ok(decision.data.rejected.some((r) => r.id === weakHost.podId && r.code === 'boundary'))
   })
 
+  it('decidePod() decides and audits the same way but spawns nothing', async () => {
+    const decided = await orchestrator.decidePod(SPEC('d1'), { requesterId: 'mallory' })
+    assert.equal(decided.hostPodId, strongHost.podId)
+    assert.equal(decided.decision.trust, 'untrusted')
+    assert.ok(records.records.some((r) => r.operation === PLACEMENT_AUDIT.REQUESTED && r.data.phase === 'decision' && r.data.name === 'd1'))
+    const listed = await createPodHostClient({ peerNode: nodes.get(operator.podId), timeoutMs: 1000 }).list(strongHost.podId)
+    assert.equal(listed.some((s) => s.name === 'd1'), false)
+  })
+
+  it('decidePod() refuses with the plan code in the error, and audits the denial', async () => {
+    await assert.rejects(
+      () => orchestrator.decidePod(SPEC('d2'), { requesterId: 'mallory', policy: { minBoundary: 'hardware' } }),
+      (err) => err.code === POD_HOST_ERROR.EACCES && typeof err.details?.plan === 'string',
+    )
+    assert.ok(records.records.some((r) => r.operation === PLACEMENT_AUDIT.DENIED && r.data.name === 'd2'))
+  })
+
+  it('a supervisor over this orchestrator places "auto" under the stated requester, and the operator\'s wide grants do not widen it', async () => {
+    const { createPodSupervisor } = await import('../src/pod-supervisor.mjs')
+    const supervisor = createPodSupervisor({ orchestrator })
+    const { host } = await supervisor.supervise('auto', SPEC('s1'), { requesterId: 'mallory' })
+    assert.equal(host, strongHost.podId, 'the untrusted requester lands behind the strong boundary, not on the first host')
+    await assert.rejects(
+      supervisor.supervise('auto', SPEC('s2'), { requesterId: 'mallory', minBoundary: 'hardware' }),
+      (err) => err.code === POD_HOST_ERROR.EACCES && typeof err.details?.plan === 'string',
+    )
+    assert.equal(supervisor.list().some((p) => p.ref.name === 's2'), false)
+    supervisor.stop()
+  })
+
   it('a requester the trust graph rates highly may land on the weaker boundary (ranking decides among both)', async () => {
     const placed = await orchestrator.placePod(SPEC('p2'), { requesterId: alice, policy: { preferHost: weakHost.podId } })
     assert.equal(placed.hostPodId, weakHost.podId)

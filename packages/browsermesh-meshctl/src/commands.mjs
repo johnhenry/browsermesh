@@ -82,6 +82,23 @@ function candidateHostRefs(session, flags) {
   return [...new Set([...session.knownHosts(), ...asArray(flags.host)])]
 }
 
+/**
+ * `--requester` and `--min-boundary`, validated.
+ * @param {object} flags
+ * @param {string} where - The command, for the usage error.
+ * @returns {{requesterId: string|undefined, minBoundary: string|undefined}}
+ */
+function placementFlags(flags, where) {
+  if (flags.requester !== undefined && (typeof flags.requester !== 'string' || flags.requester === '')) {
+    throw new UsageError(`${where}: --requester needs a pubKey`)
+  }
+  const minBoundary = flags['min-boundary']
+  if (minBoundary !== undefined && !Object.values(PLACEMENT_BOUNDARY).includes(minBoundary)) {
+    throw new UsageError(`${where}: --min-boundary must be one of ${Object.values(PLACEMENT_BOUNDARY).join('|')}`)
+  }
+  return { requesterId: flags.requester, minBoundary }
+}
+
 // ---------------------------------------------------------------------------
 // hosts / host describe
 // ---------------------------------------------------------------------------
@@ -231,15 +248,9 @@ export async function cmdPodsSpawn(session, { positionals, flags }) {
     const refs = candidateHostRefs(session, flags)
     if (flags.requester !== undefined || flags['min-boundary'] !== undefined) {
       // A placement flag hands the choice to the placement planner.
-      if (flags.requester !== undefined && (typeof flags.requester !== 'string' || flags.requester === '')) {
-        throw new UsageError('pods spawn auto: --requester needs a pubKey')
-      }
-      const minBoundary = flags['min-boundary']
-      if (minBoundary !== undefined && !Object.values(PLACEMENT_BOUNDARY).includes(minBoundary)) {
-        throw new UsageError(`pods spawn auto: --min-boundary must be one of ${Object.values(PLACEMENT_BOUNDARY).join('|')}`)
-      }
+      const { requesterId, minBoundary } = placementFlags(flags, 'pods spawn auto')
       const planned = await selectPlannedHost({
-        session, candidateRefs: refs, spec, requesterId: flags.requester, minBoundary,
+        session, candidateRefs: refs, spec, requesterId, minBoundary,
       })
       const pod = await session.client.spawn(planned.podId, spec)
       return { host: planned.podId, chosenVia: planned.via, placement: planned.placement, pod }
@@ -353,6 +364,15 @@ export async function cmdPodsSupervise(session, { positionals, flags }) {
     if (normalized.ok) spec = normalized.value
     if (!spec.lane) throw new UsageError('pods supervise auto: --lane is required to select a host (or give --kind so it can be inferred)')
     const refs = candidateHostRefs(session, flags)
+    if (flags.requester !== undefined || flags['min-boundary'] !== undefined) {
+      // A placement flag hands the choice, and every later restart of this pod, to the placement planner under THIS
+      // requester (recorded now): a restart is never placed under meshctl's own identity, and stops with a named
+      // reason if the requester's rules no longer allow a host.
+      const { requesterId, minBoundary } = placementFlags(flags, 'pods supervise auto')
+      session.rememberHostRefs?.(refs)
+      const { ref: podRef, host, status } = await supervisor.supervise('auto', spec, { requesterId, minBoundary })
+      return { host, chosenVia: 'planner', ref: podRef, requesterId: requesterId ?? null, pod: status }
+    }
     const picked = await selectAutoHost({ session, candidateRefs: refs, lane: spec.lane })
     const { ref: podRef, host, status } = await supervisor.supervise(picked.podId, spec)
     return { host, chosenVia: picked.via, ref: podRef, pod: status }
