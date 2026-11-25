@@ -368,6 +368,131 @@ test('layers validate their options and the channel', () => {
   assert.ok(STREAM_DEFAULT_WINDOW_BYTES > 0)
 })
 
+// ------------------------------------------------- a budget for rule-breaking
+
+/** A receiver layer (with `opts`) and the raw sending end of its channel; `sentByReceiver` lists what the receiver sends. */
+function abuseSetup(opts) {
+  const { a, b } = memoryChannelPair('alice', 'bob')
+  const sentByReceiver = []
+  const counted = { ...b, notify(method, params) { sentByReceiver.push(method); return b.notify(method, params) } }
+  const abuse = []
+  const receiver = createStreamLayer(counted, { window: 4096, ...opts, onAbuse: (reason, count) => abuse.push({ reason, count }) })
+  const readers = new Map()
+  receiver.onStream((reader) => { readers.set(reader.id, reader) })
+  const open = id => a.request('stream.open', { id, meta: {} })
+  const badData = id => a.notify('stream.data', { id, s: 5, d: new Uint8Array(4) }) // out of sequence
+  return { a, receiver, abuse, readers, open, badData, sentByReceiver }
+}
+
+test('without maxViolations a peer that keeps breaking the rules is never cut off', async () => {
+  const { receiver, abuse, readers, open, badData } = abuseSetup({ maxStreams: 1 })
+  await open(1)
+  for (let id = 2; id < 22; id++) await assert.rejects(open(id), { reason: 'too-many-streams' })
+  for (let i = 0; i < 20; i++) await badData(1)
+  await flush()
+  assert.equal(abuse.length, 0)
+  assert.equal(receiver.abused, false)
+  assert.equal(receiver.violations, 0)
+  await assert.rejects(readers.get(1).read(), { reason: 'stream-violation' }, 'the one stream still fails as before')
+})
+
+test('violations are counted across streams and past the budget every stream is cancelled, once', async () => {
+  const { a, receiver, abuse, readers, open, badData, sentByReceiver } = abuseSetup({ maxViolations: 2 })
+  for (const id of [1, 2, 3, 4]) await open(id)
+  await badData(1); await badData(2)
+  await flush()
+  assert.equal(receiver.violations, 2)
+  assert.equal(receiver.abused, false, 'within the budget')
+  assert.equal(abuse.length, 0)
+  await badData(3)
+  await flush()
+  assert.equal(receiver.abused, true)
+  assert.equal(abuse.length, 1)
+  assert.equal(abuse[0].count, 3)
+  assert.equal(abuse[0].reason, 'data frame out of sequence')
+  await assert.rejects(readers.get(4).read(), { reason: 'stream-abuse' }, 'a stream that broke nothing is cancelled too')
+  // Nothing further is processed or answered, and the report is not repeated.
+  const before = sentByReceiver.length
+  await badData(4); await a.notify('stream.data', { id: 9, s: 0, d: new Uint8Array(1) }); await a.notify('stream.end', { id: 4 })
+  await assert.rejects(open(10), { reason: 'stream-abuse' })
+  await flush()
+  assert.equal(sentByReceiver.length, before, 'no notification goes back to a peer that was cut off')
+  assert.equal(abuse.length, 1)
+  assert.equal(receiver.violations, 3)
+  assert.equal(readers.size, 4, 'no new stream was accepted')
+})
+
+test('refusals past maxStreams count against the budget', async () => {
+  const { receiver, abuse, readers, open } = abuseSetup({ maxStreams: 1, maxViolations: 2 })
+  await open(1)
+  await assert.rejects(open(2), { reason: 'too-many-streams' })
+  await assert.rejects(open(3), { reason: 'too-many-streams' })
+  assert.equal(receiver.violations, 2)
+  assert.equal(receiver.abused, false)
+  await assert.rejects(open(4), { reason: 'too-many-streams' }, 'the refusal that breaks the budget is still the refusal')
+  assert.equal(receiver.abused, true)
+  assert.equal(abuse.length, 1)
+  assert.equal(abuse[0].count, 3)
+  await assert.rejects(readers.get(1).read(), { reason: 'stream-abuse' })
+  await assert.rejects(open(5), { reason: 'stream-abuse' })
+})
+
+test('reusing a stream id counts against the budget', async () => {
+  const { receiver, abuse, open } = abuseSetup({ maxViolations: 1 })
+  await open(1)
+  await assert.rejects(open(1), { reason: 'bad-stream-id' })
+  assert.equal(receiver.violations, 1)
+  await assert.rejects(open(1), { reason: 'bad-stream-id' })
+  assert.equal(abuse.length, 1)
+  assert.equal(receiver.abused, true)
+})
+
+test('a stream past maxStreamBytes counts against the budget', async () => {
+  const { a, receiver, abuse, open } = abuseSetup({ maxViolations: 1, maxStreamBytes: 100 })
+  await open(1); await open(2)
+  await a.notify('stream.data', { id: 1, s: 0, d: new Uint8Array(101) })
+  await a.notify('stream.data', { id: 2, s: 0, d: new Uint8Array(101) })
+  await flush()
+  assert.equal(receiver.violations, 2)
+  assert.equal(abuse.length, 1)
+  assert.equal(abuse[0].reason, 'stream is larger than 100 bytes')
+})
+
+test('a peer that keeps the rules is never counted', async () => {
+  const { a, b } = memoryChannelPair('alice', 'bob')
+  const sender = createStreamLayer(a, { chunkBytes: 1024 })
+  const receiver = createStreamLayer(b, { window: 4096, maxStreams: 2, maxViolations: 1, onAbuse: () => assert.fail('abuse reported') })
+  const done = []
+  receiver.onStream(reader => { done.push(collect(reader)) })
+  for (let i = 0; i < 5; i++) {
+    const w = await sender.open({ i })
+    await w.write(bodyOf(50_000, i))
+    await w.end()
+  }
+  await flush()
+  assert.equal((await Promise.all(done)).length, 5)
+  assert.equal(receiver.violations, 0)
+  assert.equal(receiver.abused, false)
+})
+
+test('a layer that cut a peer off opens no more streams either', async () => {
+  const { a, b } = memoryChannelPair('alice', 'bob')
+  const layer = createStreamLayer(b, { maxViolations: 1 })
+  layer.onStream(() => {})
+  await a.request('stream.open', { id: 1, meta: {} })
+  await a.request('stream.open', { id: 1, meta: {} }).catch(() => {})
+  await a.request('stream.open', { id: 1, meta: {} }).catch(() => {})
+  assert.equal(layer.abused, true)
+  await assert.rejects(layer.open({}), { reason: 'stream-abuse' })
+})
+
+test('maxViolations and onAbuse are validated', () => {
+  const { a } = memoryChannelPair()
+  for (const bad of [0, -1, 1.5, NaN, '3', Infinity]) assert.throws(() => createStreamLayer(a, { maxViolations: bad }), TypeError, String(bad))
+  assert.throws(() => createStreamLayer(a, { maxViolations: 1, onAbuse: 'x' }), TypeError)
+  assert.doesNotThrow(() => createStreamLayer(a, { maxViolations: 1 }))
+})
+
 // ----------------------------------------------------------- over the mesh
 
 async function meshPair(linkLimits) {

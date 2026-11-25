@@ -89,6 +89,12 @@ function toBytes(value) {
  * @param {number} [opts.chunkBytes=32768] - largest chunk this end sends or accepts (also bounded by the channel's message size)
  * @param {number} [opts.maxStreams=16] - concurrent streams per direction
  * @param {number} [opts.maxStreamBytes=1073741824] - the most one stream may carry
+ * @param {number} [opts.maxViolations] - off unless given (a positive whole number). Counts, across all streams of this
+ *   peer, the rules it breaks (data out of sequence, past its credit, past the chunk or stream size, without bytes) and
+ *   the opens this end refuses for a reused or invalid id or for being past `maxStreams`. More than `maxViolations`
+ *   cut the peer off: every stream fails with `stream-abuse`, `onAbuse` is called once, later opens are refused and
+ *   nothing further it sends is processed or answered. Nothing new is sent on the wire.
+ * @param {(reason: string, violations: number) => void} [opts.onAbuse] - called once when the budget is spent
  * @param {Function} [opts.onLog]
  */
 export function createStreamLayer(channel, {
@@ -97,9 +103,13 @@ export function createStreamLayer(channel, {
   maxStreams = STREAM_DEFAULT_MAX_STREAMS,
   maxStreamBytes = STREAM_DEFAULT_MAX_STREAM_BYTES,
   authorize,
+  maxViolations,
+  onAbuse,
   onLog,
 } = {}) {
   if (authorize !== undefined && typeof authorize !== 'function') throw new TypeError('createStreamLayer: authorize must be a function')
+  if (maxViolations !== undefined && !isPosInt(maxViolations)) throw new TypeError('createStreamLayer: maxViolations must be a positive whole number')
+  if (onAbuse !== undefined && typeof onAbuse !== 'function') throw new TypeError('createStreamLayer: onAbuse must be a function')
   for (const m of ['request', 'notify', 'onRequest', 'onNotification', 'onClose']) {
     if (!channel || typeof channel[m] !== 'function') throw new TypeError(`createStreamLayer: channel is missing ${m}()`)
   }
@@ -117,6 +127,21 @@ export function createStreamLayer(channel, {
   let acceptor = null
   let layerClosed = false
   const offs = []
+
+  // A budget for the rules this peer breaks, across all of its streams (off unless `maxViolations` is given).
+  let violations = 0
+  let abused = false
+  const abuseError = () => err(ChannelErrorCode.CANCELLED, 'stream-abuse', 'the peer broke more stream rules than allowed')
+  /** Count a broken rule or a refusal; past the budget cut the peer off: every stream fails and `onAbuse` is called once. */
+  function count(reason) {
+    if (maxViolations === undefined || abused) return
+    violations++
+    if (violations <= maxViolations) return
+    abused = true
+    failAll(abuseError())
+    log('protocol-stream:abuse', { reason, violations })
+    if (onAbuse) { try { onAbuse(reason, violations) } catch (e) { log('protocol-stream:onAbuse-threw', { error: e?.message }) } }
+  }
 
   /** Largest chunk this end may put in one message of the channel. */
   const chunkLimit = () => Math.max(1, Math.min(chunkBytes, (Number.isSafeInteger(channel.maxMessageBytes) ? channel.maxMessageBytes : chunkBytes + STREAM_FRAMING_RESERVE_BYTES) - STREAM_FRAMING_RESERVE_BYTES))
@@ -336,18 +361,24 @@ export function createStreamLayer(channel, {
   // -------------------------------------------------------------- receiving
   offs.push(channel.onRequest(STREAM_METHODS.open, async (params, ctx) => {
     if (layerClosed) throw err(ChannelErrorCode.CANCELLED, 'channel-closed', 'stream layer closed')
+    if (abused) throw abuseError() // a peer that was cut off is refused (the request needs an answer) and nothing else
     const id = params?.id
-    if (!isPosInt(id) || incoming.has(id)) throw err(ChannelErrorCode.INVALID, 'bad-stream-id', 'invalid stream id')
+    const badId = () => { count('invalid or reused stream id'); return err(ChannelErrorCode.INVALID, 'bad-stream-id', 'invalid stream id') }
+    if (!isPosInt(id) || incoming.has(id)) throw badId()
     const peer = ctx?.peer ?? channel.peer
     if (authorize) {
       // Before anything about this end is revealed (whether it accepts streams, how many are open).
       const verdict = await authorize(params.meta, { peer })
       if (verdict === false || verdict?.allowed === false) throw err(ChannelErrorCode.UNAUTHORIZED, 'not-authorized', 'not authorised to open that stream')
       if (layerClosed) throw err(ChannelErrorCode.CANCELLED, 'channel-closed', 'stream layer closed')
-      if (incoming.has(id)) throw err(ChannelErrorCode.INVALID, 'bad-stream-id', 'invalid stream id')
+      if (abused) throw abuseError()
+      if (incoming.has(id)) throw badId()
     }
     if (!acceptor) throw err(ChannelErrorCode.METHOD_NOT_FOUND, 'no-stream-handler', 'this end does not accept streams')
-    if (incoming.size >= maxStreams) throw err(ChannelErrorCode.BUSY, 'too-many-streams', 'too many streams open')
+    if (incoming.size >= maxStreams) {
+      count('stream opened beyond the concurrency limit')
+      throw err(ChannelErrorCode.BUSY, 'too-many-streams', 'too many streams open')
+    }
     const st = makeReader(id, params.meta, peer)
     incoming.set(id, st)
     try {
@@ -365,9 +396,15 @@ export function createStreamLayer(channel, {
     return { window: windowBytes, chunkBytes: chunkLimit(), maxBytes: maxStreamBytes }
   }))
 
-  const violation = (st, message) => st.fail(err(ChannelErrorCode.INVALID, 'stream-violation', message), { notify: true, keepQueue: true })
+  const violation = (st, message) => {
+    st.fail(err(ChannelErrorCode.INVALID, 'stream-violation', message), { notify: true, keepQueue: true })
+    count(message)
+  }
 
-  offs.push(channel.onNotification(STREAM_METHODS.data, (params) => {
+  // A peer that was cut off is not processed: every notification below is ignored once `abused`.
+  const onNote = (method, handler) => offs.push(channel.onNotification(method, (params) => { if (!abused) return handler(params) }))
+
+  onNote(STREAM_METHODS.data, (params) => {
     const st = incoming.get(params?.id)
     if (!st || st.ended || st.cancelled || st.error) return
     let bytes
@@ -376,27 +413,29 @@ export function createStreamLayer(channel, {
     if (bytes.byteLength > chunkLimit()) return violation(st, 'chunk exceeds the advertised chunk size')
     if (st.buffered + bytes.byteLength > windowBytes) return violation(st, 'writer exceeded the credit it was granted')
     if (st.total + bytes.byteLength > maxStreamBytes) {
-      return st.fail(err(ChannelErrorCode.TOO_LARGE, 'stream-too-large', `stream is larger than ${maxStreamBytes} bytes`), { notify: true, keepQueue: true })
+      const message = `stream is larger than ${maxStreamBytes} bytes`
+      st.fail(err(ChannelErrorCode.TOO_LARGE, 'stream-too-large', message), { notify: true, keepQueue: true })
+      return count(message)
     }
     st.nextSeq++
     st.pushed(bytes)
-  }))
-  offs.push(channel.onNotification(STREAM_METHODS.end, (params) => {
+  })
+  onNote(STREAM_METHODS.end, (params) => {
     const st = incoming.get(params?.id)
     if (st && !st.cancelled && !st.error) st.finish()
-  }))
-  offs.push(channel.onNotification(STREAM_METHODS.abort, (params) => {
+  })
+  onNote(STREAM_METHODS.abort, (params) => {
     const st = incoming.get(params?.id)
     st?.fail(err(ChannelErrorCode.CANCELLED, 'stream-aborted', `the writer aborted the stream: ${reasonText(params?.reason)}`), { keepQueue: true })
-  }))
-  offs.push(channel.onNotification(STREAM_METHODS.credit, (params) => {
+  })
+  onNote(STREAM_METHODS.credit, (params) => {
     const st = outgoing.get(params?.id)
     if (st && isPosInt(params.n)) st.granted(params.n)
-  }))
-  offs.push(channel.onNotification(STREAM_METHODS.cancel, (params) => {
+  })
+  onNote(STREAM_METHODS.cancel, (params) => {
     const st = outgoing.get(params?.id)
     st?.stop('cancelled', err(ChannelErrorCode.CANCELLED, 'stream-cancelled', `the reader cancelled the stream: ${reasonText(params?.reason)}`))
-  }))
+  })
 
   function failAll(why) {
     for (const st of [...outgoing.values()]) st.stop('failed', why)
@@ -410,6 +449,7 @@ export function createStreamLayer(channel, {
   // ----------------------------------------------------------------- opening
   async function open(meta = {}, { signal, timeoutMs } = {}) {
     if (layerClosed) throw err(ChannelErrorCode.CANCELLED, 'channel-closed', 'stream layer closed')
+    if (abused) throw abuseError()
     if (signal?.aborted) throw err(ChannelErrorCode.CANCELLED, 'cancelled', 'open aborted')
     if (outgoing.size >= maxStreams) throw err(ChannelErrorCode.BUSY, 'too-many-streams', 'too many streams open')
     const id = nextId++
@@ -475,6 +515,10 @@ export function createStreamLayer(channel, {
     },
     /** Streams currently open: `{ outgoing, incoming }`. */
     stats() { return { outgoing: outgoing.size, incoming: incoming.size } },
+    /** Rules broken and refusals counted so far (always 0 unless `maxViolations` was given). */
+    get violations() { return violations },
+    /** True once the peer broke more rules than `maxViolations` allows and was cut off. */
+    get abused() { return abused },
     /** Detach from the channel and fail every open stream. */
     close() {
       layerClosed = true
