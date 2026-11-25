@@ -203,6 +203,16 @@ proves itself is accepted and what it sends is unverified; a proof that is sent
 and does not verify still closes the connection). `webrtcIdentityBinding: false`
 turns it off entirely.
 
+**Half-open inbound connections are bounded.** The standing offer handler of
+`createWebRTCTransportFactory()` answers every inbound offer, but at most
+`maxHalfOpenInbound` (default 64) inbound connections may be connecting (answered,
+DataChannel not yet open) at once, and each may stay so for at most
+`halfOpenTimeoutMs` (default 60 s) before it is closed. When one more offer
+arrives the oldest unfinished connection is closed to make room, so a real peer is
+never locked out by stale ones. A renegotiation offer for a connection that is
+already open takes no slot. `Infinity` turns either bound off; the live numbers
+are on the factory as `halfOpenInbound` (`max`, `timeoutMs`, `count`).
+
 By default, `createMeshNode()` gathers **no ICE servers at all** (no STUN,
 no TURN) -- host candidates only, which is enough for peers on the same LAN
 and discloses nothing to a third party. That's fine for typical NAT, but
