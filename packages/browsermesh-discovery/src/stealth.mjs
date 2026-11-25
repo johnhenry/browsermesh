@@ -68,6 +68,7 @@
  * Run tests:
  *   cd packages/browsermesh-discovery && node --import ./test/_setup-globals.mjs --test test/dht.test.mjs
  */
+import { deriveWriteSigner, signDhtStore } from './dht-auth.mjs'
 import {
   stealthShardChecksum, isChecksum3, splitState3, joinState3, shardBytes, toBase64Url as bytesToB64u, fromBase64Url as strictFromB64u,
   MAX_STATE_BYTES, MAX_SHARDS, PARITY_CODES,
@@ -840,6 +841,10 @@ export class StealthAgent {
 
   #parity = 'rs'
 
+  #ownedStores = false
+
+  #storeLifetimeMs = 24 * 3600 * 1000
+
   /** @type {{ podId: string, rawPublicKey: () => Promise<Uint8Array>, sign: (data: Uint8Array) => Promise<Uint8Array> }|null} */
   #identity = null
 
@@ -869,16 +874,25 @@ export class StealthAgent {
    * @param {string} [opts.lookupNonce] - A secret nonce (at least 16 base64url characters; see `deriveStealthLookupNonce`). With it, DHT keys are `hex(SHA-256(agentId, nonce, index))`, which do not name the agent, and the stored records carry no agent id. Needs `identity`. Whoever should be able to find the shards must hold the nonce.
    * @param {2|3|Array<2|3>} [opts.shardFormat=2] - Which shard record format(s) this agent WRITES. 2 is the format older peers read (the default, unchanged). 3 adds a SHA-256 checksum and Reed-Solomon parity under key names older peers never read; `[2, 3]` writes both so older readers keep working. Format 3 needs the async methods (`hideAsync`, `hideSigned`, `hideEncrypted`): the synchronous `hide()` throws `async-required` when 3 is selected. See docs/design/discovery-records.md.
    * @param {Array<2|3>} [opts.readFormats=[2, 3]] - Which formats this agent READS. The newest complete valid write across them wins (a tie prefers 3). `[3]` ignores every format-2 record (use once every writer is upgraded, so stale format-2 records cannot be read back).
+   * @param {boolean} [opts.ownedStores=false] - Format 3 only, with an `identity`: every format-3 record is stored with a proof (`signDhtStore`) so a DHT node with a `storePolicy` accepts a later store under that key only from this agent. With a `lookupNonce` each shard has its own writer key derived from the identity (`deriveWriteSigner`): group members who hold the nonce can still find and read the shards but cannot store under their keys, and the keys themselves are unchanged. Refused stores make `hideSigned()` / `hideAsync()` throw `store-refused`. See docs/design/discovery-records.md, item 3.
+   * @param {number} [opts.storeLifetimeMs=86400000] - With `ownedStores`: how long a store proof is valid; re-store (call `hideSigned()` again) before it lapses.
    * @param {'rs'|'xor'} [opts.parity='rs'] - Format 3 only: the parity code of the shards written. `rs` is Reed-Solomon over GF(2^8) (any `threshold` of `totalShards` rebuild the state); `xor` is the older single-loss parity.
    */
-  constructor({ agentId, dhtNode, threshold = 3, totalShards = 5, key = null, keyring = null, maxAgeMs, identity = null, allowUnsigned = false, trustedKeys = [], lookupNonce = null, shardFormat = 2, readFormats = [2, 3], parity = 'rs' }) {
+  constructor({ agentId, dhtNode, threshold = 3, totalShards = 5, key = null, keyring = null, maxAgeMs, identity = null, allowUnsigned = false, trustedKeys = [], lookupNonce = null, shardFormat = 2, readFormats = [2, 3], parity = 'rs', ownedStores = false, storeLifetimeMs = 24 * 3600 * 1000 }) {
     if (!agentId || typeof agentId !== 'string') {
       throw new Error('agentId is required and must be a non-empty string')
     }
+    if (ownedStores !== false) {
+      if (ownedStores !== true || !identity) throw new StealthError('bad-argument', 'ownedStores needs an identity (it signs the stores)')
+      if (!Number.isSafeInteger(storeLifetimeMs) || storeLifetimeMs < 1) throw new StealthError('bad-argument', 'storeLifetimeMs must be a positive number of milliseconds')
+    }
+    this.#ownedStores = ownedStores
+    this.#storeLifetimeMs = storeLifetimeMs
     this.#writeFormats = normalizeFormats(shardFormat, 'shardFormat')
     this.#readFormats = normalizeFormats(readFormats, 'readFormats')
     if (!PARITY_CODES.includes(parity)) throw new StealthError('bad-argument', `parity must be one of ${PARITY_CODES.join(', ')}`)
     this.#parity = parity
+    if (ownedStores && !this.#writeFormats.includes(3)) throw new StealthError('bad-argument', 'ownedStores applies to shard format 3: set shardFormat to 3 or [2, 3]')
     if (lookupNonce !== null && (typeof lookupNonce !== 'string' || !LOOKUP_NONCE_RE.test(lookupNonce))) {
       throw new StealthError('bad-argument', 'lookupNonce must be at least 16 base64url characters (see deriveStealthLookupNonce)')
     }
@@ -1148,12 +1162,20 @@ export class StealthAgent {
       for (const s of made.shards) {
         const text = this.#signedText3({ key: keys3[s.i], i: s.i, seq, threshold: this.#threshold, total: this.#totalShards, checksum: s.checksum })
         const sig = toBase64Url(new Uint8Array(await this.#identity.sign(new TextEncoder().encode(text))))
-        writes.push({ key: keys3[s.i], record: anonymous
+        writes.push({ key: keys3[s.i], ...(this.#ownedStores ? { ownedIndex: s.i } : {}), record: anonymous
           ? { v: 3, i: s.i, data: s.data, checksum: s.checksum, code: made.code, len: made.len, seq, sig }
           : { v: 3, shardId: `${this.#agentId}:shard3:${s.i}`, agentId: this.#agentId, i: s.i, data: s.data, threshold: this.#threshold, total: this.#totalShards, checksum: s.checksum, code: made.code, len: made.len, seq, sig } })
       }
     }
-    for (const { key, record } of writes) this.#dhtNode.store(key, record)
+    const refusals = []
+    for (const { key, record, ownedIndex } of writes) {
+      if (ownedIndex === undefined) { this.#dhtNode.store(key, record); continue }
+      const signer = anonymous ? await deriveWriteSigner({ identity: this.#identity, lookupNonce: this.#lookupNonce, index: ownedIndex }) : this.#identity
+      const auth = await signDhtStore({ signer, key, value: record, seq, exp: Date.now() + this.#storeLifetimeMs })
+      const result = await this.#dhtNode.store(key, record, 0, { auth })
+      if (result && result.stored === false) refusals.push(result.refused ?? 'refused')
+    }
+    if (refusals.length > 0) throw new StealthError('store-refused', `the DHT refused ${refusals.length} of ${writes.length} shard stores (${[...new Set(refusals)].join(', ')})`)
     this.#shardSeq = seq
     this.#manifest = {
       agentId: this.#agentId,

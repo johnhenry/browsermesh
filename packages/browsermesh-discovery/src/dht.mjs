@@ -18,6 +18,56 @@
  */
 
 import { DiscoveryStrategy } from './discovery.mjs'
+import { canonicalJson, isDhtAuth, verifyDhtStore, podIdOfPublicKey, classifyStoreKey, stealthPlainId, looksLikePodId } from './dht-auth.mjs'
+
+const MAX_KEY_LENGTH = 1024
+const OWNED_DEFAULTS = { maxValueBytes: 65536, maxEntries: 4096, maxEntriesPerWriter: 256, maxLifetimeMs: 7 * 24 * 3600 * 1000, rate: { max: 120, windowMs: 60_000 } }
+
+/** Validate a `storePolicy` option into the shape `DhtNode` uses. */
+function normalizeStorePolicy(p) {
+  if (p === null || typeof p !== 'object' || Array.isArray(p)) throw new Error('storePolicy must be an object')
+  const mode = p.mode ?? 'open'
+  if (mode !== 'open' && mode !== 'owned') throw new Error("storePolicy.mode must be 'open' or 'owned'")
+  const defaults = mode === 'owned' ? OWNED_DEFAULTS : {}
+  const limit = (name) => {
+    const v = p[name] === undefined ? defaults[name] : p[name]
+    if (v === undefined || v === null) return null
+    if (!Number.isFinite(v) || v < 1) throw new Error(`storePolicy.${name} must be a positive number`)
+    return v
+  }
+  let rate = p.rate === undefined ? (defaults.rate ?? null) : p.rate
+  if (rate !== null && (typeof rate !== 'object' || !(rate.max >= 1) || !(rate.windowMs >= 1))) throw new Error('storePolicy.rate must be { max, windowMs } with positive numbers')
+  if (rate !== null) rate = { max: rate.max, windowMs: rate.windowMs }
+  const openPrefixes = p.openPrefixes ?? []
+  if (!Array.isArray(openPrefixes) || !openPrefixes.every((s) => typeof s === 'string')) throw new Error('storePolicy.openPrefixes must be a list of strings')
+  if (p.onRefuse !== undefined && typeof p.onRefuse !== 'function') throw new Error('storePolicy.onRefuse must be a function')
+  return {
+    mode, maxValueBytes: limit('maxValueBytes'), maxEntries: limit('maxEntries'), maxEntriesPerWriter: limit('maxEntriesPerWriter'),
+    maxLifetimeMs: limit('maxLifetimeMs'), rate, openPrefixes: [...openPrefixes], onRefuse: p.onRefuse,
+  }
+}
+
+/** First 8 hex characters of SHA-256(key): enough to correlate log lines, not enough to name the key. */
+async function hashPrefix(key) {
+  const d = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(key)))
+  return Array.from(d.subarray(0, 4), (b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+/**
+ * How a verified writer key stands to a DHT key: `strict` (the key names the writer's pod), `pinned` (the first valid signer
+ * owns it), `open` (signed, but nothing is owned), or `wrong-owner` (the key names another pod).
+ */
+async function bindingOf(key, writer, policy) {
+  const kind = classifyStoreKey(key)
+  if (kind === 'pod') return key === await podIdOfPublicKey(writer) ? 'strict' : 'wrong-owner'
+  if (kind === 'stealth-plain') {
+    const id = stealthPlainId(key)
+    if (looksLikePodId(id)) return id === await podIdOfPublicKey(writer) ? 'strict' : 'wrong-owner'
+    return 'pinned'
+  }
+  if (kind === 'anon') return 'pinned'
+  return policy.mode === 'owned' ? 'pinned' : 'open'
+}
 
 // ---------------------------------------------------------------------------
 // Wire Constants
@@ -346,6 +396,14 @@ export class DhtNode {
   /** @type {() => number} */
   #now
 
+  /** @type {object|null} normalized store policy, or null for the unrestricted node every release before owned stores was */
+  #policy = null
+
+  #stats = { accepted: 0, refused: {} }
+
+  /** @type {Map<string, number[]>} sending peer -> times of its recent stores */
+  #rate = new Map()
+
   /**
    * @param {object} opts
    * @param {string} opts.localId - This node's identifier
@@ -353,8 +411,11 @@ export class DhtNode {
    * @param {Map} [opts.store] - Local key-value store
    * @param {Function} [opts.sendFn] - Function to send messages: (targetId, msg) => {}
    * @param {() => number} [opts.now] - Clock in ms (default `Date.now`); stored values expire against it
+   * @param {object} [opts.storePolicy] - Opt-in rules for who may store under which key (docs/design/discovery-records.md, item 3). Absent (the default): a `store` is accepted from anyone for any key, exactly as before. With a policy, a store is handled asynchronously (`handleMessage` and `store` return a promise for a store) and a refusal is a named reply, never an exception.
+   *   `mode: 'open'` (default when a policy is given): an unsigned store is accepted as before unless the key is owned; a signed store (`auth`, see `signDhtStore`) is verified and takes ownership of a pod-id key, a `stealth:<podId>:shard3:<n>` key, a `stealth:<id>:shard3:<n>` key or an agent-anonymous 64-hex key. `mode: 'owned'`: every store needs a valid proof and any key not under `openPrefixes` is owned by its first signer.
+   *   Limits (defaults in `owned`: 65536, 4096, 256, 7 days, 120 per minute; none in `open`): `maxValueBytes`, `maxEntries`, `maxEntriesPerWriter`, `maxLifetimeMs`, `rate: { max, windowMs }`. `openPrefixes: string[]`. `onRefuse({ reason, from, keyHash })` is called for each refusal (never with the value or the key itself).
    */
-  constructor({ localId, routingTable, store, sendFn, now }) {
+  constructor({ localId, routingTable, store, sendFn, now, storePolicy }) {
     if (!localId || typeof localId !== 'string') {
       throw new Error('localId is required and must be a non-empty string')
     }
@@ -363,6 +424,7 @@ export class DhtNode {
     this.#store = store ?? new Map()
     this.#sendFn = sendFn ?? (() => {})
     this.#now = typeof now === 'function' ? now : () => Date.now()
+    if (storePolicy !== undefined) this.#policy = normalizeStorePolicy(storePolicy)
   }
 
   /** @returns {string} */
@@ -403,7 +465,7 @@ export class DhtNode {
     const entry = this.#store.get(key)
     if (entry) {
       // Check TTL
-      if (entry.ttl > 0 && this.#now() > entry.storedAt + entry.ttl) {
+      if (this.#isExpired(entry)) {
         this.#store.delete(key)
       } else {
         return { found: true, value: entry.value }
@@ -412,26 +474,136 @@ export class DhtNode {
     return { found: false, closest: this.findNode(key) }
   }
 
+  #isExpired(entry) {
+    const now = this.#now()
+    return (entry.ttl > 0 && now > entry.storedAt + entry.ttl) || (entry.exp !== undefined && now >= entry.exp)
+  }
+
   /**
    * Store a key-value pair locally and replicate to closest nodes.
+   *
+   * Without a `storePolicy` this is what it always was (and returns `{ stored: true }`). With one, the store is checked first
+   * by the same rules a remote store meets and a promise of `{ stored: true }` or `{ stored: false, refused: '<name>' }` is
+   * returned; only an accepted store is replicated.
+   *
    * @param {string} key
    * @param {*} value
    * @param {number} [ttl=0] - Time-to-live in ms (0 = no expiry)
+   * @param {{ auth?: object }} [opts] - `auth`: a proof from `signDhtStore`, sent with the replicated message (older nodes ignore it)
+   * @returns {{ stored: true }|Promise<{ stored: boolean, refused?: string }>}
    */
-  store(key, value, ttl = 0) {
-    this.#store.set(key, { value, ttl, storedAt: this.#now() })
-
-    // Replicate to closest nodes
-    const closest = this.#routingTable.findClosest(key)
-    for (const contact of closest) {
-      this.#sendFn(contact.podId, {
-        type: DHT_STORE,
-        from: this.#localId,
-        key,
-        value,
-        ttl,
+  store(key, value, ttl = 0, opts = undefined) {
+    const auth = opts?.auth
+    const msg = { type: DHT_STORE, from: this.#localId, key, value, ttl, ...(auth === undefined ? {} : { auth }) }
+    if (this.#policy) {
+      return this.#applyStore(this.#localId, msg).then((r) => {
+        if (r.stored) this.#replicate(key, msg)
+        return r
       })
     }
+    this.#store.set(key, { value, ttl, storedAt: this.#now() })
+    this.#replicate(key, msg)
+    return { stored: true }
+  }
+
+  #replicate(key, msg) {
+    // Replicate to closest nodes
+    const closest = this.#routingTable.findClosest(key)
+    for (const contact of closest) this.#sendFn(contact.podId, { ...msg })
+  }
+
+  /** The public key (base64url) that owns `key` here, or null. */
+  ownerOf(key) {
+    const entry = this.#store.get(key)
+    if (!entry || this.#isExpired(entry)) return null
+    return entry.owner ?? null
+  }
+
+  /** Counters of the store policy: `{ accepted, refused: { <name>: n } }`. */
+  get storeStats() {
+    return { accepted: this.#stats.accepted, refused: { ...this.#stats.refused } }
+  }
+
+  // -- store policy ------------------------------------------------------------
+
+  async #refuse(reason, from, key) {
+    this.#stats.refused[reason] = (this.#stats.refused[reason] ?? 0) + 1
+    if (this.#policy.onRefuse) {
+      try { this.#policy.onRefuse({ reason, from, keyHash: typeof key === 'string' ? await hashPrefix(key) : '' }) } catch { /* a logging hook never changes the outcome */ }
+    }
+    return { stored: false, refused: reason }
+  }
+
+  /** Everything between "a store arrived" and "it is in the map": returns `{ stored: true }` or a named refusal. Never throws. */
+  async #applyStore(from, msg) {
+    const policy = this.#policy
+    try {
+      const { key, value } = msg
+      const now = this.#now()
+      // 1. rate, before any other work
+      if (policy.rate) {
+        const times = (this.#rate.get(from) ?? []).filter((t) => now - t < policy.rate.windowMs)
+        const limited = times.length >= policy.rate.max
+        times.push(now)
+        this.#rate.set(from, times)
+        if (this.#rate.size > 4096) for (const [peer, ts] of this.#rate) if (ts.every((t) => now - t >= policy.rate.windowMs)) this.#rate.delete(peer)
+        if (limited) return this.#refuse('rate-limited', from, key)
+      }
+      // 2. shape and size
+      const ttl = msg.ttl ?? 0
+      if (typeof key !== 'string' || key === '' || key.length > MAX_KEY_LENGTH || value === undefined || typeof ttl !== 'number' || !(ttl >= 0) || !Number.isFinite(ttl)) return this.#refuse('malformed', from, key)
+      let size
+      try { size = new TextEncoder().encode(canonicalJson(value)).length } catch { return this.#refuse('malformed', from, key) }
+      if (policy.maxValueBytes !== null && size > policy.maxValueBytes) return this.#refuse('value-too-large', from, key)
+      // 3. the proof, if there is one
+      const auth = msg.auth
+      let writer = null
+      let kind = null
+      if (auth !== undefined) {
+        if (!isDhtAuth(auth)) return this.#refuse('bad-auth', from, key)
+        if (auth.exp <= now) return this.#refuse('expired', from, key)
+        if (policy.maxLifetimeMs !== null && auth.exp - now > policy.maxLifetimeMs) return this.#refuse('lifetime-too-long', from, key)
+        if (!(await verifyDhtStore({ key, value, auth }))) return this.#refuse('bad-auth', from, key)
+        writer = auth.w
+        kind = await bindingOf(key, writer, policy)
+        if (kind === 'wrong-owner') return this.#refuse('not-key-owner', from, key)
+      }
+      // 4. who owns the key now
+      const existing = this.#store.get(key)
+      const live = existing && !this.#isExpired(existing) ? existing : null
+      if (existing && !live) this.#store.delete(key)
+      if (live?.owner !== undefined) {
+        if (writer !== live.owner) return this.#refuse('owned-key', from, key)
+        if (auth.seq <= live.seq) return this.#refuse('stale-seq', from, key)
+      } else if (writer === null && policy.mode === 'owned' && !policy.openPrefixes.some((p) => key.startsWith(p))) {
+        return this.#refuse('unsigned-store', from, key)
+      }
+      // 5. room
+      const owns = writer !== null && (kind === 'strict' || kind === 'pinned')
+      if (!live) {
+        if (policy.maxEntries !== null && this.#store.size >= policy.maxEntries) this.#purgeExpired()
+        if (policy.maxEntries !== null && this.#store.size >= policy.maxEntries) return this.#refuse('store-full', from, key)
+        if (owns && policy.maxEntriesPerWriter !== null) {
+          let held = 0
+          for (const e of this.#store.values()) if (e.owner === writer && !this.#isExpired(e)) held++
+          if (held >= policy.maxEntriesPerWriter) return this.#refuse('writer-quota', from, key)
+        }
+      }
+      // 6. accept
+      this.#store.set(key, {
+        value, ttl, storedAt: now,
+        ...(auth === undefined ? {} : { exp: auth.exp }),
+        ...(owns ? { owner: writer, seq: auth.seq } : {}),
+      })
+      this.#stats.accepted++
+      return { stored: true }
+    } catch {
+      return this.#refuse('malformed', from, msg?.key)
+    }
+  }
+
+  #purgeExpired() {
+    for (const [k, e] of this.#store) if (this.#isExpired(e)) this.#store.delete(k)
   }
 
   /**
@@ -446,7 +618,7 @@ export class DhtNode {
 
     switch (msg.type) {
       case DHT_PING:
-        return { type: DHT_PING, from: this.#localId, pong: true }
+        return { type: DHT_PING, from: this.#localId, pong: true, ...(this.#policy ? { caps: { store: 1, policy: this.#policy.mode } } : {}) }
 
       case DHT_FIND_NODE:
         return {
@@ -463,6 +635,10 @@ export class DhtNode {
         }
 
       case DHT_STORE:
+        if (this.#policy) {
+          // Verifying a proof is asynchronous: with a policy a store answers with a promise (it never rejects).
+          return this.#applyStore(fromId, msg).then((r) => ({ type: DHT_STORE, from: this.#localId, ...r }))
+        }
         if (msg.key !== undefined && msg.value !== undefined) {
           this.#store.set(msg.key, {
             value: msg.value,
@@ -485,7 +661,7 @@ export class DhtNode {
   get(key) {
     const entry = this.#store.get(key)
     if (!entry) return undefined
-    if (entry.ttl > 0 && this.#now() > entry.storedAt + entry.ttl) {
+    if (this.#isExpired(entry)) {
       this.#store.delete(key)
       return undefined
     }
