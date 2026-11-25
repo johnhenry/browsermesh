@@ -19,27 +19,45 @@
  * its functions" — not a new package, not copied code.
  */
 
-import {
-  demoSpawnOpts, runSpawn, runExec, runSnapshot, runRestore, runDrain, runStatus,
-} from '../../../spikes/vm-pod-host/src/cli.mjs'
 import { UsageError } from './output.mjs'
 
-// `VmPodHost` is imported dynamically (see `startVmPodHost()` below) so
-// that a `meshctl` run that never touches `vm` never pays for loading the
-// Firecracker driver stack at all -- the same "only pay for what you use"
-// shape `cli.mjs`'s own dispatch already has at the command-group level.
-const HOST_POD_MODULE_URL = new URL('../../../spikes/vm-pod-host/src/host-pod.mjs', import.meta.url)
+// The spike is loaded only when a `vm` command runs, and not when this module
+// is: it lives outside the package (`spikes/`, not a workspace member), so a
+// static import made the whole package unloadable without a repository
+// checkout beside it -- every command, not just `vm`. It is also the same
+// "only pay for what you use" shape `cli.mjs`'s dispatch has per command group.
+const SPIKE_SRC_URL = new URL('../../../spikes/vm-pod-host/src/', import.meta.url)
 
 /** The `vm` subcommands `meshctl vm <command> ...` recognizes. */
 export const VM_COMMANDS = Object.freeze(['spawn', 'exec', 'snapshot', 'restore', 'drain', 'status'])
 
 /**
+ * @returns {Promise<{ cli: object, VmPodHost: Function }>}
+ */
+async function loadSpike() {
+  try {
+    const [cli, hostPod] = await Promise.all([
+      import(new URL('cli.mjs', SPIKE_SRC_URL).href),
+      import(new URL('host-pod.mjs', SPIKE_SRC_URL).href),
+    ])
+    return { cli, VmPodHost: hostPod.VmPodHost }
+  } catch (err) {
+    if (err?.code === 'ERR_MODULE_NOT_FOUND') {
+      throw new UsageError(
+        'meshctl vm: this command drives the vm-pod-host spike, which is not part of the installed package; '
+        + 'run it from a checkout of the repository (spikes/vm-pod-host)',
+      )
+    }
+    throw err
+  }
+}
+
+/**
  * @param {object} [opts]
  * @param {Function} [opts.onLog]
- * @returns {Promise<InstanceType<typeof import('../../../spikes/vm-pod-host/src/host-pod.mjs').VmPodHost>>}
+ * @param {Function} opts.VmPodHost
  */
-async function startVmPodHost({ onLog } = {}) {
-  const { VmPodHost } = await import(HOST_POD_MODULE_URL)
+async function startVmPodHost({ onLog, VmPodHost } = {}) {
   const host = new VmPodHost({ dryRun: true, onLog: onLog || (() => {}) })
   await host.start()
   return host
@@ -80,33 +98,34 @@ export async function runVmCommand({
     throw new UsageError(`meshctl vm ${command}: a pod name is required`)
   }
 
-  const host = await startVmPodHost({ onLog })
-  const spawnOpts = demoSpawnOpts({ kernel, rootfs, dryRun })
+  const { cli, VmPodHost } = await loadSpike()
+  const host = await startVmPodHost({ onLog, VmPodHost })
+  const spawnOpts = cli.demoSpawnOpts({ kernel, rootfs, dryRun })
 
   switch (command) {
     case 'spawn': {
-      const vmPod = await runSpawn(host, name, spawnOpts)
+      const vmPod = await cli.runSpawn(host, name, spawnOpts)
       return summarizePod(host, name, vmPod)
     }
     case 'exec': {
-      const { vmPod, result } = await runExec(host, name, spawnOpts, argv)
+      const { vmPod, result } = await cli.runExec(host, name, spawnOpts, argv)
       return { ...summarizePod(host, name, vmPod), exec: result }
     }
     case 'snapshot': {
-      const vmPod = await runSnapshot(host, name, spawnOpts)
+      const vmPod = await cli.runSnapshot(host, name, spawnOpts)
       return summarizePod(host, name, vmPod)
     }
     case 'restore': {
-      const vmPod = await runRestore(host, name, spawnOpts)
+      const vmPod = await cli.runRestore(host, name, spawnOpts)
       return summarizePod(host, name, vmPod)
     }
     case 'drain': {
-      const vmPod = await runDrain(host, name, spawnOpts)
+      const vmPod = await cli.runDrain(host, name, spawnOpts)
       return summarizePod(host, name, vmPod)
     }
     case 'status':
     default:
-      return { hostPodId: host.podId, pods: runStatus(host) }
+      return { hostPodId: host.podId, pods: cli.runStatus(host) }
   }
 }
 

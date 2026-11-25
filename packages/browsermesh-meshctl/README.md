@@ -12,7 +12,10 @@ has no more authority over a host than any other granted peer does.
 > **Publishing.** This package is `"private": true` for now. It is a real
 > workspace member (turbo runs its tests, `npm install` links it), but
 > whether/when it ships to npm as `@johnhenry/browsermesh-meshctl` is a
-> separate decision -- see [RELEASING.md](../../RELEASING.md).
+> separate decision -- see [RELEASING.md](../../RELEASING.md). The package as
+> `npm pack` would ship it starts on its own (`test/standalone.test.mjs`);
+> `meshctl vm` drives the `spikes/vm-pod-host` spike, which is not part of the
+> package, and says so when it is not there.
 
 ## Contents
 
