@@ -539,8 +539,9 @@ describe('signed session descriptions: WebRTCPeerConnection', () => {
       assert.deepEqual(Object.keys(offer).sort(), ['sdp', 'type'])
       const answer = await b.handleOffer(offer)
       assert.deepEqual(Object.keys(answer).sort(), ['sdp', 'type'])
+      const closedB = new Promise((resolve) => b.onStateChange((s) => s === 'closed' && resolve()))
       await a.handleAnswer(answer)
-      await new Promise((resolve) => b.onStateChange((s) => s === 'closed' && resolve()))
+      await closedB
       assert.equal(b.bindingFailure, 'no-fingerprint')
       a.close(); b.close()
     } finally {
