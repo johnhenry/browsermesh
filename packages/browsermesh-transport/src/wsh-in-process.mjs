@@ -62,6 +62,8 @@ export async function createInProcessPipeRelay({ tap = null, relayOptions } = {}
       const [client, server] = memory.createSocketPair();
       const send = server.send.bind(server);
       server.send = (data) => {
+        // A text frame (the paired signal a host half asked for with `?paired=1`) is not wsh bytes: passed on as it is, not recorded.
+        if (typeof data === 'string') { send(data); return; }
         const bytes = toBytes(data);
         env.recorded.push({ to: role, id, bytes: bytes.slice() });
         let out = [bytes];
@@ -74,7 +76,8 @@ export async function createInProcessPipeRelay({ tap = null, relayOptions } = {}
       };
       sockets.add(server);
       server.addEventListener('close', () => sockets.delete(server));
-      void relay.accept(server, { id, role }).catch(() => {});
+      // A relay that predates the signal (wsh before 0.54.1) ignores `notifyPaired`, as it would ignore `?paired=1`.
+      void relay.accept(server, { id, role, notifyPaired: role === 'host' && u.searchParams.get('paired') === '1' }).catch(() => {});
       return client;
     }
   };

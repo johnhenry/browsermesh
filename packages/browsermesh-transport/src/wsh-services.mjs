@@ -28,6 +28,7 @@
 
 import { encodeBase64url } from '@johnhenry/browsermesh-primitives';
 import { WshLinkError, resolveCredential, fingerprintToPodId, podIdToFingerprint } from './wsh-links.mjs';
+import { loadWatchPairing, waitingHalf } from './wsh-pairing.mjs';
 
 const RENDEZVOUS_LABEL = 'browsermesh-wsh-services/1:';
 
@@ -81,7 +82,8 @@ async function loadWsh() {
     if (typeof page.webmcpTools !== 'function' || typeof page.exposeObjects !== 'function' || typeof duplex.serveWshOverDuplex !== 'function') {
       throw new Error('this @johnhenry/wsh is older than 0.50');
     }
-    wshModule = { createMemoryHost: memory.createMemoryHost, webmcpTools: page.webmcpTools, exposeObjects: page.exposeObjects, serveWshOverDuplex: duplex.serveWshOverDuplex };
+    // `watchPairing` (wsh 0.54.1, with `accept(socket, { waitForPeer })`) is null for an older wsh: see wsh-pairing.mjs.
+    wshModule = { createMemoryHost: memory.createMemoryHost, webmcpTools: page.webmcpTools, exposeObjects: page.exposeObjects, serveWshOverDuplex: duplex.serveWshOverDuplex, watchPairing: await loadWatchPairing() };
     return wshModule;
   } catch (cause) {
     throw new WshLinkError('WSH_UNAVAILABLE', `wsh services need @johnhenry/wsh 0.50 or later: ${cause?.message ?? cause}`, { cause });
@@ -95,10 +97,11 @@ const realmTimers = () => ({
   clearInterval: (id) => globalThis.clearInterval(id),
 });
 
-function pipeUrl(relay, id, role) {
+function pipeUrl(relay, id, role, notifyPaired = false) {
   const u = new URL(relay);
   u.pathname = `${u.pathname.replace(/\/+$/, '')}/r/${id}`;
-  u.search = role === 'host' ? '?role=host' : '';
+  // `paired=1` asks a relay to tell a waiting host half when its client arrives (wsh 0.54.1); a relay that predates it ignores it.
+  u.search = role === 'host' ? (notifyPaired ? '?role=host&paired=1' : '?role=host') : '';
   return u.toString();
 }
 
@@ -396,9 +399,11 @@ export class WshServices {
       sealSession: 'require',
       requireChannelBinding: true,
       // wsh counts its login deadline (60 s by default) from the moment the host accepts a socket. A host half at a pipe relay is accepted
-      // when it reaches the relay, long before a client pairs with it, so the default would close every idle half each minute: no deadline
-      // there. A mesh channel is served from the moment its peer opens it, and keeps wsh's default.
-      ...(slot.peer === undefined ? { loginTimeoutMs: 0 } : {}),
+      // when it reaches the relay, long before a client pairs with it: from wsh 0.54.1 each such half is accepted with `waitForPeer`
+      // (below), so the deadline runs from the client's arrival. With an older wsh there is no such option (0.54.0 would close every idle
+      // half each minute), so those halves carry no deadline. A mesh channel is served from the moment its peer opens it and keeps
+      // wsh's default.
+      ...(slot.peer === undefined && !this.#wsh.watchPairing ? { loginTimeoutMs: 0 } : {}),
       auth: (who) => this.#login(who, slot),
       onSealed: () => this.#sealed(slot),
       // Only these rpc channels exist on this host: no exec, pty, fs, targets, endpoints or gateway.
@@ -554,7 +559,7 @@ export class WshServices {
   // -- Listening: waiting host halves ---------------------------------------------
 
   #openSocket(role, id, relay) {
-    const url = pipeUrl(relay, id, role);
+    const url = pipeUrl(relay, id, role, role === 'host' && Boolean(this.#wsh?.watchPairing));
     if (this.#socketFactory) return this.#socketFactory(url, { role, id, relay });
     if (!this.#WebSocketCtor) throw new WshLinkError('WSH_UNAVAILABLE', 'no WebSocket constructor: pass { WebSocket } or run where one is global');
     return new this.#WebSocketCtor(url);
@@ -597,7 +602,9 @@ export class WshServices {
           if (!slot.paired) this.#retrySlots(relay);
         });
         slot.host = this.#makeHost(slot);
-        void slot.host.accept(ws).catch((e) => this.#log(`accept failed: ${e?.message ?? e}`));
+        // The client is not here yet: wsh starts the login clock when it arrives (the relay's paired signal, else its first byte).
+        const half = waitingHalf(ws, this.#wsh.watchPairing);
+        void slot.host.accept(half.socket, half.options).catch((e) => this.#log(`accept failed: ${e?.message ?? e}`));
       }
     } catch (e) {
       this.#log(`could not open a host half at ${relay}: ${e?.message ?? e}`);

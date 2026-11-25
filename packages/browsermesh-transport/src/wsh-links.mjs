@@ -25,6 +25,7 @@
 
 import { encodeBase64url, podIdToFingerprint, fingerprintToPodId, podIdFromRawKey } from '@johnhenry/browsermesh-primitives';
 import { encodeFrame, FrameDecoder, WshFrameError, DEFAULT_MAX_FRAME_BYTES } from './wsh-frames.mjs';
+import { loadWatchPairing, waitingHalf } from './wsh-pairing.mjs';
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -128,10 +129,11 @@ async function loadWsh(load) {
 const loadClient = () => (clientModule ??= loadWsh(() => import('@johnhenry/wsh')));
 const loadHost = () => (hostModule ??= loadWsh(() => import('@johnhenry/wsh/memory')));
 
-function pipeUrl(relay, id, role) {
+function pipeUrl(relay, id, role, notifyPaired = false) {
   const u = new URL(relay);
   u.pathname = `${u.pathname.replace(/\/+$/, '')}/r/${id}`;
-  u.search = role === 'host' ? '?role=host' : '';
+  // `paired=1` asks a relay to tell a waiting host half when its peer arrives (wsh 0.54.1); a relay that predates it ignores it.
+  u.search = role === 'host' ? (notifyPaired ? '?role=host&paired=1' : '?role=host') : '';
   return u.toString();
 }
 
@@ -209,6 +211,8 @@ export class WshPeerLinks {
   /** @type {Map<string, { attempts: number, timer: any }>} */
   #wanted = new Map();
   #host = null;
+  /** wsh's `watchPairing`, or null when the installed wsh predates `accept(socket, { waitForPeer })` (0.54.1). */
+  #watchPairing = null;
   #listening = false;
   #closed = false;
   /** @type {Map<string, Set<object>>} relay -> waiting host halves */
@@ -329,6 +333,7 @@ export class WshPeerLinks {
     const cred = await this.#credReady;
     this.#ownRid = await rendezvousId(cred.podId);
     const { createMemoryHost } = await loadHost();
+    this.#watchPairing = await loadWatchPairing();
     if (this.#closed) return;
     this.#host = createMemoryHost({
       hostKey: cred.keyPair ?? cred.signer,
@@ -336,8 +341,10 @@ export class WshPeerLinks {
       sealSession: 'require',
       requireChannelBinding: true,
       // wsh counts its login deadline (60 s by default) from the moment the host accepts a socket, and a host half is accepted when it
-      // reaches the relay, long before an operator pairs with it: the default would close every idle half each minute.
-      loginTimeoutMs: 0,
+      // reaches the relay, long before an operator pairs with it. From wsh 0.54.1 each half is accepted with `waitForPeer` (below), so
+      // the deadline runs from the peer's arrival. With an older wsh there is no such option: 0.54.0 would close every idle half each
+      // minute, so there the hosts carry no deadline at all (0.53 and earlier have none and ignore this).
+      ...(this.#watchPairing ? {} : { loginTimeoutMs: 0 }),
       auth: (who) => this.#authorizePeer(who),
       endpoints: { [ENDPOINT]: (duplex, who) => this.#serve(duplex, who) },
       onRefused: (r) => this.#onWshRefused(r),
@@ -485,7 +492,7 @@ export class WshPeerLinks {
   // -- Listening: waiting host halves -------------------------------------------
 
   #openSocket(role, id, relay) {
-    const url = pipeUrl(relay, id, role);
+    const url = pipeUrl(relay, id, role, role === 'host' && this.#watchPairing !== null);
     if (this.#socketFactory) return this.#socketFactory(url, { role, id, relay });
     if (!this.#WebSocketCtor) throw new WshLinkError('WSH_UNAVAILABLE', 'no WebSocket constructor: pass { WebSocket } or run where one is global');
     return new this.#WebSocketCtor(url);
@@ -527,7 +534,9 @@ export class WshPeerLinks {
           set.delete(slot);
           this.#retrySlots(relay);
         });
-        void this.#host.accept(ws).catch((e) => this.#onLog(`accept failed: ${e?.message ?? e}`));
+        // The peer is not here yet: wsh starts the login clock when it arrives (the relay's paired signal, else its first byte).
+        const half = waitingHalf(ws, this.#watchPairing);
+        void this.#host.accept(half.socket, half.options).catch((e) => this.#onLog(`accept failed: ${e?.message ?? e}`));
       }
     } catch (e) {
       this.#onLog(`could not open a host half at ${relay}: ${e?.message ?? e}`);
