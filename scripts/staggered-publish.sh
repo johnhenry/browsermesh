@@ -141,6 +141,7 @@ publish_batch "Runtime & Embed" \
   "@johnhenry/browsermesh-objects" \
   "@johnhenry/browsermesh-mcp" \
   "@johnhenry/browsermesh-ingress" \
+  "@johnhenry/browsermesh-egress" \
   "@johnhenry/browsermesh-embed"
 
 echo ""

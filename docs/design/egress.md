@@ -1,7 +1,27 @@
 # Egress: a pod that lends its network access to peers
 
-Status: research and design for [#379](https://github.com/johnhenry/browsermesh/issues/379). Nothing here is built, no
-package is created, and nothing existing changes. Written 2026-11-25 against `main` and `@johnhenry/wsh` 0.54.1.
+Status: research and design for [#379](https://github.com/johnhenry/browsermesh/issues/379), written 2026-11-25 against
+`main` and `@johnhenry/wsh` 0.54.1. **Option (ii), stage 1 is built** as `@johnhenry/browsermesh-egress` (TCP connect and
+A lookup, grants, destination sets, wide mode, budgets, audit, metering, revocation, no chaining, a consumer with a netway
+backend); what the package does is in its README and in [security.md](../security.md#egress). The rest of this page is the
+design as it was written and is kept as it was, except where the owner's decisions replaced it:
+
+- The package is `@johnhenry/browsermesh-egress`.
+- A wide "any public destination" mode exists, only behind the provider operator's explicit acknowledgement
+  (`wide: { acknowledge: 'any-public-address' }`), modelled on the relaying pod's wildcard rule; private, loopback,
+  link-local, unique-local, carrier-NAT and metadata space stay refused in it, and only the operator's own `allowPrivate`
+  admits private space, never a peer's grant (section 4.2 and 4.3 as built).
+- The provider's address check is wsh's own, `@johnhenry/wsh/address-guard` (wsh 0.55.0): section 3.2's options (A) and (B)
+  are replaced by it, behind a `dial` / `resolve` seam (`nodeDialer` on `./node`).
+- The first version includes TCP, DNS, the fetch form and UDP; the core (this stage) is built first, and the fetch form,
+  UDP, the CLI and the browser spec follow in the same package. Not built yet: they are listed at the end of the package
+  README.
+- Choices made while building, where the note left room: a name whose answers mix a refused address with a permitted one is
+  refused whole (`refuseMixed`); the blocked ports (25, 465, 587) are absolute for every grant and wide mode keeps them
+  (the note let an exact-port grant override them); a `*.suffix` in a set needs at least two labels after the star; sets
+  cannot hold a bare wildcard; IPv6 literals are not accepted in this version; no `admit` hook.
+- Section 6.4's item 6 is done: `docs/capability-notation.md` and `docs/wsh-and-browsermesh.md` say that gateway rights are
+  never granted from mesh trust and that the `egress:*` scopes are the narrow, operator-written exception.
 
 The mirror of [`@johnhenry/browsermesh-ingress`](http-ingress.md). A peer that cannot reach the open network (a browser tab:
 no raw sockets, bound by CORS) borrows the access of a peer that can (a pod in Node, or anywhere with sockets).

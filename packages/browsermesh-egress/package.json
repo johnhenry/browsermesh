@@ -1,0 +1,70 @@
+{
+  "name": "@johnhenry/browsermesh-egress",
+  "version": "0.1.0",
+  "description": "A pod lends its network access to peers that hold a grant: TCP connections and name lookups to destinations the operator allows, over a protocol channel, with budgets, audit and revocation",
+  "type": "module",
+  "main": "./src/index.mjs",
+  "types": "./src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "default": "./src/index.mjs"
+    },
+    "./node": {
+      "types": "./src/node.d.ts",
+      "default": "./src/node.mjs"
+    }
+  },
+  "files": [
+    "src",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "test:real-peer": "node --test --test-concurrency=1 test/real-peer/*.test.mjs"
+  },
+  "keywords": [
+    "egress",
+    "tcp",
+    "dns",
+    "proxy",
+    "gateway",
+    "mesh",
+    "webrtc",
+    "browser"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/johnhenry/browsermesh",
+    "directory": "packages/browsermesh-egress"
+  },
+  "homepage": "https://opensource.johnhenry.me/browsermesh/",
+  "engines": {
+    "node": ">=26.0.0"
+  },
+  "peerDependencies": {
+    "@johnhenry/browsermesh-apps": ">=0.21.0 <1.0.0",
+    "@johnhenry/browsermesh-netway": ">=0.3.0 <1.0.0",
+    "@johnhenry/wsh": ">=0.55.0 <1.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@johnhenry/wsh": {
+      "optional": true
+    }
+  },
+  "optionalDependencies": {
+    "@johnhenry/browsermesh-core": "^0.13.0",
+    "@johnhenry/browsermesh-discovery": "^0.5.0",
+    "@johnhenry/browsermesh-pod": "^0.5.0",
+    "@johnhenry/browsermesh-primitives": "^0.7.0",
+    "@johnhenry/browsermesh-transport": "^0.12.0",
+    "node-datachannel": "^0.33.4"
+  },
+  "devDependencies": {
+    "@johnhenry/browsermesh-apps": "^0.23.0",
+    "@johnhenry/browsermesh-netway": "^0.3.0",
+    "@johnhenry/wsh": "^0.55.0"
+  }
+}

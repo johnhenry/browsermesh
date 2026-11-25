@@ -14,7 +14,8 @@
   the API, the wire (protocol `http` v1), pinning, the defaults, and what is not built.
 - [`design/egress.md`](design/egress.md): research and design for an egress package, the mirror of ingress (a pod that lends
   its network access to peers under per-destination grants): what exists today, the options, the safety requirements, a
-  staged plan. Design only; nothing is built.
+  staged plan. The core (TCP and name lookup) is built as `@johnhenry/browsermesh-egress`; the page says which decisions
+  replaced the note.
 - [`design/routed-confidentiality.md`](design/routed-confidentiality.md): sealing of messages routed through other peers.
 - [`design/stealth-threshold.md`](design/stealth-threshold.md): threshold key sharing for StealthAgent (spec only).
 - [`hosted-pods.md`](hosted-pods.md), [`design/hosted-pods-firecracker.md`](design/hosted-pods-firecracker.md),

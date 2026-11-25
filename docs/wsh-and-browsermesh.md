@@ -8,11 +8,12 @@ the version built and tested against. wsh's own view of the same boundary is
 [`spec/wsh-and-browsermesh.md`](https://github.com/johnhenry/wsh/blob/main/spec/wsh-and-browsermesh.md) in the wsh
 repository (written against wsh 0.52.0); the two pages describe one boundary and should agree.
 
-**Versions.** The repository installs `@johnhenry/wsh` `^0.54.1` as a dev dependency (the root and `browsermesh-mcp`,
-`browsermesh-netway`, `browsermesh-objects`, `browsermesh-primitives` and `browsermesh-transport`), so what its tests ran
-against is wsh **0.54.1**. The peer ranges are `>=0.49.0 <1.0.0` for `browsermesh-objects` and `browsermesh-mcp`, and an
-optional `*` for `browsermesh-transport` (its floors are listed under "Not verified"); `browsermesh-netway` and
-`browsermesh-primitives` have no wsh dependency beyond the dev one.
+**Versions.** The repository installs `@johnhenry/wsh` `^0.55.0` as a dev dependency (the root and `browsermesh-mcp`,
+`browsermesh-netway`, `browsermesh-objects`, `browsermesh-primitives`, `browsermesh-transport` and `browsermesh-egress`), so
+what its tests ran against is wsh **0.55.0**. The peer ranges are `>=0.49.0 <1.0.0` for `browsermesh-objects` and
+`browsermesh-mcp`, an optional `*` for `browsermesh-transport` (its floors are listed under "Not verified") and an optional
+`>=0.55.0 <1.0.0` for `browsermesh-egress` (its provider half takes wsh's address guard, `@johnhenry/wsh/address-guard`,
+which first shipped in 0.55.0); `browsermesh-netway` and `browsermesh-primitives` have no wsh dependency beyond the dev one.
 
 ## What each is
 
@@ -52,6 +53,7 @@ The strings for the shared forms coincide. The full table, with where the two di
 | `rpc:NAME` | `protocol:NAME:open` | `checkAccess(peer, 'protocol:NAME', 'open')` |
 | `expires="..."` | `grantCapabilities(peer, scopes, { expiresAt })` | refused at the instant, both |
 | `exec`, `pty`, `fs:*`, `gateway:*`, `unix:*`, `endpoint:*`, `target:*`, `relay` | none | machine rights are not granted from mesh trust |
+| none | `egress:tcp:HOST:PORT:connect`, `egress:dns:NAME:resolve`, `egress:set:NAME:connect` | the egress package's own grants for an operator-lent network, not a translation of `gateway:*` ([capability-notation.md](capability-notation.md#egress-scopes)) |
 
 ## Identity
 
@@ -106,7 +108,12 @@ The grants are the same scopes as above. Design: [`design/wsh-services-on-a-pod.
   it (`rendezvousId`), nowhere else.
 * **exec, pty, files, the gateway and hosted pods.** These are machine rights. Mesh trust, a mesh grant or being reachable on
   the mesh never gives them, and no code derives one from the other. A machine's own `authorized_keys` says who gets
-  them.
+  them. One narrow thing is different, and is stated here so the rule above is not read wider than it is: the egress package
+  (`@johnhenry/browsermesh-egress`) lets a pod lend **its own** outbound network to a peer that holds an `egress:*` grant in
+  that pod's registry. That is a scope family of its own, written by the operator for named destinations (or, with an
+  explicit acknowledgement, any public one), checked against wsh's address guard on the provider, and it is not a wsh
+  `gateway:` capability, does not run a wsh gateway for the peer and gives the peer no `exec`, files or endpoint. Mesh
+  trust still never produces such a grant.
 * **Discovery and sync.** Finding pods and merging their state stay in the mesh; nothing of them is pushed into wsh.
 
 ## Not verified
