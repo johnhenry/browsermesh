@@ -6,3 +6,4 @@ export * from './swarm.mjs';
 export * from './sw-routing.mjs';
 export * from './stealth.mjs';
 export * from './stealth-threshold.mjs';
+export { rsEncode, rsDecode, ParityError, MAX_RS_SHARDS } from './shard-parity.mjs';

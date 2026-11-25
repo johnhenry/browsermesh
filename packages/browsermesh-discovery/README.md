@@ -28,6 +28,7 @@ Extracted from a private monorepo (previously `packages/browsermesh-discovery`),
 | swarm | `SwarmCoordinator`, `LeaderElection`, `TaskDistributor`, `SwimMembership` |
 | sw-routing | `MeshFetchRouter`, `parseMeshRequest` |
 | stealth | `StealthAgent`, `ShardDistributor`, `ShardCollector` |
+| shard parity (opt-in, format 3) | `rsEncode`, `rsDecode`, `ParityError`, `MAX_RS_SHARDS`, `stealthShardChecksum` |
 | stealth threshold (opt-in) | `dealStealthShares`, `reconstructStealthSecret`, `verifyStealthShare`, `thresholdEpochKeys`, `stealthEpochKeyId`, `stealthShareSigningBytes` |
 
 ## Install
@@ -144,8 +145,21 @@ name is refused and counted; shares of different epochs are never mixed. When a 
 the rest, re-seal the latest state and pass `minEpoch`. A compromised dealer, `t` colluding holders, and what a leaving
 member already read are NOT protected, and shares are signed, not encrypted: see
 [docs/design/stealth-threshold.md](https://github.com/johnhenry/browsermesh/blob/main/docs/design/stealth-threshold.md).
-Also not done: a real checksum and multi-loss parity. The plain
-`hide()` / `reconstitute()` below are unchanged and plaintext:
+
+**Shard format 3: a SHA-256 checksum and Reed-Solomon parity** (opt-in, `shardFormat: 3` or `[2, 3]`;
+[docs/design/discovery-records.md](https://github.com/johnhenry/browsermesh/blob/main/docs/design/discovery-records.md)).
+Format 3 shards are base64url byte slices of the UTF-8 state with `total - threshold` Reed-Solomon parity shards
+(GF(2^8), polynomial 0x11d, Cauchy matrix; `parity: 'xor'` keeps the old single-loss parity), so **any `threshold` of
+`totalShards` valid shards rebuild the state** (with the defaults 3 of 5, any two lost, data shards included). The
+checksum is the whole SHA-256 over the shard's bytes, index, threshold, total, parity code and state length: on the
+unsigned path a real corruption check (not authentication: it is unkeyed), on the signed path a cheap check before the
+signature that tells damage (`stats.shardCorrupt`) from forgery (`shardBadSignature`). Parity protects against lost
+shards, not forged ones, and is unrelated to the Shamir key shares above (those split the secret, this splits the
+state). Format 3 records live under **different DHT keys** (`stealth:<agentId>:shard3:<i>`, or the `lookup/3` label), so an
+older peer never reads one and cannot mis-verify it: `shardFormat: [2, 3]` writes both so older readers keep working,
+`shardFormat: 3` alone is for when every reader is upgraded; readers read both by default (`readFormats`). The
+synchronous `hide()` stays format 2 (it throws `async-required` if `shardFormat` includes 3; use `hideAsync()`).
+The plain `hide()` / `reconstitute()` below are unchanged and plaintext:
 
 `StealthAgent.hide(stateString)` / `reconstitute()` split a state string into
 `threshold` plaintext data shards plus XOR parity shards and store them in the

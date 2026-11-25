@@ -169,8 +169,10 @@ The state is encoded to UTF-8 (a string with a lone surrogate is refused, `not-w
 `data` is base64url of the bytes (JSON-clean; 4/3 of the byte size). Record, signed and anonymous:
 `{ v: 3, i, data, checksum, code, len, seq, sig }`; plain adds `shardId, agentId, threshold, total`. `code` is `"rs"` (default
 in format 3) or `"xor"` (the old parity under the new checksum, for item 1 alone). The signed text is
-`browsermesh-stealth-shard/3`, agent, key, index, seq, threshold, total, `code`, `len`, `checksum`, nonce. Signing `code` and `len`
-means a record cannot be re-labelled to make the decoder produce a different state.
+`browsermesh-stealth-shard/3`, agent, key, index, seq, threshold, total, `checksum`, nonce. `code` and `len` are not listed
+separately: the checksum already commits to them (and to the bytes, index, threshold and total), so signing the checksum signs
+them, and a record re-labelled to make the decoder produce a different state fails the checksum (damage) or, with a recomputed
+(public, unkeyed) checksum, the signature. The tests pin both.
 
 Overhead: `(k + m) / k` times the state, times 4/3 for base64url. The defaults `3 of 5` give 1.67x (2.2x encoded) and survive
 **two** lost shards of any kind, where XOR survived one data shard. Interop: as item 1 (same format-3 namespace; a reader decodes
@@ -360,4 +362,4 @@ In the style of `docs/security.md`: the scenario, and what the code does. Nothin
    that signs its stores for the new namespaces needs format 3, so that last step builds on item 1+2.
 3. **Item 4**: independent of all of them (a new module over the existing threshold module).
 
-Status (updated as each lands): items 1 and 2: designed; item 3: designed; item 4: designed.
+Status (updated as each lands): items 1 and 2: **built** (shard format 3, opt-in); item 3: designed; item 4: designed.

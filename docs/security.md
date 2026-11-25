@@ -957,7 +957,7 @@ Package: `browsermesh-discovery`.
   messages either.
 - **StealthAgent.** The plain `hide()` / `reconstitute()` path is **not
   encrypted and not anonymous**: `threshold` plaintext shards plus XOR parity,
-  a checksum that detects corruption but not tampering (defaults 3 of 5). With
+  a checksum that detects corruption but not tampering (defaults 3 of 5; format 3, below, has a real one). With
   `key` (`deriveStealthKey`: HKDF-SHA-256 then AES-256-GCM, agent id as AAD) or a
   `keyring` (key ids with rotation, sequence and issue-time replay refusal,
   optional `maxAgeMs` default unset, seal budget 2^32) the shards are encrypted
@@ -991,7 +991,17 @@ Package: `browsermesh-discovery`.
   - not protected: the content of `hideSigned()` shards (plaintext slices),
     that something is stored, availability against overwrites, and a group-key
     holder reading or forging encrypted state (the sender is a label, not a
-    signature, on that path). Multi-loss parity is not done.
+    signature, on that path).
+  - **shard format 3** (opt-in, `shardFormat: 3` or `[2, 3]`; `design/discovery-records.md`): a
+    whole-SHA-256 checksum over the shard's bytes, place, parity code and state length
+    (unsigned: a corruption check, not authentication; signed: checked before the signature, so
+    damage is counted `shardCorrupt` and forgery `shardBadSignature`) and Reed-Solomon parity
+    (GF(2^8), 0x11d, Cauchy) so any `threshold` of `totalShards` shards rebuild the state.
+    Parity protects against lost shards, not forged ones, and is not the Shamir key sharing
+    (that protects who can read). Records sit under different DHT keys, so an older peer never
+    reads one; `[2, 3]` writes both. Not protected: a stale format-2 set can still be read back
+    unless readers pass `readFormats: [3]`; the parity code is hand-written (field vectors and
+    a second implementation in the tests, no audit); shard size is 4/3 of the bytes.
   - threshold sharing of the group secret (opt-in, `stealth-threshold.mjs`,
     `design/stealth-threshold.md`): the dealer (the owner pod) sees the secret; fewer
     than `t` shares reveal nothing; shares are signed (agent, group, epoch, index,

@@ -118,6 +118,7 @@ them.
 
 ## Also not done (smaller, independent, left)
 
-- A real checksum in place of the char-code sum, and Reed-Solomon parity: both change the shard record that older peers
-  read and verify, so they need version negotiation of their own.
-- Ownership of DHT entries is a DHT concern.
+- A real checksum in place of the char-code sum, and Reed-Solomon parity: built as shard format 3, negotiated by DHT key
+  namespace (`discovery-records.md`, items 1 and 2).
+- Ownership of DHT entries is a DHT concern (`discovery-records.md`, item 3).
+- The on-demand share release round (`discovery-records.md`, item 4).
