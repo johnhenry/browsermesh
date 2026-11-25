@@ -36,6 +36,19 @@ Placement logic across lanes (`planPlacement()`, `createHostPool()`) is in
 and the `worker_threads` / permission-model runtimes (the honest in-process
 stand-ins for the isolate lane) are in `packages/browsermesh-pod`.
 
+### State of the wave 3 follow-ups ([#221](https://github.com/johnhenry/browsermesh/issues/221)), 2026-11-24
+
+| Item | State |
+| --- | --- |
+| Firecracker on a real host, full lifecycle | Needs a Linux/KVM host (none here; `/dev/kvm` is absent in Docker Desktop's VM, checked). Everything short of KVM now runs on Linux: the network policy against a real kernel, the guest's exec responder as a process, the whole spike suite. One checklist for the rest: [`runbook-firecracker-kvm.md`](runbook-firecracker-kvm.md). |
+| `VmPod.restore()` bugs | Fixed in #243 against the fake API; confirmation against a real VMM is part of the runbook. |
+| Durable Object hibernation topology | Owner decision; options in [`design/hosted-pods-open-decisions.md`](design/hosted-pods-open-decisions.md) section 1. |
+| End to end across a relay | Done for the sealed path: `meshctl --wsh-relay` reaches a host through a pipe relay over a sealed, key-authenticated wsh link, with no signalling server or WebRTC, tested against the in-process pipe relay and a real pod-host service. The unsealed relay dialect is deliberately not used for pod-host traffic. Not run against a deployed relay. |
+| Isolate hosts and the compute scorer | Done in #277. |
+| Publish meshctl | Owner decision; section 2 of the decisions note. The package now starts without a repository checkout (#361). |
+| MV3 extension in a real browser | Loaded in real Chromium: it does not run (its worker imports files outside the extension and dies at once). Owner decision (#272); section 3 of the decisions note. |
+| Raw `onIncomingData()` subscribers; `WebSocketTransport` and Blob frames | Done (#208, #212, #243). |
+
 ## Motivation
 
 `Pod` (`@johnhenry/browsermesh-pod`) is defined as "any execution context," but
