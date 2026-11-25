@@ -1010,6 +1010,22 @@ Package: `browsermesh-discovery`.
     secrets; epochs are never mixed. Not protected: a compromised dealer, `t`
     colluding holders, share transport (signed, not encrypted), and what a leaving
     member already read (a new epoch re-seals the latest state only).
+  - **on-demand share release** (opt-in, `stealth-release.mjs`; `design/discovery-records.md`, item 4):
+    a member asks the holders for their shares when it needs the secret, instead of only holding
+    shares dealt up front. A request is Ed25519-signed by the member, bound to one holder, a time
+    and a nonce, and names the agent only by a hash tag; a holder checks in order size and
+    version, addressee and freshness (60 s), a rate limit per requester, the signature, the replay
+    cache, **membership against its roster** (a non-member gets the same refusal whether or not it
+    holds that agent), then the tag, the epoch floor (`minEpoch`, retired epochs) and an optional
+    approval hook, and answers with its signed share sealed (X25519 ECDH, HKDF, AES-256-GCM) to the
+    requester and signed by the holder, or a named refusal (`not-a-member`, `replayed`, `stale-request`,
+    `rate-limited`, `stale-epoch`, `no-share`, `not-approved`, ...). The reader verifies each share
+    against the dealer, `minEpoch` and `holders`, stops at `t`, and reports released, refused and
+    unreachable holders; an offline holder does not lower `t`. Logged: outcome, reason, requester pod id
+    and 8 characters of the tag, never a share or a key. Not defended: a member (membership is the
+    proof; `approve` is where more is added), a holder whose roster is wrong, guessable agent and group
+    ids (the tag only keeps names off the wire), colluding holders, a holder that is offline when
+    needed.
 - **Verified.** Unit, with in-process nodes and a no-op send function. Never over
   a network or in a browser.
 

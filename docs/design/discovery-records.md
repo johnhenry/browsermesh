@@ -294,7 +294,7 @@ a protocol channel named `stealth:<agentId>:share:release` (the reserved name; t
    a holder serves
 7. the share's `epoch >= max(request.minEpoch, holder.minEpoch)` (`stale-epoch`) and the holder's own name is in the share
    (`unknown-holder`): the same rules as `verifyStealthShare`
-8. an optional `approve(requesterPodId, { agentId, epoch })` callback (consent, quorum, a human); `refused` if it says no
+8. an optional `approve({ requester, agentId, groupId, epoch })` callback (consent, quorum, a human); `not-approved` unless it returns `true`
 9. release (sealed); log the outcome
 
 A holder never logs a share, a key or the tag in full: it logs `{ outcome, reason, requester podId, first 8 hex of the tag, epoch }`
@@ -362,4 +362,4 @@ In the style of `docs/security.md`: the scenario, and what the code does. Nothin
    that signs its stores for the new namespaces needs format 3, so that last step builds on item 1+2.
 3. **Item 4**: independent of all of them (a new module over the existing threshold module).
 
-Status (updated as each lands): items 1 and 2: **built** (shard format 3, opt-in); item 3: designed; item 4: designed.
+Status (updated as each lands): items 1 and 2: **built** (shard format 3, opt-in); item 3: designed; item 4: **built** (`stealth-release.mjs`, opt-in).

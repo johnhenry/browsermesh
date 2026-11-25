@@ -29,6 +29,7 @@ Extracted from a private monorepo (previously `packages/browsermesh-discovery`),
 | sw-routing | `MeshFetchRouter`, `parseMeshRequest` |
 | stealth | `StealthAgent`, `ShardDistributor`, `ShardCollector` |
 | shard parity (opt-in, format 3) | `rsEncode`, `rsDecode`, `ParityError`, `MAX_RS_SHARDS`, `stealthShardChecksum` |
+| share release (opt-in) | `createShareHolder`, `requestShareRelease`, `createReleaseRequest`, `createReleaseResponse`, `stealthReleaseChannel`, `stealthReleaseTag`, `RELEASE_REFUSALS` |
 | stealth threshold (opt-in) | `dealStealthShares`, `reconstructStealthSecret`, `verifyStealthShare`, `thresholdEpochKeys`, `stealthEpochKeyId`, `stealthShareSigningBytes` |
 
 ## Install
@@ -145,6 +146,28 @@ name is refused and counted; shares of different epochs are never mixed. When a 
 the rest, re-seal the latest state and pass `minEpoch`. A compromised dealer, `t` colluding holders, and what a leaving
 member already read are NOT protected, and shares are signed, not encrypted: see
 [docs/design/stealth-threshold.md](https://github.com/johnhenry/browsermesh/blob/main/docs/design/stealth-threshold.md).
+
+**On-demand share release** (opt-in; [design note](https://github.com/johnhenry/browsermesh/blob/main/docs/design/discovery-records.md), item 4).
+Instead of only holding shares dealt up front, a group member can ask the holders when it needs the secret. Each holder checks
+who is asking before it says anything about what it holds, and answers with its signed share sealed to the requester:
+
+```js
+// holder side: one per share holder, over the protocol channel stealthReleaseChannel(agentId) = `stealth:<agentId>:share:release`
+const holder = createShareHolder({ name: myPodId, identity, members: memberPublicKeys, trustedDealers: [dealerPublicKey], approve, log });
+await holder.addShare(myDealtShare);
+channel.onMessage((from, request) => channel.reply(from, holder.handle(from, request)));
+// reader side: a member
+const { secret, epoch, released, refused, unreachable } = await requestShareRelease({
+  identity, agentId, groupId, trustedDealers: [dealerPublicKey], minEpoch, holders: currentHolderNames,
+  peers: holders.map((h) => ({ holder: h.name, publicKey: h.publicKey, send: (request) => channel.request(h.podId, request) })),
+});
+```
+
+The request is signed by the member, bound to one holder, a time and a nonce, and names the agent only by a hash. A holder
+refuses by name (`not-a-member`, `replayed`, `stale-request`, `rate-limited`, `stale-epoch`, `no-share`, `not-approved`, ...)
+and a non-member gets the same answer whether or not the holder holds that agent. With fewer than `t` valid shares the reader
+throws `below-threshold` with who was refused or unreachable; an older peer that does not run the channel is simply
+unreachable. `holder.retire({ agentId, groupId, belowEpoch })` drops old shares and `holder.setMembers(keys)` follows the roster.
 
 **Shard format 3: a SHA-256 checksum and Reed-Solomon parity** (opt-in, `shardFormat: 3` or `[2, 3]`;
 [docs/design/discovery-records.md](https://github.com/johnhenry/browsermesh/blob/main/docs/design/discovery-records.md)).
