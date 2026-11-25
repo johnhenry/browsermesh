@@ -136,6 +136,29 @@ key, which must hash to `remotePodId`, the pod id claimed in signalling.
   frame sees one extra JSON message of type `mesh:bind` on the control channel.
   `createMeshNode()` does not enable this yet.
 
+### The certificate in use
+
+With `identity`, once the control channel is open the connection also compares
+the certificate it actually uses with the fingerprint the peer's own session
+description named (the one the proof covers): `remoteCertificateFingerprints(pc,
+algorithms)` reads it from `RTCDtlsTransport.getRemoteCertificates()` or, where
+that is missing, from the `certificate` entry of `getStats()`, and
+`certificateMatches(expected, seen)` compares. A different certificate closes
+the connection (`bindingFailure` is `certificate-mismatch`) before it is
+reported bound. `certificateCheck` says what happened: `'matched'`,
+`'mismatch'`, `'unavailable'` (this browser exposes no certificate, so nothing
+was compared; the connection still works and relies on the browser's own DTLS
+check), or `null` (off, no identity, or not run yet). `checkCertificate: false`
+turns the check off; `requireCertificateCheck: true` also refuses a connection
+whose certificate cannot be read (off by default, since it would refuse every
+connection in a browser that does not expose it). The check sends nothing, so
+an older peer is unaffected. Chromium exposes the certificate through
+`getStats()` (checked in the browser tests: `'matched'`); `node-datachannel`
+returns an empty buffer and no certificate stats, so it reports
+`'unavailable'`; Firefox and WebKit have not been checked here and are expected
+to report `'unavailable'` or `'matched'` (their CI legs report, they do not
+gate). An empty certificate buffer is treated as "not exposed", never compared.
+
 This is verified here with an in-memory duplex and fixed vectors; it has not
 been run over a real `RTCPeerConnection` in a browser (see issue #270).
 

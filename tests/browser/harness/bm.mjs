@@ -274,7 +274,7 @@ const bm = {
     st.signal({ kind: 'offer', description: offer, renegotiation: true })
   },
   rtcOpen() { return !!bm.rtc?.conn?.isOpen },
-  rtcStatus() { const c = bm.rtc.conn; return { state: c.state, bound: c.bound, failure: c.bindingFailure } },
+  rtcStatus() { const c = bm.rtc.conn; return { state: c.state, bound: c.bound, failure: c.bindingFailure, certificate: c.certificateCheck } },
 
   /**
    * An attacker that holds the signalling server: the test double hands it every offer, answer and ICE
