@@ -84,6 +84,7 @@ export { DEFAULT_TRUST_THRESHOLD, decidePlacement, resolveRequesterTrust } from 
 export { decideRestart, restartDelayMs, policyWantsRestart } from './restart-policy.mjs';
 export * from './peer-payments.mjs';
 export * from './peer-registry.mjs';
+export * from './peer-join-gate.mjs';
 export * from './peer-routing.mjs';
 export * from './peer-services.mjs';
 export * from './peer-terminal.mjs';
