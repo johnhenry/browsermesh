@@ -9,10 +9,12 @@ import { attachService, createMeshProtocolService, createMeshRpcService, PeerReg
 export async function createNodes(count) {
   const nodes = new Map()
   for (let i = 0; i < count; i++) {
-    const { podId } = await PodIdentity.generate()
+    const identity = await PodIdentity.generate()
+    const { podId } = identity
     const listeners = new Set()
     const node = {
       podId,
+      identity,
       listeners,
       onIncomingData(cb) { listeners.add(cb); return () => listeners.delete(cb) },
       async sendTo(to, data) {
