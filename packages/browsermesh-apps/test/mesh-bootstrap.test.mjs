@@ -62,6 +62,7 @@ class MockRTCPeerConnection {
 globalThis.RTCPeerConnection = MockRTCPeerConnection
 
 const { createMeshNode } = await import('../src/mesh-bootstrap.mjs')
+const { MeshTransportNegotiator } = await import('@johnhenry/browsermesh-transport')
 
 // ---------------------------------------------------------------------------
 // Stub signaling transport -- MeshSignalingChannel only requires
@@ -160,5 +161,56 @@ describe('createMeshNode: TURN/ICE server plumbing (Phase 6)', () => {
       [],
       'default behaviour (no TURN/STUN supplied) must be unchanged by Phase 6',
     )
+  })
+})
+
+describe('createMeshNode: half-open inbound bounds reach the WebRTC transport factory', () => {
+  /** Build a node and return the factory it registered as the 'webrtc' adapter (the negotiator has no getter for it). */
+  async function factoryFor(options = {}) {
+    const original = MeshTransportNegotiator.prototype.registerAdapter
+    let factory = null
+    MeshTransportNegotiator.prototype.registerAdapter = function (type, f) {
+      if (type === 'webrtc') factory = f
+      return original.call(this, type, f)
+    }
+    try {
+      await createMeshNode({ label: 'half-open', signalingTransport: createStubSignalingTransport(), skipBoot: true, ...options })
+    } finally {
+      MeshTransportNegotiator.prototype.registerAdapter = original
+    }
+    assert.ok(factory, 'a webrtc factory was registered')
+    return factory
+  }
+
+  it('omitting them keeps the defaults (64 connections, 60 s)', async () => {
+    const { halfOpenInbound } = await factoryFor()
+    assert.equal(halfOpenInbound.max, 64)
+    assert.equal(halfOpenInbound.timeoutMs, 60_000)
+  })
+
+  it('passes maxHalfOpenInbound and halfOpenTimeoutMs through', async () => {
+    const { halfOpenInbound } = await factoryFor({ maxHalfOpenInbound: 5, halfOpenTimeoutMs: 1234 })
+    assert.equal(halfOpenInbound.max, 5)
+    assert.equal(halfOpenInbound.timeoutMs, 1234)
+  })
+
+  it('passes one without the other: the other keeps its default', async () => {
+    const a = (await factoryFor({ maxHalfOpenInbound: 7 })).halfOpenInbound
+    assert.equal(a.max, 7)
+    assert.equal(a.timeoutMs, 60_000)
+    const b = (await factoryFor({ halfOpenTimeoutMs: 9000 })).halfOpenInbound
+    assert.equal(b.max, 64)
+    assert.equal(b.timeoutMs, 9000)
+  })
+
+  it('Infinity turns either bound off', async () => {
+    const { halfOpenInbound } = await factoryFor({ maxHalfOpenInbound: Infinity, halfOpenTimeoutMs: Infinity })
+    assert.equal(halfOpenInbound.max, Infinity)
+    assert.equal(halfOpenInbound.timeoutMs, Infinity)
+  })
+
+  it('values the factory refuses are refused by createMeshNode', async () => {
+    await assert.rejects(factoryFor({ maxHalfOpenInbound: 0 }), TypeError)
+    await assert.rejects(factoryFor({ halfOpenTimeoutMs: -1 }), TypeError)
   })
 })

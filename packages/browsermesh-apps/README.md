@@ -213,6 +213,10 @@ arrives the oldest unfinished connection is closed to make room, so a real peer 
 never locked out by stale ones. A renegotiation offer for a connection that is
 already open takes no slot. `Infinity` turns either bound off; the live numbers
 are on the factory as `halfOpenInbound` (`max`, `timeoutMs`, `count`).
+`createMeshNode()` passes both through: `createMeshNode({ maxHalfOpenInbound: 32,
+halfOpenTimeoutMs: 30_000 })`. Leave them out and the defaults above apply;
+a value the factory refuses (not a positive integer, or not a positive number)
+throws a `TypeError` from `createMeshNode()`.
 
 By default, `createMeshNode()` gathers **no ICE servers at all** (no STUN,
 no TURN) -- host candidates only, which is enough for peers on the same LAN
