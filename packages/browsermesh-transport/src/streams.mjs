@@ -87,6 +87,7 @@ export class MeshStream {
   #createdAt;
   #closedAt = null;
   #maxSize;
+  #enforceReceive = false;
 
   // Callbacks
   #onData = null;
@@ -114,6 +115,7 @@ export class MeshStream {
     this.#maxSize = opts.maxSize ?? STREAM_DEFAULTS.maxStreamSize;
     this.#createdAt = opts.createdAt ?? Date.now();
     this.#mux = opts.multiplexer || null;
+    this.#enforceReceive = opts.enforceReceive === true;
   }
 
   // ── Accessors ────────────────────────────────────────────────────
@@ -271,11 +273,39 @@ export class MeshStream {
 
   // ── Receive path (called by multiplexer) ─────────────────────────
 
+  /**
+   * @internal The rule an inbound data frame breaks, or null. Only checked when the multiplexer enforces
+   * receive-side rules (see `maxViolations`); otherwise always null, as before.
+   * @returns {string|null}
+   */
+  _checkData(data, seq) {
+    if (!this.#enforceReceive) return null;
+    if (this.#state !== 'OPEN' && this.#state !== 'HALF_CLOSED_LOCAL') return null; // dropped in `_receiveData` as ever
+    if (!(data instanceof Uint8Array)) return 'data frame without bytes';
+    if (data.length > STREAM_DEFAULTS.maxChunkSize) return 'data frame larger than the chunk limit';
+    if (this.#recvCredits <= 0) return 'sender exceeded the credit it was granted';
+    if (this.#ordered && seq !== this.#recvSeq + 1) return 'data frame out of sequence';
+    if (this.#bytesReceived + data.length > this.#maxSize) return 'stream larger than its size limit';
+    return null;
+  }
+
+  /**
+   * @internal The rule an inbound credit grant breaks, or null (enforcing multiplexers only).
+   * @returns {string|null}
+   */
+  _checkCredits(n) {
+    if (!this.#enforceReceive) return null;
+    if (!Number.isSafeInteger(n) || n <= 0) return 'credit grant that is not a positive whole number';
+    if (this.#sendCredits + n > STREAM_DEFAULTS.maxCredits) return 'credit grant beyond the credit limit';
+    return null;
+  }
+
   /** @internal Handle inbound data frame */
   _receiveData(data, seq) {
     if (this.#state !== 'OPEN' && this.#state !== 'HALF_CLOSED_LOCAL') {
       return; // Drop data in wrong state
     }
+    if (this.#enforceReceive) this.#recvCredits--; // spent; `grantCredits()` returns it as the reader consumes
     this.#recvSeq = seq;
     this.#bytesReceived += data.length;
     this.#framesReceived++;
@@ -387,13 +417,63 @@ export class StreamMultiplexer {
   #maxConcurrent;
   #defaults;
 
+  // Receive-side rules and a budget for breaking them (off unless `maxViolations` is given)
+  #maxViolations = null;
+  #violations = 0;
+  #abused = false;
+  #onAbuse = null;
+
   // Callbacks
   #onStream = null;
   #onSend = null;
 
+  /**
+   * @param {object} [opts]
+   * @param {number} [opts.maxConcurrentStreams=16]
+   * @param {number} [opts.maxViolations] - Off unless given (a positive whole number). When given, the
+   *   rules a peer must keep on what it sends are enforced and counted: data within the credit it was
+   *   granted, in sequence (ordered streams), at most `maxChunkSize` bytes a frame and `maxStreamSize`
+   *   bytes a stream; credit grants that are positive whole numbers within the credit limit; no
+   *   duplicate opens; no opens past `maxConcurrentStreams`; no frames for streams that do not exist.
+   *   A frame that breaks a rule is dropped and counted (a refusal or an unknown-id error is still
+   *   answered as before). More than `maxViolations` of them cut the peer off: every stream is
+   *   cancelled, `onAbuse` is called once, and nothing further from it is processed or answered. A peer
+   *   that keeps the rules is never counted; a late frame or two for a stream just closed is, which is
+   *   what the budget is for. Receive-side only: nothing new is sent.
+   * @param {number} [opts.maxStreamSize] - The most one stream may carry (default 256 MiB).
+   */
   constructor(opts = {}) {
     this.#maxConcurrent = opts.maxConcurrentStreams ?? STREAM_DEFAULTS.maxConcurrentStreams;
     this.#defaults = { ...STREAM_DEFAULTS, ...opts };
+    if (opts.maxViolations !== undefined) {
+      if (!Number.isSafeInteger(opts.maxViolations) || opts.maxViolations < 1) {
+        throw new TypeError('maxViolations must be a positive whole number');
+      }
+      this.#maxViolations = opts.maxViolations;
+    }
+  }
+
+  /** Violations counted so far (always 0 unless `maxViolations` was given). */
+  get violations() { return this.#violations; }
+
+  /** True once the peer was cut off for breaking more rules than the budget allows. */
+  get abused() { return this.#abused; }
+
+  /**
+   * Register a callback for the peer being cut off: `(reason, violations) => void`, called once with the
+   * rule that broke the budget.
+   * @param {(reason: string, violations: number) => void} cb
+   */
+  onAbuse(cb) { this.#onAbuse = cb; return this; }
+
+  /** Count a broken rule; cut the peer off beyond the budget. No-op without `maxViolations`. */
+  #violation(reason) {
+    if (this.#maxViolations === null || this.#abused) return;
+    this.#violations++;
+    if (this.#violations <= this.#maxViolations) return;
+    this.#abused = true;
+    this.closeAll();
+    if (this.#onAbuse) this.#onAbuse(reason, this.#violations);
   }
 
   // ── Callbacks ────────────────────────────────────────────────────
@@ -432,6 +512,7 @@ export class StreamMultiplexer {
       encrypted: opts.encrypted,
       metadata: opts.metadata,
       initiator: true,
+      enforceReceive: this.#maxViolations !== null,
       initialCredits: opts.initialCredits ?? this.#defaults.initialCredits,
       maxSize: opts.maxSize ?? this.#defaults.maxStreamSize,
       multiplexer: this,
@@ -486,6 +567,7 @@ export class StreamMultiplexer {
    * @param {object} msg - Wire message with `t` and `p` fields
    */
   dispatch(msg) {
+    if (this.#abused) return; // a peer that was cut off is neither processed nor answered
     if (!msg || !msg.p) return;
     const streamId = msg.p.streamId;
     if (!streamId) return;
@@ -494,13 +576,25 @@ export class StreamMultiplexer {
 
     // STREAM_OPEN: new inbound stream
     if (msg.t === MESH_TYPE.STREAM_OPEN) {
-      if (this.#streams.has(hexId)) return; // Duplicate
+      if (this.#streams.has(hexId)) { // Duplicate
+        this.#violation('duplicate stream open');
+        return;
+      }
       if (this.activeCount >= this.#maxConcurrent) {
         this._emit({
           t: 0x15, // STREAM_ERROR
           p: { streamId: hexId, code: 'FLOW_CONTROL', message: 'Too many concurrent streams', retryable: true },
         });
+        this.#violation('stream opened beyond the concurrency limit');
         return;
+      }
+      const enforcing = this.#maxViolations !== null;
+      let announced = msg.p.initialCredits ?? STREAM_DEFAULTS.initialCredits;
+      if (enforcing && !(Number.isSafeInteger(announced) && announced >= 0 && announced <= STREAM_DEFAULTS.maxCredits)) {
+        // Announcing more credit than the limit (or not a number) breaks a rule; trust no more than the limit.
+        this.#violation('stream opened announcing more credit than the limit');
+        if (this.#abused) return;
+        announced = Number.isSafeInteger(announced) && announced > 0 ? STREAM_DEFAULTS.maxCredits : STREAM_DEFAULTS.initialCredits;
       }
       const stream = new MeshStream({
         id: typeof streamId === 'string'
@@ -511,7 +605,9 @@ export class StreamMultiplexer {
         encrypted: msg.p.encrypted === true,
         metadata: msg.p.metadata || {},
         initiator: false,
-        initialCredits: msg.p.initialCredits ?? STREAM_DEFAULTS.initialCredits,
+        enforceReceive: enforcing,
+        maxSize: this.#defaults.maxStreamSize,
+        initialCredits: announced,
         multiplexer: this,
       });
       stream._open();
@@ -527,13 +623,17 @@ export class StreamMultiplexer {
         t: 0x15,
         p: { streamId: hexId, code: 'INTERNAL', message: 'Unknown stream ID', retryable: false },
       });
+      this.#violation('frame for a stream that does not exist');
       return;
     }
 
     switch (msg.t) {
-      case 0x13: // STREAM_DATA
+      case 0x13: { // STREAM_DATA
+        const broken = stream._checkData(msg.p.data, msg.p.seq);
+        if (broken) { this.#violation(broken); break; }
         stream._receiveData(msg.p.data, msg.p.seq);
         break;
+      }
       case 0x14: // STREAM_END
         stream._receiveEnd();
         if (stream.state === 'CLOSED') this.#streams.delete(hexId);
@@ -542,9 +642,12 @@ export class StreamMultiplexer {
         stream._receiveError(msg.p.code, msg.p.message);
         this.#streams.delete(hexId);
         break;
-      case 0x16: // STREAM_WINDOW_UPDATE
+      case 0x16: { // STREAM_WINDOW_UPDATE
+        const broken = stream._checkCredits(msg.p.additionalCredits);
+        if (broken) { this.#violation(broken); break; }
         stream._receiveCredits(msg.p.additionalCredits);
         break;
+      }
     }
   }
 
