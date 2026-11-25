@@ -280,6 +280,15 @@ supervises nothing after the fact. `meshctl watch <host>` is the
 long-running command that keeps a session (and therefore its supervisor)
 alive to actually observe restarts happen.
 
+**Re-placement and who it is done for.** `pods supervise auto` with `--requester <pubKey>` and/or `--min-boundary`
+hands placement to the placement planner, and so does every restart of that pod: a restart is placed under the
+requester recorded when the pod was supervised, with that requester's trust read from this CLI's trust graph, never
+under meshctl's own identity and never with wider rights than the requester has. With only `--min-boundary` the
+requester is none, which counts as untrusted. If the requester's rules no longer allow any host (its trust fell, a
+boundary is no longer met), the supervisor stops with the named reason `replacement-refused:<plan code>` and spawns
+nothing; a shortage of room (`EBUSY`) is retried like any restart, within `--max-restarts`. Without either flag
+nothing changes: `auto` picks as it always did, and a restart stays on its host.
+
 ```
 meshctl pods supervise node-host --name web --kind command --ref /bin/sh \
   --lane node --restart on-failure --max-restarts 3 --backoff 1000 --loopback

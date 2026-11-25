@@ -213,10 +213,13 @@ export async function handlePodHostRequest(request, env) {
       spec = validated.value
     }
 
+    // A wake (see `createHibernatingDriver()`) asks for a shorter discovery window than a first boot waits.
+    const asked = url.searchParams.get('discoveryWindowMs')
+    const discoveryWindowMs = asked !== null && /^\d{1,6}$/.test(asked) ? Number(asked) : undefined
     const response = await stubFor(env, name).fetch(new Request('http://pod/boot', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, spec }),
+      body: JSON.stringify({ name, spec, ...(discoveryWindowMs === undefined ? {} : { discoveryWindowMs }) }),
     }))
     if (response.ok) await updateRoster(env, 'add', name)
     return response

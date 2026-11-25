@@ -92,6 +92,6 @@ What was missing when this note was written, and is now there:
 
 Still not built here: MCP across the mesh (#334 item 3) and wsh over a mesh link (reaching a browser through a mesh peer, #334 item 7).
 
-## The remote-eval spike
+## The retired remote-eval spike
 
-`spikes/browser-extension-host`'s `exec` evaluates a JavaScript string in a page. That cannot work under a strict Content-Security-Policy and cannot be allow-listed by path. The spike is kept, not deleted; its README and driver now say so at the top and point here. It is private, not a workspace member, and imported by no published package (`browsermesh-pod`, `-apps` and `-meshctl` reference other spikes, not this one), so nothing published reaches that `exec`; there was nothing to gate.
+An earlier browser-extension spike evaluated a JavaScript string in a page for its `exec`. That cannot work under a strict Content-Security-Policy and cannot be allow-listed by path, and the extension never ran in a real Chromium either. The spike has been removed; [what was learned](hosted-pods.md#what-was-learned-from-the-mv3-extension-spike) is in the hosted pods document. No published package imported it, so nothing published reached that `exec`.

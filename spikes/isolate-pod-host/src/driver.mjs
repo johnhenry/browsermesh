@@ -131,7 +131,12 @@ export function createIsolatePodDriver({ baseUrl, fetch: fetchImpl, token } = {}
       return { verbs: [...VERBS] }
     },
 
-    async spawn(spec) {
+    /**
+     * @param {object} spec
+     * @param {{wake?: {discoveryWindowMs?: number}}} [options] - From a hibernating wrapper: a pod that is being
+     *   woken waits a shorter time to hear its peers than a first boot does.
+     */
+    async spawn(spec, options) {
       const validated = validatePodSpec(spec)
       if (!validated.ok) {
         throw new PodHostDriverError(POD_HOST_ERROR.EINVAL, validated.errors.join('; '), {
@@ -146,7 +151,9 @@ export function createIsolatePodDriver({ baseUrl, fetch: fetchImpl, token } = {}
           { lane: value.lane },
         )
       }
-      return call(`/pods/${encodeURIComponent(value.name)}/boot`, {
+      const window = options?.wake?.discoveryWindowMs
+      const query = Number.isInteger(window) && window >= 0 ? `?discoveryWindowMs=${window}` : ''
+      return call(`/pods/${encodeURIComponent(value.name)}/boot${query}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(value),

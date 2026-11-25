@@ -2,10 +2,10 @@
  * browser-host-driver.mjs — the **in-page** `PodHostDriver` for the browser
  * lane (issue #185 item 7, deliverable A).
  *
- * Of the browser lane's three drivers (in-page, here; CDP,
- * `spikes/browser-pod-host`; extension, `spikes/browser-extension-host`),
- * this is the one that needs NOTHING beyond what a page already has: no
- * remote debugging port, no extension privileges, zero dependencies. A tab
+ * Of the browser lane's two drivers (in-page, here; CDP,
+ * `spikes/browser-pod-host`), this is the one that needs NOTHING beyond
+ * what a page already has: no remote debugging port, no extension
+ * privileges, zero dependencies. A tab
  * (or a worker) drives sibling pages/workers it itself spawned, using
  * `iframe`/`window.open`/`Worker` and `BroadcastChannel` — the same
  * primitives `Pod` already uses for peer discovery.
@@ -396,8 +396,8 @@ export function createInPageDriver({
     // `exec` is lane-capable on 'browser' (it means "evaluate script in the
     // page" -- see host-protocol.mjs's POD_LANE_VERBS doc comment) but this
     // driver never implements it: a parent tab has no safe way to evaluate
-    // code in a cross-origin child it spawned. Use the CDP or extension
-    // driver, which run with an operator's out-of-band control instead of
+    // code in a cross-origin child it spawned. Use the CDP driver, which
+    // runs with an operator's out-of-band control instead of
     // borrowing the hosted page's own (nonexistent) trust boundary.
     async exec() {
       requireVerb(POD_HOST_VERB.EXEC) // always throws -- EXEC is not in VERBS

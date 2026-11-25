@@ -1,5 +1,28 @@
 # Hosted pods: running `Pod` outside the browser
 
+## What only a KVM host can settle
+
+Nothing on this list can run on a machine without `/dev/kvm` (it is absent in Docker Desktop's VM, checked), and each
+step is the owner's. [`runbook-firecracker-kvm.md`](runbook-firecracker-kvm.md) has the commands, the expected output
+and what to look for at each step; everything short of KVM already runs and is listed in its section 0.
+
+1. Get a Linux/KVM host (x86_64 or arm64, root, cgroup v2) and set it up as the runbook's section 1 says.
+2. Install the pinned Firecracker and jailer (section 2).
+3. Get a guest kernel (section 3).
+4. Build the guest rootfs on that host with Alpine 3.23 (`ALPINE_VERSION=3.23`) and note which Node it installs; move the
+   script's default if it works (section 4; decision 6 of
+   [the open-decisions note](design/hosted-pods-open-decisions.md)). The packages declare Node 26.
+5. Run a signalling server the guest can reach (section 5).
+6. Run `REQUIRE_REAL_FIRECRACKER=1 npm run test:real-firecracker` (section 6): a jailed boot with an exec over vsock,
+   guest state kept across snapshot and restore (this is also the first check of `VmPod.restore()` against a real VMM),
+   no route to the metadata address or the host, and nothing left behind after drain. Record the three numbers it prints
+   (boot to exec, VMM memory, restore to exec) against issue #185 section 9's targets.
+7. Check that the guest registers over signalling and its pod id shows in `peers` (section 7; the test does not assert it).
+8. Report as section 8 lists, with the failing command and its output for anything the first run finds.
+
+Not KVM, also the owner's: the one real `meshctl` run and the first publish of its name, and the Durable Object wake
+measurement (decisions note, sections 1 and 2).
+
 ## Status
 
 This document tracks [issue #185](https://github.com/johnhenry/browsermesh/issues/185)
@@ -22,7 +45,7 @@ lanes answer to — the eight-verb pod host protocol, the mesh service that
 serves it, and the per-lane drivers. See [§8a](#8a-control-surface);
 items 3-6 of that work (`mesh://` routes, `meshctl` tools, an external CLI,
 a supervisor) are all projections of it. Item 7, the **browser lane**, adds
-a third lane with three drivers of its own (in-page, CDP, extension) —
+a third lane with two drivers of its own (in-page, CDP) —
 see [§8b](#8b-lane-c--browser-pods).
 
 Later work is in `docs/design/`: the
@@ -40,13 +63,13 @@ stand-ins for the isolate lane) are in `packages/browsermesh-pod`.
 
 | Item | State |
 | --- | --- |
-| Firecracker on a real host, full lifecycle | Needs a Linux/KVM host (none here; `/dev/kvm` is absent in Docker Desktop's VM, checked). Everything short of KVM now runs on Linux: the network policy against a real kernel, the guest's exec responder as a process, the whole spike suite. One checklist for the rest: [`runbook-firecracker-kvm.md`](runbook-firecracker-kvm.md). |
+| Firecracker on a real host, full lifecycle | Needs a Linux/KVM host (none here; `/dev/kvm` is absent in Docker Desktop's VM, checked). Everything short of KVM now runs on Linux: the network policy against a real kernel, the guest's exec responder as a process, the whole spike suite. The steps for the rest are the list at the top of this document, with the commands in [`runbook-firecracker-kvm.md`](runbook-firecracker-kvm.md). |
 | `VmPod.restore()` bugs | Fixed in #243 against the fake API; confirmation against a real VMM is part of the runbook. |
-| Durable Object hibernation topology | Owner decision; options in [`design/hosted-pods-open-decisions.md`](design/hosted-pods-open-decisions.md) section 1. |
+| Durable Object hibernation topology | Decided: cold boot is the sleep (option B). Built and tested in process behind the existing interfaces, see [4.4 Hibernation](#44-hibernation-cold-boot-as-sleep). Not run: a real Durable Object eviction, and the wake time on a deployed Worker (the owner's account). |
 | End to end across a relay | Done for the sealed path: `meshctl --wsh-relay` reaches a host through a pipe relay over a sealed, key-authenticated wsh link, with no signalling server or WebRTC, tested against the in-process pipe relay and a real pod-host service. The unsealed relay dialect is deliberately not used for pod-host traffic. Not run against a deployed relay. |
 | Isolate hosts and the compute scorer | Done in #277. |
 | Publish meshctl | Prepared: the package is public, in the release list, with a changeset and a user README (decision 2 of the decisions note, option C). Packed, installed into an empty project and run from outside the repository against the in-process hosts. What is left is the owner's: one real run against a deployed host, then the first publish of the name (the steps are in section 2 of [the decisions note](design/hosted-pods-open-decisions.md)). Starts without a repository checkout (#361); `vm` still needs one. |
-| MV3 extension in a real browser | Loaded in real Chromium: it does not run (its worker imports files outside the extension and dies at once). Owner decision (#272); section 3 of the decisions note. |
+| MV3 extension in a real browser | Retired. Loaded in real Chromium it did not run (its worker imported files outside the extension root and exited at once), so the spike was removed; why, and what a working extension would need, is [recorded below](#what-was-learned-from-the-mv3-extension-spike). |
 | Raw `onIncomingData()` subscribers; `WebSocketTransport` and Blob frames | Done (#208, #212, #243). |
 
 ## Motivation
@@ -411,6 +434,39 @@ and the DO namespace; no Cloudflare account needed for the spike. `cf dev`
 (Cloudflare's Wrangler successor, open beta — the spike migrated off
 Wrangler 4 to it) is the quickest local harness. See WP2.
 
+### 4.4 Hibernation: cold boot as sleep
+
+Decision 1 of [the open-decisions note](design/hosted-pods-open-decisions.md), option B. An outbound WebSocket keeps a
+Durable Object in memory, so a pod cannot "hibernate" in the platform's sense; instead an idle pod is allowed to be
+evicted and the first message boots it again. `createHibernatingDriver(inner, opts)` in `@johnhenry/browsermesh-pod` is a
+`PodHostDriver` decorator that does this for any lane driver. No new verb, no new wire message: a sleeping pod is the
+existing lifecycle state `cold`, with an optional `sleeping: true` on its status.
+
+| Question | Behaviour |
+| --- | --- |
+| What is sleep? | After `idleMs` (default 5 minutes) with no `send`/`exec`/delivery, `sweep()` writes `{name, spec, podId, sleptAt, wakes}` to a `HibernationStore` first, then drains the pod through the inner driver. The inner driver's own drain events are held back: a sleep is not an exit, so a supervisor sees nothing to restart. A `lifecycle` event with `reason: 'slept'` is sent instead. A pod with a verb in flight, or one `eligible()` rejects, is never slept. |
+| What survives? | The record: podspec and `podId`. The wake checks the pod comes back with the same `podId` and fails `identity-changed` if not (a Durable Object keeps its keypair in its storage). Anything only in memory does not: peers, open connections, in-flight work. A lane that can snapshot should use `snapshot`/`restore`, which keep memory. |
+| How is a sleeping pod found? | `status` and `list` answer from the record without waking it: `state: cold`, `sleeping: true`, `podId`, `sleptAt`, `wakes`. `describe()` states the host's `hibernation: {idleMs, wakeTimeoutMs, discoveryWindowMs}` (null elsewhere). A host's front door that receives mesh traffic for a pod id calls `driver.deliver(podIdOrName, msg)`. |
+| What wakes it? | `send`, `exec` (where the lane has it) and `deliver`, after the service's access checks, so only someone allowed to use a pod can wake it. Never `status`, `list` or `drain` (drain of a sleeper removes the record and reports `exit` `drained`, `restartable: false`). `snapshot`/`restore` of a sleeper are refused `EBUSY` (`asleep`). |
+| How long? | A caller waits at most `wakeTimeoutMs` (default 5 s) and then gets `ETIMEDOUT` (`details.reason: 'wake-timeout'`); the boot goes on, so the next call usually finds it awake. The booting pod waits only `discoveryWindowMs` (default 100 ms, passed as `spawn(spec, {wake})`; the isolate driver forwards it to the Durable Object, which may only shorten its 1.5 s window) to hear its peers. That default is a guess: the measurement is the owner's (see below). |
+| What does a caller see meanwhile? | `status` says `booting` with `waking: true`. Concurrent sends share one boot and reach the pod in the order they arrived (up to `maxQueuedPerPod`, default 32, then `EBUSY` `wake-queue-full`); at most `maxConcurrentWakes` (4) boots at once (`EBUSY` `wake-capacity`). The reply to a send that woke the pod carries `woke: true, wakeMs`. The relay does not queue messages for a sleeper, so the queue exists only on the host: a message sent straight to a sleeping pod's id over a relay is lost unless the host's front door calls `deliver`. |
+| A boot that fails? | The pod stays asleep with the failure on its record (`lastWakeError`); the caller gets `EBUSY` `wake-failed`. Nothing retries by itself; the next call tries again. |
+| Host restart? | The record is in the store, so a new driver over the same store lists and wakes its sleepers. Use a durable store (a Durable Object's `ctx.storage` behind the four-method `HibernationStore`); the in-memory one loses them. |
+
+**The placement planner.** A pool (`createHostPool`) notices a driver with `attachPlacement`. By default nothing about
+capacity changes: a sleeping pod keeps its whole reservation. With `overcommitSleeping: true` a sleeping pod frees its
+cpu and memory in the ledger, still counts as a pod and toward its requester's quota (`perRequesterMaxPods`), and a
+wake is admitted only if the host has room again; otherwise it is refused `EBUSY` (`wake-refused`) and the pod stays
+asleep. A boot that fails after admission gives the reservation back.
+
+**The supervisor.** Sleeping sends no `exit` event and reports `cold`, not `gone`, so no restart policy fires and the
+reconcile sweep does not mistake it for a loss; a wake is not a restart (`restarts` stays 0). If the host itself is lost
+the supervisor re-places the pod as before, and the sleeper's record is lost with the host unless its store is shared.
+
+**Not run here.** A real Durable Object eviction and boot (needs a Cloudflare account), the wake time (the issue's
+target is under 50 ms for option C; for B the number to measure is `wakeMs` with a small `discoveryWindowMs`), and the
+memory per idle pod. Everything above is tested in process with a fake clock.
+
 ### 4.3 Threat model for Lane A
 
 An isolate pod protects the *host* from the *pod's JavaScript* and pods from
@@ -643,8 +699,8 @@ records.
 \* Issue #185 item 7's decision, made while building the browser lane's
 drivers (see [§8b](#8b-lane-c--browser-pods)): `exec` on the browser lane
 means **"evaluate an expression in the page's JS context,"** not "spawn a
-shell command" — a tab has no shell, but it does have a JS realm, and two
-of the browser lane's three drivers (CDP, extension) can genuinely drive
+shell command" — a tab has no shell, but it does have a JS realm, and
+the browser lane's CDP driver can genuinely drive
 that safely from outside the page. So `exec` is lane-capable (`true`), not
 `ELANE`; the in-page driver, which has no safe way to do this from inside
 the page it hosts, answers `ENOTSUP` for it instead — a driver gap, not a
@@ -696,7 +752,6 @@ A `PodHostDriver` is a JSDoc typedef, not a base class: any object with
 | `createIsolatePodDriver({baseUrl})` | `isolate` | `spikes/isolate-pod-host/src/driver.mjs`, over WP2's Worker routes |
 | `createInPageDriver({podUrl, ...})` | `browser` | `browsermesh-pod/src/browser-host-driver.mjs` — in-page, zero deps, see [§8b](#8b-lane-c--browser-pods) |
 | `createCdpDriver({cdp, podUrl})` | `browser` | `spikes/browser-pod-host/src/driver.mjs` — remote debugging protocol |
-| `createExtensionDriver({chrome})` | `browser` | `spikes/browser-extension-host/src/driver.mjs` — MV3 extension |
 
 The isolate lane's HTTP routes (`spikes/isolate-pod-host/src/routes.mjs`)
 are a 1:1 projection of the same verbs: `GET /pods`,
@@ -767,6 +822,29 @@ via `pickHost` (default: the same `pickAutoHost()` selection
 refusing host, "the orchestrator proposes, the host accepts" all the way
 down.
 
+**Re-placement and the requester (the supervisor's design decision).** A pod
+supervised with a requester or a minimum boundary
+(`supervise(host, spec, {requesterId, minBoundary})`; `meshctl pods supervise
+auto --requester ... --min-boundary ...`) is placed by the placement planner,
+now and at every restart, and the supervisor takes the conservative reading of
+"on whose behalf": the requester recorded when the pod was supervised, with
+that requester's trust read from the local trust graph, never the supervisor's
+own identity (which holds the grants of the whole operator) and never anything
+wider than that requester has. With only a boundary the requester is none,
+which the planner treats as untrusted. A restart prefers the current host
+(`preferHost`), or avoids a lost one (`avoidHosts`); the planner's decision
+comes from `orchestrator.decidePod()` (the same decision and audit as
+`placePod()`, spawning nothing) or an injected `placer`. If the requester's
+rules no longer allow any host (trust fell, a boundary is not met), the
+supervisor does not widen them: it emits `supervisor:replacement-refused`
+(requester, code, the planner's plan code, the rejected hosts), then
+`supervisor:gave-up` with the reason `replacement-refused:<plan code>`, writes
+both to the audit chain, and leaves the pod `dead`. A shortage of room
+(`EBUSY`) is retried like any restart, within `maxRestarts`. Pods supervised
+without either option are placed exactly as before (`pickHost`,
+`pickAutoHost()`). Not covered: a supervised pod does not count toward the
+per-requester pod quota, as before.
+
 `MeshOrchestrator#getSupervisor()` lazily builds one supervisor per
 orchestrator, and `drainPod(hostPodId)` consults it (without creating one
 it didn't need) so draining a HOST pod cascades into every pod it
@@ -827,8 +905,9 @@ item 7) is the opposite case: the host and the hosted pod are both inside
 *someone's own browser* — a tab spawning and controlling windows, iframes,
 and workers that each boot a `Pod`. The verb set, the podspec, and the
 gated/audited service are identical; only the driver changes, and this
-lane has **three** of them, trading how much of the browser they can touch
-for how much setup they need.
+lane has **two** of them, trading how much of the browser they can touch
+for how much setup they need. (A third, a Manifest V3 extension, was a spike
+and has been retired; see [what was learned](#what-was-learned-from-the-mv3-extension-spike).)
 
 ```mermaid
 flowchart TB
@@ -846,12 +925,6 @@ flowchart TB
       HostTab -. "BroadcastChannel: browser-host:ready" .- Worker
     end
 
-    subgraph ExtHost["Extension driver (spikes/browser-extension-host)"]
-      SW["MV3 service worker<br/>createExtensionDriver()"]
-      Tab1["chrome.tabs pod"]
-      SW -- "chrome.tabs.create / sendMessage" --> Tab1
-      SW -. "chrome.scripting.executeScript (exec)" .- Tab1
-    end
   end
 
   subgraph Remote["Anywhere with a debugging port"]
@@ -877,21 +950,18 @@ flowchart TB
   Remote -. "Lane B host agent could run the CDP driver\ninside the guest instead of on the host" .-> MicroVM
 ```
 
-### The three drivers
+### The two drivers
 
 | Driver | Needs | Trust model | `exec` | `snapshot`/`restore` |
 | --- | --- | --- | --- | --- |
 | **In-page** (`browser-host-driver.mjs`) | Nothing — a page's own JS | None: the driver IS a page, with no privilege over what it spawns | `ENOTSUP` — no safe way to evaluate in a child from inside the page that hosts it | `ENOTSUP` (IndexedDB soft-snapshot is a documented follow-up) |
 | **CDP** (`spikes/browser-pod-host`) | A `--remote-debugging-port`, raw `WebSocket` | An external operator with full remote control of the browser | **Supported** — `Runtime.evaluate(expression)`, gated by `checkAccess()` like any exec | `ENOTSUP` (not implemented this wave) |
-| **Extension** (`spikes/browser-extension-host`) | An installed MV3 extension | Extension privileges (host permissions, `scripting`) over pages it is allowed to touch | **Supported** — `chrome.scripting.executeScript` in the page's isolated world, gated | `snapshot` ≈ `chrome.tabs.discard` / `restore` ≈ reload — a real pause, but a WEAKER promise than a microVM snapshot (documented honestly in that spike's README, not wired into the standard gated verb set) |
 
-All three answer `spawn`/`status`/`send`/`drain`/`list` and share the same
+Both answer `spawn`/`status`/`send`/`drain`/`list` and share the same
 lifecycle (`cold → booting → registered → … → draining → gone`). What
 differs is `exec`'s availability — see `host-protocol.mjs`'s
 `POD_LANE_VERBS` doc comment for the full "why `exec` is lane-capable but
-driver-optional" reasoning — and, for the extension driver only, an
-honestly-weaker `snapshot`/`restore` pair kept out of the gated verb set
-on purpose.
+driver-optional" reasoning.
 
 ### Nesting with Lane B
 
@@ -920,9 +990,39 @@ For actually-untrusted hosted-pod code, do not reach for the browser
 lane's in-page driver at all: use the **CDP driver inside a microVM**
 (Lane B's isolation, with a real headless Chrome inside it) so a hostile
 pod page is contained by the guest/host boundary Firecracker already
-provides, not by browser same-origin policy. The extension driver sits in
-between — it has no sandbox either, but at least confines itself to pages
-the extension's `host_permissions` were explicitly scoped to.
+provides, not by browser same-origin policy.
+
+### What was learned from the MV3 extension spike
+
+A third browser-lane driver, a Manifest V3 extension (a service worker driving
+`chrome.tabs` and `chrome.scripting.executeScript`), was written as a spike and
+only ever ran against a fake `chrome` object. It was retired on the owner's
+decision (#272, decision 3 of [the open-decisions note](design/hosted-pods-open-decisions.md))
+and removed, with no archive copy.
+
+- **It did not run.** Loaded unpacked into a real Chromium (driven with
+  Playwright), its service worker started and exited at once, with no error on
+  the extensions page. A worker with a trivial `background.mjs` stayed up; a
+  worker whose `background.mjs` imported a file outside the extension directory
+  (the spike imported the pod package by a relative path into `packages/`) died
+  the same way. An unpacked extension can only import files inside its own root
+  (the extension root), and the pod package also imports by bare package name,
+  which an extension worker cannot resolve. So nothing written about its
+  behaviour was ever observed in a browser.
+- **What a working extension would need.** A build step this repository does not
+  have: bundle the worker and the pod package into the extension directory
+  (one self-contained file with no bare imports), set `host_permissions` to a
+  real origin, and add a test that loads it in a real browser and drives
+  `spawn` and `exec`.
+- **Why that was not done.** Its `exec` evaluated a string with the extension's
+  `scripting` access, which cannot work under a strict Content-Security-Policy
+  and is the capability the spike was frozen for. If an extension is wanted at
+  all later, the better design is to serve the remote-object layer from the page
+  (`@johnhenry/wsh/objects`, `examples/19-wsh-objects-over-protocol-channel.mjs`)
+  and let the extension only inject that.
+- **What was lost.** The browser lane has two drivers (in-page and CDP) instead of
+  three. The extension's weaker pause and resume (a tab discard and reload) was
+  never part of the gated verb set, so no verb changed.
 
 ## 9. Work packages
 

@@ -56,7 +56,8 @@ function fakeNamespace() {
             return Response.json({ names: instance.roster })
           }
           if (url.pathname === '/boot') {
-            const { name, spec } = await request.json()
+            const { name, spec, discoveryWindowMs } = await request.json()
+            instance.boots = [...(instance.boots ?? []), { discoveryWindowMs }]
             instance.record = {
               name, lane: POD_LANE.ISOLATE, state: POD_LIFECYCLE.REGISTERED, spec,
               createdAt: 1, updatedAt: 2,
@@ -144,6 +145,16 @@ describe('isolate pod host routes', () => {
 
     assert.equal((await driver.drain('alpha')).state, POD_LIFECYCLE.GONE)
     assert.deepEqual(await driver.list(), [])
+  })
+
+  it('a wake passes the short discovery window to the pod object; a first spawn passes none', async () => {
+    await driver.spawn(spec({ name: 'first' }))
+    await driver.spawn(spec({ name: 'woken' }), { wake: { discoveryWindowMs: 40, podId: 'x' } })
+    await driver.spawn(spec({ name: 'bad' }), { wake: { discoveryWindowMs: -1 } })
+    const windows = (name) => env.POD.instances.get(name).boots.map((b) => b.discoveryWindowMs ?? null)
+    assert.deepEqual(windows('first'), [null])
+    assert.deepEqual(windows('woken'), [40])
+    assert.deepEqual(windows('bad'), [null], 'a window that is not a non-negative integer is not sent')
   })
 
   it('normalizes the podspec before storing it, and the URL wins on name', async () => {

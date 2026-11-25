@@ -713,6 +713,16 @@ The gated, audited mesh service that speaks this protocol over a `PeerNode`
 is `createPodHostService()` in `@johnhenry/browsermesh-apps` — see that
 package's "Pod host service" README section.
 
+### Hibernating pods: `createHibernatingDriver()`
+
+`createHibernatingDriver(innerDriver, { idleMs, wakeTimeoutMs, discoveryWindowMs, store, ... })` wraps any
+`PodHostDriver`. A pod idle for `idleMs` is drained to a record in a `HibernationStore` (podspec and `podId`) and
+reports `state: 'cold'`, `sleeping: true`; a `send`, `exec` or `deliver()` boots it again (`inner.spawn(spec, {wake})`),
+sharing one boot between concurrent callers, within `wakeTimeoutMs`. `status`, `list` and `drain` never wake it, and a
+sleep sends no `exit` event. Memory does not survive (use `snapshot`/`restore` where the lane has them). Nothing is on
+by default: you construct the wrapper and call `sweep()` (or `start()` with `sweepIntervalMs`). Time is injectable.
+See [hosted pods, 4.4](../../docs/hosted-pods.md#44-hibernation-cold-boot-as-sleep) for the full behaviour and bounds.
+
 ### Browser lane drivers
 
 The browser lane (`POD_LANE.BROWSER`) has three drivers, documented in full
@@ -739,13 +749,12 @@ await driver.drain('worker-1')
 It answers `spawn`/`status`/`send`/`drain`/`list`; `exec`/`snapshot`/
 `restore` are `ENOTSUP` — a parent tab has no safe way to evaluate code in
 a child it spawned, and no durable freeze/thaw of a page's JS heap exists
-yet. The other two drivers trade that safety story for more setup:
+yet. The other driver trades that safety story for more setup:
 
 | Driver | Where | `exec` |
 | --- | --- | --- |
 | In-page (above) | here | `ENOTSUP` |
 | CDP (remote debugging protocol) | `spikes/browser-pod-host` | real `Runtime.evaluate`, gated like any exec |
-| Extension (Manifest V3) | `spikes/browser-extension-host` | real `chrome.scripting.executeScript`, gated |
 
 **Trust caveat:** a tab is not a privilege boundary against the page it
 hosts. For a hosted pod whose code you do not trust, use the CDP driver
