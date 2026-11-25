@@ -46,14 +46,27 @@ export class MockWshClient {
   #transport;
   #state;
 
-  constructor({ connected = true } = {}) {
+  #features;
+
+  /**
+   * @param {Object} [opts]
+   * @param {boolean} [opts.connected=true]
+   * @param {string[]} [opts.features] - what the "host" states, as `hasFeature()` reports it. Empty by default,
+   *   like a host from before `gateway-credit` existed.
+   */
+  constructor({ connected = true, features = [] } = {}) {
+    this.#features = features;
     this.#transport = new MockWshTransport();
     this.#state = connected ? 'authenticated' : 'disconnected';
     this.onGatewayMessage = null;
+    /** Like WshClient's: called when the transport closes. */
+    this.onClose = null;
     this.#transport.onGatewayMessage = (msg) => {
       this.onGatewayMessage?.(msg);
     };
   }
+
+  hasFeature(name) { return this.#features.includes(name); }
 
   get transport() { return this.#transport; }
   get state() { return this.#state; }

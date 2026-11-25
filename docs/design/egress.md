@@ -18,12 +18,14 @@ code. Line numbers are for `main` at the time of writing.
    session to a *named machine* the operator mapped; `createProxyHandler` / `ServerSharing` fetch from *one configured
    origin*. In each, the peer never names a destination, which is why each is safe, and why none serves a container that
    wants to open TCP to any address.
-2. **The one piece that does take a destination, netway's `GatewayBackend`, cannot carry real traffic against a current
-   wsh host.** It ignores wsh's `gateway-credit` flow control, so a connection stops after 256 KiB received and closes
-   after about 256 KiB sent. I ran this against the real in-memory wsh 0.54.1 host: 262 144 bytes arrived of 2 MiB, and an
-   upload was closed by the host after 458 752 bytes had been written, 262 144 received by the origin; the wsh client's own
-   `openTcp` moved 2 MiB each way through the same host **(V, section 1.1)**. Every existing real-host test moves a few
-   bytes, which is why nothing caught it. Its UDP is send-only: replies are never read **(V)**.
+2. **The one piece that does take a destination, netway's `GatewayBackend`, could not carry real traffic against a current
+   wsh host when this survey was made (issue #381, since fixed).** It ignored wsh's `gateway-credit` flow control, so a
+   connection stopped after 256 KiB received and closed after about 256 KiB sent. I ran this against the real in-memory wsh
+   0.54.1 host: 262 144 bytes arrived of 2 MiB, and an upload was closed by the host after 458 752 bytes had been written,
+   262 144 received by the origin; the wsh client's own `openTcp` moved 2 MiB each way through the same host **(V, section
+   1.1)**. Every real-host test then moved a few bytes, which is why nothing caught it. The fix honours the credit in both
+   directions and the real-host test now moves 4 MiB each way. Its UDP is send-only: replies are never read, and that
+   stays, stated in the package README **(V)**.
 3. **The first consumer (a container engine in a tab) needs far less than Wisp or a socket API:** TCP connect to an
    address, with half-close and pause/resume backpressure, and DNS A lookup. No UDP. It already has a pluggable network
    backend, so nothing needs to speak Wisp **(V, section 2)**.
@@ -57,12 +59,14 @@ host or port. A `policy` callback receives `{ capability, address }` and has fin
 write a destination filter, but the package ships none, and the scope is local to one process and keyed by an opaque scope
 id, not a peer (`policy.mjs:16-19`) **(V)**. The destination policy that actually bites lives on the wsh host (1.4).
 
-**Flow control: broken against a current host.** The wsh client lists `gateway-credit` in every `Hello`
+**Flow control: was broken against a current host; fixed by the change that closes #381.** The text from here to the end of
+this subsection is the survey as it was made, before the fix; what the backend does now is in the netway README
+("Flow control"). The wsh client lists `gateway-credit` in every `Hello`
 (`@johnhenry/wsh` `src/client.mjs:727`, `:3139`) **(V)**; with it, each direction of each connection starts with 256 KiB of
-credit that the receiver returns as it consumes (`src/gateway-channel.mjs:1-25`) **(V)**. `GatewayBackend` drives the raw
-0x70-0x7e messages: it has no case for `GatewayCredit` and never sends one (the only mention of credit in the file is a
-comment, `gateway-backend.mjs:20-27`) **(V)**. So a current host (a) stops sending after 256 KiB per connection and (b)
-closes a connection whose client sends past the credit it was given (`gateway-channel.mjs:6-12`). I ran it: a scratch
+credit that the receiver returns as it consumes (`src/gateway-channel.mjs:1-25`) **(V)**. `GatewayBackend` drove the raw
+0x70-0x7e messages: it had no case for `GatewayCredit` and never sent one **(V)**. So a current host (a) stopped sending
+after 256 KiB per connection and (b)
+closed a connection whose client sent past the credit it was given (`gateway-channel.mjs:6-12`). I ran it: a scratch
 script (not committed) built the same real host the netway real-host test builds (`createWshServer` with a gateway, joined
 to a real `WshClient` by an in-memory socket pair; `gateway-real-wsh.test.mjs:63-97`), a local TCP origin that sends 2 MiB,
 and compared `GatewayBackend.connect` with the client's own `openTcp`:
@@ -72,8 +76,8 @@ and compared `GatewayBackend.connect` with the client's own `openTcp`:
 | `GatewayBackend.connect` | 262 144 of 2 097 152 bytes, then nothing | write rejected "Socket is closed" after 458 752 bytes written; origin received 262 144 |
 | wsh client `openTcp` | 2 097 152 | 2 097 152 |
 
-**(V, run in this task.)** This is a bug in a published package, found by this survey; it is not part of this design's
-scope to fix, and it is filed here as a prerequisite note (section 6, stage 0).
+**(V, run in this task.)** This was a bug in a published package, found by this survey (issue #381). It is fixed in
+netway (section 6, stage 0 is done): the tables above are the "before".
 
 **What has been run against a real host, and what only against a mock.**
 
@@ -82,8 +86,10 @@ scope to fix, and it is filed here as a prerequisite note (section 6, stage 0).
 - Real wsh host (`createWshServer` from `@johnhenry/wsh/server` and `createMemoryHost`, joined to a real `WshClient` and a
   real Ed25519 login by an in-memory socket pair, **not a network connection**, to a local TCP echo): TCP connect and data
   both ways (a few bytes), close from either end, policy refusal, connection refused, name not found, `resolve`, a connection
-  cap, listen. **No UDP, no large transfer, no browser.** The Rust `wsh-server` was not run **(V,
-  `test/gateway-real-wsh.test.mjs:1-17`, `:116-313`; `docs/wsh-and-browsermesh.md:165-174`)**.
+  cap, listen. **At the time of the survey: no UDP, no large transfer, no browser.** Since the fix for #381 the same file
+  also moves 4 MiB each way with every byte checked, runs a slow reader on each side, and sends one UDP datagram to a real
+  UDP socket; there is still no browser run and the Rust `wsh-server` was not run **(V,
+  `test/gateway-real-wsh.test.mjs`; `docs/wsh-and-browsermesh.md`)**.
 - Timeout (code 8), an older gateway's 5, HOST_UNREACHABLE and CLOSED: mock and the exported code table only **(V,
   `docs/security.md:60`; `gateway-parity.test.mjs`)**.
 - Browser: nothing for netway's gateway in `tests/browser/` **(V, listing)**.
@@ -109,8 +115,8 @@ not an open proxy and cannot be aimed at a destination of the peer's choosing.
   (`docs/security.md`, same section) **(V)**. Audit: `onLog` lines only (`mesh-relay-host.mjs`, `this.#onLog(...)` calls) **(V)**.
 - Run: unit with in-memory services; `test/real-peer/mesh-relay.test.mjs` runs it over real WebRTC, with the "wsh" half a
   hand-written double with real local sockets behind it (`:99`, `:211-231`), **not a real wsh host**; never in a browser **(V)**.
-  Because its gateway half is the same `GatewayBackend`, it has the 256 KiB limit of 1.1 whenever the shared service sits
-  behind a real wsh host **(I: follows from 1.1; not run through this path)**.
+  Because its gateway half is the same `GatewayBackend`, it had the 256 KiB limit of 1.1 whenever the shared service sat
+  behind a real wsh host; that limit is gone since the fix for #381 **(I: follows from 1.1; not run through this path)**.
 
 ### 1.3 `WshRelay`: a pod carries a sealed wsh session to a named machine
 
@@ -130,7 +136,7 @@ session is sealed end to end, so the relay cannot read it **(V, `wsh-over-mesh.m
   `wsh-relay.test.mjs:355`). So a consumer holding `wsh-relay:<name>:open`, and a key authorised on a machine whose wsh host
   has a gateway, could pass `conn.client` to `new GatewayBackend({ wshClient })` and reach the network through that machine
   **(I: nothing runs this; the test's machine host is a `createMemoryHost` with `capabilities: []` and no gateway, `wsh-relay.test.mjs:344`)**.
-  It would meet the 256 KiB limit of 1.1, and the relay's 64 MiB and two-session limits.
+  It would have met the 256 KiB limit of 1.1 (fixed since), and it meets the relay's 64 MiB and two-session limits.
 - Run: in memory with real registries and the real wsh client; three real WebRTC peers; **not in a browser** **(V,
   `docs/security.md:383-408`)**.
 
@@ -250,9 +256,9 @@ here without names or paths). **(V for what the consumer's files say; the number
 
 | Need | Why | Today |
 | --- | --- | --- |
-| Open a TCP stream to `host-or-ip : port`; success or a coarse failure class (refused, unreachable, denied, timeout) | the backend's `connect` and `onClose(error)` | `GatewayBackend.connect` (broken for bulk, 1.1); `MeshRelayBackend.connect` by service name only |
+| Open a TCP stream to `host-or-ip : port`; success or a coarse failure class (refused, unreachable, denied, timeout) | the backend's `connect` and `onClose(error)` | `GatewayBackend.connect` (credit-metered since the #381 fix, 1.1); `MeshRelayBackend.connect` by service name only |
 | Half-close both ways | `end()` and `onEnd` | `StreamSocket.end()` exists; wsh `GatewayClose` is a half-close |
-| Real backpressure: the provider stops reading the origin when the consumer stops reading, and the reverse | `pause`/`resume`, `buffered`, `onDrain`; a container pulling an image is tens of MB | protocol streams have credit (below); `GatewayBackend` does not |
+| Real backpressure: the provider stops reading the origin when the consumer stops reading, and the reverse | `pause`/`resume`, `buffered`, `onDrain`; a container pulling an image is tens of MB | protocol streams have credit (below); `GatewayBackend` has it against a host that states `gateway-credit` (not against an older one) |
 | DNS `A` lookup, `ENOTFOUND` distinct from failure | `lookup(name)` | `GatewayBackend.resolve` (errors swallowed by `VirtualNetwork.resolve`) |
 | At least 16 concurrent streams from one consumer, 64 from the whole mesh | the consumer's own per-peer and per-tab overlay limits are 16 and 64; a package manager opens several at once | protocol stream layer default `maxStreams` is 16 per channel (`protocol-stream.mjs:65`), configurable |
 | Address information: the destination (a name or an IP) and port | what to dial and what to grant | the consumer supplies; it needs nothing back but success/failure |
@@ -326,7 +332,7 @@ provider (Node, Deno, Bun or the hosted-pod lane; a browser tab can never be one
 (i-a) *Document the existing composition.* An operator runs a wsh host with a gateway on a machine (Node `createWshServer`, or
 the Rust `wsh-server` with `[gateway]`), registers it at a pipe relay, maps a name on a `WshRelay`, and gives a consumer pod
 `wsh-relay:<name>:open` and a key authorised on the host with `capabilities="gateway:tcp:host:port,..."`. The consumer
-builds `GatewayBackend` on `conn.client` (1.3). Honest status: **never run, and unusable for bulk until stage 0**; the
+builds `GatewayBackend` on `conn.client` (1.3). Honest status: **never run end to end** (the bulk limit of stage 0 is fixed); the
 destination grant lives in wsh's key file, not the mesh registry (two policy languages, the registry grants only the
 carrier session); `WshRelay` allows two sessions and 64 MiB per session, one hour; and it needs a machine wsh host plus a
 pipe relay, which is a server, so it does not meet the "no server" goal in the issue. It is a legitimate interim for an
@@ -400,7 +406,7 @@ function** (1.4). Two ways to get them:
 
 - **(A) The provider runs a wsh host with a gateway in its own process, reachable only by the egress package**: an
   in-memory socket pair, a throwaway key, `allow: ['*']` on a host no peer can reach, and the egress package checking every
-  grant BEFORE it calls `client.openTcp` (the credit-aware API; I showed it moves 2 MiB each way, 1.1). The rebinding defence,
+  grant BEFORE it calls `client.openTcp` (the credit-aware API; I showed it moves 2 MiB each way, 1.1; `GatewayBackend` now does too). The rebinding defence,
   the address classes (including IPv4-mapped, NAT64, 6to4), UDP bounds and the Rust-parity rule are wsh's, kept in one place.
   This is the setup `gateway-real-wsh.test.mjs` builds (`:63-97`) **(V)**. Cost: a wsh server and client in the provider;
   `@johnhenry/wsh` becomes a provider dependency.
@@ -698,8 +704,8 @@ package; the provider's address policy taken from the wsh gateway in-process (3.
    capability strings policed.
 3. It mirrors ingress closely enough to inherit its test shapes (hostile client, hostile provider, real two-peer WebRTC,
    Chromium, Firefox and WebKit) and its posture (off, default deny, bounded, named reasons, audit without content).
-4. It does not depend on `GatewayBackend`, whose 256 KiB limit (1.1) would otherwise block it; the in-process wsh client uses
-   the credit-aware `openTcp`.
+4. It does not depend on `GatewayBackend` (whose 256 KiB limit, 1.1, was fixed after this survey); the in-process wsh client
+   uses the credit-aware `openTcp`.
 5. (iv) first would produce something the first consumer cannot use for its main need, and (iii) is for a consumer nobody has
    named.
 
@@ -710,7 +716,8 @@ re-export wsh's gateway through the mesh under a mesh scope without the owner re
 
 Each stage is a complete, tested slice with a changeset; nothing is on by default at any stage.
 
-**Stage 0: fix `GatewayBackend`'s flow control (netway, patch).** Not required by (ii) but required for everything else that
+**Stage 0: fix `GatewayBackend`'s flow control (netway, patch). Done (#381): credit is honoured in both directions, UDP
+stays send-only and says so, the test below is in `gateway-real-wsh.test.mjs`.** Not required by (ii) but required for everything else that
 uses it (`MeshRelayHost` over a real wsh host, (i-a)). Make the backend honour `gateway-credit` (return credit as the user
 side consumes; send only while it holds credit), or build on the wsh client's gateway channel; add UDP receive or document
 send-only. Tests: against the real in-memory host, 4 MiB each way with a slow reader (the scratch script of 1.1 becomes the
@@ -767,8 +774,8 @@ wants the existing `MeshRelayHost` path fixed.
    needs only a sentence saying egress is a new mesh scope; (i-b) would need it reversed.
 7. **The provider's dial: (A) wsh in-process, or (B) its own guard**, and whether to ask wsh to export its address guard.
 8. **Direct links only in v1** (as ingress) or routed delivery with sealing.
-9. **Whether to file the `GatewayBackend` flow-control finding as an issue** (I have not touched issues) and treat stage 0 as
-   its own change.
+9. ~~Whether to file the `GatewayBackend` flow-control finding as an issue and treat stage 0 as its own change.~~ Done: it
+   is #381.
 
 ## 7. What I could not determine by reading
 
@@ -779,8 +786,9 @@ wants the existing `MeshRelayHost` path fixed.
   memory.
 - **What the Rust wsh-server's "WISP bridging" covers**, and whether Wisp traffic meets its gateway policy.
 - **Whether a composition of `WshRelay` to a machine wsh host with a gateway and `GatewayBackend` works end to end** (1.3),
-  beyond the 256 KiB limit shown; nobody has run it.
-- **UDP through a real wsh host from netway**: untested at the netway layer; wsh tests its own UDP, I did not run those.
+  beyond the 256 KiB limit shown (since fixed); nobody has run it.
+- **UDP through a real wsh host from netway**: since the #381 fix one datagram sent through a real host is received by a
+  real UDP socket; replies are not read (send-only); wsh tests its own UDP, I did not run those.
 - **Whether `client.openTcp` exposes the address the host dialled**, which the audit would like; the README does not say.
 - **Whether Node's HTTP client can be made to connect to exactly a checked address with TLS and a host name intact** for
   the fetch form: believed so through `lookup`, not tried.

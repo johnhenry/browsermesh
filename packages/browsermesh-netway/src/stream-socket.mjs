@@ -53,6 +53,7 @@ export class AsyncBuffer {
   #bytes = 0;
   #readers = [];
   #spaceWaiters = [];
+  #abortWaiters = [];
   #ended = false;
   #cancelled = false;
   #error = null;
@@ -181,6 +182,19 @@ export class AsyncBuffer {
     this.#wake(this.#spaceWaiters);
   }
 
+  /**
+   * Resolves when the reader cancels or the buffer is destroyed (not on a
+   * plain {@link AsyncBuffer#end}, after which queued data is still readable).
+   * For an owner that waits on something else and must stop when the data it
+   * would deliver is no longer wanted.
+   *
+   * @returns {Promise<void>}
+   */
+  whenAborted() {
+    if (this.#cancelled || this.#error) return Promise.resolve();
+    return new Promise((resolve) => this.#abortWaiters.push(resolve));
+  }
+
   /** Reader wants no more data: queued data is dropped, writers fail. */
   cancel() {
     this.#cancelled = true;
@@ -188,6 +202,7 @@ export class AsyncBuffer {
     this.#bytes = 0;
     this.#wake(this.#readers, { value: null });
     this.#wake(this.#spaceWaiters);
+    this.#wake(this.#abortWaiters);
   }
 
   /** Abort with an error: queued data is dropped, readers reject with `err`. */
@@ -197,6 +212,7 @@ export class AsyncBuffer {
     this.#bytes = 0;
     this.#wake(this.#readers, { error: this.#error });
     this.#wake(this.#spaceWaiters);
+    this.#wake(this.#abortWaiters);
   }
 
   /** Legacy close: both ends of this direction are done; queued data is dropped. */

@@ -35,7 +35,7 @@ Short version: wsh is the door into one place; browsermesh is how many places ta
 | wsh's remote objects over a mesh channel | `@johnhenry/browsermesh-objects` (`packages/browsermesh-objects`) | `exposeObjectsOnMesh`, `openObjectsOnMesh`; peers `@johnhenry/wsh/objects` and the protocol channel (`packages/browsermesh-apps/src/protocol-channel.mjs`, `protocol-roots.mjs`); example 19; [protocol channels](protocol-channel.md) |
 | A stock wsh client, or a mesh peer, using a pod's objects and MCP tools | `packages/browsermesh-transport/src/wsh-services.mjs` | `WshServices` (over a pipe relay, or `serveOnMesh` / `connectWshServicesOverMesh` over a mesh protocol channel); [design](design/wsh-services-on-a-pod.md), [over the mesh](design/wsh-over-mesh.md). Off unless constructed; objects and MCP only. |
 | A pod carrying another pod's wsh session to a target (a mesh `--via`) | `packages/browsermesh-transport/src/wsh-relay.mjs` | `WshRelay`, `connectWshServicesViaRelay`, per-target grant `wsh-relay:<target>:open`; [design](design/wsh-over-mesh.md#the-relaying-pod-wshrelay), [threat model](security.md#a-relaying-pod-wsh---via-over-the-mesh). Off unless constructed. |
-| The wsh TCP gateway as a virtual-network backend | `packages/browsermesh-netway/src/gateway-backend.mjs` | `GatewayBackend` speaks wsh's gateway control messages; its `GATEWAY_ERROR` codes are checked against wsh's exported `GATEWAY_FAIL_TABLE` (5 is `GATEWAY_DISABLED`, what the Rust server always sent; a timeout is 8 from wsh 0.52.0 on; a gateway at 0.51.0 or earlier still sends 5 for a timeout, so a received 5 is read as "the gateway is disabled, or a timeout from an older gateway", and a received 8 is thrown as an `OperationTimeoutError`), and it is tested against a hand-written mock and against a real wsh host (`gateway-real-wsh.test.mjs`: see "Not verified" for what that covers) |
+| The wsh TCP gateway as a virtual-network backend | `packages/browsermesh-netway/src/gateway-backend.mjs` | `GatewayBackend` speaks wsh's gateway control messages, including `GatewayCredit` flow control when the host states `gateway-credit`; its `GATEWAY_ERROR` codes are checked against wsh's exported `GATEWAY_FAIL_TABLE` (5 is `GATEWAY_DISABLED`, what the Rust server always sent; a timeout is 8 from wsh 0.52.0 on; a gateway at 0.51.0 or earlier still sends 5 for a timeout, so a received 5 is read as "the gateway is disabled, or a timeout from an older gateway", and a received 8 is thrown as an `OperationTimeoutError`), and it is tested against a hand-written mock and against a real wsh host (`gateway-real-wsh.test.mjs`: see "Not verified" for what that covers) |
 | One key | `packages/browsermesh-primitives/src/ssh-keys.mjs` | `podIdToFingerprint`, `fingerprintToPodId`, `openSSHPublicKeyFromRaw`, `rawPublicKeyFromOpenSSH`, `podIdFromOpenSSHPublicKey`, `authorizedKeysLine`; `PodIdentity#toOpenSSHPublicKey`, `#toAuthorizedKeysLine`. See [security.md, "One key in both worlds"](security.md#one-key-in-both-worlds) |
 | One capability notation, tested | `packages/browsermesh-apps/test/capability-vectors.test.mjs`, `peer-registry.mjs` | wsh's vectors run against `PeerRegistry`; `isGrantableScope`; [capability notation](capability-notation.md) |
 | A pipe relay on the relay server | the sibling repository `browsermesh-servers` | not in this repository |
@@ -167,8 +167,14 @@ The grants are the same scopes as above. Design: [`design/wsh-services-on-a-pod.
   connects a real `WshClient` with a real Ed25519 login to a real wsh host and runs it end to end: against
   `createWshServer` (from `@johnhenry/wsh/server`) with a TCP gateway to a local echo server it covers connect, data in
   both directions, close from either end, refusal by policy, connection refused, name not found, resolve, too many
-  connections and listen (bound and refused); against `createMemoryHost` it checks that TCP, DNS and listen are refused.
+  connections and listen (bound and refused); it moves 4 MiB each way (origin to client, client to origin, and both at
+  once through an echo) with every byte checked against a counter-hash pattern, which exercises wsh's `gateway-credit` flow
+  control; a slow consumer on each side shows the held bytes stay bounded (at most the socket's 256 KiB window plus the
+  256 KiB of credit granted); and one UDP datagram sent through the host reaches a real UDP socket (UDP is send-only: no
+  reply is read). Against `createMemoryHost` it checks that TCP, DNS and listen are refused.
   The two hosts are the Node implementations joined to the client by an in-memory socket pair, not a network connection,
   and the test skips when `@johnhenry/wsh` is not installed. It was written against wsh 0.52.0 and now runs against 0.54.1;
-  the Rust `wsh-server` was not run, and a gateway timeout (code 8) and an older gateway's 5 are checked only against the
-  mock and wsh's exported code table (`gateway-parity.test.mjs`), not through a real host.
+  the Rust `wsh-server` was not run, a host from before `gateway-credit` was not run (that path is covered by
+  `gateway-credit.test.mjs` against the mock only), no browser run covers the gateway path, and a gateway timeout (code 8)
+  and an older gateway's 5 are checked only against the mock and wsh's exported code table (`gateway-parity.test.mjs`),
+  not through a real host.

@@ -15,24 +15,84 @@
  */
 
 import { Backend } from './backend.mjs';
-import { StreamSocket, DEFAULT_WINDOW_BYTES } from './stream-socket.mjs';
+import { StreamSocket, AsyncBuffer, DEFAULT_WINDOW_BYTES } from './stream-socket.mjs';
 
-// Gateway socket pairs are [userSocket, relaySocket]. The user's writes reach
-// the wire through a pump that awaits each send, so the relay side takes a
-// window and the user's `write()` is paced by the wire. Data arriving FROM the
-// wire has no credit protocol to throttle the remote sender (GATEWAY_DATA
-// carries none), so the user side gets no window and is served as before
-// (queued, closed at the chunk cap) rather than letting un-awaited writes pile
-// up without bound.
-const GATEWAY_PAIR_OPTS = Object.freeze({ windowBytes: [0, DEFAULT_WINDOW_BYTES] });
+// Flow control. A gateway connection is a pair [userSocket, relaySocket]; the
+// user's writes reach the wire through a pump on the relay side, which awaits
+// each send, so the relay side always takes a window and the user's `write()`
+// is paced by the wire.
+//
+// Data arriving FROM the wire is metered by wsh's `gateway-credit` when the host
+// states that feature (`wshClient.hasFeature('gateway-credit')`): each direction
+// of each connection starts with GATEWAY_CREDIT_WINDOW bytes of credit, the
+// receiver returns credit (GatewayCredit, 0x7f) as its application takes data
+// in, and a sender never has more than the credit it holds in flight.
+//   - To the host: the pump sends only while it holds the host's credit, in
+//     frames of at most GATEWAY_MAX_FRAME, and waits for a 0x7f otherwise. The
+//     wait ends when the connection closes, the user destroys the socket, the
+//     gateway closes it, or the wsh client's transport closes.
+//   - From the host: the user side takes the same window as any socket, and
+//     credit is returned as bytes are accepted into it, i.e. as the consumer
+//     reads, so a consumer that stops reading stops the host's origin.
+//     At most the window plus the credit granted is ever held.
+// Without the feature (an older host, or a client that cannot say), nothing is
+// metered on the wire and the user side has no window: the behaviour from before
+// credit existed (queued, closed at the chunk cap).
+const GATEWAY_CREDIT_FEATURE = 'gateway-credit';
+const GATEWAY_CREDIT = 0x7f;
+/** Credit each direction of a connection starts with (a wsh protocol constant), and the window netway grants. */
+const GATEWAY_CREDIT_WINDOW = 262_144;
+/** Largest GatewayData payload sent while credit is on (wsh's own client sends the same). */
+const GATEWAY_MAX_FRAME = 65_536;
 import { DatagramSocket } from './datagram-socket.mjs';
 import { Listener } from './listener.mjs';
 import { OperationQueue } from './queue.mjs';
-import { ConnectionRefusedError, NetwayError, OperationTimeoutError } from './errors.mjs';
+import { ConnectionRefusedError, NetwayError, OperationTimeoutError, SocketClosedError } from './errors.mjs';
 import { GATEWAY_ERROR } from './constants.mjs';
 
 /** Default timeout (ms) for gateway operations that await a server response. */
 const DEFAULT_OPERATION_TIMEOUT_MS = 30_000;
+
+/**
+ * The credit the host has granted for sending on one connection. `take` hands out
+ * up to `max` bytes and waits while there are none; `fail` ends every wait.
+ * @private
+ */
+class CreditGate {
+  #available;
+  #waiters = [];
+  #failed = false;
+
+  constructor(initial) { this.#available = initial; }
+
+  get available() { return this.#available; }
+
+  grant(n) {
+    if (this.#failed || !Number.isFinite(n) || n <= 0) return;
+    this.#available = Math.min(this.#available + n, Number.MAX_SAFE_INTEGER);
+    this.#wake();
+  }
+
+  async take(max) {
+    while (this.#available <= 0) {
+      if (this.#failed) throw new SocketClosedError();
+      await new Promise((resolve) => this.#waiters.push(resolve));
+    }
+    if (this.#failed) throw new SocketClosedError();
+    const n = Math.min(max, this.#available);
+    this.#available -= n;
+    return n;
+  }
+
+  fail() {
+    this.#failed = true;
+    this.#wake();
+  }
+
+  #wake() {
+    for (const w of this.#waiters.splice(0)) w();
+  }
+}
 
 /**
  * A backend that proxies all networking through a remote wsh gateway server.
@@ -47,7 +107,7 @@ export class GatewayBackend extends Backend {
   #pendingListens = new Map();      // listener_id -> { resolve, reject, listener }
   #pendingDns = new Map();          // gateway_id -> { resolve, reject }
   #activeListeners = new Map();     // listener_id -> Listener
-  #activeSockets = new Map();       // gateway_id -> StreamSocket (outbound channel)
+  #flows = new Map();               // gateway_id -> { socket (relay side), gate (send credit or null), unacked }
   #closed = false;
   #gatewayIdCounter = 0;
   #listenerIdCounter = 0;
@@ -73,6 +133,50 @@ export class GatewayBackend extends Backend {
     this.#operationTimeoutMs = operationTimeoutMs;
     if (wshClient) {
       wshClient.onGatewayMessage = (msg) => this.#handleGatewayMessage(msg);
+      // A client that can say when its transport closed (wsh's WshClient has `onClose`): end every
+      // connection and every wait for credit, and call the handler that was there before.
+      if ('onClose' in wshClient) {
+        const previous = wshClient.onClose;
+        wshClient.onClose = (...args) => {
+          this.#failFlows();
+          return typeof previous === 'function' ? previous.apply(wshClient, args) : undefined;
+        };
+      }
+    }
+  }
+
+  /** Whether the host stated `gateway-credit`, so the connections opened from now on are metered. @private */
+  #creditOn() {
+    const client = this.#wshClient;
+    return typeof client?.hasFeature === 'function' && client.hasFeature(GATEWAY_CREDIT_FEATURE) === true;
+  }
+
+  /**
+   * Make the two sockets of a new connection and register the relay side.
+   * The user side gets a receive window only when the connection is metered.
+   * @returns {{ userSocket: StreamSocket, flow: object }}
+   * @private
+   */
+  #openFlow(gatewayId) {
+    const credit = this.#creditOn();
+    const toRelay = new AsyncBuffer({ highWaterMark: 1024, windowBytes: DEFAULT_WINDOW_BYTES }); // user -> wire
+    const toUser = new AsyncBuffer({ highWaterMark: 1024, windowBytes: credit ? DEFAULT_WINDOW_BYTES : 0 }); // wire -> user
+    const userSocket = new StreamSocket({ inbound: toUser, outbound: toRelay });
+    const relaySocket = new StreamSocket({ inbound: toRelay, outbound: toUser });
+    const flow = { socket: relaySocket, gate: credit ? new CreditGate(GATEWAY_CREDIT_WINDOW) : null, unacked: 0 };
+    this.#flows.set(gatewayId, flow);
+    // The user destroyed their socket, or the relay side was closed: a pump waiting for credit stops waiting.
+    toRelay.whenAborted().then(() => flow.gate?.fail());
+    return { userSocket, flow };
+  }
+
+  /** Close every connection and end every wait for credit (the transport is gone, or the backend closed). @private */
+  #failFlows() {
+    const flows = [...this.#flows.values()];
+    this.#flows.clear();
+    for (const flow of flows) {
+      flow.gate?.fail();
+      flow.socket.close().catch(() => {});
     }
   }
 
@@ -257,30 +361,69 @@ export class GatewayBackend extends Backend {
    * @private
    */
   #startDataPump(gatewayId, relaySocket) {
+    const flow = this.#flows.get(gatewayId);
     (async () => {
       let transportError = false;
       try {
         while (true) {
           const chunk = await relaySocket.read();
           if (chunk === null) break; // socket closed
-          await this.#wshClient.sendControl({
-            type: 0x7e, gateway_id: gatewayId, data: chunk,
-          });
+          await this.#sendData(gatewayId, flow, chunk, () => { transportError = true; });
         }
       } catch (_) {
-        // Transport closed or errored — close relay socket so user-side
-        // reads return null (EOF) instead of hanging indefinitely.
-        transportError = true;
+        // Transport closed or errored, the user destroyed the socket, or the connection was closed while
+        // waiting for credit. Close the relay socket so user-side reads return null (EOF) instead of
+        // hanging indefinitely.
         await relaySocket.close();
-        this.#activeSockets.delete(gatewayId);
+        this.#flows.delete(gatewayId);
       }
-      // Tell server the channel is done (best-effort)
+      // Tell server the channel is done (best-effort); a dead transport cannot be told.
       if (!transportError) {
         await this.#wshClient.sendControl({
           type: 0x75, gateway_id: gatewayId,
         }).catch(() => {});
       }
     })();
+  }
+
+  /**
+   * Send one chunk to the host. With credit on, in frames of at most GATEWAY_MAX_FRAME, each only as
+   * far as the host's credit allows (the wait ends if the connection ends: `take` then throws).
+   * @param {() => void} onTransportError - called when the send itself fails, before the error is rethrown
+   * @private
+   */
+  async #sendData(gatewayId, flow, chunk, onTransportError) {
+    const send = async (data) => {
+      try {
+        await this.#wshClient.sendControl({ type: 0x7e, gateway_id: gatewayId, data });
+      } catch (e) {
+        onTransportError();
+        throw e;
+      }
+    };
+    if (!flow?.gate) return send(chunk);
+    for (let off = 0; off < chunk.length;) {
+      const n = await flow.gate.take(Math.min(chunk.length - off, GATEWAY_MAX_FRAME));
+      await send(chunk.subarray(off, off + n));
+      off += n;
+    }
+  }
+
+  /**
+   * Data from the host reached the user side: hand it to the relay socket and, once the user side has
+   * taken it into its window (the consumer has made room), return that much credit to the host.
+   * @private
+   */
+  #deliver(gatewayId, flow, data) {
+    flow.socket.write(data).then(() => {
+      if (!flow.gate || this.#flows.get(gatewayId) !== flow) return;
+      flow.unacked += data.length;
+      if (flow.unacked >= GATEWAY_CREDIT_WINDOW / 2) {
+        const bytes = flow.unacked;
+        flow.unacked = 0;
+        this.#wshClient.sendControl({ type: GATEWAY_CREDIT, gateway_id: gatewayId, bytes }).catch(() => {});
+      }
+    }, () => {});
   }
 
   /**
@@ -291,7 +434,8 @@ export class GatewayBackend extends Backend {
    * - **0x74 GATEWAY_FAIL** — Rejects a pending connection or DNS request.
    * - **0x75 GATEWAY_CLOSE** — Closes an active relayed socket.
    * - **0x76 INBOUND_OPEN** — Auto-accepts an incoming connection on an active listener.
-   * - **0x7e GATEWAY_DATA** — Pushes received data into the matching relay socket.
+   * - **0x7e GATEWAY_DATA** — Pushes received data into the matching relay socket, and returns credit to the host as it is taken in.
+   * - **0x7f GATEWAY_CREDIT** — The host lets the pump send more on a connection (only when `gateway-credit` is on).
    * - **0x79 DNS_RESULT** — Resolves a pending DNS request with addresses.
    * - **0x7b LISTEN_OK** — Resolves a pending listen with the bound listener.
    * - **0x7c LISTEN_FAIL** — Rejects a pending listen request.
@@ -310,11 +454,10 @@ export class GatewayBackend extends Backend {
         if (pendingTcp) {
           this.#pendingConnections.delete(msg.gateway_id);
           // Create a StreamSocket pair — one side for the user, one for wsh data relay
-          const [userSocket, relaySocket] = StreamSocket.createPair(GATEWAY_PAIR_OPTS);
-          this.#activeSockets.set(msg.gateway_id, relaySocket);
+          const { userSocket, flow } = this.#openFlow(msg.gateway_id);
           pendingTcp.resolve(userSocket);
           // Start pumping data from relay socket to server
-          this.#startDataPump(msg.gateway_id, relaySocket);
+          this.#startDataPump(msg.gateway_id, flow.socket);
         } else if (pendingUdp) {
           // UDP: send queued datagram payload and close the channel
           this.#pendingUdp.delete(msg.gateway_id);
@@ -352,10 +495,11 @@ export class GatewayBackend extends Backend {
       }
 
       case 0x75: { // GATEWAY_CLOSE
-        const socket = this.#activeSockets.get(msg.gateway_id);
-        if (socket) {
-          socket.close();
-          this.#activeSockets.delete(msg.gateway_id);
+        const flow = this.#flows.get(msg.gateway_id);
+        if (flow) {
+          flow.gate?.fail(); // a write waiting for the host's credit ends: the host will grant none now
+          flow.socket.close();
+          this.#flows.delete(msg.gateway_id);
         }
         break;
       }
@@ -364,16 +508,15 @@ export class GatewayBackend extends Backend {
         const listener = this.#activeListeners.get(msg.listener_id);
         if (listener && !listener.closed) {
           // Auto-accept: create socket pair, enqueue server socket, send accept
-          const [userSocket, relaySocket] = StreamSocket.createPair(GATEWAY_PAIR_OPTS);
           const gatewayId = this.#nextGatewayId();
-          this.#activeSockets.set(gatewayId, relaySocket);
+          const { userSocket, flow } = this.#openFlow(gatewayId);
           listener._enqueue(userSocket);
           // Send InboundAccept with gateway_id for data routing
           this.#wshClient.sendControl({
             type: 0x77, channel_id: msg.channel_id, gateway_id: gatewayId,
           }).catch(() => {});
           // Start pumping data from relay socket to server
-          this.#startDataPump(gatewayId, relaySocket);
+          this.#startDataPump(gatewayId, flow.socket);
         } else {
           // Reject if no listener
           this.#wshClient.sendControl({ type: 0x78, channel_id: msg.channel_id, reason: 'no listener' }).catch(() => {});
@@ -382,10 +525,13 @@ export class GatewayBackend extends Backend {
       }
 
       case 0x7e: { // GATEWAY_DATA
-        const socket = this.#activeSockets.get(msg.gateway_id);
-        if (socket) {
-          socket.write(msg.data).catch(() => {});
-        }
+        const flow = this.#flows.get(msg.gateway_id);
+        if (flow) this.#deliver(msg.gateway_id, flow, msg.data);
+        break;
+      }
+
+      case GATEWAY_CREDIT: { // the host lets us send `bytes` more on gateway_id
+        this.#flows.get(msg.gateway_id)?.gate?.grant(msg.bytes);
         break;
       }
 
@@ -461,9 +607,9 @@ export class GatewayBackend extends Backend {
   async close() {
     this.#closed = true;
     this.#queue.clear();
-    for (const socket of this.#activeSockets.values()) await socket.close();
+    for (const flow of this.#flows.values()) { flow.gate?.fail(); await flow.socket.close(); }
     for (const listener of this.#activeListeners.values()) listener.close();
-    this.#activeSockets.clear();
+    this.#flows.clear();
     this.#activeListeners.clear();
     // Reject all pending
     for (const p of this.#pendingConnections.values()) p.reject(new NetwayError('Backend closed', 'ECLOSED'));
