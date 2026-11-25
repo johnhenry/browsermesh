@@ -70,7 +70,7 @@ await net.close();
 
 ### Core Abstractions
 
-- `StreamSocket` -- reliable ordered byte stream (TCP-like), with `createPair()` for paired sockets. Byte-level backpressure: each direction has a receive window (`createPair({ windowBytes })`, default 256 KiB), `write()` resolves only once the peer's window has taken every byte, and reading returns credit. A reader that never reads stops its writer; `readableLength` / `writableLength` report the bytes held at each side. `end()` is a half-close, `close()` lets the peer read what was already accepted and then see EOF, `destroy(err)` makes the peer's reads reject with `err`, and `readable` / `writable` are Web Streams views. `close(reason)` records why on both endpoints (`closeReason`, and `SocketClosedError.reason` on a write that fails afterwards). A peer with no window (`windowBytes: 0`, or a buffer from before windows) is served as before: `write()` resolves when the chunk is queued and the buffer closes at the chunk cap. `GatewayBackend` sockets use a window for the user's writes (paced by the wire pump) but not for data arriving from the wire, which has no credit message to throttle the remote sender.
+- `StreamSocket` -- reliable ordered byte stream (TCP-like), with `createPair()` for paired sockets. Byte-level backpressure: each direction has a receive window (`createPair({ windowBytes })`, default 256 KiB), `write()` resolves only once the peer's window has taken every byte, and reading returns credit. A reader that never reads stops its writer; `readableLength` / `writableLength` report the bytes held at each side. `end()` is a half-close, `close()` lets the peer read what was already accepted and then see EOF, `destroy(err)` makes the peer's reads reject with `err`, and `readable` / `writable` are Web Streams views. `close(reason)` records why on both endpoints (`closeReason`, and `SocketClosedError.reason` on a write that fails afterwards). A peer with no window (`windowBytes: 0`, or a buffer from before windows) is served as before: `write()` resolves when the chunk is queued and the buffer closes at the chunk cap. `GatewayBackend` sockets use that window in both directions when the host states `gateway-credit` (see "Gateway flow control" below), and a window for the user's writes only against a host that does not.
 - `DatagramSocket` -- unreliable message socket (UDP-like)
 - `Listener` -- server-side accept queue for incoming connections
 
@@ -85,10 +85,45 @@ await net.close();
 
 - `Backend` -- abstract base class for network backends
 - `LoopbackBackend` -- in-memory backend for `mem://` and `loop://` schemes
-- `GatewayBackend` -- wsh-proxied backend for real TCP/UDP/DNS
+- `GatewayBackend` -- wsh-proxied backend for real TCP/UDP/DNS (TCP and DNS are complete; UDP is send-only, see below)
 - `ServiceBackend` -- `svc://` scheme backend using a service registry
 - `ChaosBackendWrapper` -- wraps any backend with fault injection (latency, drops, partitions)
 - `FsServiceBackend` -- filesystem service routing backend
+
+#### Gateway flow control
+
+wsh meters a gateway connection's data in both directions with `GatewayCredit` when the host states the `gateway-credit`
+feature (and the client offers it: wsh's `WshClient` always does): each direction starts with 256 KiB of credit, the
+receiver returns credit as its application takes data in, and a sender never has more than the credit it holds in
+flight. `GatewayBackend` follows that, on every connection it opens or accepts, and only when
+`wshClient.hasFeature('gateway-credit')` is true when the connection is established:
+
+- **Writing to the origin**: the pump sends in frames of at most 64 KiB and only as far as the host's credit allows; a
+  `write()` on the socket waits on the socket's own 256 KiB window, which the pump drains as credit arrives. Held at most:
+  the window plus the chunk the pump is working on.
+- **Reading from the origin**: the socket has a 256 KiB receive window, and credit goes back to the host as bytes are
+  taken into that window, which happens as the consumer reads. A consumer that stops reading stops the origin, and what is
+  held is at most the window plus the credit granted (`2 x 256 KiB`).
+- A wait for credit ends when the host closes the connection, the user destroys the socket, the backend is closed, or the
+  client's transport closes (`GatewayBackend` wraps the client's `onClose` if it has one, and calls the handler that was
+  there): the write rejects with `SocketClosedError` and reads return `null`. A `close()` (not `destroy()`) on the socket
+  lets what it already wrote go out as credit arrives. The failure codes are unchanged (8 is an `OperationTimeoutError`;
+  5 is read as "the gateway is disabled, or a timeout from an older gateway").
+- **A host that does not state the feature** (or a client object with no `hasFeature()`): nothing new is sent; writes are
+  paced by the transport, and data from the host is queued without a window as before, with the socket closed once 1024
+  chunks are queued unread. wsh's own hosts then bound what a client makes them hold with byte caps (4 MiB per connection by
+  default) and close a connection that exceeds them, so a large transfer against such a host works while the consumer reads.
+  This is covered against the mock only, not against a real older host.
+
+#### UDP through the gateway is send-only
+
+`GatewayBackend.sendDatagram` opens a wsh UDP flow, sends the one datagram and closes the flow; a reply is not read, and
+there is no `bindDatagram` (it throws, as `Backend.bindDatagram()` does). This is deliberate. A wsh UDP flow is fixed to one
+destination and the host drops anything from another address, so it cannot stand for a socket bound to a local port that
+hears from anyone; a bound socket would need a flow per peer address (the host allows 16 per client, closes idle ones and
+rate-limits them), a lifetime and eviction policy for them, and the WebTransport-datagram form (which `WshClient` handles
+itself, not this backend). That is more than a contained change, so it is not done here. `sendDatagram` against a real host
+is tested (a datagram reaches a real UDP socket).
 
 ### Network
 

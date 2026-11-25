@@ -660,6 +660,18 @@ export interface WshClient {
   sendControl(msg: any): Promise<void>;
   /** Callback for inbound gateway messages. Assigned by GatewayBackend. */
   onGatewayMessage: ((msg: any) => void) | null;
+  /**
+   * Whether the host states a feature (wsh's `WshClient` has this). GatewayBackend meters gateway data with
+   * wsh's `gateway-credit` flow control only when `hasFeature('gateway-credit')` is true; a client without this
+   * method, or a host that does not state the feature, is served without credit. The client must offer
+   * `gateway-credit` in its own Hello for the host to use it (wsh's `WshClient` always does).
+   */
+  hasFeature?(name: string): boolean;
+  /**
+   * Called when the client's transport closes (wsh's `WshClient` has this). If the property exists,
+   * GatewayBackend wraps it (calling the handler that was there) to end every connection and every wait for credit.
+   */
+  onClose?: ((info?: any) => void) | null;
 }
 
 /** Options for constructing a GatewayBackend. */
@@ -677,6 +689,13 @@ export interface GatewayBackendOptions {
 
 /**
  * A backend that proxies all networking through a remote wsh gateway server.
+ *
+ * Flow control: when the host states wsh's `gateway-credit` feature, each connection's data is metered in both
+ * directions (256 KiB of credit each way to start). A write to the socket waits for the host's credit (and for
+ * the socket's own window), and credit is returned to the host as the socket's consumer reads, so a consumer
+ * that stops reading stops the origin; at most the socket's window plus the credit granted is held. Against a host
+ * that does not state the feature nothing is metered: writes are paced by the transport, and data from the
+ * host is queued without a window and the socket is closed at 1024 queued chunks.
  */
 export class GatewayBackend extends Backend {
   constructor(opts?: GatewayBackendOptions);
@@ -710,6 +729,10 @@ export class GatewayBackend extends Backend {
 
   /**
    * Send a datagram through the gateway. If offline, the operation is queued.
+   *
+   * UDP through the gateway is send-only today: each call opens a UDP flow, sends the one datagram and closes
+   * it, and any reply is not read. There is no `bindDatagram` on this backend (it throws, as the base class
+   * does), because a wsh UDP flow is fixed to one destination and cannot be bound to a local port.
    *
    * @param host - The target hostname or IP.
    * @param port - The target port number.
