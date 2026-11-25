@@ -89,7 +89,7 @@ hand-written.
 | `browsermesh-ingress` | yes | `.` `./node` | yes | yes | yes |
 | `browsermesh-kernel` | yes | `.` | yes | no | no |
 | `browsermesh-mcp` | yes | `.` | yes | yes | yes |
-| `browsermesh-meshctl` | private | `.` | yes | no | no |
+| `browsermesh-meshctl` | yes | `.` | yes | no | no |
 | `browsermesh-netway` | yes | `.` | yes | no | no |
 | `browsermesh-objects` | yes | `.` | yes | yes | yes |
 | `browsermesh-pod` | yes | `.` `./node-runtimes` | yes | yes | yes |

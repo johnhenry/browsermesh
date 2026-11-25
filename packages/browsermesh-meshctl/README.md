@@ -2,32 +2,34 @@
 
 [![license](https://img.shields.io/npm/l/%40johnhenry%2Fbrowsermesh-meshctl.svg)](LICENSE)
 
-External CLI for the browsermesh hosted-pods control surface
-([issue #185](https://github.com/johnhenry/browsermesh/issues/185), item 5).
-`meshctl` is itself a pod: it boots its own mesh identity, joins the mesh,
-and issues the same `pod-host:request` envelopes the in-mesh
-`createPodHostClient()` uses. There is no separate admin API -- `meshctl`
-has no more authority over a host than any other granted peer does.
+A command-line client for **hosted pods**: pods that run on a machine someone
+else operates (a Node process, a microVM, an isolate, a browser tab). `meshctl`
+is itself a pod: it boots its own mesh identity, joins the mesh, and issues the
+same `pod-host:request` envelopes the in-mesh `createPodHostClient()` uses. It
+spawns, lists, sends to, snapshots and drains pods on the hosts that allow it.
+There is no separate admin API: `meshctl` has no more authority over a host
+than any other granted peer does, and a host decides, per verb, what this
+identity may do.
 
-> **Publishing.** This package is `"private": true` for now. It is a real
-> workspace member (turbo runs its tests, `npm install` links it), but
-> whether/when it ships to npm as `@johnhenry/browsermesh-meshctl` is a
-> separate decision -- see [RELEASING.md](../../RELEASING.md). The package as
-> `npm pack` would ship it starts on its own (`test/standalone.test.mjs`);
-> `meshctl vm` drives the `spikes/vm-pod-host` spike, which is not part of the
-> package, and says so when it is not there.
+> **Status.** The commands are tested in full against in-process hosts
+> (`--loopback`), and the sealed relay path (`--wsh-relay`) against the
+> in-process pipe relay and a real pod-host service. `meshctl` has not been run
+> against a deployed host, and the WebRTC path (`--signaling`) is wired but has
+> not been exercised end to end. Read [What is not supported](#what-is-not-supported)
+> before relying on it.
 
 ## Contents
 
-- [Why this exists](#why-this-exists)
 - [Install](#install)
+- [Quick start](#quick-start)
+- [Why this exists](#why-this-exists)
 - [The `cf`-style JSON contract](#the-cf-style-json-contract)
 - [Exit codes](#exit-codes)
 - [Identity](#identity)
-- [Connection modes: `--loopback` vs. a real mesh](#connection-modes---loopback-vs-a-real-mesh)
+- [Transports](#transports)
 - [Commands](#commands)
 - [`vm`: a different animal](#vm-a-different-animal)
-- [Known limitations](#known-limitations)
+- [What is not supported](#what-is-not-supported)
 - [Peer dependencies](#peer-dependencies)
 - [License](#license)
 
@@ -46,11 +48,42 @@ calls `createPodHostClient()`.
 
 ## Install
 
-Not published yet (see the note above). Inside this monorepo:
+Needs Node 26 or later.
 
 ```bash
-npm install   # root install links the workspace + `meshctl` on PATH via node_modules/.bin
-npx meshctl --help
+npm install -g @johnhenry/browsermesh-meshctl
+meshctl --help
+```
+
+The mesh packages it drives are peer dependencies (`browsermesh-apps`, `-core`,
+`-pod`, `-primitives`); npm installs them with it. Two are optional, and you
+need them only for a real mesh:
+
+```bash
+# for --wsh-relay (a sealed link through a relay) and --signaling (WebRTC)
+npm install -g @johnhenry/browsermesh-transport @johnhenry/wsh
+```
+
+`--signaling` also needs `node-datachannel` (the native WebRTC binding,
+optional in the transport package). In a project instead of globally:
+`npm install @johnhenry/browsermesh-meshctl` and run `npx meshctl`.
+
+## Quick start
+
+With no network at all, against two in-process demo hosts:
+
+```bash
+meshctl hosts --loopback
+meshctl pods spawn auto --lane node --name hello --kind command --ref /bin/echo --loopback
+```
+
+Against a real host you are allowed to use (its operator grants your pod id the
+verbs you need; print yours with `meshctl identity`):
+
+```bash
+meshctl identity
+meshctl hosts --wsh-relay wss://relay.example.com --host <host-pod-id>
+meshctl pods list <host-pod-id> --wsh-relay wss://relay.example.com
 ```
 
 ## The `cf`-style JSON contract
@@ -115,9 +148,11 @@ npx meshctl identity
 A host only ever grants capabilities to a `podId` -- without a persisted
 identity, every invocation would be a different, ungranted stranger.
 
-## Connection modes: `--loopback` vs. a real mesh
+## Transports
 
-Every command except `identity` and `vm` (see below) needs exactly one of:
+How `meshctl` reaches a host. Every command except `identity` and `vm` (see
+below) needs `--loopback`, or `--wsh-relay`, or `--signaling` (the last two can
+be combined):
 
 - **`--loopback`** -- an in-process mesh with no network at all: `meshctl`
   boots its own `PeerNode`, plus (by default) two demo hosts --
@@ -254,6 +289,12 @@ meshctl pods crash node-host web --loopback   # dev-only: demo a restart
 
 ## `vm`: a different animal
 
+**`vm` needs a repository checkout, and is not available from the npm
+package.** It drives `spikes/vm-pod-host` in a checkout of
+[johnhenry/browsermesh](https://github.com/johnhenry/browsermesh), which is not
+published. Everything else works without a checkout; in the installed package
+`meshctl vm ...` exits 2 (`EUSAGE`) and says so.
+
 `meshctl vm <spawn|exec|snapshot|restore|drain|status> ... [--dry-run]`
 talks to a **local** `VmPodHost` directly (`spikes/vm-pod-host`'s
 Firecracker driver) -- no `--loopback`/`--signaling`, no identity, no
@@ -271,8 +312,19 @@ them -- `src/vm-bridge.mjs` is the glue, the spike's own `cli.mjs` stays a
 thin wrapper around the exact same functions for its own standalone use,
 and the spike's own test suite (`spikes/vm-pod-host/test/`) stays green.
 
-## Known limitations
+## What is not supported
 
+- **`vm` needs a repository checkout** (above): it is absent from the
+  installed package.
+- **Nothing here has been run against a deployed host.** The commands are
+  tested against in-process hosts and the sealed relay path against an
+  in-process pipe relay and a real pod-host service; the real-mesh path has
+  not been run against a deployed host or relay.
+- **No host discovery.** Real-mode `<host>` arguments are pod ids, and
+  `--host <podId>` lists the hosts a command considers. There is no
+  directory to ask.
+- **`meshctl` never listens.** Nothing can open a link to it; a host cannot
+  call it back except on the connection it opened.
 - **`--relay` is not load-bearing, on purpose.** It opens and closes a
   second `WebSocketTransport` (relay mode) cleanly, and nothing in the
   pod-host request path uses it. That relay dialect is readable by the relay
@@ -309,9 +361,13 @@ and the spike's own test suite (`spikes/vm-pod-host/test/`) stays green.
 
 Matches how `@johnhenry/browsermesh-apps` declares its own workspace
 peers: `@johnhenry/browsermesh-primitives`, `@johnhenry/browsermesh-pod`,
-`@johnhenry/browsermesh-core`, `@johnhenry/browsermesh-apps` are required;
-`@johnhenry/browsermesh-transport` is an optional peer, needed only for
-the real-mesh (`--signaling`) path.
+`@johnhenry/browsermesh-core`, `@johnhenry/browsermesh-apps` (0.18 or later)
+are required; `@johnhenry/browsermesh-transport` (0.11 or later, the release
+with the `/wsh` subpath) and `@johnhenry/wsh` are optional peers, needed only
+for the real-mesh paths (`--wsh-relay`, `--signaling`). Without them, those
+flags say what is missing and the other commands still work. The lower bounds
+are the releases that carry what `meshctl` calls; they are not tested against
+older releases.
 
 ## License
 

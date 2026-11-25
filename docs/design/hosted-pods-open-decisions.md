@@ -48,6 +48,21 @@ talk to.
 **Recommendation.** C, with B's steps ready. The package is small (16 files, about 31 kB packed) and self-contained now;
 what is missing is evidence from outside the test suite. Releases stop at a major: this would be a first minor.
 
+**Decided 2026-11-25: C. B's steps are done** (public manifest at version 0.0.0 with a minor changeset, so the release
+pull request makes it 0.1.0; in `scripts/staggered-publish.sh`; a user README; peers raised to the releases that carry
+what it calls). Left for the owner, in this order:
+
+1. The real run: against one deployed pod host that allows your identity (`meshctl identity` prints the pod id to grant
+   the pod-host verbs and `mesh:link:connect` to), run `meshctl hosts --wsh-relay <relay> --host <host pod id>`, then
+   `pods spawn`, `pods status`, `pods send` and `pods drain` on a harmless pod. Look for: the host is described
+   with its lane and verbs (not `WSH_UNREACHABLE` or `WSH_REFUSED`), each verb returns `{"ok":true}` with exit 0, a
+   refused verb returns `EACCES` (exit 3), and the pod id the host claims is the one you asked for. Record it, and repeat
+   with `--signaling` if the WebRTC path is to be claimed.
+2. The first publish of the new name, by hand (a name that does not exist yet cannot be published by the trusted
+   publisher): from a checkout at the released commit, `npm publish --workspace=@johnhenry/browsermesh-meshctl --access public`
+   after the release pull request has made the version 0.1.0; then enable trusted publishing for the name so later
+   releases go through the workflow.
+
 ## 3. The MV3 extension spike
 
 **State.** `spikes/browser-extension-host` is frozen (its `exec` evaluates a string in a page, which cannot work under a
