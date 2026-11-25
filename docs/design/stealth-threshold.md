@@ -88,8 +88,9 @@ Old epochs stay readable only while the application keeps their keys.
   stays read. Re-sealing covers the latest state only.
 - Share transport: shares are signed, not encrypted. They must travel over channels that are authenticated and confidential;
   this module sends nothing itself.
-- A holder that releases its share to the wrong party. The on-demand release round (decision (b)) is not built; the share
-  format is the unit it would carry.
+- A holder that releases its share to the wrong party. The on-demand release round (decision (b)) is built separately
+  (`discovery-records.md`, item 4; `stealth-release.mjs`): a holder answers only members of its roster, seals the share to the
+  requester, and offers an `approve` hook; what the holder's own approval and roster get wrong is still the holder's.
 - Traffic analysis, the existence of the agent, state size and access timing: unchanged.
 - Memory: `K` and shares are `Uint8Array`s the caller should overwrite (`fill(0)`) after use; JavaScript gives no guarantee
   that copies are gone.
@@ -111,7 +112,8 @@ them.
 
 1. **Dealer model (a)**: a trusted dealer, the agent's owner pod, hands shares to named holders at setup. The share-release
    API for on-demand recovery (b) is reserved as the protocol-channel name `stealth:<agentId>:share:release`, authorised per
-   root; it is not built, and the signed share is the message it would carry. (c) is out of scope.
+   root; the signed share is the message it carries (built later, sealed to the requester: `discovery-records.md`, item 4).
+   (c) is out of scope.
 2. **Holders**: group members by default, `t` a majority, an explicit custodian list as an option.
 3. **Epoch on every leave**: new `K`, new key id, new lookup nonce; re-seal only the latest state; old shares refused through
    `minEpoch`.

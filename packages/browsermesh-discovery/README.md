@@ -30,6 +30,7 @@ Extracted from a private monorepo (previously `packages/browsermesh-discovery`),
 | stealth | `StealthAgent`, `ShardDistributor`, `ShardCollector` |
 | owned stores (opt-in) | `signDhtStore`, `verifyDhtStore`, `deriveWriteSigner`, `canonicalJson`, `classifyStoreKey`, `DHT_STORE_REFUSALS` |
 | shard parity (opt-in, format 3) | `rsEncode`, `rsDecode`, `ParityError`, `MAX_RS_SHARDS`, `stealthShardChecksum` |
+| share release (opt-in) | `createShareHolder`, `requestShareRelease`, `createReleaseRequest`, `createReleaseResponse`, `stealthReleaseChannel`, `stealthReleaseTag`, `RELEASE_REFUSALS` |
 | stealth threshold (opt-in) | `dealStealthShares`, `reconstructStealthSecret`, `verifyStealthShare`, `thresholdEpochKeys`, `stealthEpochKeyId`, `stealthShareSigningBytes` |
 
 ## Install
@@ -147,6 +148,28 @@ the rest, re-seal the latest state and pass `minEpoch`. A compromised dealer, `t
 member already read are NOT protected, and shares are signed, not encrypted: see
 [docs/design/stealth-threshold.md](https://github.com/johnhenry/browsermesh/blob/main/docs/design/stealth-threshold.md).
 
+**On-demand share release** (opt-in; [design note](https://github.com/johnhenry/browsermesh/blob/main/docs/design/discovery-records.md), item 4).
+Instead of only holding shares dealt up front, a group member can ask the holders when it needs the secret. Each holder checks
+who is asking before it says anything about what it holds, and answers with its signed share sealed to the requester:
+
+```js
+// holder side: one per share holder, over the protocol channel stealthReleaseChannel(agentId) = `stealth:<agentId>:share:release`
+const holder = createShareHolder({ name: myPodId, identity, members: memberPublicKeys, trustedDealers: [dealerPublicKey], approve, log });
+await holder.addShare(myDealtShare);
+channel.onMessage((from, request) => channel.reply(from, holder.handle(from, request)));
+// reader side: a member
+const { secret, epoch, released, refused, unreachable } = await requestShareRelease({
+  identity, agentId, groupId, trustedDealers: [dealerPublicKey], minEpoch, holders: currentHolderNames,
+  peers: holders.map((h) => ({ holder: h.name, publicKey: h.publicKey, send: (request) => channel.request(h.podId, request) })),
+});
+```
+
+The request is signed by the member, bound to one holder, a time and a nonce, and names the agent only by a hash. A holder
+refuses by name (`not-a-member`, `replayed`, `stale-request`, `rate-limited`, `stale-epoch`, `no-share`, `not-approved`, ...)
+and a non-member gets the same answer whether or not the holder holds that agent. With fewer than `t` valid shares the reader
+throws `below-threshold` with who was refused or unreachable; an older peer that does not run the channel is simply
+unreachable. `holder.retire({ agentId, groupId, belowEpoch })` drops old shares and `holder.setMembers(keys)` follows the roster.
+
 **Shard format 3: a SHA-256 checksum and Reed-Solomon parity** (opt-in, `shardFormat: 3` or `[2, 3]`;
 [docs/design/discovery-records.md](https://github.com/johnhenry/browsermesh/blob/main/docs/design/discovery-records.md)).
 Format 3 shards are base64url byte slices of the UTF-8 state with `total - threshold` Reed-Solomon parity shards
@@ -160,6 +183,7 @@ state). Format 3 records live under **different DHT keys** (`stealth:<agentId>:s
 older peer never reads one and cannot mis-verify it: `shardFormat: [2, 3]` writes both so older readers keep working,
 `shardFormat: 3` alone is for when every reader is upgraded; readers read both by default (`readFormats`). The
 synchronous `hide()` stays format 2 (it throws `async-required` if `shardFormat` includes 3; use `hideAsync()`).
+
 **Who may store under which key** (opt-in; [design note](https://github.com/johnhenry/browsermesh/blob/main/docs/design/discovery-records.md), item 3).
 By default a `DhtNode` accepts a `store` from anyone for any key, as it always did. Give it a `storePolicy` and a store may carry
 a proof (`signDhtStore`: the writer's key, a `seq`, an absolute expiry and an Ed25519 signature over key, value, `seq` and expiry):
