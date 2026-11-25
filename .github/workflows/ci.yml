@@ -155,6 +155,12 @@ jobs:
       - name: Install nftables and iproute2
         run: sudo apt-get install -y --no-install-recommends nftables iproute2
 
+      # The runner has Docker, which sets the iptables FORWARD policy to DROP;
+      # the test's control run (no rules of ours: the guest must be able to reach
+      # the "internet") needs forwarding to work, then checks the rules close it.
+      - name: Let the runner forward packets
+        run: sudo iptables -P FORWARD ACCEPT
+
       - name: Network policy on a real kernel
         env:
           REQUIRE_REAL_LINUX_NET: '1'

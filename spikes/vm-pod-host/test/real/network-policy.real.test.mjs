@@ -185,9 +185,12 @@ if (unmet && required) {
     })
 
     it('control: with no rules the guest reaches everything, so the topology itself works', async () => {
-      assert.equal(await reaches(UPSTREAM_IP), true)
-      assert.equal(await reaches(METADATA_IP), true)
-      assert.equal(await reaches(PRIVATE_IP), true)
+      // If this fails, something on the host drops forwarded traffic before this test's rules exist. Docker does:
+      // it sets the iptables FORWARD policy to DROP. `iptables -P FORWARD ACCEPT` (CI does this) lets the topology work.
+      const why = 'no rules of ours are loaded: a default FORWARD DROP on this host (Docker sets one) is the likely cause'
+      assert.equal(await reaches(UPSTREAM_IP), true, why)
+      assert.equal(await reaches(METADATA_IP), true, why)
+      assert.equal(await reaches(PRIVATE_IP), true, why)
     })
 
     it('the plan loads into the kernel (this is the nft grammar and the order of the commands)', async () => {
