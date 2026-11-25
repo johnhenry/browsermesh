@@ -73,6 +73,20 @@ const DEFAULT_ANSWER_TIMEOUT_MS = 15_000
 const DEFAULT_OPEN_TIMEOUT_MS = 15_000
 
 /**
+ * How many inbound connections may be connecting (answered, DataChannel not yet open) at once. Generous on
+ * purpose: a node that is dialled by dozens of peers at once (a relay, a gateway) answers them all; the bound
+ * only has to stop a peer that sends offers it never completes from growing the node's connection table
+ * without limit.
+ */
+export const DEFAULT_MAX_HALF_OPEN_INBOUND = 64
+
+/**
+ * How long an inbound connection may stay half-open. Four times the 15 s a dialling side waits for its own
+ * DataChannel, so a slow but working path (relay-only ICE, a busy tab) is not cut short.
+ */
+export const DEFAULT_HALF_OPEN_TIMEOUT_MS = 60_000
+
+/**
  * Build a `'webrtc'` adapter factory for `MeshTransportNegotiator`, backed by
  * a real `WebRTCMeshManager` and a `MeshSignalingChannel`.
  *
@@ -95,6 +109,13 @@ const DEFAULT_OPEN_TIMEOUT_MS = 15_000
  * @param {number} [opts.openTimeoutMs] - How long to wait for the callee-side
  *   DataChannel to open before giving up on firing `onIncomingConnection`
  *   (the offer/answer exchange itself already succeeded either way).
+ * @param {number} [opts.maxHalfOpenInbound=64] - How many inbound connections may be connecting (answered, not yet
+ *   open) at once. When one more offer arrives the oldest unfinished connection is closed to make room, so a real
+ *   peer is never locked out by stale ones. An offer for a connection that is already open (a renegotiation) or
+ *   already counted does not take a slot. `Infinity` turns the cap off.
+ * @param {number} [opts.halfOpenTimeoutMs=60000] - How long an inbound connection may stay half-open before it is
+ *   closed and its slot freed. `Infinity` turns the deadline off.
+ *   The live numbers are on the returned factory as `halfOpenInbound` (`max`, `timeoutMs`, `count`).
  * @returns {(endpoint: string, auth?: object) => Promise<import('@johnhenry/browsermesh-transport').WebRTCTransportAdapter>}
  *   Factory suitable for `negotiator.registerAdapter('webrtc', factory)`.
  *   `endpoint` is the remote peer's podId; `auth` may carry
@@ -104,11 +125,64 @@ const DEFAULT_OPEN_TIMEOUT_MS = 15_000
 export function createWebRTCTransportFactory({
   localPodId, meshManager, signaling, onLog, onIncomingConnection, openTimeoutMs: defaultOpenTimeoutMs,
   onBindingFailure,
+  maxHalfOpenInbound = DEFAULT_MAX_HALF_OPEN_INBOUND,
+  halfOpenTimeoutMs = DEFAULT_HALF_OPEN_TIMEOUT_MS,
 }) {
   if (!localPodId) throw new Error('localPodId is required')
   if (!meshManager) throw new Error('meshManager is required')
   if (!signaling) throw new Error('signaling is required')
+  if (maxHalfOpenInbound !== Infinity && !(Number.isInteger(maxHalfOpenInbound) && maxHalfOpenInbound > 0)) {
+    throw new TypeError('maxHalfOpenInbound must be a positive integer (or Infinity)')
+  }
+  if (!(halfOpenTimeoutMs > 0)) throw new TypeError('halfOpenTimeoutMs must be a positive number (or Infinity)')
   const log = onLog || (() => {})
+
+  /**
+   * Inbound connections that were answered and have not opened yet, oldest first (Map keeps insertion order).
+   * @type {Map<string, { conn: object|null, timer: any, evicted: boolean }>}
+   */
+  const halfOpen = new Map()
+
+  function closeQuietly(conn) {
+    try { conn?.close?.() } catch (err) { log('webrtc-negotiator:half-open-close-failed', { error: err?.message || String(err) }) }
+  }
+
+  /** Take a slot for an inbound offer, making room by closing the oldest unfinished connection if needed. */
+  function admitHalfOpen(key, remotePodId, connectionId) {
+    while (halfOpen.size >= maxHalfOpenInbound) {
+      const [oldKey, old] = halfOpen.entries().next().value
+      halfOpen.delete(oldKey)
+      clearTimeout(old.timer)
+      old.evicted = true
+      closeQuietly(old.conn)
+      log('webrtc-negotiator:half-open-evicted', { key: oldKey, for: remotePodId })
+    }
+    const entry = { conn: null, timer: null, evicted: false }
+    halfOpen.set(key, entry)
+    return entry
+  }
+
+  function releaseHalfOpen(key, entry) {
+    clearTimeout(entry.timer)
+    if (halfOpen.get(key) === entry) halfOpen.delete(key)
+  }
+
+  /** Watch an answered inbound connection: it frees its slot when it opens or closes, and is closed at the deadline. */
+  function watchHalfOpen(key, entry, conn, remotePodId, connectionId) {
+    entry.conn = conn
+    conn.onStateChange((state) => {
+      if (state === 'closed' || (state === 'connected' && conn.isOpen)) releaseHalfOpen(key, entry)
+    })
+    if (conn.isOpen) { releaseHalfOpen(key, entry); return }
+    if (halfOpenTimeoutMs === Infinity) return
+    entry.timer = setTimeout(() => {
+      if (halfOpen.get(key) !== entry || conn.isOpen) return
+      releaseHalfOpen(key, entry)
+      log('webrtc-negotiator:half-open-timed-out', { from: remotePodId, connectionId })
+      closeQuietly(conn)
+    }, halfOpenTimeoutMs)
+    entry.timer?.unref?.()
+  }
 
   /** @type {Set<string>} "remotePodId connectionId" pairs whose ICE relay is already wired */
   const wiredIce = new Set()
@@ -186,8 +260,15 @@ export function createWebRTCTransportFactory({
   // for the lifetime of this factory, so a peer that only ever receives
   // connections (never calls negotiate() itself) still gets connected.
   signaling.onOffer(async (fromPodId, offer, connectionId = DEFAULT_CONNECTION_ID) => {
+    const key = iceKey(fromPodId, connectionId)
+    let entry = null
     try {
+      // An offer for a connection that is already open (a renegotiation) or already counted takes no slot.
+      const existing = meshManager.getConnection?.(fromPodId, connectionId)
+      if (!halfOpen.has(key) && !existing?.isOpen) entry = admitHalfOpen(key, fromPodId, connectionId)
       const conn = await getWiredConnection(fromPodId, connectionId)
+      if (entry?.evicted) { closeQuietly(conn); return }
+      if (entry) watchHalfOpen(key, entry, conn, fromPodId, connectionId)
       const answer = await conn.handleOffer(offer)
       signaling.send('webrtc-answer', fromPodId, answer, connectionId)
       log('webrtc-negotiator:answered', { from: fromPodId, connectionId })
@@ -204,6 +285,13 @@ export function createWebRTCTransportFactory({
         onIncomingConnection(fromPodId, adapter, connectionId)
       }
     } catch (err) {
+      if (entry) {
+        // Still held: the offer failed before the connection opened, so do not leave it in the table. Already
+        // released (opened, evicted, timed out): nothing more to close.
+        const held = halfOpen.get(key) === entry
+        releaseHalfOpen(key, entry)
+        if (held) closeQuietly(entry.conn)
+      }
       log('webrtc-negotiator:offer-failed', { from: fromPodId, connectionId, error: err?.message || String(err) })
     }
   })
@@ -228,7 +316,7 @@ export function createWebRTCTransportFactory({
    * @param {object} [auth]
    * @returns {Promise<import('@johnhenry/browsermesh-transport').WebRTCTransportAdapter>}
    */
-  return async function webrtcTransportFactory(endpoint, auth) {
+  async function webrtcTransportFactory(endpoint, auth) {
     const remotePodId = endpoint
     if (!remotePodId) throw new Error('webrtcTransportFactory: endpoint (remote podId) is required')
 
@@ -269,4 +357,14 @@ export function createWebRTCTransportFactory({
     await adapter.connect()
     return adapter
   }
+
+  Object.defineProperty(webrtcTransportFactory, 'halfOpenInbound', {
+    enumerable: true,
+    value: Object.freeze({
+      max: maxHalfOpenInbound,
+      timeoutMs: halfOpenTimeoutMs,
+      get count() { return halfOpen.size },
+    }),
+  })
+  return webrtcTransportFactory
 }

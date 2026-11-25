@@ -347,6 +347,27 @@ describeIfReal('WebRTC against real peers', () => {
     }
   })
 
+  it('identity binding over real DTLS: bound, and a binding that exposes no usable certificate is reported unavailable, not mismatched', async () => {
+    const { PodIdentity } = await import('@johnhenry/browsermesh-primitives')
+    const ia = await PodIdentity.generate()
+    const ib = await PodIdentity.generate()
+    const alice = new webrtc.WebRTCPeerConnection({ localPodId: ia.podId, remotePodId: ib.podId, iceServers: [], identity: ia })
+    const bob = new webrtc.WebRTCPeerConnection({ localPodId: ib.podId, remotePodId: ia.podId, iceServers: [], identity: ib })
+    alice.onIceCandidate((c) => bob.addIceCandidate(c))
+    bob.onIceCandidate((c) => alice.addIceCandidate(c))
+    try {
+      await alice.handleAnswer(await bob.handleOffer(await alice.createOffer()))
+      await waitFor(() => alice.bound && bob.bound, 15_000, 'both sides to verify the other')
+      // node-datachannel's getRemoteCertificates() returns an empty buffer and its getStats() has no
+      // certificate entry, so nothing can be compared here; it must say so, not close the connection.
+      assert.equal(alice.certificateCheck, 'unavailable')
+      assert.equal(bob.certificateCheck, 'unavailable')
+      assert.equal(alice.bindingFailure, null)
+    } finally {
+      alice.close(); bob.close()
+    }
+  })
+
   it('close() is idempotent and fires its close callbacks exactly once', async () => {
     const peers = pair()
     try {

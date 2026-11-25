@@ -18,6 +18,7 @@ import { encodeWireData } from './wire-data.mjs'
 import {
   BINDING_FRAME_TYPE, extractDtlsFingerprints, createBindingProof, verifyBindingProof,
   signDescription, verifyDescription,
+  remoteCertificateFingerprints, certificateMatches,
 } from './identity-binding.mjs'
 
 /** Default time to wait for the peer's identity proof once the control channel is open. */
@@ -297,6 +298,10 @@ export class WebRTCPeerConnection {
   #descriptionVerified = null   // null: no identity or nothing received yet; false: received unsigned; true: verified
   #descriptionFailure = null
   #sentOfferSdp = null          // the offer this side last sent: an answer to it must name it
+  #checkCertificate = true
+  #requireCertificateCheck = false
+  #certificateCheck = null      // null | 'matched' | 'unavailable' | 'mismatch'
+  #certificateDone = null       // promise: the check has finished (and failed the binding if it must)
 
   /**
    * @param {object} opts
@@ -319,6 +324,16 @@ export class WebRTCPeerConnection {
    *   says why). A description that arrives without one (an older peer) is applied and reported with
    *   `descriptionVerified === false`, since the proof on the connection still binds it; with `true` it
    *   is refused (`unsigned`). Off by default: it would refuse every peer that predates the field.
+   * @param {boolean} [opts.checkCertificate=true] - With `identity`: once the control channel is
+   *   open, compare the certificate the connection actually uses (where the browser exposes it:
+   *   `RTCDtlsTransport.getRemoteCertificates()` or the `certificate` entry of `getStats()`) with
+   *   the fingerprint the peer's session description named, the one the identity proof covers. A
+   *   different certificate closes the connection (`bindingFailure` is `certificate-mismatch`). It
+   *   can only refuse a connection that is already wrong, and it sends nothing, so an older peer
+   *   is unaffected. Where the browser exposes nothing, `certificateCheck` says `'unavailable'`.
+   * @param {boolean} [opts.requireCertificateCheck=false] - Also close a connection whose
+   *   certificate cannot be read (`certificate-unavailable`). Off by default: it would refuse
+   *   every connection in a browser that does not expose the certificate.
    * @param {RTCIceServer[]} [opts.iceServers]
    * @param {'all'|'relay'} [opts.iceTransportPolicy] - Forwarded verbatim to
    *   `RTCPeerConnection`. `'relay'` gathers TURN candidates only, so host and
@@ -335,10 +350,13 @@ export class WebRTCPeerConnection {
     localPodId, remotePodId, iceServers, iceTransportPolicy, onLog, disconnectedGraceMs = 5000,
     identity, requirePeerBinding = true, bindingTimeoutMs = DEFAULT_BINDING_TIMEOUT_MS,
     requireSignedDescription = false,
+    checkCertificate = true, requireCertificateCheck = false,
   } = {}) {
     if (!localPodId) throw new Error('localPodId is required')
     this.#requireSignedDescription = requireSignedDescription === true
     if (!remotePodId) throw new Error('remotePodId is required')
+    this.#checkCertificate = checkCertificate !== false
+    this.#requireCertificateCheck = requireCertificateCheck === true
     if (identity) {
       if (typeof identity.sign !== 'function' || typeof identity.rawPublicKey !== 'function') {
         throw new Error('identity must be able to sign (a PodIdentity)')
@@ -385,6 +403,13 @@ export class WebRTCPeerConnection {
 
   /** Why the last description was refused (`unsigned`, `bad-signature`, ...), or null. */
   get descriptionFailure() { return this.#descriptionFailure }
+
+  /**
+   * What the comparison of the certificate in use with the peer's described one found:
+   * `'matched'`, `'mismatch'` (the connection was closed), `'unavailable'` (this browser does not
+   * expose the certificate, so nothing was compared), or `null` (not run yet, off, or no identity).
+   */
+  get certificateCheck() { return this.#certificateCheck }
 
   /** Why identity binding failed (the connection was closed), or null. */
   get bindingFailure() { return this.#bindingFailure }
@@ -1341,6 +1366,31 @@ export class WebRTCPeerConnection {
     this.#bindingFailure = null
     this.#bindingStarted = false
     this.#pendingProof = null
+    this.#certificateCheck = null
+    this.#certificateDone = null
+  }
+
+  /**
+   * Compare the certificate the connection really uses with the fingerprint(s) the peer's own
+   * description named. Runs once the control channel is open (DTLS is up by then).
+   */
+  async #verifyCertificateInUse(params) {
+    const peerFingerprints = this.#role === 'offerer' ? params.answerFingerprints : params.offerFingerprints
+    const algorithms = peerFingerprints.map((f) => f.split(' ')[0])
+    const seen = await remoteCertificateFingerprints(this.#pc, algorithms)
+    if (this.#state === 'closed') return
+    if (!seen) {
+      this.#certificateCheck = 'unavailable'
+      this.#log(`Certificate in use with ${this.#remotePodId} is not exposed by this browser; not compared`)
+      if (this.#requireCertificateCheck) this.#failBinding('certificate-unavailable')
+      return
+    }
+    if (!certificateMatches(peerFingerprints, seen)) {
+      this.#certificateCheck = 'mismatch'
+      this.#failBinding('certificate-mismatch')
+      return
+    }
+    this.#certificateCheck = 'matched'
   }
 
   #bindingStarted = false
@@ -1375,6 +1425,10 @@ export class WebRTCPeerConnection {
       if (typeof this.#bindingTimer?.unref === 'function') this.#bindingTimer.unref()
     }
     const dc = this.#dataChannel
+    if (this.#checkCertificate) {
+      this.#certificateDone = this.#verifyCertificateInUse(params)
+        .catch((err) => silentCatch('webrtc', 'swallow', err))
+    }
     createBindingProof(this.#identity, { ...params, signer: this.#role })
       .then((proof) => {
         if (this.#state !== 'closed' && dc.readyState === 'open') dc.send(JSON.stringify(proof))
@@ -1404,6 +1458,9 @@ export class WebRTCPeerConnection {
       this.#failBinding(verdict.reason)
       return
     }
+    // The proof covers the descriptions; the certificate in use must be the one they name.
+    if (this.#certificateDone) await this.#certificateDone
+    if (this.#state === 'closed' || this.#bound) return
     this.#bound = true
     clearTimeout(this.#bindingTimer)
     this.#bindingTimer = null
@@ -1478,6 +1535,8 @@ export class WebRTCMeshManager {
   #requirePeerBinding
   #bindingTimeoutMs
   #requireSignedDescription
+  #checkCertificate
+  #requireCertificateCheck
   #lastStats = []
 
   /**
@@ -1495,17 +1554,21 @@ export class WebRTCMeshManager {
    *   before it counts as an error worth reconnecting over.
    * @param {object} [opts.identity] - This pod's `PodIdentity`; passed to every connection to
    *   enable identity binding (see `WebRTCPeerConnection`). `requirePeerBinding` and
-   *   `bindingTimeoutMs` and `requireSignedDescription` are passed along with it.
+   *   `bindingTimeoutMs`, `requireSignedDescription`, `checkCertificate` and
+   *   `requireCertificateCheck` are passed along with it.
    */
   constructor({
     localPodId, iceServers, iceTransportPolicy, onLog,
     maxReconnectAttempts = 5, reconnectBaseDelayMs = 1000, disconnectedGraceMs = 5000,
     identity, requirePeerBinding = true, bindingTimeoutMs = DEFAULT_BINDING_TIMEOUT_MS,
     requireSignedDescription = false,
+    checkCertificate = true, requireCertificateCheck = false,
   } = {}) {
     if (!localPodId) throw new Error('localPodId is required')
     this.#requireSignedDescription = requireSignedDescription
     if (identity && identity.podId !== localPodId) throw new Error('identity.podId must equal localPodId')
+    this.#checkCertificate = checkCertificate
+    this.#requireCertificateCheck = requireCertificateCheck
     this.#identity = identity ?? null
     this.#requirePeerBinding = requirePeerBinding
     this.#bindingTimeoutMs = bindingTimeoutMs
@@ -1602,6 +1665,8 @@ export class WebRTCMeshManager {
         requirePeerBinding: this.#requirePeerBinding,
         bindingTimeoutMs: this.#bindingTimeoutMs,
         requireSignedDescription: this.#requireSignedDescription,
+        checkCertificate: this.#checkCertificate,
+        requireCertificateCheck: this.#requireCertificateCheck,
       } : {}),
     })
     // Forward messages to manager-level listeners

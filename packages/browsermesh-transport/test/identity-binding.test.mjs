@@ -8,6 +8,7 @@
 // A real-browser run of this path has not been made (see issue #270).
 import { describe, it, mock } from 'node:test'
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { PodIdentity } from '@johnhenry/browsermesh-primitives'
 
 // ---------------------------------------------------------------------------
@@ -56,9 +57,19 @@ class FakePC {
   connectionState = 'new'
   constructor() {
     fpSeq++
-    const hex = fpSeq.toString(16).padStart(2, '0').toUpperCase()
-    this.fingerprint = `sha-256 ${Array(32).fill(hex).join(':')}`
+    // A certificate (a few bytes standing in for the DER) and the fingerprint of it, as an SDP names it.
+    this.cert = new Uint8Array(40).fill(fpSeq)
+    const hex = createHash('sha256').update(this.cert).digest('hex').toUpperCase()
+    this.fingerprint = `sha-256 ${hex.match(/../g).join(':')}`
   }
+  // What the browser exposes about the certificate the connection really uses: FakePC.exposure is
+  // 'none' (nothing, like a browser without it), 'dtls' (RTCDtlsTransport.getRemoteCertificates),
+  // 'stats' (a certificate entry in getStats) or 'wrong' (a certificate that is not the peer's).
+  get sctp() {
+    if (FakePC.exposure !== 'dtls' && FakePC.exposure !== 'wrong') return null
+    return { transport: { getRemoteCertificates: () => [FakePC.exposure === 'wrong' ? new Uint8Array(40).fill(250) : this.peerPc.cert] } }
+  }
+
   createDataChannel(label) {
     const dc = new FakeDC(label)
     this.channels.push(dc)
@@ -81,6 +92,8 @@ class FakePC {
     if (desc.type === 'offer') {
       const offerer = offerers.get(Number(/a=x-fake-offerer:(\d+)/.exec(desc.sdp)?.[1]))
       this.offerer = offerer
+      this.peerPc = offerer
+      offerer.peerPc = this
       for (const oc of offerer.channels) {
         const mine = new FakeDC(oc.label)
         mine.peer = oc
@@ -99,11 +112,19 @@ class FakePC {
     }
   }
   addIceCandidate() {}
-  async getStats() { return new Map() }
+  async getStats() {
+    if (FakePC.exposure !== 'stats') return new Map()
+    const hex = createHash('sha256').update(this.peerPc.cert).digest('hex').toUpperCase()
+    return new Map([
+      ['T', { type: 'transport', remoteCertificateId: 'C' }],
+      ['C', { type: 'certificate', fingerprintAlgorithm: 'sha-256', fingerprint: hex.match(/../g).join(':') }],
+    ])
+  }
   close() { this.closed = true }
   get remoteDescription() { return null }
 }
 FakePC.applied = 0 // descriptions applied (setRemoteDescription calls), across all instances
+FakePC.exposure = 'none'
 globalThis.RTCPeerConnection = FakePC
 
 const {
@@ -112,6 +133,7 @@ const {
 const {
   extractDtlsFingerprints, bindingTranscript, createBindingProof, verifyBindingProof, BINDING_DOMAIN,
   DESCRIPTION_DOMAIN, descriptionTranscript, signDescription, verifyDescription,
+  remoteCertificateFingerprints, certificateMatches,
 } = await import('../src/identity-binding.mjs')
 
 const dec = new TextDecoder()
@@ -555,5 +577,182 @@ describe('signed session descriptions: WebRTCPeerConnection', () => {
     assert.deepEqual(Object.keys(offer).sort(), ['sdp', 'type'])
     assert.equal(a.descriptionVerified, null)
     a.close()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The certificate the connection actually uses
+// ---------------------------------------------------------------------------
+
+describe('certificate in use: pure functions', () => {
+  const cert = new Uint8Array(40).fill(7)
+  const sha256 = `sha-256 ${createHash('sha256').update(cert).digest('hex').match(/../g).join(':')}`
+  const sha384 = `sha-384 ${createHash('sha384').update(cert).digest('hex').match(/../g).join(':')}`
+
+  it('reads the certificate from the DTLS transport, in the form the SDP names it', async () => {
+    const pc = { sctp: { transport: { getRemoteCertificates: () => [cert] } } }
+    assert.deepEqual(await remoteCertificateFingerprints(pc, ['sha-256', 'sha-384']), [sha256, sha384])
+    assert.deepEqual(await remoteCertificateFingerprints(pc), [sha256])
+  })
+
+  it('falls back to the certificate entry of getStats', async () => {
+    const hex = sha256.split(' ')[1].toUpperCase()
+    const pc = {
+      getStats: async () => new Map([
+        ['T', { type: 'transport', remoteCertificateId: 'C' }],
+        ['C', { type: 'certificate', fingerprintAlgorithm: 'sha-256', fingerprint: hex }],
+      ]),
+    }
+    assert.deepEqual(await remoteCertificateFingerprints(pc), [sha256])
+  })
+
+  it('says null, not a guess, when the browser exposes nothing', async () => {
+    assert.equal(await remoteCertificateFingerprints({}), null)
+    assert.equal(await remoteCertificateFingerprints({ getStats: async () => new Map() }), null)
+    assert.equal(await remoteCertificateFingerprints({ sctp: { transport: { getRemoteCertificates: () => [] } }, getStats: async () => { throw new Error('x') } }), null)
+  })
+
+  it('an empty certificate (what some Node bindings return) is "not exposed", never a certificate', async () => {
+    const empty = { sctp: { transport: { getRemoteCertificates: () => [new ArrayBuffer(0)] } } }
+    assert.equal(await remoteCertificateFingerprints(empty), null)
+    assert.equal(await remoteCertificateFingerprints({ sctp: { transport: { getRemoteCertificates: () => [new Uint8Array(0)] } } }), null)
+  })
+
+  it('matches only a certificate the signed description names', () => {
+    assert.equal(certificateMatches([sha256], [sha256]), true)
+    assert.equal(certificateMatches([sha256, 'sha-256 aa'], [sha256, sha384]), false) // a seen entry the description does not name
+    assert.equal(certificateMatches(['sha-256 aa'], [sha256]), false)
+    assert.equal(certificateMatches([], [sha256]), false)
+    assert.equal(certificateMatches([sha256], []), false)
+  })
+})
+
+describe('certificate in use: WebRTCPeerConnection', () => {
+  const withExposure = async (mode, fn) => {
+    FakePC.exposure = mode
+    try { return await fn() } finally { FakePC.exposure = 'none' }
+  }
+
+  for (const mode of ['dtls', 'stats']) {
+    it(`a certificate that matches the peer's description is reported matched (${mode})`, async () => {
+      await withExposure(mode, async () => {
+        const { a, b, when } = await pair()
+        await Promise.all([when(a, 'connected'), when(b, 'connected')])
+        assert.equal(a.certificateCheck, 'matched')
+        assert.equal(b.certificateCheck, 'matched')
+        assert.equal(a.bound && b.bound, true)
+        a.close(); b.close()
+      })
+    })
+  }
+
+  it('a connection that uses another certificate than the one named is closed, even though the proofs would verify', async () => {
+    await withExposure('wrong', async () => {
+      const { a, b, events, when } = await pair()
+      await Promise.all([when(a, 'closed'), when(b, 'closed')])
+      // Whichever side reads its certificate first reports and closes; the other then sees the channel close.
+      assert.ok(a.bindingFailure === 'certificate-mismatch' || b.bindingFailure === 'certificate-mismatch')
+      assert.ok(a.certificateCheck === 'mismatch' || b.certificateCheck === 'mismatch')
+      assert.equal(a.bound || b.bound, false)
+      assert.match([...events.errA, ...events.errB].join(), /certificate-mismatch/)
+    })
+  })
+
+  it('a browser that exposes nothing is reported unavailable and the connection still works', async () => {
+    const { a, b, when } = await pair()
+    await Promise.all([when(a, 'connected'), when(b, 'connected')])
+    assert.equal(a.certificateCheck, 'unavailable')
+    assert.equal(b.certificateCheck, 'unavailable')
+    assert.equal(a.bound, true)
+    a.close(); b.close()
+  })
+
+  it('requireCertificateCheck: true refuses a browser that exposes nothing', async () => {
+    const { a, b, when } = await pair({ aOpts: { requireCertificateCheck: true } })
+    await Promise.all([when(a, 'closed'), when(b, 'closed')])
+    assert.equal(a.bindingFailure, 'certificate-unavailable')
+  })
+
+  it('checkCertificate: false turns the check off', async () => {
+    await withExposure('wrong', async () => {
+      const { a, b, when } = await pair({ aOpts: { checkCertificate: false }, bOpts: { checkCertificate: false } })
+      await Promise.all([when(a, 'connected'), when(b, 'connected')])
+      assert.equal(a.certificateCheck, null)
+      a.close(); b.close()
+    })
+  })
+
+  it('without an identity the check does not run', async () => {
+    await withExposure('wrong', async () => {
+      const a = new WebRTCPeerConnection({ localPodId: 'a', remotePodId: 'b', iceServers: [] })
+      const b = new WebRTCPeerConnection({ localPodId: 'b', remotePodId: 'a', iceServers: [] })
+      const connected = Promise.all([a, b].map((c) => new Promise((resolve) => c.onStateChange((s) => s === 'connected' && resolve()))))
+      await a.handleAnswer(await b.handleOffer(await a.createOffer()))
+      await connected
+      assert.equal(a.certificateCheck, null)
+      a.close(); b.close()
+    })
+  })
+})
+
+describe('signed descriptions and the certificate in use, together', () => {
+  const withExposure = async (mode, fn) => {
+    FakePC.exposure = mode
+    try { return await fn() } finally { FakePC.exposure = 'none' }
+  }
+  const swapSdp = (desc) => ({ ...desc, sdp: desc.sdp.replace(/a=fingerprint:.*/, `a=fingerprint:sha-256 ${Array(32).fill('EE').join(':')}`) })
+
+  it('both checks pass: descriptions verified before they were applied, certificate matched, then bound', async () => {
+    await withExposure('dtls', async () => {
+      const { a, b, when } = await pair()
+      await Promise.all([when(a, 'connected'), when(b, 'connected')])
+      assert.equal(a.descriptionVerified && b.descriptionVerified, true)
+      assert.equal(a.certificateCheck, 'matched')
+      assert.equal(b.certificateCheck, 'matched')
+      assert.equal(a.descriptionFailure, null)
+      assert.equal(a.bindingFailure, null)
+      assert.equal(a.bound && b.bound, true)
+      a.close(); b.close()
+    })
+  })
+
+  it('a description that does not verify is refused with its own reason, and the certificate check never runs', async () => {
+    await withExposure('dtls', async () => {
+      const ida = await PodIdentity.generate()
+      const idb = await PodIdentity.generate()
+      const a = new WebRTCPeerConnection({ localPodId: ida.podId, remotePodId: idb.podId, iceServers: [], identity: ida })
+      const b = new WebRTCPeerConnection({ localPodId: idb.podId, remotePodId: ida.podId, iceServers: [], identity: idb })
+      const before = FakePC.applied
+      const offer = swapSdp(await a.createOffer())
+      await assert.rejects(() => b.handleOffer(offer), /bad-signature/)
+      assert.equal(FakePC.applied, before)
+      assert.equal(b.descriptionFailure, 'bad-signature')
+      assert.equal(b.bindingFailure, null)
+      assert.equal(b.certificateCheck, null)
+      a.close(); b.close()
+    })
+  })
+
+  it('a certificate that is not the described one closes with its own reason although every description verified', async () => {
+    await withExposure('wrong', async () => {
+      const { a, b, when } = await pair()
+      await Promise.all([when(a, 'closed'), when(b, 'closed')])
+      assert.equal(a.descriptionVerified && b.descriptionVerified, true)
+      assert.equal(a.descriptionFailure, null)
+      assert.equal(b.descriptionFailure, null)
+      assert.ok(a.bindingFailure === 'certificate-mismatch' || b.bindingFailure === 'certificate-mismatch')
+      assert.equal(a.bound || b.bound, false)
+    })
+  })
+
+  it('unsigned descriptions (an older peer) do not hide a certificate mismatch', async () => {
+    await withExposure('wrong', async () => {
+      const { a, b, when } = await pair({ tamperOffer: dropSignature, tamperAnswer: dropSignature })
+      await Promise.all([when(a, 'closed'), when(b, 'closed')])
+      assert.equal(a.descriptionVerified, false)
+      assert.equal(b.descriptionVerified, false)
+      assert.equal(a.descriptionFailure, null)
+      assert.ok(a.bindingFailure === 'certificate-mismatch' || b.bindingFailure === 'certificate-mismatch')
+    })
   })
 })

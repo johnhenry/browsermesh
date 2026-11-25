@@ -108,6 +108,38 @@ parses it (`@johnhenry/browsermesh-apps`' `ctx.onIncomingData()` does). A custom
 `WebRTCTransport.send(data, { channel })` takes `'control'` (default) or
 `'bulk'` and falls back to control when the bulk channel is not open.
 
+## Holding a stream peer to the rules (opt-in)
+
+`StreamMultiplexer` hands every inbound frame to its stream as it arrives and,
+by default, checks nothing about what the peer sends: a peer that ignores the
+credit it was granted, skips sequence numbers or keeps opening streams past the
+limit is simply answered. Pass `maxViolations` (a positive whole number) and the
+multiplexer enforces the rules a conforming peer already keeps, counts each
+breach, and cuts the peer off once there are more of them than the budget:
+
+```js
+const mux = new StreamMultiplexer({ maxViolations: 16 })
+mux.onAbuse((reason, count) => link.close())   // called once; every stream is already cancelled
+```
+
+Counted (the frame is dropped): data beyond the credit granted for the stream
+(`grantCredits()` returns credit as the reader consumes), out of sequence on an
+ordered stream, larger than `maxChunkSize`, or beyond `maxStreamSize`; a credit
+grant that is not a positive whole number or goes past the credit limit; a
+duplicate open, an open past `maxConcurrentStreams` (still refused with
+`FLOW_CONTROL`, as before) or announcing more credit than the limit; and a
+frame for a stream that does not exist (still answered, as before). After the
+budget is spent nothing from the peer is processed or answered. `violations` and
+`abused` report the state. Receive-side only: no frame changes, so an older
+peer is unaffected, and a peer that keeps the rules is never counted. Off by
+default, because an existing peer that overran its credit would start losing
+frames.
+
+The credit-window flow control, bounded buffers and violation handling of the
+protocol channel (`browsermesh-apps`' `mesh-channel` and `protocol-stream`)
+are separate and unchanged. A binary frame format for a raw data channel is not
+part of this package.
+
 ## Binding a WebRTC connection to the pod identities (opt-in)
 
 Offer and answer travel through signalling, and a server on that path can swap
@@ -166,6 +198,29 @@ description.
   addressed to; it names ICE credentials and a certificate only its maker can
   complete, so the most that follows is an answer to a connection that cannot
   come up.
+
+### The certificate in use
+
+With `identity`, once the control channel is open the connection also compares
+the certificate it actually uses with the fingerprint the peer's own session
+description named (the one the proof covers): `remoteCertificateFingerprints(pc,
+algorithms)` reads it from `RTCDtlsTransport.getRemoteCertificates()` or, where
+that is missing, from the `certificate` entry of `getStats()`, and
+`certificateMatches(expected, seen)` compares. A different certificate closes
+the connection (`bindingFailure` is `certificate-mismatch`) before it is
+reported bound. `certificateCheck` says what happened: `'matched'`,
+`'mismatch'`, `'unavailable'` (this browser exposes no certificate, so nothing
+was compared; the connection still works and relies on the browser's own DTLS
+check), or `null` (off, no identity, or not run yet). `checkCertificate: false`
+turns the check off; `requireCertificateCheck: true` also refuses a connection
+whose certificate cannot be read (off by default, since it would refuse every
+connection in a browser that does not expose it). The check sends nothing, so
+an older peer is unaffected. Chromium exposes the certificate through
+`getStats()` (checked in the browser tests: `'matched'`); `node-datachannel`
+returns an empty buffer and no certificate stats, so it reports
+`'unavailable'`; Firefox and WebKit have not been checked here and are expected
+to report `'unavailable'` or `'matched'` (their CI legs report, they do not
+gate). An empty certificate buffer is treated as "not exposed", never compared.
 
 This is verified here with an in-memory duplex and fixed vectors; it has not
 been run over a real `RTCPeerConnection` in a browser (see issue #270).
@@ -255,7 +310,7 @@ changes for code that does not ask for it. Design and threat model:
 is not protected: [`docs/security.md`](../../docs/security.md).
 
 Import the link code from `@johnhenry/browsermesh-transport/wsh` and install the optional peer,
-`npm install @johnhenry/wsh` (0.45 or later for links, 0.50 or later for the services; developed against 0.51). It is
+`npm install @johnhenry/wsh` (0.45 or later for links, 0.50 or later for the services; developed against 0.52). It is
 imported lazily on the first `listen()` / `connect()`, so a page that never
 uses a wsh link loads none of it. See [Bundling for the browser](#bundling-for-the-browser).
 

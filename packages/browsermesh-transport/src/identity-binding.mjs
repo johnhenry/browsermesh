@@ -220,6 +220,73 @@ export async function verifyDescription(auth, { kind, expectedPodId, localPodId,
   return valid ? { ok: true } : { ok: false, reason: 'bad-signature' }
 }
 
+// ---------------------------------------------------------------------------
+// The certificate the connection actually uses
+// ---------------------------------------------------------------------------
+
+const DIGESTS = { 'sha-1': 'SHA-1', 'sha-256': 'SHA-256', 'sha-384': 'SHA-384', 'sha-512': 'SHA-512' }
+
+/** @param {Uint8Array} bytes @returns {string} lower-case hex pairs separated by ':' */
+function hexPairs(bytes) {
+  return [...bytes].map((b) => b.toString(16).padStart(2, '0')).join(':')
+}
+
+/**
+ * The fingerprint(s) of the certificate the remote end presented in the DTLS
+ * handshake of `pc`, in the form `extractDtlsFingerprints` returns (so the
+ * two can be compared), or `null` when the browser exposes none. Looks first
+ * at `RTCDtlsTransport.getRemoteCertificates()` (hashing the leaf certificate
+ * with each requested algorithm), then at the `certificate` entry of
+ * `getStats()`. It never guesses: no source, no answer.
+ *
+ * @param {object} pc - an RTCPeerConnection
+ * @param {string[]} [algorithms] - the hash names the description uses, e.g. `['sha-256']`
+ * @returns {Promise<string[]|null>}
+ */
+export async function remoteCertificateFingerprints(pc, algorithms = ['sha-256']) {
+  const wanted = [...new Set(algorithms.map((a) => String(a).toLowerCase()).filter((a) => DIGESTS[a]))]
+  if (!wanted.length) return null
+  try {
+    const certs = pc?.sctp?.transport?.getRemoteCertificates?.()
+    const der = certs?.length ? (certs[0] instanceof ArrayBuffer ? new Uint8Array(certs[0]) : certs[0]) : null
+    // An empty buffer is a stub (some Node bindings return one), not a certificate.
+    if (der?.byteLength > 0) {
+      const out = []
+      for (const alg of wanted) out.push(`${alg} ${hexPairs(new Uint8Array(await crypto.subtle.digest(DIGESTS[alg], der)))}`)
+      return out.sort()
+    }
+  } catch { /* fall through to stats */ }
+  try {
+    const stats = await pc?.getStats?.()
+    if (stats && typeof stats.forEach === 'function') {
+      const byId = new Map()
+      stats.forEach((v, k) => byId.set(k, v))
+      let remoteId
+      for (const v of byId.values()) if (v?.type === 'transport' && v.remoteCertificateId) remoteId = v.remoteCertificateId
+      const c = remoteId ? byId.get(remoteId) : undefined
+      if (c && typeof c.fingerprint === 'string' && /^[0-9A-Fa-f]{2}(:?[0-9A-Fa-f]{2})*$/.test(c.fingerprint)) {
+        const alg = String(c.fingerprintAlgorithm || 'sha-256').toLowerCase()
+        const hex = c.fingerprint.replace(/:/g, '').toLowerCase()
+        return [`${alg} ${hex.match(/../g).join(':')}`]
+      }
+    }
+  } catch { /* unavailable */ }
+  return null
+}
+
+/**
+ * True when the certificate seen in use is one the peer's description names:
+ * something was compared, and every fingerprint seen is in the signed set.
+ *
+ * @param {string[]} expected - `extractDtlsFingerprints(peerSdp)`
+ * @param {string[]} seen - `remoteCertificateFingerprints(pc, ...)`
+ * @returns {boolean}
+ */
+export function certificateMatches(expected, seen) {
+  if (!expected?.length || !seen?.length) return false
+  return seen.every((s) => expected.includes(s))
+}
+
 /** @param {Uint8Array} raw @returns {Promise<string>} pod id */
 export async function podIdOfRawKey(raw) {
   return toBase64url(new Uint8Array(await crypto.subtle.digest('SHA-256', raw)))

@@ -30,6 +30,12 @@ test('identity binding succeeds on a real RTCPeerConnection', async ({ servers, 
   for (const page of [alice, bob]) {
     expect(await status(page)).toMatchObject({ state: 'connected', bound: true, failure: null, descriptionVerified: true, refusals: [] })
   }
+  // The certificate the connection really uses was compared with the one the peer's description named
+  // where the browser exposes it (Chromium does, through getStats; a browser that does not says so).
+  // It is never a mismatch on an honest connection.
+  const certificates = [await status(alice), await status(bob)].map((s) => s.certificate)
+  for (const c of certificates) expect(['matched', 'unavailable']).toContain(c)
+  if (test.info().project.name === 'chromium') expect(certificates).toEqual(['matched', 'matched'])
   // And traffic flows once bound, in both directions.
   await alice.evaluate(() => window.bm.rtcSend({ hello: 'bob' }))
   await bob.evaluate(() => window.bm.rtcSend({ hello: 'alice' }))

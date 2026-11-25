@@ -280,7 +280,10 @@ const bm = {
   rtcOpen() { return !!bm.rtc?.conn?.isOpen },
   rtcStatus() {
     const c = bm.rtc.conn
-    return { state: c.state, bound: c.bound, failure: c.bindingFailure, descriptionVerified: c.descriptionVerified, descriptionFailure: c.descriptionFailure, refusals: bm.rtc.refusals }
+    return {
+      state: c.state, bound: c.bound, failure: c.bindingFailure, certificate: c.certificateCheck,
+      descriptionVerified: c.descriptionVerified, descriptionFailure: c.descriptionFailure, refusals: bm.rtc.refusals,
+    }
   },
 
   /**

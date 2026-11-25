@@ -546,5 +546,27 @@ export declare function verifyKeyStatement(statement: unknown, opts?: { now?: nu
 export declare function sealToStatement(verified: { ka: Uint8Array; kid: string }, opts: { aad: Uint8Array; plaintext: Uint8Array; maxBytes?: number }): Promise<SealedBox>;
 export declare function openSealed(sealed: unknown, opts: { privateKeys: Map<string, AgreementKeyPair> | ((kid: string) => AgreementKeyPair | undefined); aad: Uint8Array; maxBytes?: number }): Promise<Uint8Array>;
 
+// Share code: a short code plus the fingerprint of the key that made it (the first 140 bits of its pod id)
+
+export declare const SHARE_CODE_CHARS: 12;
+export declare const SHARE_FINGERPRINT_CHARS: 28;
+export declare const SHARE_FINGERPRINT_BITS: 140;
+export declare const MAX_LABEL_CHARS: 64;
+export declare function generateShareCode(random?: (n: number) => Uint8Array): string;
+export declare function shareFingerprintOfPodId(podId: string): string;
+export declare function shareFingerprintOfPublicKey(publicKey: Uint8Array | CryptoKey): Promise<string>;
+export declare function podIdMatchesShareFingerprint(podId: string, fingerprint: string): boolean;
+export declare function publicKeyMatchesShareFingerprint(publicKey: Uint8Array | CryptoKey, fingerprint: string): Promise<boolean>;
+export declare function normalizeShareCode(input: string): string | null;
+export declare function normalizeShareFingerprint(input: string): string | null;
+export declare function formatShareCode(code: string): string;
+export declare function formatShareFingerprint(fingerprint: string): string;
+export declare function formatShare(parts: { code: string; fingerprint: string; origin?: string; linkBase?: string }): { code: string; url: string };
+export type ParsedShare =
+  | { ok: true; code: string; fingerprint: string }
+  | { ok: false; reason: 'empty' | 'invalid' | 'no-fingerprint' | 'bad-fingerprint'; message: string };
+export declare function parseShareInput(text: string): ParsedShare;
+export declare function sanitizeLabel(input: unknown, max?: number): string;
+
 /** Parse a case-sensitive mesh:// or *.mesh.local address. */
 export declare function parseMeshRequest(url: string): { podId: string; path: string } | null;
