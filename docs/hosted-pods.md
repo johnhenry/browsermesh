@@ -799,6 +799,29 @@ via `pickHost` (default: the same `pickAutoHost()` selection
 refusing host, "the orchestrator proposes, the host accepts" all the way
 down.
 
+**Re-placement and the requester (the supervisor's design decision).** A pod
+supervised with a requester or a minimum boundary
+(`supervise(host, spec, {requesterId, minBoundary})`; `meshctl pods supervise
+auto --requester ... --min-boundary ...`) is placed by the placement planner,
+now and at every restart, and the supervisor takes the conservative reading of
+"on whose behalf": the requester recorded when the pod was supervised, with
+that requester's trust read from the local trust graph, never the supervisor's
+own identity (which holds the grants of the whole operator) and never anything
+wider than that requester has. With only a boundary the requester is none,
+which the planner treats as untrusted. A restart prefers the current host
+(`preferHost`), or avoids a lost one (`avoidHosts`); the planner's decision
+comes from `orchestrator.decidePod()` (the same decision and audit as
+`placePod()`, spawning nothing) or an injected `placer`. If the requester's
+rules no longer allow any host (trust fell, a boundary is not met), the
+supervisor does not widen them: it emits `supervisor:replacement-refused`
+(requester, code, the planner's plan code, the rejected hosts), then
+`supervisor:gave-up` with the reason `replacement-refused:<plan code>`, writes
+both to the audit chain, and leaves the pod `dead`. A shortage of room
+(`EBUSY`) is retried like any restart, within `maxRestarts`. Pods supervised
+without either option are placed exactly as before (`pickHost`,
+`pickAutoHost()`). Not covered: a supervised pod does not count toward the
+per-requester pod quota, as before.
+
 `MeshOrchestrator#getSupervisor()` lazily builds one supervisor per
 orchestrator, and `drainPod(hostPodId)` consults it (without creating one
 it didn't need) so draining a HOST pod cascades into every pod it

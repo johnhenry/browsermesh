@@ -474,6 +474,46 @@ export class MeshOrchestrator {
    */
   async placePod(spec, { requesterId, policy, hostIds } = {}) {
     const state = this.#placement
+    const { hostPodId, decision: audit, mergedPolicy, requester } = await this.#decide(spec, { requesterId, policy, hostIds })
+    let status
+    try {
+      status = await this.spawnPod(hostPodId, spec)
+    } catch (err) {
+      // Only a transport-level failure says anything about the host's health.
+      if (err?.code === POD_HOST_ERROR.ETIMEDOUT) state.health.recordFailure(hostPodId, state.now())
+      throw err
+    }
+    state.health.recordSuccess(hostPodId, state.now())
+    const limits = {
+      vcpus: spec.limits?.vcpus ?? mergedPolicy.defaultLimits?.vcpus ?? 1,
+      memMib: spec.limits?.memMib ?? mergedPolicy.defaultLimits?.memMib ?? 128,
+    }
+    try {
+      state.ledger.reserve({ hostId: hostPodId, name: status?.name ?? spec.name, requesterId: requester.id, limits })
+    } catch {
+      // Already reserved under this name on this host: the host would have refused the spawn.
+    }
+    return { hostPodId, status, decision: audit }
+  }
+
+  /**
+   * Decide where a podspec may go, exactly as `placePod()` does (requester trust from the local trust graph, the
+   * planner's rules, the audit trail), and spawn nothing. For a caller that spawns itself, such as the pod
+   * supervisor re-placing a pod under the requester it was supervised for: the rules applied are that requester's,
+   * never the caller's.
+   *
+   * @param {object} spec
+   * @param {{requesterId?: string, policy?: object, hostIds?: string[]}} [opts]
+   * @returns {Promise<{hostPodId: string, decision: object}>}
+   * @throws {PodHostDriverError} as `placePod()` does; `details.plan` names the planner's reason.
+   */
+  async decidePod(spec, { requesterId, policy, hostIds } = {}) {
+    const { hostPodId, decision } = await this.#decide(spec, { requesterId, policy, hostIds })
+    return { hostPodId, decision }
+  }
+
+  async #decide(spec, { requesterId, policy, hostIds } = {}) {
+    const state = this.#placement
     const now = state.now()
     const known = (await this.listPodHosts())
       .filter((h) => !hostIds || hostIds.includes(h.podId))
@@ -497,26 +537,7 @@ export class MeshOrchestrator {
     }
     await this.recordPlacement(PLACEMENT_AUDIT.REQUESTED, { actor: 'operator', ...decision.audit })
 
-    const hostPodId = decision.plan.host.id
-    let status
-    try {
-      status = await this.spawnPod(hostPodId, spec)
-    } catch (err) {
-      // Only a transport-level failure says anything about the host's health.
-      if (err?.code === POD_HOST_ERROR.ETIMEDOUT) state.health.recordFailure(hostPodId, state.now())
-      throw err
-    }
-    state.health.recordSuccess(hostPodId, state.now())
-    const limits = {
-      vcpus: spec.limits?.vcpus ?? mergedPolicy.defaultLimits?.vcpus ?? 1,
-      memMib: spec.limits?.memMib ?? mergedPolicy.defaultLimits?.memMib ?? 128,
-    }
-    try {
-      state.ledger.reserve({ hostId: hostPodId, name: status?.name ?? spec.name, requesterId: decision.requester.id, limits })
-    } catch {
-      // Already reserved under this name on this host: the host would have refused the spawn.
-    }
-    return { hostPodId, status, decision: decision.audit }
+    return { hostPodId: decision.plan.host.id, decision: decision.audit, mergedPolicy, requester: decision.requester }
   }
 
   /**
