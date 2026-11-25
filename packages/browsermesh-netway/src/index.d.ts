@@ -39,12 +39,14 @@ export interface GatewayErrorCodes {
   readonly DNS_FAILED: 3;
   /** The gateway's server-side policy blocked the request (code 4). */
   readonly POLICY_DENIED: 4;
-  /** The operation timed out before completing (code 5). */
-  readonly TIMEOUT: 5;
+  /** The host has its gateway disabled (code 5). A gateway at wsh 0.51.0 or earlier also sent 5 for a timeout. */
+  readonly GATEWAY_DISABLED: 5;
   /** The gateway connection was closed before the operation finished (code 6). */
   readonly CLOSED: 6;
   /** The gateway's internal queue is full (code 7). */
   readonly QUEUE_FULL: 7;
+  /** The host did not finish in time (code 8). */
+  readonly TIMEOUT: 8;
 }
 
 /** Frozen gateway error codes. */

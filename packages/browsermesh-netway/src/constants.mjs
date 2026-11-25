@@ -37,21 +37,23 @@ export const DEFAULTS = Object.freeze({
  * @property {number} HOST_UNREACHABLE - The remote host could not be reached on the network (code 2).
  * @property {number} DNS_FAILED - DNS resolution failed for the requested hostname (code 3).
  * @property {number} POLICY_DENIED - The gateway's server-side policy blocked the request (code 4).
- * @property {number} TIMEOUT - The operation timed out before completing (code 5). The one number with two meanings:
- *   the Node gateway sends 5 for a timeout, the Rust wsh-server sends 5 when its gateway is disabled (wsh's
- *   `GATEWAY_FAIL_TABLE` says so). The code cannot tell them apart; the host's message, which `GatewayBackend` puts beside the
- *   code in the error it throws, does.
+ * @property {number} GATEWAY_DISABLED - The host has its gateway disabled (code 5, what the Rust wsh-server sends). A Node
+ *   gateway at wsh 0.51.0 or earlier sent 5 for a timeout too, so a received 5 means "the gateway is disabled, or a timeout from
+ *   an older gateway"; `GatewayBackend` says so in the error it throws and puts the host's message beside the code.
  * @property {number} CLOSED - The gateway connection was closed before the operation finished (code 6).
  * @property {number} QUEUE_FULL - The gateway's internal queue is full and cannot accept more work (code 7).
+ * @property {number} TIMEOUT - The host did not finish in time (code 8; a Node gateway sends it from wsh 0.52.0 on). A received 8
+ *   is thrown as an {@link OperationTimeoutError}. A peer running an earlier netway reads an 8 as a code it does not know.
  */
 export const GATEWAY_ERROR = Object.freeze({
   CONNECTION_REFUSED: 1,
   HOST_UNREACHABLE: 2,
   DNS_FAILED: 3,
   POLICY_DENIED: 4,
-  TIMEOUT: 5,
+  GATEWAY_DISABLED: 5,
   CLOSED: 6,
   QUEUE_FULL: 7,
+  TIMEOUT: 8,
 });
 
 /**

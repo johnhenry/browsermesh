@@ -27,7 +27,7 @@ Short version: wsh is the door into one place; browsermesh is how many places ta
 | wsh's remote objects over a mesh channel | `@johnhenry/browsermesh-objects` (`packages/browsermesh-objects`) | `exposeObjectsOnMesh`, `openObjectsOnMesh`; peers `@johnhenry/wsh/objects` and the protocol channel (`packages/browsermesh-apps/src/protocol-channel.mjs`, `protocol-roots.mjs`); example 19; [protocol channels](protocol-channel.md) |
 | A stock wsh client, or a mesh peer, using a pod's objects and MCP tools | `packages/browsermesh-transport/src/wsh-services.mjs` | `WshServices` (over a pipe relay, or `serveOnMesh` / `connectWshServicesOverMesh` over a mesh protocol channel); [design](design/wsh-services-on-a-pod.md), [over the mesh](design/wsh-over-mesh.md). Off unless constructed; objects and MCP only. |
 | A pod carrying another pod's wsh session to a target (a mesh `--via`) | `packages/browsermesh-transport/src/wsh-relay.mjs` | `WshRelay`, `connectWshServicesViaRelay`, per-target grant `wsh-relay:<target>:open`; [design](design/wsh-over-mesh.md#the-relaying-pod-wshrelay), [threat model](security.md#a-relaying-pod-wsh---via-over-the-mesh). Off unless constructed. |
-| The wsh TCP gateway as a virtual-network backend | `packages/browsermesh-netway/src/gateway-backend.mjs` | `GatewayBackend` speaks wsh's gateway control messages; its `GATEWAY_ERROR` codes are checked against wsh's exported `GATEWAY_FAIL_TABLE` (code 5 is "timeout" in the Node gateway and "gateway disabled" in the Rust server, one number), and it is tested against a real wsh host and a mock |
+| The wsh TCP gateway as a virtual-network backend | `packages/browsermesh-netway/src/gateway-backend.mjs` | `GatewayBackend` speaks wsh's gateway control messages; its `GATEWAY_ERROR` codes are checked against wsh's exported `GATEWAY_FAIL_TABLE` (5 is `GATEWAY_DISABLED`, what the Rust server always sent; a timeout is 8 from wsh 0.52.0 on; a gateway at 0.51.0 or earlier still sends 5 for a timeout, so a received 5 is read as "the gateway is disabled, or a timeout from an older gateway", and a received 8 is thrown as an `OperationTimeoutError`), and it is tested against a real wsh host and a mock |
 | One key | `packages/browsermesh-primitives/src/ssh-keys.mjs` | `podIdToFingerprint`, `fingerprintToPodId`, `openSSHPublicKeyFromRaw`, `rawPublicKeyFromOpenSSH`, `podIdFromOpenSSHPublicKey`, `authorizedKeysLine`; `PodIdentity#toOpenSSHPublicKey`, `#toAuthorizedKeysLine`. See [security.md, "One key in both worlds"](security.md#one-key-in-both-worlds) |
 | One capability notation, tested | `packages/browsermesh-apps/test/capability-vectors.test.mjs`, `peer-registry.mjs` | wsh's vectors run against `PeerRegistry`; `isGrantableScope`; [capability notation](capability-notation.md) |
 | A pipe relay on the relay server | the sibling repository `browsermesh-servers` | not in this repository |
@@ -103,8 +103,8 @@ The grants are the same scopes as above. Design: [`design/wsh-services-on-a-pod.
 
 ## Not verified
 
-* Built and run against wsh 0.49.0, 0.50.0 and 0.51.0 (tested range of `browsermesh-objects` and `browsermesh-mcp`:
-  0.49.0 to 0.51.0, the peer range starts at 0.49.0; the first two were run when they were the newest, the last is what
+* Built and run against wsh 0.49.0, 0.50.0, 0.51.0 and 0.52.0 (tested range of `browsermesh-objects` and `browsermesh-mcp`:
+  0.49.0 to 0.52.0, the peer range starts at 0.49.0; the earlier ones were run when they were the newest, the last is what
   the repository now installs). wsh 0.51 adds events through a handle and typed remotes (`rootDescription`) to the object
   layer; `browsermesh-objects` judges both through the registry. The object layer's MCP face (`exposeObjects({ mcp })`)
   is not exposed by `browsermesh-objects`: a page's tools go through `browsermesh-mcp`. They use its transport-neutral caller identity (`who: { username, fingerprint, podId }`, strict about 32

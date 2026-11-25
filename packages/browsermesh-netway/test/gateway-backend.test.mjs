@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { GatewayBackend } from '../src/gateway-backend.mjs';
+import { GATEWAY_ERROR } from '../src/constants.mjs';
 import { MockWshClient } from './mock-wsh-transport.mjs';
 
 /** Flush microtask queue to let async operations settle. */
@@ -42,6 +43,56 @@ describe('GatewayBackend', () => {
     client.inject({ type: 0x74, gateway_id: openMsg.gateway_id, code: 111, message: 'Connection refused' });
 
     await assert.rejects(() => connectPromise, { name: 'ConnectionRefusedError' });
+    await backend.close();
+  });
+
+  it('a GatewayFail with code 8 is a timeout: OperationTimeoutError, the host\'s message and the code kept', async () => {
+    const client = new MockWshClient({ connected: true });
+    const backend = new GatewayBackend({ wshClient: client });
+
+    const connectPromise = backend.connect('slow.host', 80);
+    await tick();
+    client.inject({ type: 0x74, gateway_id: client.lastSent.gateway_id, code: GATEWAY_ERROR.TIMEOUT, message: 'connect timed out' });
+
+    await assert.rejects(() => connectPromise, (err) => {
+      assert.equal(err.name, 'OperationTimeoutError');
+      assert.equal(err.code, 'ETIMEDOUT');
+      assert.match(err.message, /connect timed out \(code: 8\)/);
+      return true;
+    });
+    await backend.close();
+  });
+
+  it('a GatewayFail with code 5 is read as "the gateway is disabled, or a timeout from an older gateway", not as only one', async () => {
+    const client = new MockWshClient({ connected: true });
+    const backend = new GatewayBackend({ wshClient: client });
+
+    const connectPromise = backend.connect('some.host', 80);
+    await tick();
+    client.inject({ type: 0x74, gateway_id: client.lastSent.gateway_id, code: GATEWAY_ERROR.GATEWAY_DISABLED, message: 'gateway disabled' });
+
+    await assert.rejects(() => connectPromise, (err) => {
+      assert.equal(err.name, 'ConnectionRefusedError');
+      assert.match(err.message, /gateway disabled \(code: 5\)/);
+      assert.match(err.message, /the gateway is disabled, or a timeout from an older gateway/);
+      return true;
+    });
+    await backend.close();
+  });
+
+  it('a GatewayFail with another code carries no code-5 note', async () => {
+    const client = new MockWshClient({ connected: true });
+    const backend = new GatewayBackend({ wshClient: client });
+
+    const connectPromise = backend.connect('some.host', 80);
+    await tick();
+    client.inject({ type: 0x74, gateway_id: client.lastSent.gateway_id, code: GATEWAY_ERROR.POLICY_DENIED, message: 'policy denied' });
+
+    await assert.rejects(() => connectPromise, (err) => {
+      assert.equal(err.name, 'ConnectionRefusedError');
+      assert.doesNotMatch(err.message, /older gateway/);
+      return true;
+    });
     await backend.close();
   });
 

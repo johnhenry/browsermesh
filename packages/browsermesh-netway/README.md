@@ -64,7 +64,7 @@ await net.close();
 
 - `DEFAULTS` -- default configuration values
 - `CAPABILITY` -- capability tags (`TCP_CONNECT` = `tcp:connect`, `TCP_LISTEN`, `UDP_SEND`, `UDP_BIND`, `DNS_RESOLVE`, `LOOPBACK`, `ALL` = `*`)
-- `GATEWAY_ERROR` -- gateway error codes
+- `GATEWAY_ERROR` -- gateway error codes, kept equal to wsh's `GATEWAY_FAIL` (1 `CONNECTION_REFUSED`, 2 `HOST_UNREACHABLE`, 3 `DNS_FAILED`, 4 `POLICY_DENIED`, 5 `GATEWAY_DISABLED`, 6 `CLOSED`, 7 `QUEUE_FULL`, 8 `TIMEOUT`). `GatewayBackend` throws a received 8 as an `OperationTimeoutError`. A received 5 is thrown as a `ConnectionRefusedError` that says "the gateway is disabled, or a timeout from an older gateway": the Rust server sends 5 when its gateway is off, and a Node gateway at wsh 0.51.0 or earlier sent 5 for a timeout
 - `NetwayError` -- base error class
 - `ConnectionRefusedError`, `PolicyDeniedError`, `AddressInUseError`, `QueueFullError`, `UnknownSchemeError`, `SocketClosedError`, `OperationTimeoutError`
 

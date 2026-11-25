@@ -9,10 +9,11 @@
  *   old to export them this fails, it does not read the file. The behaviour of each code that a
  *   host can be made to produce is also checked against a real host in gateway-real-wsh.test.mjs.
  *
- * Code 5 is the one number with two meanings: wsh documents it as "timeout" in the Node gateway
- * and as "gateway disabled" in the Rust wsh-server. netway has one name for it (`TIMEOUT`) and the
- * code alone cannot say which happened; `GatewayBackend` puts the host's own message beside the
- * code in the error it throws, which is what tells them apart.
+ * Code 5 is the one number with two meanings: it is `GATEWAY_DISABLED` (what the Rust wsh-server
+ * sends) and also what a Node gateway at wsh 0.51 or earlier sent for a timeout. A timeout from a
+ * current Node gateway is `TIMEOUT` = 8. netway has one name for 5 (`GATEWAY_DISABLED`);
+ * `GatewayBackend` reads a 5 as "disabled, or a timeout from an older gateway" and puts the host's
+ * own message beside the code in the error it throws.
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
@@ -65,12 +66,13 @@ describe('netway and wsh agree on the gateway wire values', { skip }, () => {
     assert.equal(wsh.gatewayFailName(99), null);
   });
 
-  it('a code wsh gives a second name has ONE name here, and that is written down: 5 is timeout or "gateway disabled"', () => {
+  it('a code wsh gives a second name has ONE name here, and that is written down: 5 is "gateway disabled", or a timeout from an older Node gateway', () => {
     const twoNames = wsh.GATEWAY_FAIL_TABLE.filter((row) => row.alsoSentAs?.length);
     // If wsh ever gives another code a second meaning, this fails and the docs of GATEWAY_ERROR must say so.
-    assert.deepEqual(twoNames.map((row) => [row.name, row.code, ...row.alsoSentAs]), [['TIMEOUT', 5, 'GATEWAY_DISABLED']]);
-    assert.equal(GATEWAY_ERROR.TIMEOUT, 5);
-    assert.equal(Object.values(GATEWAY_ERROR).filter((code) => code === 5).length, 1, 'no second name for 5 in netway: the host\'s message tells them apart');
+    assert.deepEqual(twoNames.map((row) => [row.name, row.code, ...row.alsoSentAs]), [['GATEWAY_DISABLED', 5, 'TIMEOUT']]);
+    assert.equal(GATEWAY_ERROR.GATEWAY_DISABLED, 5);
+    assert.equal(GATEWAY_ERROR.TIMEOUT, 8);
+    assert.equal(Object.values(GATEWAY_ERROR).filter((code) => code === 5).length, 1, 'no second name for 5 in netway: it is GATEWAY_DISABLED, read with the older-timeout caveat');
   });
 
   it('the one code a client gives its own error without asking the host (UNSUPPORTED, 0) is not a wire code and is not in GATEWAY_ERROR', () => {
