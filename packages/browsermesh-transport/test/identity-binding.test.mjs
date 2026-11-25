@@ -45,7 +45,7 @@ function sdpFor(fingerprint) {
   return [
     'v=0', 'o=- 1 2 IN IP4 127.0.0.1', 's=-', 't=0 0',
     'a=group:BUNDLE 0', 'm=application 9 UDP/DTLS/SCTP webrtc-datachannel',
-    `a=fingerprint:${fingerprint}`, 'a=setup:actpass', 'a=mid:0', '',
+    ...(FakePC.noFingerprint ? [] : [`a=fingerprint:${fingerprint}`]), 'a=setup:actpass', 'a=mid:0', '',
   ].join('\r\n')
 }
 
@@ -88,6 +88,7 @@ class FakePC {
   async createAnswer() { return { type: 'answer', sdp: sdpFor(this.fingerprint) } }
   async setLocalDescription() {}
   async setRemoteDescription(desc) {
+    FakePC.applied++
     if (desc.type === 'offer') {
       const offerer = offerers.get(Number(/a=x-fake-offerer:(\d+)/.exec(desc.sdp)?.[1]))
       this.offerer = offerer
@@ -110,7 +111,7 @@ class FakePC {
       })
     }
   }
-  addIceCandidate() {}
+  addIceCandidate() { FakePC.candidatesAdded++ }
   async getStats() {
     if (FakePC.exposure !== 'stats') return new Map()
     const hex = createHash('sha256').update(this.peerPc.cert).digest('hex').toUpperCase()
@@ -122,7 +123,9 @@ class FakePC {
   close() { this.closed = true }
   get remoteDescription() { return null }
 }
+FakePC.applied = 0 // descriptions applied (setRemoteDescription calls), across all instances
 FakePC.exposure = 'none'
+FakePC.candidatesAdded = 0 // ICE candidates handed to a (fake) RTCPeerConnection
 globalThis.RTCPeerConnection = FakePC
 
 const {
@@ -130,6 +133,7 @@ const {
 } = await import('../src/webrtc.mjs')
 const {
   extractDtlsFingerprints, bindingTranscript, createBindingProof, verifyBindingProof, BINDING_DOMAIN,
+  DESCRIPTION_DOMAIN, descriptionTranscript, signDescription, verifyDescription,
   remoteCertificateFingerprints, certificateMatches,
 } = await import('../src/identity-binding.mjs')
 
@@ -254,7 +258,11 @@ async function pair({ aOpts = {}, bOpts = {}, tamperOffer = (o) => o, tamperAnsw
   return { a, b, ida, idb, events, when }
 }
 
-const swapFingerprint = (desc) => ({ ...desc, sdp: desc.sdp.replace(/a=fingerprint:.*/, `a=fingerprint:sha-256 ${Array(32).fill('EE').join(':')}`) })
+// A signalling server that swaps a description and also drops the signature that came with it (the signature is
+// checked before the description is applied, see "signed session descriptions"; these tests are about the proof
+// on the connection that follows).
+const dropSignature = (desc) => ({ type: desc.type, sdp: desc.sdp })
+const swapFingerprint = (desc) => ({ ...desc, auth: undefined, sdp: desc.sdp.replace(/a=fingerprint:.*/, `a=fingerprint:sha-256 ${Array(32).fill('EE').join(':')}`) })
 
 describe('identity binding: WebRTCPeerConnection', () => {
   it('connects only once both sides have proved their keys, then carries messages', async () => {
@@ -275,7 +283,7 @@ describe('identity binding: WebRTCPeerConnection', () => {
   })
 
   it('a signalling server that swaps the offer is detected by both sides, which close and report', async () => {
-    const { a, b, events, when } = await pair({ tamperOffer: swapFingerprint })
+    const { a, b, events, when } = await pair({ tamperOffer: swapFingerprint, tamperAnswer: dropSignature })
     await Promise.all([when(a, 'closed'), when(b, 'closed')])
     // Whichever side verifies first reports and closes; the other then sees the channel close.
     assert.match([...events.errA, ...events.errB].join(), /identity binding failed: bad-signature/)
@@ -286,7 +294,7 @@ describe('identity binding: WebRTCPeerConnection', () => {
   })
 
   it('a signalling server that swaps the answer is detected too', async () => {
-    const { a, b, events, when } = await pair({ tamperAnswer: swapFingerprint })
+    const { a, b, events, when } = await pair({ tamperOffer: dropSignature, tamperAnswer: swapFingerprint })
     await Promise.all([when(a, 'closed'), when(b, 'closed')])
     assert.equal(a.bound, false)
     assert.equal(b.bound, false)
@@ -305,7 +313,10 @@ describe('identity binding: WebRTCPeerConnection', () => {
     const failedB = new Promise((resolve) => b.onError((e) => { errB.push(e.message); resolve() }))
     const closedB = new Promise((resolve) => b.onStateChange((s) => s === 'closed' && resolve()))
     const offer = await a.createOffer()
-    await a.handleAnswer(await b.handleOffer(offer))
+    // The description layer refuses a description signed by a key that is not the claimed pod before it is applied.
+    await assert.rejects(() => b.handleOffer(offer), /wrong-pod-id/)
+    // This test is about the proof on the connection: an older-style, unsigned offer reaches it.
+    await a.handleAnswer(dropSignature(await b.handleOffer(dropSignature(offer))))
     await failedB
     await closedB
     assert.match(errB.join(), /wrong-pod-id/)
@@ -360,7 +371,7 @@ describe('identity binding: WebRTCPeerConnection', () => {
   })
 
   it('requirePeerBinding: false still closes on a proof that fails', async () => {
-    const { a, b, when } = await pair({ aOpts: { requirePeerBinding: false }, bOpts: { requirePeerBinding: false }, tamperOffer: swapFingerprint })
+    const { a, b, when } = await pair({ aOpts: { requirePeerBinding: false }, bOpts: { requirePeerBinding: false }, tamperOffer: swapFingerprint, tamperAnswer: dropSignature })
     await Promise.all([when(a, 'closed'), when(b, 'closed')])
     assert.ok(a.bindingFailure === 'bad-signature' || b.bindingFailure === 'bad-signature')
   })
@@ -380,6 +391,222 @@ describe('identity binding: WebRTCPeerConnection', () => {
     const id = await PodIdentity.generate()
     assert.throws(() => new WebRTCPeerConnection({ localPodId: 'someone-else', remotePodId: 'b', identity: id }), /identity.podId/)
     assert.throws(() => new WebRTCPeerConnection({ localPodId: id.podId, remotePodId: 'b', identity: { podId: id.podId } }), /sign/)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Signed session descriptions, verified before they are applied
+// ---------------------------------------------------------------------------
+
+describe('signed session descriptions: pure functions', () => {
+  const OFFER = 'v=0\r\na=fingerprint:sha-256 AA:BB\r\na=ice-ufrag:one\r\n'
+  const ANSWER = 'v=0\r\na=fingerprint:sha-256 CC:DD\r\na=ice-ufrag:two\r\n'
+  let ida, idb
+  const base = async () => {
+    ida ??= await PodIdentity.generate()
+    idb ??= await PodIdentity.generate()
+    return { ida, idb }
+  }
+  const offerCheck = (ids, extra = {}) => ({ kind: 'offer', expectedPodId: ids.ida.podId, localPodId: ids.idb.podId, sdp: OFFER, ...extra })
+  const answerCheck = (ids, extra = {}) => ({ kind: 'answer', expectedPodId: ids.idb.podId, localPodId: ids.ida.podId, sdp: ANSWER, offerSdp: OFFER, ...extra })
+
+  it('an offer signed for its recipient verifies, and so does an answer to that offer', async () => {
+    const ids = await base()
+    const offerAuth = await signDescription(ids.ida, { kind: 'offer', peerPodId: ids.idb.podId, sdp: OFFER })
+    assert.deepEqual(await verifyDescription(offerAuth, offerCheck(ids)), { ok: true })
+    const answerAuth = await signDescription(ids.idb, { kind: 'answer', peerPodId: ids.ida.podId, sdp: ANSWER, offerSdp: OFFER })
+    assert.deepEqual(await verifyDescription(answerAuth, answerCheck(ids)), { ok: true })
+  })
+
+  it('the transcript starts with its own domain, so it cannot be a connection-binding proof', async () => {
+    const bytes = await descriptionTranscript({ kind: 'offer', signerPodId: 'a', peerPodId: 'b', sdp: OFFER })
+    assert.ok(dec.decode(bytes).startsWith(DESCRIPTION_DOMAIN))
+    assert.notEqual(DESCRIPTION_DOMAIN, BINDING_DOMAIN)
+  })
+
+  it('each input is bound: changing the text, the kind, the signer, the recipient or the offer answered fails', async () => {
+    const ids = await base()
+    const other = await PodIdentity.generate()
+    const offerAuth = await signDescription(ids.ida, { kind: 'offer', peerPodId: ids.idb.podId, sdp: OFFER })
+    const answerAuth = await signDescription(ids.idb, { kind: 'answer', peerPodId: ids.ida.podId, sdp: ANSWER, offerSdp: OFFER })
+    const reason = async (auth, check) => (await verifyDescription(auth, check)).reason
+    assert.equal(await reason(offerAuth, offerCheck(ids, { sdp: OFFER.replace('AA:BB', 'EE:EE') })), 'bad-signature')
+    assert.equal(await reason(offerAuth, offerCheck(ids, { sdp: OFFER + 'a=candidate:x\r\n' })), 'bad-signature')
+    assert.equal(await reason(offerAuth, offerCheck(ids, { localPodId: other.podId })), 'bad-signature') // re-addressed
+    assert.equal(await reason(offerAuth, offerCheck(ids, { expectedPodId: other.podId })), 'wrong-pod-id') // a key that is not the claimed pod
+    assert.equal(await reason(offerAuth, { ...offerCheck(ids), kind: 'answer', offerSdp: OFFER }), 'bad-signature') // an offer passed off as an answer
+    assert.equal(await reason(answerAuth, answerCheck(ids, { offerSdp: OFFER.replace('one', 'other') })), 'bad-signature') // answer to another offer
+    assert.equal(await reason(answerAuth, answerCheck(ids, { sdp: ANSWER.replace('CC:DD', 'EE:EE') })), 'bad-signature')
+  })
+
+  it('refuses unsigned, malformed and fingerprint-less input', async () => {
+    const ids = await base()
+    const auth = await signDescription(ids.ida, { kind: 'offer', peerPodId: ids.idb.podId, sdp: OFFER })
+    assert.deepEqual(await verifyDescription(undefined, offerCheck(ids)), { ok: false, reason: 'unsigned' })
+    assert.deepEqual(await verifyDescription(null, offerCheck(ids)), { ok: false, reason: 'unsigned' })
+    for (const bad of [5, {}, { ...auth, v: 2 }, { ...auth, sig: 'AAAA' }, { ...auth, pk: 'AAAA' }, { ...auth, podId: 'x' }]) {
+      assert.equal((await verifyDescription(bad, offerCheck(ids))).ok, false)
+    }
+    const noFp = 'v=0\r\na=ice-ufrag:one\r\n'
+    assert.deepEqual(await verifyDescription(auth, offerCheck(ids, { sdp: noFp })), { ok: false, reason: 'no-fingerprint' })
+    await assert.rejects(() => signDescription(ids.ida, { kind: 'offer', peerPodId: ids.idb.podId, sdp: noFp }), TypeError)
+    await assert.rejects(() => signDescription(ids.idb, { kind: 'answer', peerPodId: ids.ida.podId, sdp: ANSWER }), TypeError) // no offer named
+    await assert.rejects(() => signDescription(ids.ida, { kind: 'both', peerPodId: ids.idb.podId, sdp: OFFER }), TypeError)
+  })
+})
+
+describe('signed session descriptions: WebRTCPeerConnection', () => {
+  const swapSdp = (desc) => ({ ...desc, sdp: desc.sdp.replace(/a=fingerprint:.*/, `a=fingerprint:sha-256 ${Array(32).fill('EE').join(':')}`) })
+
+  it('descriptions are signed and verified before they are applied, then the connection binds as before', async () => {
+    const { a, b, when } = await pair()
+    await Promise.all([when(a, 'connected'), when(b, 'connected')])
+    assert.equal(a.descriptionVerified, true)
+    assert.equal(b.descriptionVerified, true)
+    assert.equal(a.bound && b.bound, true)
+    a.close(); b.close()
+  })
+
+  it('a candidate that arrives while the offer is being verified is held and applied with it, not thrown away', async () => {
+    const ida = await PodIdentity.generate()
+    const idb = await PodIdentity.generate()
+    const a = new WebRTCPeerConnection({ localPodId: ida.podId, remotePodId: idb.podId, iceServers: [], identity: ida })
+    const b = new WebRTCPeerConnection({ localPodId: idb.podId, remotePodId: ida.podId, iceServers: [], identity: idb })
+    const offer = await a.createOffer()
+    const before = FakePC.candidatesAdded
+    const answering = b.handleOffer(offer) // the signalling path hands over the next frame without waiting
+    assert.equal(await b.addIceCandidate({ candidate: 'candidate:1 1 udp 1 127.0.0.1 9 typ host', sdpMid: '0' }), true)
+    await answering
+    assert.equal(FakePC.candidatesAdded, before + 1)
+    a.close(); b.close()
+  })
+
+  it('a candidate held for an offer that is then refused is dropped', async () => {
+    const ida = await PodIdentity.generate()
+    const idb = await PodIdentity.generate()
+    const a = new WebRTCPeerConnection({ localPodId: ida.podId, remotePodId: idb.podId, iceServers: [], identity: ida })
+    const b = new WebRTCPeerConnection({ localPodId: idb.podId, remotePodId: ida.podId, iceServers: [], identity: idb })
+    const offer = swapSdp(await a.createOffer())
+    const before = FakePC.candidatesAdded
+    const answering = b.handleOffer(offer)
+    assert.equal(await b.addIceCandidate({ candidate: 'candidate:1 1 udp 1 127.0.0.1 9 typ host', sdpMid: '0' }), true)
+    await assert.rejects(answering, /bad-signature/)
+    assert.equal(FakePC.candidatesAdded, before)
+    assert.throws(() => b.addIceCandidate({ candidate: 'x' }), /No peer connection/)
+    a.close(); b.close()
+  })
+
+  it('a swapped offer is refused before it is applied: nothing reaches the RTCPeerConnection', async () => {
+    const ida = await PodIdentity.generate()
+    const idb = await PodIdentity.generate()
+    const a = new WebRTCPeerConnection({ localPodId: ida.podId, remotePodId: idb.podId, iceServers: [], identity: ida })
+    const b = new WebRTCPeerConnection({ localPodId: idb.podId, remotePodId: ida.podId, iceServers: [], identity: idb })
+    const offer = swapSdp(await a.createOffer())
+    const before = FakePC.applied
+    await assert.rejects(() => b.handleOffer(offer), /offer .*bad-signature/)
+    assert.equal(FakePC.applied, before)
+    assert.equal(b.descriptionFailure, 'bad-signature')
+    assert.equal(b.descriptionVerified, false)
+    a.close(); b.close()
+  })
+
+  it('a swapped answer is refused before it is applied, and the offerer is not connected', async () => {
+    const ida = await PodIdentity.generate()
+    const idb = await PodIdentity.generate()
+    const a = new WebRTCPeerConnection({ localPodId: ida.podId, remotePodId: idb.podId, iceServers: [], identity: ida })
+    const b = new WebRTCPeerConnection({ localPodId: idb.podId, remotePodId: ida.podId, iceServers: [], identity: idb })
+    const answer = swapSdp(await b.handleOffer(await a.createOffer()))
+    const before = FakePC.applied
+    await assert.rejects(() => a.handleAnswer(answer), /answer .*bad-signature/)
+    assert.equal(FakePC.applied, before)
+    assert.equal(a.descriptionFailure, 'bad-signature')
+    assert.notEqual(a.state, 'connected')
+    a.close(); b.close()
+  })
+
+  it('an answer signed for another offer is refused (it cannot be moved onto a different attempt)', async () => {
+    const ida = await PodIdentity.generate()
+    const idb = await PodIdentity.generate()
+    const mk = () => [
+      new WebRTCPeerConnection({ localPodId: ida.podId, remotePodId: idb.podId, iceServers: [], identity: ida }),
+      new WebRTCPeerConnection({ localPodId: idb.podId, remotePodId: ida.podId, iceServers: [], identity: idb }),
+    ]
+    const [a1, b1] = mk()
+    const oldAnswer = await b1.handleOffer(await a1.createOffer())
+    const [a2, b2] = mk()
+    await a2.createOffer()
+    await assert.rejects(() => a2.handleAnswer(oldAnswer), /bad-signature/)
+    a1.close(); b1.close(); a2.close(); b2.close()
+  })
+
+  it('an unsigned description (an older peer) is accepted by default, and reported unverified', async () => {
+    const strip = (d) => ({ type: d.type, sdp: d.sdp })
+    const { a, b, when } = await pair({ tamperOffer: strip, tamperAnswer: strip })
+    await Promise.all([when(a, 'connected'), when(b, 'connected')])
+    assert.equal(a.descriptionVerified, false)
+    assert.equal(b.descriptionVerified, false)
+    assert.equal(a.descriptionFailure, null)
+    assert.equal(a.bound && b.bound, true) // the proof on the connection still binds both
+    a.close(); b.close()
+  })
+
+  it('requireSignedDescription: true refuses an unsigned offer and an unsigned answer', async () => {
+    const ida = await PodIdentity.generate()
+    const idb = await PodIdentity.generate()
+    const a = new WebRTCPeerConnection({ localPodId: ida.podId, remotePodId: idb.podId, iceServers: [], identity: ida, requireSignedDescription: true })
+    const b = new WebRTCPeerConnection({ localPodId: idb.podId, remotePodId: ida.podId, iceServers: [], identity: idb, requireSignedDescription: true })
+    const offer = await a.createOffer()
+    const before = FakePC.applied
+    await assert.rejects(() => b.handleOffer({ type: 'offer', sdp: offer.sdp }), /unsigned/)
+    const answer = await b.handleOffer(offer)
+    await assert.rejects(() => a.handleAnswer({ type: 'answer', sdp: answer.sdp }), /unsigned/)
+    assert.equal(FakePC.applied, before + 1) // only the signed offer was applied
+    assert.equal(a.descriptionFailure, 'unsigned')
+    a.close(); b.close()
+  })
+
+  it('an older peer without identity is not sent anything it would mis-handle, and still connects', async () => {
+    const ida = await PodIdentity.generate()
+    const a = new WebRTCPeerConnection({ localPodId: ida.podId, remotePodId: 'old', iceServers: [], identity: ida, requirePeerBinding: false })
+    const old = new WebRTCPeerConnection({ localPodId: 'old', remotePodId: ida.podId, iceServers: [] })
+    const connected = Promise.all([a, old].map((c) => new Promise((resolve) => c.onStateChange((s) => s === 'connected' && resolve()))))
+    const offer = await a.createOffer()
+    assert.deepEqual(Object.keys(offer).sort(), ['auth', 'sdp', 'type']) // one additive field
+    const answer = await old.handleOffer(offer)
+    assert.deepEqual(Object.keys(answer).sort(), ['sdp', 'type']) // no identity, nothing added
+    await a.handleAnswer(answer)
+    await connected
+    assert.equal(a.descriptionVerified, false)
+    a.close(); old.close()
+  })
+
+  it('a description that names no fingerprint (a mock, or a stack that omits it) is sent unsigned, not thrown on; the binding still refuses it later', async () => {
+    FakePC.noFingerprint = true
+    try {
+      const ida = await PodIdentity.generate()
+      const idb = await PodIdentity.generate()
+      const a = new WebRTCPeerConnection({ localPodId: ida.podId, remotePodId: idb.podId, iceServers: [], identity: ida })
+      const b = new WebRTCPeerConnection({ localPodId: idb.podId, remotePodId: ida.podId, iceServers: [], identity: idb })
+      const offer = await a.createOffer()
+      assert.deepEqual(Object.keys(offer).sort(), ['sdp', 'type'])
+      const answer = await b.handleOffer(offer)
+      assert.deepEqual(Object.keys(answer).sort(), ['sdp', 'type'])
+      const closedB = new Promise((resolve) => b.onStateChange((s) => s === 'closed' && resolve()))
+      await a.handleAnswer(answer)
+      await closedB
+      assert.equal(b.bindingFailure, 'no-fingerprint')
+      a.close(); b.close()
+    } finally {
+      FakePC.noFingerprint = false
+    }
+  })
+
+  it('without an identity nothing is signed or checked', async () => {
+    const a = new WebRTCPeerConnection({ localPodId: 'a', remotePodId: 'b', iceServers: [] })
+    const offer = await a.createOffer()
+    assert.deepEqual(Object.keys(offer).sort(), ['sdp', 'type'])
+    assert.equal(a.descriptionVerified, null)
+    a.close()
   })
 })
 
@@ -494,6 +721,68 @@ describe('certificate in use: WebRTCPeerConnection', () => {
       await connected
       assert.equal(a.certificateCheck, null)
       a.close(); b.close()
+    })
+  })
+})
+
+describe('signed descriptions and the certificate in use, together', () => {
+  const withExposure = async (mode, fn) => {
+    FakePC.exposure = mode
+    try { return await fn() } finally { FakePC.exposure = 'none' }
+  }
+  const swapSdp = (desc) => ({ ...desc, sdp: desc.sdp.replace(/a=fingerprint:.*/, `a=fingerprint:sha-256 ${Array(32).fill('EE').join(':')}`) })
+
+  it('both checks pass: descriptions verified before they were applied, certificate matched, then bound', async () => {
+    await withExposure('dtls', async () => {
+      const { a, b, when } = await pair()
+      await Promise.all([when(a, 'connected'), when(b, 'connected')])
+      assert.equal(a.descriptionVerified && b.descriptionVerified, true)
+      assert.equal(a.certificateCheck, 'matched')
+      assert.equal(b.certificateCheck, 'matched')
+      assert.equal(a.descriptionFailure, null)
+      assert.equal(a.bindingFailure, null)
+      assert.equal(a.bound && b.bound, true)
+      a.close(); b.close()
+    })
+  })
+
+  it('a description that does not verify is refused with its own reason, and the certificate check never runs', async () => {
+    await withExposure('dtls', async () => {
+      const ida = await PodIdentity.generate()
+      const idb = await PodIdentity.generate()
+      const a = new WebRTCPeerConnection({ localPodId: ida.podId, remotePodId: idb.podId, iceServers: [], identity: ida })
+      const b = new WebRTCPeerConnection({ localPodId: idb.podId, remotePodId: ida.podId, iceServers: [], identity: idb })
+      const before = FakePC.applied
+      const offer = swapSdp(await a.createOffer())
+      await assert.rejects(() => b.handleOffer(offer), /bad-signature/)
+      assert.equal(FakePC.applied, before)
+      assert.equal(b.descriptionFailure, 'bad-signature')
+      assert.equal(b.bindingFailure, null)
+      assert.equal(b.certificateCheck, null)
+      a.close(); b.close()
+    })
+  })
+
+  it('a certificate that is not the described one closes with its own reason although every description verified', async () => {
+    await withExposure('wrong', async () => {
+      const { a, b, when } = await pair()
+      await Promise.all([when(a, 'closed'), when(b, 'closed')])
+      assert.equal(a.descriptionVerified && b.descriptionVerified, true)
+      assert.equal(a.descriptionFailure, null)
+      assert.equal(b.descriptionFailure, null)
+      assert.ok(a.bindingFailure === 'certificate-mismatch' || b.bindingFailure === 'certificate-mismatch')
+      assert.equal(a.bound || b.bound, false)
+    })
+  })
+
+  it('unsigned descriptions (an older peer) do not hide a certificate mismatch', async () => {
+    await withExposure('wrong', async () => {
+      const { a, b, when } = await pair({ tamperOffer: dropSignature, tamperAnswer: dropSignature })
+      await Promise.all([when(a, 'closed'), when(b, 'closed')])
+      assert.equal(a.descriptionVerified, false)
+      assert.equal(b.descriptionVerified, false)
+      assert.equal(a.descriptionFailure, null)
+      assert.ok(a.bindingFailure === 'certificate-mismatch' || b.bindingFailure === 'certificate-mismatch')
     })
   })
 })
