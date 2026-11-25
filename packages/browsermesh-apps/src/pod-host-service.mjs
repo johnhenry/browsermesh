@@ -353,6 +353,11 @@ export function createPodHostService({
           // (`none|process|language|hardware`), or null when it says nothing.
           // It is the host's own claim: the planner reads it, it proves nothing.
           boundary: typeof driverBoundary === 'string' ? driverBoundary : null,
+          // Whether idle pods on this host may sleep and wake on use: `{idleMs, wakeTimeoutMs, discoveryWindowMs}`,
+          // or null. Additive; an older client ignores it.
+          hibernation: driverCapabilities.hibernation && typeof driverCapabilities.hibernation === 'object'
+            ? { ...driverCapabilities.hibernation }
+            : null,
         }
       }
 

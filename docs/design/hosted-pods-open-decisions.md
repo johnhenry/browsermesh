@@ -10,6 +10,11 @@ Written 2026-11-24 against `main`. Where a claim was checked, how is said; where
 
 ## 1. Durable Object hibernation (the isolate lane, Cloudflare)
 
+**Decided 2026-11-25: B, built in process** (what sleep and wake do, the bounds, the placement and supervisor
+interplay: [`../hosted-pods.md`](../hosted-pods.md#44-hibernation-cold-boot-as-sleep)). Left for the owner: on a
+deployed Worker, measure `wakeMs` with the shortened `discoveryWindowMs` and the memory per idle pod; move to C only if
+that number is too slow for a use that needs a pod addressable while asleep.
+
 **State.** `spikes/isolate-pod-host` runs a pod in a Durable Object that dials out to the relay and the signalling
 server. Cloudflare's WebSocket Hibernation only covers sockets a Durable Object *accepts* as a server, and an open
 outbound socket keeps the object in memory (the spike's README quotes the platform's documentation for both). So "a
