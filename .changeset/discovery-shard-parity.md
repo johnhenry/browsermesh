@@ -1,0 +1,5 @@
+---
+'@johnhenry/browsermesh-discovery': minor
+---
+
+Shard format 3, part two: Reed-Solomon parity. With `shardFormat` including 3 the state is cut into byte shards and `totalShards - threshold` parity shards of a systematic Reed-Solomon erasure code over GF(2^8) (polynomial 0x11d, Cauchy matrix), so any `threshold` of `totalShards` valid shards rebuild the state, data shards included: the defaults 3 of 5 survive two lost shards where the old XOR parity survived one data shard. `parity: 'xor'` keeps the old single-loss parity under the new checksum. A format 3 state also carries its byte length (a trailing NUL is no longer stripped) and must be well-formed UTF-8 text of at most 8 MiB in at most 64 shards; refusals are `not-well-formed`, `state-too-large`, `too-many-shards`. New exports `rsEncode`, `rsDecode`, `ParityError`, `MAX_RS_SHARDS`. Protects against lost shards, not forged ones, and is separate from the Shamir key sharing. No new dependency: the arithmetic is in the package, with the GF(2^8) table checked against the published QR code field values and the parity checked against a second implementation in the tests.
