@@ -224,7 +224,7 @@ changes for code that does not ask for it. Design and threat model:
 is not protected: [`docs/security.md`](../../docs/security.md).
 
 Import the link code from `@johnhenry/browsermesh-transport/wsh` and install the optional peer,
-`npm install @johnhenry/wsh` (0.45 or later for links, 0.50 or later for the services; developed against 0.51). It is
+`npm install @johnhenry/wsh` (0.45 or later for links, 0.50 or later for the services; developed against 0.52). It is
 imported lazily on the first `listen()` / `connect()`, so a page that never
 uses a wsh link loads none of it. See [Bundling for the browser](#bundling-for-the-browser).
 

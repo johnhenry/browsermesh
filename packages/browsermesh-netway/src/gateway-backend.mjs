@@ -338,7 +338,15 @@ export class GatewayBackend extends Backend {
           this.#pendingConnections.delete(msg.gateway_id);
           this.#pendingUdp.delete(msg.gateway_id);
           this.#pendingDns.delete(msg.gateway_id);
-          pending.reject(new ConnectionRefusedError(`${msg.message} (code: ${msg.code})`));
+          const detail = `${msg.message} (code: ${msg.code})`;
+          if (msg.code === GATEWAY_ERROR.TIMEOUT) {
+            pending.reject(new OperationTimeoutError(detail));
+          } else if (msg.code === GATEWAY_ERROR.GATEWAY_DISABLED) {
+            // 5 is what the Rust server sends when its gateway is off, and what a Node gateway at 0.51.0 or earlier sent for a timeout.
+            pending.reject(new ConnectionRefusedError(`${detail}: the gateway is disabled, or a timeout from an older gateway`));
+          } else {
+            pending.reject(new ConnectionRefusedError(detail));
+          }
         }
         break;
       }
