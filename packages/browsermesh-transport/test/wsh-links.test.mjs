@@ -179,8 +179,13 @@ describe('wsh link: a peer that pairs and never logs in', () => {
         } else {
           await pumpUntil(() => A.of('refused').length > 0, 'the login deadline to close the silent peer');
           assert.equal(A.of('refused')[0].reason, 'login-timeout');
-          mock.timers.tick(5_000); // wsh lets the AuthFail drain before it closes
-          await pumpUntil(() => operatorClosed, 'the pipe to end');
+          // wsh lets the AuthFail drain before it closes: a bounded wait for the write and, from wsh 0.55, a second short wait after it,
+          // each a timer set only when the one before has fired, so the clock is advanced until the pipe ends.
+          for (let i = 0; !operatorClosed; i++) {
+            if (i > 100) throw new Error('gave up waiting for the pipe to end');
+            mock.timers.tick(1_000);
+            await pump(5);
+          }
         }
       } finally {
         mock.timers.reset();

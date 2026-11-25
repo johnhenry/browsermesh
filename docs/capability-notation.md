@@ -28,11 +28,40 @@ registry is run against wsh's vectors for the shared forms by
 | `rpc:NAME` | `protocol:NAME:open` | `checkAccess(peer, 'protocol:NAME', 'open')` | opening a protocol channel. `rpc:` is not a mesh namespace |
 | `rpc:*` | none | | wsh has no wildcard for rpc. Do not translate the mesh's `protocol:*:open` into it |
 | `expires="2030-01-01T00:00:00Z"` | `grantCapabilities(peer, scopes, { expiresAt })` (ms) | | both refuse at the instant (`now >= expires`); a grant that expires is announced like a revocation (`onAccessChange`) |
-| `exec`, `pty`, `fs:*`, `gateway:*`, `unix:*`, `endpoint:*`, `target:*`, `relay`, `rpc:wsh-*` | none | | machine rights. **Never granted from mesh trust**, and not translated either way |
+| `exec`, `pty`, `fs:*`, `gateway:*`, `unix:*`, `endpoint:*`, `target:*`, `relay`, `rpc:wsh-*` | none | | machine rights. **Never granted from mesh trust**, and not translated either way. The one outbound-network grant the registry makes is the `egress:*` family below, which is its own scope family and not a translation of `gateway:*` |
+| none (a wsh gateway has `gateway:tcp:HOST:PORT`, which nothing here reads or writes) | `egress:tcp:HOST:PORT:connect`, `egress:tcp:HOST:*:connect`, `egress:dns:NAME:resolve`, `egress:set:NAME:connect` | `checkAccess(peer, 'egress:tcp:HOST:PORT', 'connect')` etc. | **mesh only**: `@johnhenry/browsermesh-egress`, see [Egress scopes](#egress-scopes) |
 
 Reading the table: a mesh scope in the left-hand column's namespaces can be copied into a wsh key line as it stands
 when it appears under the same spelling, and the `rpc:` row is a rename. Nothing is converted automatically in either
 direction.
+
+## Egress scopes
+
+The rule above, that the machine rights are never granted from mesh trust, is about **trust**: being reachable on the mesh,
+being a known pod, or holding a trust score never gives `exec`, files, a wsh gateway or hosted pods, and no code derives
+one from the other. It is not a rule that no registry grant may ever name outbound network access. The egress package
+(`@johnhenry/browsermesh-egress`) is the one place a registry grant does, by design and only because an operator wrote it:
+a pod that lends its network to a peer checks the grants of its own registry, and nothing else, before it opens a
+connection for that peer. It does not translate to or from a wsh `gateway:` capability, does not run a wsh gateway for
+the peer, and gives the peer none of the other machine rights. Its scopes, each granted by the operator with
+`grantCapabilities` (and so revocable, and expirable with `expiresAt`):
+
+| Scope (the string granted) | Meaning |
+| --- | --- |
+| `protocol:egress:open` | may open the protocol channel at all (default deny, as for every protocol) |
+| `egress:tcp:<host>:<port>:connect` | open TCP to exactly that host and port. `<host>` is a lowercase DNS name or a canonical IPv4 dotted quad (no `:`, no `*`); a grant for a name does not cover that name's address, and the reverse |
+| `egress:tcp:<host>:*:connect` | any port of exactly that host (the provider's blocked ports, 25, 465 and 587 by default, still apply) |
+| `egress:dns:<name>:resolve` | look up exactly that name. Connecting by name does not need it; a lookup is its own grant |
+| `egress:set:<name>:connect` | connect to anything the operator's set of that name lists (exact hosts, `*.suffix`, IPv4 blocks, port lists; the sets are written on the provider and never by a peer) |
+
+The registry compares scopes segment by segment and a `*` is a whole segment, so a host is one segment, and a block or a
+suffix cannot be written in a grant: those live in the operator's sets. A grant with a literal `*` where a host goes
+(`egress:tcp:*:443:connect`, `egress:tcp:*:*:connect`, `egress:dns:*:resolve`, `egress:*`, `egress:tcp:*`, `*`) is a
+**wildcard grant**: the provider asks the registry about those literal forms for each request, finds them, and refuses
+with `wide-not-acknowledged` unless its operator acknowledged wide mode (`wide: { acknowledge: 'any-public-address' }`),
+even when an exact grant would also cover the request. With the acknowledgement a wildcard grant reaches any **public**
+destination and never private, loopback, link-local, unique-local, carrier-NAT or metadata space: only the operator's own
+`allowPrivate`, for destinations a grant names, admits private space, and a peer's grant never does.
 
 ## Where the two differ
 

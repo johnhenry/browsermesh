@@ -12,7 +12,7 @@ Contents: [how to read it](#how-to-read-it) ·
 [identity](#identity) · [pod messages](#pod-messages) ·
 [peer links by transport](#peer-links-by-transport) · [relay](#relay-mesh-relay) ·
 [shared servers](#shared-servers) · [mesh-rpc, message channel, protocol seam](#mesh-rpc-the-message-channel-and-the-protocol-seam) ·
-[MCP across the mesh](#mcp-across-the-mesh) · [sync](#sync) · [discovery and StealthAgent](#discovery-and-stealthagent) ·
+[MCP across the mesh](#mcp-across-the-mesh) · [HTTP ingress](#http-ingress) · [egress](#egress) · [sync](#sync) · [discovery and StealthAgent](#discovery-and-stealthagent) ·
 [hosted pods](#hosted-pods-per-lane) · [what is verified how](#what-is-verified-how)
 
 ## How to read it
@@ -62,6 +62,7 @@ table; they come from the READMEs, source headers and test directories.
 | `browsermesh-priority-mux` | implemented | sender-side priority scheduler and framer (fake adapter tests). No authentication or encryption. The reassembler has no limit on pending messages. |
 | `browsermesh-mcp` | implemented | a page's WebMCP tools (or an explicit list) as the protocol `mcp` on the protocol seam, and a client for it; per-tool grants, approval kept with the serving page, bounds. In-memory bus (unit), real peers over WebRTC (Node) and two real browsers; threat model [below](#mcp-across-the-mesh). Depends on wsh's WebMCP bridge (peer dependency) through one adapter file. |
 | `browsermesh-ingress` | implemented | real HTTP in, a mesh pod answers: a bounded request forwarder (`createMeshIngress`, a Node listener on its own entry, a CLI) and the provider side (`serveHttpOnMesh`) over the protocol `http` on the protocol seam. Pinned to the pod a mapping names, default deny on the provider, safe defaults on every dimension (unit over an in-memory bus, hostile provider and hostile client suites on real sockets, real WebRTC peers including the CLI as a child process, and a page as the provider in three real browsers). Plain HTTP only, no WebSocket upgrade, direct links only; see [HTTP ingress](#http-ingress). |
+| `browsermesh-egress` | implemented (TCP and name lookup; the fetch form and UDP are not built) | a pod lends its network access to peers that hold a grant: TCP connections and A lookups to destinations the operator allows (`createMeshEgress`; `connectEgress` and a netway backend for the consumer, browser-safe; `nodeDialer` on its own entry, on wsh's address guard) over the protocol `egress` on the protocol seam. Off unless started, default deny, a grant per destination, every address checked after resolution and the checked address dialled, per-consumer and global budgets, audit and meter without contents, revocation ending live connections. Unit over an in-memory bus, a hostile-consumer suite, the real address guard with local sockets, and two real WebRTC peers moving several MiB each way; not run in a browser; see [Egress](#egress). |
 | `browsermesh-embed` | partial | widget wrapper tested against a DOM stub only. |
 | `browsermesh-meshctl` | partial | loopback mode exercised through all eight verbs; `--wsh-relay` (a sealed, key-authenticated wsh link through a pipe relay, no signalling server or WebRTC) exercised end to end against the in-process pipe relay and a real pod-host service, not a deployed relay; the WebRTC path is wired, not exercised end to end; `--relay` (the unsealed relay dialect) is not used for pod-host traffic, on purpose. |
 | `spikes/*` | spikes | `vm-pod-host` (Firecracker driver: never booted a VM), `isolate-pod-host`, `browser-pod-host`, `browser-extension-host`; see [hosted pods](#hosted-pods-per-lane). |
@@ -83,6 +84,7 @@ hand-written.
 | `browsermesh-apps` | yes | `.` `./compat` `./mesh-rpc` `./mesh-channel` `./protocol-channel` `./protocol-stream` `./protocol-roots` `./channel-advertisement` `./mesh-fetch` `./mesh-service` `./peer-registry` | yes | yes | yes |
 | `browsermesh-core` | yes | `.` `./compat` | yes | yes | no |
 | `browsermesh-discovery` | yes | `.` | yes | no | no |
+| `browsermesh-egress` | yes | `.` `./node` | yes | yes | no |
 | `browsermesh-embed` | yes | `.` | yes | no | no |
 | `browsermesh-ingress` | yes | `.` `./node` | yes | yes | yes |
 | `browsermesh-kernel` | yes | `.` | yes | no | no |
@@ -160,7 +162,11 @@ What listing a pod's key in a machine's `authorized_keys` means, plainly:
 - **Machine rights are never granted from mesh trust.** Being trusted, granted a
   capability or reachable on the mesh gives no access to a machine, and no code
   here derives one from the other. A machine's own `authorized_keys` decides
-  who reaches it, in its own notation and by its owner.
+  who reaches it, in its own notation and by its owner. (The one registry grant
+  that names outbound network access is the egress package's own `egress:*`
+  scope family, written by the operator of a pod that lends its network, never
+  derived from trust, and not a wsh `gateway:` capability: see
+  [Egress](#egress) and `capability-notation.md`.)
 - **A non-extractable key can still be used by whatever runs in the page.** Not
   being able to copy the key out does not stop the page from asking for
   signatures.
@@ -848,6 +854,56 @@ Threat model, by what an attacker is and wants:
   WebKit (`tests/browser/ingress.spec.mjs`). Not verified: a public deployment, TLS in front, a real CDN or proxy in
   front, WebRTC through NAT.
 
+## Egress
+
+Package: `browsermesh-egress` (`createMeshEgress`, `connectEgress`, `nodeDialer` on `./node`). Design:
+[`design/egress.md`](design/egress.md). A pod with real sockets lends its network access to peers that hold a grant: a TCP
+connection to `host:port` and an A lookup, over the protocol `egress` (version 1) on the protocol seam, bodies on the
+protocol streams. The fetch form and UDP are not in this version.
+
+**What an operator takes on.** Their address is what every destination sees; complaints and blocks go to them. A grant is
+trust in a pod key, not a person. The provider relays bytes it does not read (no TLS code is in the path, and the audit and
+meter carry no contents), but for a plain protocol the operator's machine carries the plaintext. The consumer's own TLS is
+what protects what is said to a destination from the provider; the provider's lookup answers are not an identity.
+
+The rules, each with the refusal it gives (the codes are exported as `REFUSAL_CODES`, `BUDGET_NAMES` and `END_REASONS`, and
+the README's tables are checked against them):
+
+| Rule | What the provider does | Refusal or end |
+| --- | --- | --- |
+| Off unless started | `createMeshEgress` serves nothing until `start()`, which needs an `indicator` or `unattended: true` | `provider-no-egress` for the consumer |
+| Who may open the channel | `protocol:egress:open`, default deny, asked again for every message of the channel; `allowFrom` narrows further | `provider-not-authorized` |
+| A grant per destination | the registry is asked for `egress:tcp:<host>:<port>:connect`, `egress:tcp:<host>:*:connect` or a set's `egress:set:<name>:connect`; a request with no grant is answered the same whether or not the destination exists, before any lookup | `no-grant` |
+| A lookup is its own grant | `egress:dns:<name>:resolve`; connecting by name does not carry it | `no-grant` |
+| One spelling per address | hosts are lowercase DNS names or four plain decimal numbers; every other spelling of an address, a port in the host, a trailing dot and IPv6 literals are refused before any rule is asked | `bad-destination` |
+| Wildcard grants need an acknowledgement | the registry is asked about the literal-`*` forms for each request; a holder of one is refused unless the operator wrote `wide: { acknowledge: 'any-public-address' }`, even if an exact grant also covers the request; sets cannot hold a bare wildcard | `wide-not-acknowledged` |
+| Addresses are checked after resolution, and the checked address is dialled | a name is resolved once, every answer is classified by wsh's address guard, and the connection goes to an address that passed, never to the name again; a name whose answers mix a public and a refused address is refused whole | `destination-refused` with `addressClass` |
+| Private space belongs to the operator | private, loopback, link-local, unique-local, carrier-NAT, metadata, multicast and reserved space is refused; only the operator's `allowPrivate`, for destinations a grant names, admits private space, and a wildcard grant (wide mode) never does, whatever the operator allows for named destinations. The public addresses of the provider's own interfaces are refused by default | `destination-refused` |
+| Blocked ports | 25, 465 and 587 by default, for every grant and in wide mode (where the defaults cannot be removed); the operator replaces the list otherwise | `port-blocked` |
+| Budgets | per consumer and global: connections, connection attempts per window (refused attempts count), lookups per window, bytes per connection, bytes per consumer per 24 hours; connect, idle and total time. Every limit is a finite positive whole number | `budget-exceeded` with `budget`; a live connection ends `byte-budget`, `consumer-budget`, `idle` or `time-budget` |
+| Backpressure | a consumer that stops reading stops the destination once the consumer's socket window and the stream window (256 KiB each by default) are full (576 KiB had moved in the real-peer run; the tests assert a bound of 1 MiB); a destination that stops reading stops the consumer's writes; both halves close independently | |
+| Stream rules | a sender that is out of sequence, past its credit or past its size is cut off by the stream layer, and past a budget of such breaks the consumer's connections end and its channel closes | `stream-abuse` |
+| Revocation | the registry's access changes, a 30 s interval and `recheck()` ask again, for the scope each connection was opened under; one whose grant is gone ends at once, in both directions | `revoked` |
+| No chaining | a request must carry `hops: 0`; a provider cannot be built on a `dial` or `resolve` that is an egress consumer, and a socket that is not a network socket is a failed connect; a mesh pod id is not a destination, on either end | `chaining-refused` |
+| Audit and meter | `onAudit` records who, the destination host and port, the address class, bytes each way, duration and outcome; `onMeter` records the same counts without a destination; neither carries contents, and a sink that throws never breaks a connection | |
+
+**Not protected.** What a granted destination does with the bytes, including a granted host that forwards them elsewhere.
+The provider's operator sees destinations, sizes and timing, and plaintext for a protocol that has no TLS. A consumer that
+is itself compromised, within its grants and budgets. Naming inside a TLS stream: a grant is for an address, and the
+provider does not look inside. Traffic analysis. Availability: stopping the provider drops every connection and there is no
+resume. Confidentiality across a relayed link: the protocol is for direct links, as ingress. The block on the mail ports is
+a default, not a guarantee about other ports. IPv6 destinations and UDP are not offered. The legal and operational exposure
+of an operator is theirs.
+
+**Verified.** Unit (every rule and every refusal code; each rule broken once); a hostile-consumer suite over the raw protocol
+channel (no grant, other scopes, a resolver that changes its answer, floods of opens, malformed requests, broken stream
+rules, chaining); wsh's real address guard with real local sockets; two real Node peers over real WebRTC with a local
+origin (several MiB each way with every byte checked, a slow reader, a revocation mid-transfer, a refusal of private space;
+`packages/browsermesh-egress/test/real-peer`). Not verified: a browser as the consumer, a public destination, throughput
+or behaviour through NAT or a TURN relay, a registry grant arriving through an ACL template rather than
+`grantCapabilities` (the literal-`*` forms are asked of the registry's own matcher, which the grants tested here go
+through).
+
 ## Sync
 
 Package: `browsermesh-sync`.
@@ -980,6 +1036,7 @@ twice (two pods, one identity), resource exhaustion beyond configured limits.
 | mesh-rpc / `browserMeshFetch` | yes | JSON-boundary network | | echo and 404 over a data channel | with a registry and identity in a browser |
 | Message channel, protocol seam | yes | in-memory duplex | | yes (two browsers, real WebRTC) | |
 | HTTP ingress | yes (rules broken once) | in-memory bus; real sockets (hostile client and provider) | yes (two Node peers; the CLI as a child process) | a page as provider, ingress in Node, three browsers | public deployment, TLS in front |
+| Egress | yes (rules broken once) | in-memory bus; the real wsh address guard with local sockets; a hostile consumer on the raw channel | yes (two Node peers, local origin, several MiB each way) | | a browser as consumer, a public destination, NAT or TURN |
 | Sync | yes | | | CRDT convergence over a data channel | file transfer over a real link |
 | Discovery, DHT, StealthAgent | yes | | | | any network |
 | Hosted pods | yes (fakes) | | | | real microVM, Firecracker host, `workerd`; `isolated-vm` against a real V8 exploit |
