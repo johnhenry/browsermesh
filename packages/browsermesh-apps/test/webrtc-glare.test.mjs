@@ -49,10 +49,12 @@ function fakeConn(world, local, remote) {
       return { type: 'offer', sdp: offer }
     },
     async handleOffer(offer) {
+      world.answered.push(`${local} answered ${offer.sdp}`)
+      // A renegotiation (an ICE restart) keeps the channel and the state it has; the answer says so (as the real connection's does).
+      if (conn.renegotiates) return { type: 'answer', sdp: `answer:${offer.sdp}`, renegotiation: true }
       // A fresh offer replaces whatever this side had (that is what the real connection does).
       conn.pc = { role: 'answerer', offer: offer.sdp }
       conn.isOpen = false
-      world.answered.push(`${local} answered ${offer.sdp}`)
       return { type: 'answer', sdp: `answer:${offer.sdp}` }
     },
     async handleAnswer(answer) {
@@ -290,6 +292,49 @@ describe('a peer that starts over on a connection this side still holds', () => 
     await settle()
     conn.setOpen()
     await guard(answering, 'the answer')
+    assert.deepEqual(b.incoming.at(-1).info, { restarted: false })
+  })
+
+  it('a connection handed out and still held is a restart even when its channel is no longer open: the close that follows is never seen once the connection is swapped', async () => {
+    const w = world()
+    const a = w.add('aaa')
+    const b = w.add('bbb')
+    await guard(a.factory('bbb'), 'first dial')
+    await settle()
+    const conn = b.conns.get('aaa')
+    // The pod on the other end went away without a close this side has seen yet: the channel is closing (not open), the
+    // connection is neither closed nor dropped, and what was handed to the node (the adapter, the link over it) is live.
+    conn.isOpen = false
+    assert.notEqual(b.incoming[0].adapter.state, 'closed')
+    const answering = b.handlers.offer[0]('aaa', { type: 'offer', sdp: 'offer:aaa:after-a-silent-end' }, 'default')
+    await settle()
+    conn.setOpen()
+    await guard(answering, 'the answer')
+    assert.deepEqual(b.incoming.at(-1).info, { restarted: true }, 'what ran over the old connection is over, so the node is told')
+  })
+
+  it('a connection that was never handed to the node is not a restart, whatever its state', async () => {
+    const w = world()
+    const b = w.add('bbb')
+    const conn = await b.meshManager.connectToPeer('aaa') // wired, never opened, never handed out
+    const answering = b.handlers.offer[0]('aaa', { type: 'offer', sdp: 'offer:aaa:first' }, 'default')
+    await settle()
+    conn.setOpen()
+    await guard(answering, 'the answer')
+    assert.deepEqual(b.incoming.at(-1).info, { restarted: false })
+  })
+
+  it('a renegotiation of an open connection (an ICE restart) is not a restart: the channel and what runs over it carry on', async () => {
+    const w = world()
+    const a = w.add('aaa')
+    const b = w.add('bbb')
+    await guard(a.factory('bbb'), 'first dial')
+    await settle()
+    const conn = b.conns.get('aaa')
+    conn.renegotiates = true
+    const answering = b.handlers.offer[0]('aaa', { type: 'offer', sdp: 'offer:aaa:ice-restart' }, 'default')
+    await guard(answering, 'the answer to the renegotiation')
+    assert.equal(conn.isOpen, true)
     assert.deepEqual(b.incoming.at(-1).info, { restarted: false })
   })
 })

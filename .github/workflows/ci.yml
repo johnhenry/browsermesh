@@ -51,6 +51,12 @@ jobs:
       # serialisation regardless -- it predates that bug and is about load,
       # not about #26. See #26 for the root cause and the revert condition.
       - name: Run real-peer WebRTC tests (serialized)
+        # The step takes about four minutes. Past this it is stuck: it is stopped
+        # (and fails) rather than held until the runner gives up on the whole job.
+        # Each package's script also passes `--test-force-exit`, so a test file whose
+        # tests are all done cannot keep its process alive on a handle a failed
+        # test left open.
+        timeout-minutes: 15
         # Fail rather than skip if the native binding is missing -- a skipped
         # suite reports success, which would make this step decorative.
         env:

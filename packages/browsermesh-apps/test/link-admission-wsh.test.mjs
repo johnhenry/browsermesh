@@ -51,7 +51,10 @@ function bobAdmission(extra = {}) {
     decide: () => 'restrict',
     handler: (link) => {
       seen.links.push(link)
-      link.onFrame((f) => { seen.frames.push({ from: link.peerKey, f }); link.send({ type: 'x:ack' }) })
+      // `send` returns a promise that rejects when the link ends with the write still queued. A handler that does not take
+      // that rejection leaves it unhandled, and it surfaces as an error of whichever test is running when the link is closed
+      // (the cleanup of the test it was sent in): the ack is observed by the peer receiving it, not by this promise.
+      link.onFrame((f) => { seen.frames.push({ from: link.peerKey, f }); Promise.resolve(link.send({ type: 'x:ack' })).catch(() => {}) })
     },
     onEvent: (e) => seen.events.push(e),
     ...extra,
@@ -83,6 +86,20 @@ describe('createMeshNode({ admission }) over wsh', () => {
     assert.equal(bob.hasActiveSession(alice.podId), false)
     assert.equal(bob.wsh.links.isConnected(alice.podId), false)
     assert.equal(bob.admission.stats().restricted, 1)
+  })
+
+  it('a handler\'s send that is still queued when the link ends rejects with WSH_CLOSED: the handler owns that rejection', async () => {
+    const env = await createInProcessPipeRelay()
+    cleanups.push(() => env.close())
+    const { admission, seen } = bobAdmission()
+    const bob = await makeNode(env, 'bob', { admission })
+    const alice = await makeNode(env, 'alice')
+    await alice.connectToPeer(bob.podId, { wsh: bob.podId })
+    await alice.sendTo(bob.podId, { type: 'x:hello' })
+    await waitFor(() => seen.frames.length === 1, 4000, 'the handler gets the frame')
+    const late = seen.links[0].send({ type: 'x:late' }) // the write is queued, not yet done
+    seen.links[0].close('test')
+    await assert.rejects(late, (e) => e.code === 'WSH_CLOSED' && /closed \(test\)/.test(e.message))
   })
 
   it('promote() adopts it like any inbound wsh link: a session, data both ways', async () => {

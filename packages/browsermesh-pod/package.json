@@ -37,7 +37,7 @@
   "homepage": "https://opensource.johnhenry.me/browsermesh/",
   "scripts": {
     "test": "node --test test/*.test.mjs",
-    "test:real-peer": "node --test --test-concurrency=1 test/real-peer/*.test.mjs"
+    "test:real-peer": "node --test --test-force-exit --test-concurrency=1 test/real-peer/*.test.mjs"
   },
   "peerDependencies": {
     "@johnhenry/browsermesh-primitives": ">=0.2.0 <1.0.0"

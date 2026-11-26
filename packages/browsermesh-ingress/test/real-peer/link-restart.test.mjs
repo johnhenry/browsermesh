@@ -4,7 +4,7 @@
 // dialling it (a hand mapping with the CLI's default dialling) gets its first answer without a long wait.
 //
 // Same optional `node-datachannel` guard and `REQUIRE_REAL_PEER` hard-fail as every other real-peer suite here.
-import { describe, it, before, after } from 'node:test'
+import { describe, it, before, after, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import http from 'node:http'
 import net from 'node:net'
@@ -65,7 +65,10 @@ const freePort = () => new Promise((resolve) => { const s = net.createServer(); 
 describeIfReal('a pod that stops and starts again against a running ingress, over real WebRTC', () => {
   let tmp, hub, startMeshNode, ingressPkg, apps, signaling
   let child, port, output, ingressPodId, podId
-  let current = null
+  // Everything a test starts is tracked here and stopped by `afterEach`, so a test that fails halfway (an assertion thrown
+  // between a start and its stop) leaves no pod, signalling socket or CLI process behind to keep the process alive.
+  const pods = new Set()
+  const clis = new Set()
 
   const env = () => ({ PATH: process.env.PATH, HOME: tmp, USERPROFILE: tmp, XDG_CONFIG_HOME: tmp })
   async function startCli(args) {
@@ -74,10 +77,14 @@ describeIfReal('a pod that stops and starts again against a running ingress, ove
     const out = { text: '' }
     c.stdout.on('data', (d) => { out.text += d })
     c.stderr.on('data', (d) => { out.text += d })
+    clis.add(c)
     await waitFor(() => /listening on http/.test(out.text), WEBRTC_TIMEOUT_MS, `the CLI to start (output so far: ${out.text})`)
     return { child: c, port: p, out, podId: /pod id: (\S+)/.exec(out.text)[1] }
   }
-  const stopCli = async (c) => { if (c && c.exitCode === null) { c.kill('SIGTERM'); await new Promise((r) => c.once('close', r)) } }
+  const stopCli = async (c) => {
+    clis.delete(c)
+    if (c && c.exitCode === null) { c.kill('SIGTERM'); await new Promise((r) => c.once('close', r)) }
+  }
 
   /** The pod: a stored identity, a mesh node, `http` served by name, and a name claimed. `mode` says how it stops. */
   async function startPod({ mode = 'shutdown-only', claim = true, dial = false, ingress = ingressPodId } = {}) {
@@ -94,17 +101,23 @@ describeIfReal('a pod that stops and starts again against a running ingress, ove
     } else if (dial) {
       await mesh.node.connectToPeer(ingress, { webrtc: ingress }, { answerTimeoutMs: WEBRTC_TIMEOUT_MS, openTimeoutMs: WEBRTC_TIMEOUT_MS }).catch(() => {})
     }
+    let stopped = false
     const pod = {
       mesh, served, client,
       async stop() {
+        if (stopped) return
+        stopped = true
+        pods.delete(pod)
         if (client) await client.release('app').catch(() => {})
         // The node is closed, the connection it had is left as it is (what a page that closes its node and keeps running does);
         // only the signalling socket goes, or the hub would see the old node reconnect and take the pod id from the new one.
         if (mode === 'shutdown-only') { await mesh.node.shutdown(); await mesh.node.signaling.close() }
-        else { served.stop(); await mesh.close() }
+        // `stop()` returns once the close notices have left (bounded): waited for, so they are not still going out while the
+        // node under them is torn down.
+        else { await served.stop(); await mesh.close() }
       },
     }
-    current = pod
+    pods.add(pod)
     return pod
   }
 
@@ -123,9 +136,15 @@ describeIfReal('a pod that stops and starts again against a running ingress, ove
     await first.close()
   })
 
+  // Whatever a test left running, on failure or not: every pod, then every CLI process.
+  const stopEverything = async () => {
+    for (const pod of [...pods]) { try { await pod.stop() } catch { /* gone */ } }
+    for (const c of [...clis]) { try { await stopCli(c) } catch { /* gone */ } }
+  }
+  afterEach(stopEverything)
+
   after(async () => {
-    try { await current?.stop() } catch { /* gone */ }
-    await stopCli(child)
+    await stopEverything()
     try { await hub?.close() } catch { /* gone */ }
     try { ndcMain.cleanup() } catch { /* nothing to clean up */ }
     if (tmp) await rm(tmp, { recursive: true, force: true })
@@ -192,13 +211,18 @@ describeIfReal('a pod that stops and starts again against a running ingress, ove
     const cli = await startCli(['--map', `site.example.test=${podId}#web`])
     child = cli.child
     port = cli.port
+    let starting
     try {
       await new Promise((r) => setTimeout(r, 1000)) // the ingress is already dialling the pod, which is not there yet
-      const starting = startPod({ claim: false, dial: true, ingress: cli.podId })
+      starting = startPod({ claim: false, dial: true, ingress: cli.podId })
       const first = await request({ port, host: 'site.example.test', path: '/x' })
       assert.deepEqual([first.status, first.body.toString()], [200, 'web answered /x'], first.reason ?? '')
       const pod = await starting
       await pod.stop()
-    } finally { await stopCli(cli.child) }
+    } finally {
+      // The pod may still be starting when an assertion above throws: let it finish, so `afterEach` finds it to stop.
+      await starting?.catch(() => {})
+      await stopCli(cli.child)
+    }
   })
 })
