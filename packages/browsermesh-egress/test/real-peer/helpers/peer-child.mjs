@@ -9,8 +9,6 @@
 const role = process.argv[2]
 const ndc = await import('node-datachannel/polyfill')
 Object.assign(globalThis, { RTCPeerConnection: ndc.RTCPeerConnection, RTCIceCandidate: ndc.RTCIceCandidate, RTCSessionDescription: ndc.RTCSessionDescription })
-if (!globalThis.crypto) globalThis.crypto = {}
-if (!crypto.randomUUID) crypto.randomUUID = () => `uuid-${Math.random().toString(36).slice(2)}`
 
 let handler = null
 const signalingTransport = {

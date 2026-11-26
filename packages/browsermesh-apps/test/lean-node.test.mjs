@@ -11,9 +11,6 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 
-if (!globalThis.crypto) globalThis.crypto = {}
-if (!crypto.randomUUID) crypto.randomUUID = () => `uuid-${Math.random().toString(36).slice(2)}`
-
 let lastConfig = null
 class MockRTCDataChannel { readyState = 'open'; close() {} }
 class MockRTCPeerConnection {

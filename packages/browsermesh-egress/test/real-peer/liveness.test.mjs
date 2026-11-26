@@ -13,9 +13,6 @@ import net from 'node:net'
 import { fork } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
-if (!globalThis.crypto) globalThis.crypto = {}
-if (!crypto.randomUUID) crypto.randomUUID = () => `uuid-${Math.random().toString(36).slice(2)}`
-
 let ndc = null
 let ndcMain = null
 try {

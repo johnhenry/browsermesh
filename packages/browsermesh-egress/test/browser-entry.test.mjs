@@ -7,8 +7,6 @@ import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 
-if (!globalThis.crypto) globalThis.crypto = {}
-if (!crypto.randomUUID) crypto.randomUUID = () => `uuid-${Math.random().toString(36).slice(2)}`
 class MockRTCDataChannel { readyState = 'open'; close() {} }
 class MockRTCPeerConnection {
   onicecandidate = null; ondatachannel = null; onconnectionstatechange = null; connectionState = 'new'; signalingState = 'stable'
