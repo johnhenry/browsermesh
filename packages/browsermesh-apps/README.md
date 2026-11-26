@@ -164,6 +164,9 @@ different Node WebGPU binding is adopted.
 npm install @johnhenry/browsermesh-apps @johnhenry/browsermesh-primitives @johnhenry/browsermesh-core @johnhenry/browsermesh-transport @johnhenry/browsermesh-sync @johnhenry/browsermesh-discovery
 ```
 
+`@johnhenry/browsermesh-transport` is an optional peer, `>=0.13.1 <1.0.0` (0.13.1 is the first release that passes
+`authorize(peer, { restricted: true })`, which link admission over wsh needs).
+
 ## Usage
 
 ```js
@@ -421,7 +424,9 @@ node.admission.stats();                         // restricted now, opened, promo
   restricted verdict only when the call carries `{ restricted: true }`; otherwise a `restrict` decision is a refusal
   (`onEvent` type `restricted-unsupported`), and `createMeshNode({ admission, wsh })` logs
   `mesh-bootstrap:admission-restricted-unsupported` when the loaded `WshPeerLinks` lacks the flag. With such a transport
-  every peer the seam would restrict is refused: upgrade `@johnhenry/browsermesh-transport`. `allow` and `deny` behave the
+  every peer the seam would restrict is refused: upgrade `@johnhenry/browsermesh-transport`. The declared peer range now requires a
+  transport that has the flag (0.13.1), so this guards a transport installed outside the range and anyone who calls
+  `createWshAdmissionAuthorize` against their own `WshPeerLinks`. `allow` and `deny` behave the
   same with any transport.
 
 Built and tested: the seam (cap, deadline, one-shot promote/close, frame cap, counters), the wsh path over an in-process pipe
