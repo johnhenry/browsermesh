@@ -171,6 +171,23 @@ describeIfReal('a pod that stops and starts again against a running ingress, ove
     } finally { await stopCli(cli.child) }
   })
 
+  for (const mode of ['shutdown-only', 'everything-closed']) {
+    it(`a hand mapping with the CLI's default dialling, the pod stopped (${mode}) and started again against the same running ingress: the first request after each start is answered`, async () => {
+      const cli = await startCli(['--map', `site.example.test=${podId}#web`])
+      child = cli.child
+      port = cli.port
+      try {
+        for (let cycle = 1; cycle <= 3; cycle++) {
+          const t0 = Date.now()
+          const pod = await startPod({ mode, claim: false, dial: true, ingress: cli.podId })
+          const first = await request({ port, host: 'site.example.test', path: '/x' })
+          assert.deepEqual([first.status, first.body?.toString()], [200, 'web answered /x'], `cycle ${cycle}, ${Date.now() - t0} ms after its start: ${first.reason ?? first.error ?? ''}\n${cli.out.text}`)
+          await pod.stop()
+        }
+      } finally { await stopCli(cli.child) }
+    })
+  }
+
   it('a hand mapping with the CLI\'s default dialling and a pod that dials the ingress at the same time: the first request is answered, not failed for a minute', async () => {
     const cli = await startCli(['--map', `site.example.test=${podId}#web`])
     child = cli.child

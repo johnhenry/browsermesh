@@ -107,7 +107,7 @@ function world() {
         await new Promise(() => {}) // never answered in glare: the older release times out after answerTimeoutMs
       }
     } else {
-      peer.factory = createWebRTCTransportFactory({ localPodId: id, meshManager, signaling, onIncomingConnection: (from, adapter) => incoming.push({ from, adapter }) })
+      peer.factory = createWebRTCTransportFactory({ localPodId: id, meshManager, signaling, onIncomingConnection: (from, adapter, connectionId, info) => incoming.push({ from, adapter, connectionId, info }) })
     }
     w.peers.set(id, peer)
     return peer
@@ -259,5 +259,37 @@ describe('a peer that starts over on a connection this side still holds', () => 
     await guard(answering, 'the answer to the restart')
     assert.equal(b.incoming.length >= 2, true)
     assert.equal(new Set(b.incoming.map((i) => i.adapter)).size, 1, 'one adapter for the one connection')
+  })
+
+  it('says so when it hands the connection out: `restarted` is false for a first connection and true for a peer that started over on one held open', async () => {
+    const w = world()
+    const a = w.add('aaa')
+    const b = w.add('bbb')
+    await guard(a.factory('bbb'), 'first dial')
+    await settle()
+    assert.equal(b.incoming.length, 1)
+    assert.deepEqual([b.incoming[0].connectionId, b.incoming[0].info], ['default', { restarted: false }], 'the first connection is not a restart')
+    const conn = b.conns.get('aaa')
+    assert.equal(conn.isOpen, true, 'the connection is held open when the fresh offer arrives')
+    const answering = b.handlers.offer[0]('aaa', { type: 'offer', sdp: 'offer:aaa:restart' }, 'default')
+    await settle()
+    conn.setOpen()
+    await guard(answering, 'the answer to the restart')
+    assert.deepEqual(b.incoming.at(-1).info, { restarted: true })
+  })
+
+  it('a connection that was closed is not a restart: the peer\'s next offer is a new connection', async () => {
+    const w = world()
+    const a = w.add('aaa')
+    const b = w.add('bbb')
+    await guard(a.factory('bbb'), 'first dial')
+    await settle()
+    b.conns.get('aaa').close()
+    const conn = b.conns.get('aaa')
+    const answering = b.handlers.offer[0]('aaa', { type: 'offer', sdp: 'offer:aaa:again' }, 'default')
+    await settle()
+    conn.setOpen()
+    await guard(answering, 'the answer')
+    assert.deepEqual(b.incoming.at(-1).info, { restarted: false })
   })
 })

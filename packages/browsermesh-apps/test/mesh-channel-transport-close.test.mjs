@@ -92,11 +92,31 @@ test('a link opened again after the close is a normal new link', async () => {
   a.teardown(); b.teardown()
 })
 
+test('a peer that started over on the connection it had ends the link that ran over the old one, even though a session is still active', async () => {
+  const { alice, bob, a, link, b } = await pair()
+  const reasons = []
+  link.onClose((e) => reasons.push(e?.reason))
+  alice.fire('peer:transport-restart', { pubKey: 'someone-else', sessionId: 's', transport: 'webrtc', connectionId: 'default' })
+  alice.fire('peer:transport-restart', { pubKey: bob.podId, sessionId: 's', transport: 'webrtc', connectionId: 'another' })
+  assert.equal(link.closed, false, 'another peer, or another connection of this peer, changes nothing')
+  alice.fire('peer:transport-restart', { pubKey: bob.podId, sessionId: 's', transport: 'webrtc', connectionId: 'default' })
+  assert.equal(link.closed, true)
+  assert.deepEqual(reasons, ['transport-restart'])
+  assert.equal(a.api.link(bob.podId), undefined)
+  // the next link is a normal new one, opened over the connection the peer made
+  const again = await a.api.open(bob.podId)
+  assert.notEqual(again, link)
+  assert.equal(again.closed, false)
+  a.teardown(); b.teardown()
+})
+
 test('teardown stops listening to the node', async () => {
   const { alice, a, b } = await pair()
   assert.equal(alice.listenerCount('peer:transport-close'), 1)
+  assert.equal(alice.listenerCount('peer:transport-restart'), 1)
   a.teardown()
   assert.equal(alice.listenerCount('peer:transport-close'), 0)
+  assert.equal(alice.listenerCount('peer:transport-restart'), 0)
   b.teardown()
 })
 

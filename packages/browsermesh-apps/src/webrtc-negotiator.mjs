@@ -108,7 +108,8 @@ export const DEFAULT_HALF_OPEN_TIMEOUT_MS = 60_000
  * @param {import('@johnhenry/browsermesh-transport').WebRTCMeshManager} opts.meshManager
  * @param {import('./signaling.mjs').MeshSignalingChannel} opts.signaling
  * @param {Function} [opts.onLog]
- * @param {(remotePodId: string, adapter: import('@johnhenry/browsermesh-transport').WebRTCTransportAdapter, connectionId: string) => void} [opts.onIncomingConnection]
+ * @param {(remotePodId: string, adapter: import('@johnhenry/browsermesh-transport').WebRTCTransportAdapter, connectionId: string, info: { restarted: boolean }) => void} [opts.onIncomingConnection]
+ *   `info.restarted` is true when the offer arrived for a connection this side held open: the peer started over on it.
  *   Called once the DataChannel for a *callee-side* (auto-answered) inbound
  *   offer actually opens, with a ready `WebRTCTransportAdapter` wrapping it.
  *   Optional: without it, inbound-only connections still come up at the
@@ -302,6 +303,9 @@ export function createWebRTCTransportFactory({
   signaling.onOffer(async (fromPodId, offer, connectionId = DEFAULT_CONNECTION_ID) => {
     const key = iceKey(fromPodId, connectionId)
     let entry = null
+    // An offer for a connection this side holds OPEN is a peer that started over (a page loaded again, a node made anew): the
+    // connection is swapped underneath and whatever link ran over the old one is over. The node is told when it is handed out.
+    let restarted = false
     // Glare: this side's own offer to the same peer is out. One of the two offers must give way, and both sides must
     // agree which: the lower pod id's offer wins. A peer that does not say it follows the rule (an older release,
     // whose offer has no `glare` marker) is assumed to yield, as every older release does, so then ours wins.
@@ -322,6 +326,7 @@ export function createWebRTCTransportFactory({
     try {
       // An offer for a connection that is already open (a renegotiation) or already counted takes no slot.
       const existing = meshManager.getConnection?.(fromPodId, connectionId)
+      restarted = existing?.isOpen === true
       if (!halfOpen.has(key) && !existing?.isOpen) entry = admitHalfOpen(key, fromPodId, connectionId)
       const conn = await getWiredConnection(fromPodId, connectionId)
       if (entry?.evicted) { closeQuietly(conn); return }
@@ -336,7 +341,7 @@ export function createWebRTCTransportFactory({
       // side gets from connectToPeer() -- see PeerNode.adoptIncomingSession().
       if (typeof onIncomingConnection === 'function') {
         await waitForOpen(conn, defaultOpenTimeoutMs ?? DEFAULT_OPEN_TIMEOUT_MS)
-        onIncomingConnection(fromPodId, await adapterFor(conn), connectionId)
+        onIncomingConnection(fromPodId, await adapterFor(conn), connectionId, { restarted })
       }
     } catch (err) {
       if (entry) {

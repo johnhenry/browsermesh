@@ -41,6 +41,22 @@ function fakeTransport({ finishes = true } = {}) {
   return t
 }
 
+describe('a peer that started over on the connection it had', () => {
+  it('adopting with `restarted` says so once, as `peer:transport-restart`; adopting a first connection says nothing', async () => {
+    const node = await bootedNode('a')
+    const seen = []
+    node.on('peer:transport-restart', (e) => seen.push(e))
+    const transport = fakeTransport()
+    const first = await node.adoptIncomingSession('peer-x', transport, 'webrtc', { restarted: false })
+    assert.deepEqual(seen, [])
+    const again = await node.adoptIncomingSession('peer-x', transport, 'webrtc', { restarted: true })
+    assert.equal(again.sessionId, first.sessionId, 'the session is the same one (one transport, one session)')
+    assert.deepEqual(seen, [{ pubKey: 'peer-x', sessionId: first.sessionId, transport: 'webrtc', connectionId: 'default' }])
+    await node.adoptIncomingSession('peer-x', transport, 'webrtc') // the option is optional: nothing more is said
+    assert.equal(seen.length, 1)
+  })
+})
+
 describe('one transport, one session', () => {
   it('adopting the same transport again returns the same session and delivers each message once', async () => {
     const node = await bootedNode('a')
