@@ -11,6 +11,9 @@
 export { createMeshIngress } from './ingress.mjs'
 export { serveHttpOnMesh, fromSiteHandler, declineRequest, PROVIDER_LIMIT_DEFAULTS } from './provider.mjs'
 export { requireLinkKey, nodeLinkIdentity, LinkKeyRefusal, LINK_KEY_REFUSALS, PEER_VERIFIED } from './peer-identity.mjs'
+export {
+  NAME_DENY_DEFAULTS, NAMES_PROTOCOL, NAMES_VERSIONS, NameRefusal, checkLabel, checkService, createNameTable, openNameClient, registryAllow, serveIngressNames,
+} from './names.mjs'
 export { INGRESS_LIMIT_DEFAULTS, parseBytes, parseDuration } from './limits.mjs'
 export { IngressError, REASON_HEADER } from './errors.mjs'
 export { DEFAULT_CSP, DEFAULT_FORWARD_REQUEST_HEADERS, DEFAULT_PASS_RESPONSE_HEADERS } from './headers.mjs'

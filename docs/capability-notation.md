@@ -31,6 +31,8 @@ registry is run against wsh's vectors for the shared forms by
 | `exec`, `pty`, `fs:*`, `gateway:*`, `unix:*`, `endpoint:*`, `target:*`, `relay`, `rpc:wsh-*` | none | | machine rights. **Never granted from mesh trust**, and not translated either way. The one outbound-network grant the registry makes is the `egress:*` family below, which is its own scope family and not a translation of `gateway:*` |
 | none (a wsh gateway has `gateway:tcp:HOST:PORT`, which nothing here reads or writes) | `egress:tcp:HOST:PORT:connect`, `egress:tcp:HOST:*:connect`, `egress:dns:NAME:resolve`, `egress:set:NAME:connect`, and the fetch and UDP forms (`egress:http:HOST:PORT:fetch`, `egress:udp:HOST:PORT:send`, `egress:set:NAME:fetch`, `egress:set:NAME:send`) | `checkAccess(peer, 'egress:tcp:HOST:PORT', 'connect')` etc. | **mesh only**: `@johnhenry/browsermesh-egress`, see [Egress scopes](#egress-scopes) |
 
+| none | `protocol:ingress-names:open`, `ingress:name:<label>:claim` (`ingress:name:*:claim` for any label) | `checkAccess(pod, 'ingress:name:<label>', 'claim')` | **mesh only**: `@johnhenry/browsermesh-ingress`, an operator letting a pod claim a hostname under the operator's zone while its link is up. Off unless the operator serves a name table; a deny-listed label is refused whatever is granted |
+
 Reading the table: a mesh scope in the left-hand column's namespaces can be copied into a wsh key line as it stands
 when it appears under the same spelling, and the `rpc:` row is a rename. Nothing is converted automatically in either
 direction.

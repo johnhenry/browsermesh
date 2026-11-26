@@ -11,8 +11,12 @@ import { IngressError } from './errors.mjs'
 import { NO_BODY_STATUS, isPodId } from './headers.mjs'
 import { LINK_KEY_REFUSALS, LinkKeyRefusal, nodeLinkIdentity, resolvePeer, unverifiedPeer } from './peer-identity.mjs'
 import {
-  FETCH_METHOD, HTTP_PROTOCOL, HTTP_VERSIONS, KIND_REQUEST, KIND_RESPONSE, sha256Hex, signedBytes, signedRequestBytes, validateRequestHead, validateStreamMeta,
+  FETCH_METHOD, HTTP_PROTOCOL, HTTP_VERSIONS, KIND_REQUEST, KIND_RESPONSE, SERVICES_METHOD, SERVICE_NAME_RE, sha256Hex, signedBytes, signedRequestBytes,
+  validateRequestHead, validateStreamMeta,
 } from './wire.mjs'
+
+const MAX_SERVICES = 32
+const asHandler = (h) => (typeof h === 'function' ? h : typeof h?.fetch === 'function' ? (req, ctx) => h.fetch(req, ctx) : null)
 
 export const PROVIDER_LIMIT_DEFAULTS = Object.freeze({
   maxInflight: 16,
@@ -59,14 +63,32 @@ function deferred() {
  *   only narrow (anything it does not say clearly, a throw, a public key that does not hash to the pod id: `'none'`).
  * @param {object} [opts.limits] - see `PROVIDER_LIMIT_DEFAULTS`
  * @param {(bytes: Uint8Array, info: { peer: string }) => (string|Promise<string>)} [opts.sign] - sign the response: the provider buffers it so the signature covers the body
+ * @param {Record<string, Function|{ fetch: Function }>} [opts.services]
+ *   Named services this pod serves besides (or instead of) the one handler: each a `(request, context) => Response` or `{ fetch }`.
+ *   A route that names a service reaches that handler, which finds the name in `context.service`; a pod that declares nothing is
+ *   never sent a service name. With `services`, `handler` may be `null` (no default: a route with no service is refused). Up to 32,
+ *   names of the form `[a-z0-9][a-z0-9._-]{0,63}`.
  * @param {string} [opts.protocol='http']
  * @returns {{ stop(): void, stats(): object }}
  */
-export function serveHttpOnMesh(service, handler, { allowFrom, limits: limitOptions, sign, verifyRequest, node, linkIdentity, protocol = HTTP_PROTOCOL, onLog } = {}) {
+export function serveHttpOnMesh(service, handler, { allowFrom, limits: limitOptions, sign, verifyRequest, node, linkIdentity, protocol = HTTP_PROTOCOL, onLog, services } = {}) {
   const api = service && typeof service === 'object' ? (service.api ?? service) : null
   if (typeof api?.serveProtocol !== 'function') throw new TypeError('serveHttpOnMesh: the first argument is a mesh service with serveProtocol (createMeshProtocolService)')
-  const fn = typeof handler === 'function' ? handler : typeof handler?.fetch === 'function' ? (req, ctx) => handler.fetch(req, ctx) : null
-  if (!fn) throw new TypeError('serveHttpOnMesh: handler must be a function or { fetch }')
+  let named = null // name -> handler; null when this pod declares no services
+  if (services !== undefined) {
+    if (!services || typeof services !== 'object' || Array.isArray(services)) throw new TypeError('serveHttpOnMesh: services must be an object of name to handler')
+    const entries = Object.entries(services)
+    if (!entries.length || entries.length > MAX_SERVICES) throw new TypeError(`serveHttpOnMesh: services must name 1 to ${MAX_SERVICES} services`)
+    named = new Map()
+    for (const [name, h] of entries) {
+      if (!SERVICE_NAME_RE.test(name)) throw new TypeError(`serveHttpOnMesh: "${name}" is not a service name (lowercase letters, digits, . _ -)`)
+      const f = asHandler(h)
+      if (!f) throw new TypeError(`serveHttpOnMesh: the service ${name} needs a function or { fetch }`)
+      named.set(name, f)
+    }
+  }
+  const fn = handler === null && named ? null : asHandler(handler)
+  if (!fn && !(handler === null && named)) throw new TypeError('serveHttpOnMesh: handler must be a function or { fetch }')
   if (sign !== undefined && typeof sign !== 'function') throw new TypeError('serveHttpOnMesh: sign must be a function')
   if (verifyRequest !== undefined && typeof verifyRequest !== 'function') throw new TypeError('serveHttpOnMesh: verifyRequest must be a function')
   if (linkIdentity !== undefined && typeof linkIdentity !== 'function') throw new TypeError('serveHttpOnMesh: linkIdentity must be a function')
@@ -134,6 +156,15 @@ export function serveHttpOnMesh(service, handler, { allowFrom, limits: limitOpti
       try { return await waiter.promise } finally { clearTimeout(timer); signal.removeEventListener('abort', onAbort) }
     }
 
+    // Only a pod that declares services answers this: any other pod (an older release included) answers "unknown method", which
+    // the ingress reads as "no named services".
+    if (named) {
+      channel.onRequest(SERVICES_METHOD, async () => {
+        if (open === false || (await decide(peer, context)) !== true) { counters.refused += 1; throw new MeshChannelError(ChannelErrorCode.UNAUTHORIZED, 'not-authorized', 'not served') }
+        return { services: [...named.keys()].sort(), default: fn !== null }
+      })
+    }
+
     channel.onRequest(FETCH_METHOD, async (params, ctx) => {
       if (open === false) { counters.refused += 1; throw new MeshChannelError(ChannelErrorCode.UNAUTHORIZED, 'not-authorized', 'not served') }
       // Asked again for every request, so a function that stops saying yes stops the next request, and a decision still
@@ -146,6 +177,9 @@ export function serveHttpOnMesh(service, handler, { allowFrom, limits: limitOpti
       if (inflight >= limits.maxInflight) throw new MeshChannelError(ChannelErrorCode.BUSY, 'busy', 'too many requests in flight')
       let head
       try { head = validateRequestHead(params, limits) } catch (e) { counters.errors += 1; throw asChannelError(e) }
+      // A service the pod did not declare is never served, whatever the ingress says; with none named, the default handler.
+      const target = head.service === undefined ? fn : named?.get(head.service)
+      if (!target) { counters.refused += 1; throw new MeshChannelError(ChannelErrorCode.INVALID, 'unknown-service', 'this pod serves no such service') }
       inflight += 1
       counters.requests += 1
       counters.inflight += 1
@@ -167,7 +201,7 @@ export function serveHttpOnMesh(service, handler, { allowFrom, limits: limitOpti
         if (verifyRequest) {
           const bytes = signedRequestBytes({
             rid: head.rid, nonce: head.nonce, host: head.host, method: head.method, target: head.target, headers: head.headers, client: head.client,
-            digest: await sha256Hex(bodyBytes ?? new Uint8Array(0)),
+            digest: await sha256Hex(bodyBytes ?? new Uint8Array(0)), service: head.service,
           })
           let ok = false
           let why = 'request-unverified'
@@ -183,7 +217,7 @@ export function serveHttpOnMesh(service, handler, { allowFrom, limits: limitOpti
             throw new MeshChannelError(ChannelErrorCode.UNAUTHORIZED, 'request-unverified', 'the request was not accepted')
           }
         }
-        const response = await fn(request, { peer, signal: ac.signal, client: head.client })
+        const response = await target(request, { peer, signal: ac.signal, client: head.client, ...(head.service === undefined ? {} : { service: head.service }) })
         if (response && typeof response === 'object' && DECLINED.has(response)) {
           // "Not me, try another": nothing of the response is sent, and no body was produced.
           counters.declined += 1

@@ -15,6 +15,8 @@ export const INGRESS_LIMIT_DEFAULTS = Object.freeze({
   responseIdleMs: 15_000,
   /** Time to open the channel to a provider, ms. */
   openTimeoutMs: 10_000,
+  /** How long a request for a pod told to be expected (`expect()`, a held name) waits for the link, ms. */
+  linkWaitMs: 5_000,
   maxHeaderCount: 64,
   maxHeaderBytes: 16 * 1024,
   maxTargetLength: 2048,
@@ -28,7 +30,7 @@ export const INGRESS_LIMIT_DEFAULTS = Object.freeze({
   maxTracked: 10_000,
 })
 
-const POSITIVE = ['maxRequestBodyBytes', 'maxResponseBytes', 'timeoutMs', 'bodyIdleMs', 'responseIdleMs', 'openTimeoutMs', 'maxHeaderCount',
+const POSITIVE = ['maxRequestBodyBytes', 'maxResponseBytes', 'timeoutMs', 'bodyIdleMs', 'responseIdleMs', 'openTimeoutMs', 'linkWaitMs', 'maxHeaderCount',
   'maxHeaderBytes', 'maxTargetLength', 'maxInflight', 'maxInflightPerClient', 'maxInflightPerProvider', 'maxTracked']
 
 /** @returns {typeof INGRESS_LIMIT_DEFAULTS} defaults overlaid with `given`, each value checked */

@@ -16,8 +16,8 @@ import {
 import { createInflight, createRateLimiter, resolveLimits } from './limits.mjs'
 import { nodeLinkIdentity, resolvePeer } from './peer-identity.mjs'
 import {
-  FETCH_METHOD, HTTP_PROTOCOL, HTTP_VERSIONS, KIND_RESPONSE, KIND_REQUEST, WIRE_METHODS, signedBytes, signedRequestBytes, sha256Hex, validateResponseHead,
-  validateStreamMeta,
+  FETCH_METHOD, HTTP_PROTOCOL, HTTP_VERSIONS, KIND_RESPONSE, KIND_REQUEST, SERVICES_METHOD, SERVICE_NAME_RE, WIRE_METHODS, signedBytes, signedRequestBytes,
+  sha256Hex, validateResponseHead, validateStreamMeta,
 } from './wire.mjs'
 
 const unref = (t) => { t?.unref?.(); return t }
@@ -92,9 +92,11 @@ function resolveRetry(retry) {
  */
 export function createMeshIngress({
   service, node, resolve, authorize, deny, limits: limitOptions, methods = ['GET', 'HEAD'], forwardHeaders = [], exposeHeaders = [],
-  forwardClientAddress = false, verifyResponse, signRequest, retry, rpc, onAudit, clock, protocol = HTTP_PROTOCOL, linkIdentity,
+  forwardClientAddress = false, verifyResponse, signRequest, retry, rpc, onAudit, clock, protocol = HTTP_PROTOCOL, linkIdentity, names,
 } = {}) {
-  if (typeof resolve !== 'function') throw new TypeError('createMeshIngress: resolve(request) is required: nothing is served without a mapping')
+  if (typeof resolve !== 'function' && !names) throw new TypeError('createMeshIngress: resolve(request) is required: nothing is served without a mapping')
+  if (resolve !== undefined && typeof resolve !== 'function') throw new TypeError('createMeshIngress: resolve must be a function')
+  if (names !== undefined && (typeof names?.lookup !== 'function' || typeof names?.subscribe !== 'function')) throw new TypeError('createMeshIngress: names must be a table from createNameTable')
   if (!service && !node) throw new TypeError('createMeshIngress: a mesh service (or a node to attach one to) is required')
   for (const [name, fn] of Object.entries({ authorize, deny, verifyResponse, signRequest, onAudit })) if (fn !== undefined && typeof fn !== 'function') throw new TypeError(`createMeshIngress: ${name} must be a function`)
   if (linkIdentity !== undefined && typeof linkIdentity !== 'function') throw new TypeError('createMeshIngress: linkIdentity must be a function')
@@ -122,7 +124,8 @@ export function createMeshIngress({
   const LEGACY_MEMORY_MS = 60_000
   const active = new Set() // abort controllers of requests in flight
   let closed = false
-  const counters = { requests: 0, served: 0, refused: 0, failed: 0, requestBytes: 0, responseBytes: 0, fallbacks: 0, retries: 0, reasons: {} }
+  let unsubscribeNames = null
+  const counters ={ requests: 0, served: 0, refused: 0, failed: 0, requestBytes: 0, responseBytes: 0, fallbacks: 0, retries: 0, reasons: {} }
   const count = (reason) => { counters.reasons[reason] = (counters.reasons[reason] ?? 0) + 1 }
 
   // ------------------------------------------------------------ HTTP responses the ingress makes itself
@@ -144,6 +147,125 @@ export function createMeshIngress({
       p.catch(() => {})
     }
     return p
+  }
+
+  // ------------------------------------------------------------ links the ingress is told to expect
+  // Nothing here runs for a pod nobody called `expect` for (and for a name in its hold): a request for any other pod fails or
+  // succeeds exactly as before.
+  const expected = new Map() // peer -> { windowUntil, persist, retryMs, delay, timer, running, waiters }
+  const readyWaiters = new Set()
+  const linkIsUp = (peer) => { const s = providers.get(peer); return !!s && !s.channel.closed }
+
+  function signalUp(peer) {
+    const e = expected.get(peer)
+    if (e) { e.delay = e.retryMs; for (const wake of [...e.waiters]) wake() }
+    for (const check of [...readyWaiters]) check()
+  }
+
+  /** Wait until the link to an expected pod is up: true; false when `ms` pass or `signal` aborts first. */
+  function waitUp(entry, ms, signal) {
+    return new Promise((resolve) => {
+      let timer
+      const finish = (up) => { clearTimeout(timer); entry.waiters.delete(onUp); signal?.removeEventListener('abort', onAbort); resolve(up) }
+      const onUp = () => finish(true)
+      const onAbort = () => finish(false)
+      entry.waiters.add(onUp)
+      signal?.addEventListener('abort', onAbort, { once: true })
+      timer = unref(setTimeout(() => finish(false), ms))
+      if (signal?.aborted) onAbort()
+    })
+  }
+
+  // Dial an expected pod, again and again (doubling, to 15 s) until the link is up; a pod that was only held for a moment
+  // (`persist: false`) is dialled until its window ends.
+  function pump(peer) {
+    const e = expected.get(peer)
+    if (!e || e.running || closed) return
+    e.running = true
+    const attempt = async () => {
+      e.timer = undefined
+      if (closed || expected.get(peer) !== e) { e.running = false; return }
+      try {
+        await providerState(peer)
+        e.running = false
+        if (!e.persist) expected.delete(peer)
+        return
+      } catch { /* not yet: below */ }
+      if (closed || (!e.persist && now() >= e.windowUntil)) { e.running = false; if (!e.persist && expected.get(peer) === e) expected.delete(peer); return }
+      e.timer = unref(setTimeout(attempt, e.delay))
+      e.delay = Math.min(e.delay * 2, 15_000)
+    }
+    attempt()
+  }
+
+  /**
+   * Tell the ingress a pod is about to be wanted: it is dialled now and kept dialled, and a request for it that arrives while
+   * the link is not up yet waits (up to `graceMs`, and never past the request's own deadline) instead of failing.
+   */
+  function expect(peer, { graceMs = limits.linkWaitMs, persist = true, retryMs = 1000 } = {}) {
+    if (!isPodId(peer)) throw new TypeError('expect: a pod id is required')
+    if (!Number.isSafeInteger(graceMs) || graceMs < 0 || !Number.isSafeInteger(retryMs) || retryMs <= 0) throw new TypeError('expect: graceMs and retryMs must be integers of milliseconds')
+    if (closed) return
+    let e = expected.get(peer)
+    if (!e) { e = { windowUntil: 0, persist, retryMs, delay: retryMs, timer: undefined, running: false, waiters: new Set() }; expected.set(peer, e) }
+    e.persist = e.persist || persist
+    e.windowUntil = Math.max(e.windowUntil, now() + graceMs)
+    pump(peer)
+  }
+
+  /** `{ ready, peers: { up, total } }`: ready when every pod told to be expected for good has a live link. Never names a pod. */
+  function readiness() {
+    let up = 0
+    let total = 0
+    for (const [peer, e] of expected) {
+      if (!e.persist) continue
+      total += 1
+      if (linkIsUp(peer)) up += 1
+    }
+    return { ready: up === total, peers: { up, total } }
+  }
+
+  /** Resolves true once `readiness().ready`, false after `timeoutMs`. */
+  function whenReady({ timeoutMs = 30_000 } = {}) {
+    if (readiness().ready) return Promise.resolve(true)
+    return new Promise((resolve) => {
+      let timer
+      const check = () => { if (readiness().ready) finish(true) }
+      const finish = (v) => { clearTimeout(timer); readyWaiters.delete(check); resolve(v) }
+      readyWaiters.add(check)
+      timer = unref(setTimeout(() => finish(false), timeoutMs))
+    })
+  }
+
+  /** Open the link to `peer`; for an expected pod whose link is not up yet, wait for it (bounded) before giving up. */
+  async function openWithGrace(peer, signal) {
+    const open = () => within(providerState(peer), limits.openTimeoutMs + 1000, () => new IngressError(504, 'provider-timeout', 'The provider did not answer in time.'))
+    try { return await open() } catch (first) {
+      const e = expected.get(peer)
+      const left = e ? e.windowUntil - now() : 0
+      if (!e || closed || left <= 0) throw first
+      pump(peer)
+      if (!(await waitUp(e, left, signal))) throw signal?.aborted ? signal.reason : first
+      return open()
+    }
+  }
+
+  /** What a pod says it serves by name; a pod that does not know the question serves none (and is never sent a name). Cached per link. */
+  async function declaredServices(state) {
+    if (!state.services) {
+      state.services = (async () => {
+        let result
+        try { result = await state.channel.request(SERVICES_METHOD, {}, { timeoutMs: limits.openTimeoutMs }) } catch (e) {
+          if (e?.code === -32601 || e?.reason === 'unsupported') return { names: new Set(), default: false }
+          throw e
+        }
+        const list = result?.services
+        if (!result || typeof result !== 'object' || !Array.isArray(list) || list.length > 32 || !list.every((n) => typeof n === 'string' && SERVICE_NAME_RE.test(n))) throw new IngressError(502, 'provider-failed', 'The provider failed to answer.')
+        return { names: new Set(list), default: result.default === true }
+      })()
+      state.services.catch(() => { state.services = null }) // a failure is not remembered
+    }
+    try { return await state.services } catch (e) { throw e instanceof IngressError ? e : new IngressError(502, 'provider-failed', 'The provider failed to answer.') }
   }
 
   async function openProvider(peer) {
@@ -187,8 +309,12 @@ export function createMeshIngress({
         entry.fail?.(e)
       }
       state.streams.close()
+      // A link that was expected and went away is dialled again, and requests wait for it for a moment.
+      const e = expected.get(peer)
+      if (e?.persist && !closed) { e.windowUntil = Math.max(e.windowUntil, now() + limits.linkWaitMs); pump(peer) }
     })
     providers.set(peer, state)
+    signalUp(peer)
     return state
   }
 
@@ -304,9 +430,20 @@ export function createMeshIngress({
       let theirs = null
       for (;;) {
         let mapping
-        try { mapping = await resolve(request, { attempt, tried: [...tried] }) } catch { throw new IngressError(500, 'resolve-error', 'The mapping failed.') }
+        try {
+          mapping = resolve ? await resolve(request, { attempt, tried: [...tried] }) : null
+          // Names pods claimed come after the operator's own mappings (a claimed host is never one of those: the table refuses it).
+          if (!mapping && names) {
+            const hit = names.lookup(url.host)
+            if (hit) {
+              mapping = { peer: hit.peer, ...(hit.service === undefined ? {} : { service: hit.service }) }
+              if (hit.held) expect(hit.peer, { graceMs: limits.linkWaitMs, persist: false, retryMs: 250 }) // mid-handover: wait for the pod
+            }
+          }
+        } catch { throw new IngressError(500, 'resolve-error', 'The mapping failed.') }
         if (!mapping) throw lastFailure ?? new IngressError(404, 'no-mapping', 'Nothing is served at this address.')
         if (!isPodId(mapping.peer)) throw new IngressError(500, 'bad-mapping', 'A mapping named something that is not a pod id.')
+        if (mapping.service !== undefined && (typeof mapping.service !== 'string' || !SERVICE_NAME_RE.test(mapping.service))) throw new IngressError(500, 'bad-mapping', 'A mapping named a service that is not a short plain name.')
         const peer = mapping.peer
         if (tried.includes(peer)) throw lastFailure // a pod already tried is not asked twice
         record.peer = peer
@@ -336,7 +473,7 @@ export function createMeshIngress({
           bodyBytes = await readBody(request, shape.contentLength, limits.maxRequestBodyBytes)
           record.requestBytes = bodyBytes.byteLength
         }
-        const forward = { method, target: outTarget, host, headers: outHeaders, body: bodyBytes, client: forwardClientAddress ? client.slice(0, 64) : undefined, peer }
+        const forward = { method, target: outTarget, host, headers: outHeaders, body: bodyBytes, client: forwardClientAddress ? client.slice(0, 64) : undefined, peer, service: mapping.service }
         try {
           // A streamed response keeps the deadline and the slots until its body ends; a buffered one is finished here.
           const response = await forwardToProvider(forward, policy, ac, record, (status, reason) => { clearTimeout(deadline); audit(status, reason); done() })
@@ -373,13 +510,19 @@ export function createMeshIngress({
     // site service) is asked through mesh-rpc for a while, if the operator opted in with `rpc`.
     if (rpc && (legacy.get(peer) ?? 0) > now()) return fallbackViaRpc(forward, policy, ac, record)
     try {
-      state = await within(providerState(peer), limits.openTimeoutMs + 1000, () => new IngressError(504, 'provider-timeout', 'The provider did not answer in time.'))
+      state = await openWithGrace(peer, ac.signal)
     } catch (e) {
       const err = e instanceof IngressError ? e : openFailure(e)
       if (err.fallbackable && rpc) { legacy.set(peer, now() + LEGACY_MEMORY_MS); return fallbackViaRpc(forward, policy, ac, record) }
       throw err
     }
     if (ac.signal.aborted) throw ac.signal.reason
+    // A route that names a service goes only to a pod that declared it: a pod that declares nothing (an older release, or one
+    // that serves a single handler) is never sent a name it would ignore.
+    if (forward.service !== undefined) {
+      const declared = await declaredServices(state)
+      if (!declared.names.has(forward.service)) throw new IngressError(502, 'provider-no-service', 'The provider does not serve that service.')
+    }
     const rid = state.nextRid++
     const nonce = randomHex(16)
     const hasBody = forward.body.byteLength > 0
@@ -387,7 +530,7 @@ export function createMeshIngress({
     let sig
     if (signRequest) {
       try {
-        const bytes = signedRequestBytes({ rid, nonce, host: forward.host, method: forward.method, target: forward.target, headers: forward.headers, client: forward.client, digest: await sha256Hex(forward.body) })
+        const bytes = signedRequestBytes({ rid, nonce, host: forward.host, method: forward.method, target: forward.target, headers: forward.headers, client: forward.client, digest: await sha256Hex(forward.body), service: forward.service })
         sig = await signRequest(bytes, { peer }, await resolvePeer(linkSource, peer))
       } catch { sig = undefined }
       if (typeof sig !== 'string' || !sig || sig.length > 2048) throw new IngressError(500, 'sign-error', 'The ingress could not sign the request.')
@@ -404,6 +547,7 @@ export function createMeshIngress({
       const fetchP = state.channel.request(FETCH_METHOD, {
         rid, nonce, method: forward.method, target: forward.target, host: forward.host,
         headers: forward.headers, body: hasBody, ...(forward.client ? { client: forward.client } : {}), ...(sig ? { sig } : {}),
+        ...(forward.service === undefined ? {} : { service: forward.service }),
       }, { signal: ac.signal, timeoutMs: limits.timeoutMs })
       // The body travels as a stream. A provider may answer before it has read all of it: the head decides.
       if (hasBody) state.streams.sendBody(forward.body, { rid, kind: KIND_REQUEST }, { signal: ac.signal, timeoutMs: limits.openTimeoutMs }).catch(() => {})
@@ -418,6 +562,7 @@ export function createMeshIngress({
       if (e instanceof IngressError) throw e
       if (e?.reason === 'timeout') throw new IngressError(504, 'provider-timeout', 'The provider did not answer in time.')
       if (e?.reason === 'not-authorized') throw new IngressError(502, 'provider-not-authorized', 'The provider no longer accepts this ingress.')
+      if (e?.reason === 'unknown-service') throw new IngressError(502, 'provider-no-service', 'The provider does not serve that service.')
       if (e?.reason === 'request-unverified') throw new IngressError(502, 'provider-refused-request', 'The provider did not accept the request\'s signature.')
       if (e?.reason === 'too-large' || e?.reason === 'stream-too-large') throw new IngressError(502, 'provider-refused-body', 'The provider would not take the request body.')
       throw new IngressError(502, e?.code === -32603 ? 'provider-error' : 'provider-failed', 'The provider failed to answer.')
@@ -524,6 +669,8 @@ export function createMeshIngress({
 
   /** The buffered fallback: one mesh-rpc request to a provider that does not serve `http` (opt-in, see the design doc). */
   async function fallbackViaRpc(forward, policy, ac, record) {
+    // The older buffered service has no named services: a route that names one is refused rather than sent to its one site.
+    if (forward.service !== undefined) throw new IngressError(502, 'provider-no-service', 'The provider does not serve that service.')
     counters.fallbacks += 1
     let result
     try {
@@ -548,14 +695,25 @@ export function createMeshIngress({
     return { finished: true, status, response: new Response(forward.method === 'HEAD' || NO_BODY_STATUS.has(status) ? null : bytes, { status, headers }) }
   }
 
+  // A name whose holder's link went down is held for the holder: the pod is dialled and requests for the name wait for it.
+  unsubscribeNames = names?.subscribe((event) => {
+    if (event.type === 'held') { try { expect(event.pod, { graceMs: Math.min(event.holdMs, limits.linkWaitMs), persist: false, retryMs: 250 }) } catch { /* not a pod id: nothing to dial */ } }
+  }) ?? null
+
   return {
     handle,
+    expect,
+    readiness,
+    whenReady,
     stats() {
       return { ...counters, reasons: { ...counters.reasons }, inflight: inflight.count('*'), providers: providers.size }
     },
     async close() {
       if (closed) return
       closed = true
+      unsubscribeNames?.()
+      for (const e of expected.values()) clearTimeout(e.timer)
+      expected.clear()
       for (const ac of [...active]) ac.abort(new IngressError(503, 'closing', 'The ingress is shutting down.'))
       for (const state of [...providers.values()]) { try { state.streams.close(); state.channel.close('ingress closed') } catch { /* gone */ } }
       providers.clear()

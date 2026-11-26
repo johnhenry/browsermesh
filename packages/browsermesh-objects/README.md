@@ -9,7 +9,7 @@ them by path (`await remote.app.counter.value`), under two authorisations: wsh's
 offers, by path) and the host's `PeerRegistry` grants for the channel's verified peer (what this peer may do,
 per root and per action).
 
-Peer dependencies: `@johnhenry/wsh` `>=0.49.0` (tested at 0.49.0 to 0.54.1) and
+Peer dependencies: `@johnhenry/wsh` `>=0.49.0` (tested at 0.49.0 to 0.56.1) and
 `@johnhenry/browsermesh-apps` `>=0.21.0` (the protocol channel and `createRootAuthorizer`).
 Nothing is served unless `exposeObjectsOnMesh` is called, and nothing is allowed without a grant.
 
