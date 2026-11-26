@@ -38,6 +38,11 @@ collide with the operator's own grants** (sections 5.5 and 7).
   seed**, so a single backup recovers every realm identity (see 5.10 for what that needs). The seed is **extractable and
   exported only under a passphrase**; if derivation fails in any of Chromium, Firefox or WebKit, v1 **falls back to
   independent random keys per realm**, with one backup per realm and the limitation documented.
+- **Derivation is HKDF-SHA-256** over a random 32-byte seed, with a context string that contains the realm id, and the
+  backup is a **passphrase-encrypted file** built on the identity manager's existing passphrase export. No recovery phrase
+  in v1, and never a key derived straight from a passphrase.
+- Seed derivation is relied on only if it **passes in all three of Chromium, Firefox and WebKit** (the repo's required
+  browser checks); if it fails in any, v1 takes the fallback above.
 - A peer adopts a **higher-serial descriptor offered by another peer only after verifying it** end to end against the
   pinned realm id and chain (5.2); it never adopts an unverified one.
 - The **authority-less open realm** exists as its own form, with its rendezvous information kept outside the hash (5.9).
@@ -301,18 +306,19 @@ TUI, server-side membership enforcement, and a keyless credential.
 
 ## 10. Open questions
 
-Settled by the owner on 2026-11-26 (now in section 2): seed extractable with a passphrase export; independent per-realm keys
-as the fallback if browser derivation fails; adoption of a descriptor only after verification.
+Settled by the owner on 2026-11-26 (now in section 2): seed extractable with a passphrase export; HKDF-SHA-256 derivation
+and an encrypted-file backup; derivation relied on only if it passes in Chromium, Firefox and WebKit; independent per-realm
+keys as the fallback; adoption of a descriptor only after verification.
 
 Settled by reading the code (5.5 and 7): the wsh login cannot carry realm data to `authorize` today, and the signalling
 server has no membership concept.
 
 Still open:
 
-1. **Browser support for derivation.** Ed25519 import from derived bytes works in Node 26 and is untested in Chromium,
-   Firefox and WebKit. A real-browser check is the first stage-2 task, and its result decides whether v1 derives from a seed
-   or takes the fallback.
-2. **Derivation scheme details.** The KDF context string per realm id, and how the seed is stored in the wallet.
+1. **The browser check itself.** Ed25519 import from derived bytes works in Node 26 and is untested in the three browsers.
+   It is the first stage-2 task, and its result decides whether v1 derives from a seed or takes the fallback.
+2. **The exact context string and file format.** To be fixed with the wallet code and covered by test vectors; the choices
+   above (HKDF-SHA-256, realm id in the context, encrypted file) are not in question.
 3. **A wsh change for a pre-authentication realm hint** (5.5): worth doing only if stranger slots prove to be a real
    problem. Deferred.
 
