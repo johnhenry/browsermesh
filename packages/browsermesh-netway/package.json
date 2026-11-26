@@ -1,6 +1,6 @@
 {
   "name": "@johnhenry/browsermesh-netway",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Virtual networking layer with BSD-socket-like abstractions for browser environments",
   "type": "module",
   "main": "./src/index.mjs",
