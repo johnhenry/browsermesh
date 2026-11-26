@@ -16,6 +16,7 @@
 
 import { chmod, mkdir, readFile, readdir, rename, writeFile, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
+import { randomBytes } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { RealmCliError, UsageError } from './errors.mjs'
 
@@ -74,9 +75,9 @@ export function createStore(root) {
       dir = dirname(dir)
     }
     for (const d of toFix) await privateDir(d)
-    const tmp = `${target}.tmp-${process.pid}`
-    await writeFile(tmp, text, { mode: 0o600 })
-    await chmod(tmp, 0o600)
+    // Created exclusively (`wx`, so never through a pre-planted file or symlink) with 0600 at creation, then renamed.
+    const tmp = `${target}.tmp-${process.pid}-${randomBytes(6).toString('hex')}`
+    await writeFile(tmp, text, { mode: 0o600, flag: 'wx' })
     await rename(tmp, target)
   }
 

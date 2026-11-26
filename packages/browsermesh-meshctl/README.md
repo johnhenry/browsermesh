@@ -355,7 +355,8 @@ The passphrase is **never taken from argv**. Commands that sign accept exactly:
 
 - `--passphrase-env <VAR>`: the name of an environment variable holding it, or
 - `--passphrase-file <path>`: a file holding it (one trailing newline is ignored). The file must belong to you and be
-  mode `0600`, or the command refuses (`EREALM_PASSPHRASE_FILE_MODE`, exit 3).
+  mode `0600`, or the command refuses (`EREALM_PASSPHRASE_FILE_MODE`, exit 3). It is opened once and checked and read through
+  that one descriptor (no check-then-read race), and a **symlink is refused** (`O_NOFOLLOW`; give the real path).
 
 An unset or empty passphrase, both options together, or a `--passphrase` flag is a usage error (exit 2); a wrong one is
 `EREALM_BAD_PASSPHRASE` (exit 3). `--authority-less` realms have no keys and need none. One passphrase seals the root

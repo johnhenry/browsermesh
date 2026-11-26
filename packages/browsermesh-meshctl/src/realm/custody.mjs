@@ -12,7 +12,8 @@
  * effort: the passphrase string and the key object live until they are collected.
  */
 
-import { readFile, stat } from 'node:fs/promises'
+import { constants } from 'node:fs'
+import { open as openFile } from 'node:fs/promises'
 import { seal, open, VaultError } from '@johnhenry/keyvault'
 import { PodIdentity, encodeBase64url, decodeBase64url } from '@johnhenry/browsermesh-primitives'
 import { RealmCliError, UsageError } from './errors.mjs'
@@ -42,19 +43,30 @@ export async function readPassphrase(flags, env) {
   }
 
   if (typeof file !== 'string') throw new UsageError('--passphrase-file needs a path')
-  let st
+  // ONE open, and every check and the read go through that descriptor, so the file cannot be swapped between the
+  // check and the read. O_NOFOLLOW makes a symlink a refusal (where the platform has it; Windows has no such flag).
+  let fh
   try {
-    st = await stat(file)
+    fh = await openFile(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
   } catch (err) {
     if (err?.code === 'ENOENT') throw new RealmCliError('ENOENT', `passphrase file '${file}' does not exist`)
+    if (err?.code === 'ELOOP' || err?.code === 'EMLINK') {
+      throw new RealmCliError('EREALM_PASSPHRASE_FILE_MODE', `refusing passphrase file '${file}': it is a symlink (give the real path)`)
+    }
     throw err
   }
-  if (!st.isFile()) throw new UsageError(`passphrase file '${file}' is not a regular file`)
-  const foreign = typeof process.getuid === 'function' && st.uid !== process.getuid()
-  if ((st.mode & 0o177) !== 0 || foreign) {
-    throw new RealmCliError('EREALM_PASSPHRASE_FILE_MODE', `refusing passphrase file '${file}': it must belong to you and be mode 0600 (chmod 600), not ${(st.mode & 0o777).toString(8).padStart(3, '0')}`)
+  let passphrase
+  try {
+    const st = await fh.stat()
+    if (!st.isFile()) throw new UsageError(`passphrase file '${file}' is not a regular file`)
+    const foreign = typeof process.getuid === 'function' && st.uid !== process.getuid()
+    if ((st.mode & 0o177) !== 0 || foreign) {
+      throw new RealmCliError('EREALM_PASSPHRASE_FILE_MODE', `refusing passphrase file '${file}': it must belong to you and be mode 0600 (chmod 600), not ${(st.mode & 0o777).toString(8).padStart(3, '0')}`)
+    }
+    passphrase = (await fh.readFile('utf8')).replace(/\r?\n$/, '')
+  } finally {
+    await fh.close()
   }
-  const passphrase = (await readFile(file, 'utf8')).replace(/\r?\n$/, '')
   if (passphrase.length === 0) throw new UsageError(`passphrase file '${file}' is empty`)
   return passphrase
 }
