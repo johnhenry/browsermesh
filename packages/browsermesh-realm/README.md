@@ -3,10 +3,11 @@
 The pure-logic core of **realms** (design: [docs/design/realms.md](../../docs/design/realms.md)): signed realm descriptors,
 root rotation, roles, issuer-signed credentials, and the issuer ledger.
 
-**Status: private, not yet published, used by nothing in production.** The pure logic has no I/O, no network and no clock
+**Status: private, not yet published.** The pure logic has no I/O, no network and no clock
 of its own: every function takes plain objects and an injectable `now`. The realm exchange (below) talks to a duck-typed
-channel and a duck-typed registry, so it needs no transport either. `createMeshNode({ realm })`, renewal over the protocol
-seam and `meshctl` are later stages. It depends on `@johnhenry/browsermesh-primitives` only (peer dependency, `>=0.8.0`,
+channel and a duck-typed registry, so it needs no transport either. `createMeshNode({ realm })` in `browsermesh-apps` now wires
+it in (the admission seam, the dialler, and renewal over the `realm` protocol of the protocol seam; see that README's "Realms"
+section); `meshctl` is a later stage. It depends on `@johnhenry/browsermesh-primitives` only (peer dependency, `>=0.8.0`,
 the first release that exports `canonicalJson`), never on
 `browsermesh-apps` or `browsermesh-core`; the integration tests that use the real `PeerRegistry`, the real admission seam
 and a real wsh link live in `browsermesh-apps` (`test/realm-exchange-wsh.test.mjs`), which has this package as a devDependency.

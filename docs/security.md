@@ -60,7 +60,7 @@ table; they come from the READMEs, source headers and test directories.
 | `browsermesh-netway` | implemented | loopback, virtual network, policy, queue, sockets (byte-level backpressure), listener, router, service and fs backends, chaos wrapper (unit). `gateway-backend`: implemented, tested against a mock wsh client and against a real wsh server host and a real in-memory host (`test/gateway-real-wsh.test.mjs`); HOST_UNREACHABLE, TIMEOUT and CLOSED are mock-tested only. `backend.mjs`: abstract base. |
 | `browsermesh-kernel` | implemented | in-process microkernel with capability checks and resource tables; unit tests per module. No cryptography; isolation is by capability and ownership checks, not process boundaries. |
 | `browsermesh-priority-mux` | implemented | sender-side priority scheduler and framer (fake adapter tests). No authentication or encryption. The reassembler has no limit on pending messages. |
-| `browsermesh-realm` | implemented (pure logic only; private, not yet used by anything) | realm descriptors, root rotation, roles, credentials and the issuer ledger as pure functions over strict canonical JSON and Ed25519, with language-neutral test vectors (unit; hostile-input and threat-model suites). The realm exchange (frames, descriptor store, verifier and prover) is duck-typed over a channel and a registry; it has no I/O of its own and nothing in a node enables it yet (no `createMeshNode({ realm })`), so nothing enforces a realm by default. Integration tests over a real wsh link and the real `PeerRegistry` live in `browsermesh-apps`; design in [docs/design/realms.md](design/realms.md). |
+| `browsermesh-realm` | implemented (private, unpublished; wired into a node as an opt-in) | realm descriptors, root rotation, roles, credentials and the issuer ledger as pure functions over strict canonical JSON and Ed25519, with language-neutral test vectors (unit; hostile-input and threat-model suites), and the realm exchange (frames, descriptor store, verifier and prover), duck-typed over a channel and a registry with no I/O of its own. `browsermesh-apps` wires it in with `createMeshNode({ realm })` (admission seam, dialler, renewal over the protocol seam); nothing enforces a realm unless that option is given. Integration tests over a real wsh link and real WebRTC, with the real `PeerRegistry`, live in `browsermesh-apps`; design in [docs/design/realms.md](design/realms.md). |
 | `browsermesh-mcp` | implemented | a page's WebMCP tools (or an explicit list) as the protocol `mcp` on the protocol seam, and a client for it; per-tool grants, approval kept with the serving page, bounds. In-memory bus (unit), real peers over WebRTC (Node) and two real browsers; threat model [below](#mcp-across-the-mesh). Depends on wsh's WebMCP bridge (peer dependency) through one adapter file. |
 | `browsermesh-ingress` | implemented | real HTTP in, a mesh pod answers: a bounded request forwarder (`createMeshIngress`, a Node listener on its own entry, a CLI) and the provider side (`serveHttpOnMesh`) over the protocol `http` on the protocol seam. Pinned to the pod a mapping names, default deny on the provider, safe defaults on every dimension (unit over an in-memory bus, hostile provider and hostile client suites on real sockets, real WebRTC peers including the CLI as a child process, and a page as the provider in three real browsers). The hooks are told what the link proved (`peer.verified`: `bound`, `wsh`, `key`, or `none`), and `requireLinkKey` binds a request's signer to the link's key. Plain HTTP only, no WebSocket upgrade, direct links only; see [HTTP ingress](#http-ingress). |
 | `browsermesh-egress` | implemented (TCP, UDP, the fetch form and name lookup; a CLI) | a pod lends its network access to peers that hold a grant: TCP connections, UDP flows, fetches (the provider is the HTTP client and sees them) and A lookups to destinations the operator allows (`createMeshEgress`; `connectEgress` and a netway backend for the consumer, browser-safe; `nodeDialer` on its own entry, on wsh's address guard; the `browsermesh-egress` command) over the protocol `egress` on the protocol seam. Off unless started, default deny, a grant per destination, every address checked after resolution and the checked address dialled, per-consumer and global budgets, audit and meter without contents, revocation ending live connections. Unit over an in-memory bus, a hostile-consumer and a hostile-provider suite, the real address guard with local sockets, two real WebRTC peers moving several MiB each way, and a page as the consumer in Chromium, Firefox and WebKit against a Node provider; see [Egress](#egress). |
@@ -369,6 +369,40 @@ pipe relay with real sealed sessions, through `createMeshNode` (a stranger held,
 fail-closed negotiation (an authorizer called with one argument refuses, and a stub that grants on any truthy verdict
 refuses). Never: a real relay, a real WebRTC connection through the gate, a published older transport release (a stub with
 its grant rule is tested, not the release).
+
+### Realms
+
+Opt in (`createMeshNode({ realm })`, which needs the private workspace package `@johnhenry/browsermesh-realm`); off by default,
+and without it nothing here applies. A node hosts and joins ONE realm. A stranger is held on a restricted link (the link
+admission seam above, sized for descriptor frames), presents a credential, and is promoted holding exactly the scopes its role
+carries that the host's `realmPolicy` admits. Design: [`design/realms.md`](design/realms.md).
+
+Authenticated: the descriptor is verified end to end (canonical form, rotation chain from the pinned realm id, root signature)
+before it is held; a credential is verified against the held descriptor (issuer listed, signature, role, epoch, not revoked,
+validity window) and its subject must be the pod id of the key the link proved, so a credential presented by any other key is
+refused (`subject-mismatch`) and advances nothing. Renewal runs the same verification on the `realm` protocol channel, whose
+peer is the key the link proved.
+
+Bounded: a realm grant is scopes the host's policy lists for that role (a scope it does not list, `egress:` and the like
+included, is dropped and reported), expires at the credential's `notAfter`, is never persisted, and is replaced per (realm,
+peer, role); a credential older than one the verifier already admitted (`stale-serial`) or issued under an older epoch is
+refused, and a higher descriptor epoch revokes older grants and closes those links at the next access re-check. Descriptor
+offers are size-checked, rate-limited per link and globally, and frames per exchange are capped. The `realm` protocol is open
+only to a peer that holds a live grant of this realm (no new scope).
+
+Not protected: nothing is persisted by the library (the app persists the descriptor through `persist` and the sealed seed itself);
+realm grants are lost on restart and the peer must present again; a peer that holds a grant skips the exchange on re-link, so a
+host that restarted and a dialler that did not leave the dialler's automatic presentation to time out (harmless, the link is
+kept); an epoch bump ends every grant of the older epoch, so a descriptor update that raises the epoch cannot also renew;
+a realm credential is not revoked by anything but its serial in the descriptor, its expiry or an epoch bump; one realm per
+node; where the realm package is absent the option fails at boot.
+
+Verified: unit tests of the exchange in `browsermesh-realm`; in `browsermesh-apps`, `createMeshNode({ realm })` over a real wsh
+link through the in-process pipe relay and over real WebRTC (`test/real-peer`), with the real `PeerRegistry` and admission seam
+(stranger promoted with exactly its role's scopes, policy drop reported, open-mode guest, no credential in invite mode,
+wrong-subject, `peer-does-not-speak-realms`, renewal accepted and an older serial refused, renewal without a live grant refused,
+epoch bump closing a promoted link, persistence, the auto-renew timer cleared at shutdown). Never: a real relay, a hostile
+descriptor flood through a real hub.
 
 ### wsh services on a pod
 
