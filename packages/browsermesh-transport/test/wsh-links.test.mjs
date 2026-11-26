@@ -436,6 +436,34 @@ describe('wsh link: simultaneous dial', () => {
   });
 });
 
+describe('wsh link: a half-closed link', () => {
+  // A superseded link is half-closed by the side that dropped it ("no more from me"). wsh 0.57 keeps a half-closed gateway connection
+  // open until the other side has finished too, or for five minutes of silence, so the link must finish its own side when it reads the
+  // peer's end: a link that waited would hold the connection, and the pipe, for the bound.
+  it('the peer\'s half-close ends our side of the link at once, not at wsh\'s idle bound or our own drain limit', async () => {
+    const env = await makeEnv();
+    cleanups.push(() => env.close());
+    const ids = await makeIdentities(2);
+    let arrived = 0;
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    const beforeDial = async () => { if (++arrived === 2) release(); await gate; };
+    // An hour to drain: only the peer's end of stream, not the grace timer, can finish the loser.
+    const [A, B] = ids.map((id, i) => {
+      const h = makeHub(env, id, { allow: [ids[1 - i].podId], beforeDial, supersedeGraceMs: 3_600_000 });
+      cleanups.push(() => h.close());
+      return h;
+    });
+    await A.listen();
+    await B.listen();
+    await Promise.all([A.connect(ids[1].podId), B.connect(ids[0].podId)]);
+    await waitFor(() => A.getStats().linksEstablished === 2 && B.getStats().linksEstablished === 2, { label: 'both links were built' });
+    await waitFor(() => A.linkCount(ids[1].podId) === 1 && B.linkCount(ids[0].podId) === 1, { label: 'the loser ended on both sides, with the grace timer at an hour' });
+    A.send(ids[1].podId, 'still works');
+    await waitFor(() => B.of('message').some((m) => m.data === 'still works'));
+  });
+});
+
 describe('wsh link: framing limits', () => {
   it('refuses to send a frame over the local limit and stays usable', async () => {
     const { ids, hubs: [A, B] } = await rig(2, (i) => (i === 0 ? { maxFrameBytes: 4096 } : {}));

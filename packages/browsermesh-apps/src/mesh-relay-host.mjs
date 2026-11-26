@@ -334,7 +334,7 @@ export class MeshRelayHost {
     if (!connId || typeof connId !== 'string') return
 
     if (op === 'connect') {
-      await this.#handleConnect(fromPubKey, connId, data.service, data.window)
+      await this.#handleConnect(fromPubKey, connId, data.service, data.window, data.halfClose === true)
       return
     }
 
@@ -351,7 +351,11 @@ export class MeshRelayHost {
     } else if (op === 'credit') {
       if (conn.tx.enabled && !conn.tx.credit(data.bytes)) {
         this.#closeConnection(key, conn, { notifyPeer: true, reason: 'flow control violation' })
+      } else {
+        conn.lastActive = Date.now()
       }
+    } else if (op === 'end') {
+      await this.#handleEnd(key, conn)
     } else if (op === 'close') {
       await this.#closeConnection(key, conn, { notifyPeer: false, reason: 'closed by peer' })
     }
@@ -362,8 +366,9 @@ export class MeshRelayHost {
    * @param {string} connId
    * @param {*} service
    * @param {*} peerWindow - the window the peer advertised, if any
+   * @param {boolean} peerHalfClose - the peer said it understands the `end` frame (half-close)
    */
-  async #handleConnect(fromPubKey, connId, service, peerWindow) {
+  async #handleConnect(fromPubKey, connId, service, peerWindow, peerHalfClose) {
     if (!service || typeof service !== 'string') {
       await this.#refuse(fromPubKey, connId, 'invalid service')
       return
@@ -430,6 +435,9 @@ export class MeshRelayHost {
     const creditAware = Number.isInteger(peerWindow) && peerWindow > 0
     const conn = {
       socket, fromPubKey, connId, service, closed: false,
+      // Half-close is used only when the peer asked for it in its connect; we say so in `ok`, and an older peer is never sent an `end`.
+      halfClose: peerHalfClose === true,
+      localEnded: false, remoteEnded: false, lastActive: Date.now(), idleTimer: null,
       tx: new CreditSender({
         window: creditAware ? Math.min(peerWindow, this.#flow.maxBufferedBytesPerConnection) : 0,
         lowWater: this.#flow.lowWaterBytes,
@@ -440,14 +448,14 @@ export class MeshRelayHost {
         maxBuffered: this.#flow.maxBufferedBytesPerConnection,
         creditAware,
         grant: (bytes) => {
-          if (!conn.closed) this.#send(fromPubKey, { op: 'credit', connId, bytes }).catch(() => {})
+          if (!conn.closed) { conn.lastActive = Date.now(); this.#send(fromPubKey, { op: 'credit', connId, bytes }).catch(() => {}) }
         },
       }),
     }
     this.#connections.set(key, conn)
     this.#pumpToRemote(key, conn)
 
-    await this.#send(fromPubKey, { op: 'ok', connId, window: this.#flow.highWaterBytes })
+    await this.#send(fromPubKey, { op: 'ok', connId, window: this.#flow.highWaterBytes, ...(conn.halfClose ? { halfClose: true } : {}) })
     this.#onLog('mesh-relay-host:connect:ok', { fromPubKey, service, connId })
   }
 
@@ -458,6 +466,8 @@ export class MeshRelayHost {
    */
   async #handleData(key, conn, base64Data) {
     if (typeof base64Data !== 'string') return
+    if (conn.remoteEnded) return // the peer said it was done sending: nothing more is taken from it
+    conn.lastActive = Date.now()
     const approx = Math.floor((base64Data.length * 3) / 4)
     if (approx > this.#flow.maxBufferedBytesPerConnection) {
       this.#closeConnection(key, conn, { notifyPeer: true, reason: 'buffer limit exceeded' })
@@ -492,6 +502,9 @@ export class MeshRelayHost {
         this.#onLog('mesh-relay-host:data:write-failed', {
           connId: conn.connId, error: err?.message || String(err),
         })
+        // The service closed its socket: it will read nothing more, so the connection is over (a service that only finished
+        // sending still reads, and its writes do not fail).
+        if (conn.socket.closed === true) this.#closeConnection(key, conn, { notifyPeer: true, reason: 'service closed' })
       }
     } finally {
       const left = (this.#peerBuffered.get(conn.fromPubKey) ?? n) - n
@@ -512,10 +525,12 @@ export class MeshRelayHost {
    */
   #pumpToRemote(key, conn) {
     (async () => {
+      let eof = false
       try {
         outer: while (!conn.closed) {
           const chunk = await conn.socket.read()
-          if (chunk === null) break // local service closed the connection (EOF)
+          if (chunk === null) { eof = true; break } // local service closed the connection (EOF)
+          conn.lastActive = Date.now()
           for (let off = 0; off < chunk.length;) {
             const want = Math.min(chunk.length - off, this.#flow.maxFrameBytes)
             const n = await conn.tx.reserve(want)
@@ -531,8 +546,64 @@ export class MeshRelayHost {
       } catch (err) {
         if (!conn.closed) this.#onLog('mesh-relay-host:pump:error', { connId: conn.connId, error: err?.message || String(err) })
       }
+      // The service finished sending. With a peer that understands half-close this is only "no more from me": the peer may
+      // still send, and the connection is over when it has finished too. Otherwise (an older peer) it is a full close, as before.
+      if (eof && conn.halfClose && !conn.closed) {
+        conn.localEnded = true
+        await this.#send(conn.fromPubKey, { op: 'end', connId: conn.connId }).catch(() => {})
+        if (conn.closed) return
+        if (conn.remoteEnded) this.#finish(key, conn)
+        else this.#watchIdle(key, conn)
+        return
+      }
       await this.#closeConnection(key, conn, { notifyPeer: true, reason: 'service closed' })
     })()
+  }
+
+  /** The peer will send no more (an `end` frame, on a connection that negotiated half-close): the service sees end of stream and may go on sending. */
+  async #handleEnd(key, conn) {
+    if (!conn.halfClose || conn.remoteEnded || conn.closed) return
+    conn.remoteEnded = true
+    conn.lastActive = Date.now()
+    if (typeof conn.socket.end !== 'function') {
+      // A service socket that cannot be half-closed: the best that can be said is that it is over.
+      await this.#closeConnection(key, conn, { notifyPeer: true, reason: 'closed by peer' })
+      return
+    }
+    try { await conn.socket.end() } catch { /* the service closed meanwhile */ }
+    if (conn.closed) return
+    if (conn.localEnded) this.#finish(key, conn)
+    else this.#watchIdle(key, conn)
+  }
+
+  /**
+   * Half-closed: close the connection when nothing has moved in either direction for `halfCloseIdleMs`. One timer; traffic only
+   * stamps `lastActive`, and the timer re-arms for what is left of the bound when it fires.
+   */
+  #watchIdle(key, conn) {
+    const ms = this.#flow.halfCloseIdleMs
+    conn.lastActive = Date.now()
+    if (!(ms > 0) || conn.idleTimer || conn.closed) return
+    const check = () => {
+      conn.idleTimer = null
+      if (conn.closed) return
+      const left = conn.lastActive + ms - Date.now()
+      if (left > 0) { conn.idleTimer = setTimeout(check, left); conn.idleTimer.unref?.(); return }
+      this.#closeConnection(key, conn, { notifyPeer: true, reason: 'idle timeout' })
+    }
+    conn.idleTimer = setTimeout(check, ms)
+    conn.idleTimer.unref?.()
+  }
+
+  /** Both sides have finished sending: the connection is over; nothing needs saying to the peer, which finishes the same way. */
+  #finish(key, conn) {
+    if (conn.closed) return
+    conn.closed = true
+    this.#connections.delete(key)
+    clearTimeout(conn.idleTimer)
+    conn.tx.close()
+    Promise.resolve(conn.socket.close?.()).catch(() => {})
+    this.#onLog('mesh-relay-host:connection:closed', { connId: conn.connId, fromPubKey: conn.fromPubKey, reason: 'finished' })
   }
 
   /**
@@ -548,6 +619,7 @@ export class MeshRelayHost {
     if (conn.closed) return
     conn.closed = true
     this.#connections.delete(key)
+    clearTimeout(conn.idleTimer)
     conn.tx.close()
     try { await conn.socket.close(reason) } catch { /* already closed */ }
     if (notifyPeer) {

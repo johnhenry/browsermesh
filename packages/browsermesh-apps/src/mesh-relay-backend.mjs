@@ -207,7 +207,9 @@ function resolveMeshRelayBackendClass() {
       this.#pending.set(connId, { resolve, reject, service: host })
     })
 
-    await this.#send({ op: 'connect', connId, service: host, window: this.#flow.highWaterBytes })
+    // `halfClose: true` says this backend understands the `end` frame; a host that does not ignores it and answers without
+    // it, and then an end of stream is a full close, as it always was.
+    await this.#send({ op: 'connect', connId, service: host, window: this.#flow.highWaterBytes, halfClose: true })
 
     if (!this.#connectTimeoutMs) return pending
 
@@ -249,7 +251,11 @@ function resolveMeshRelayBackendClass() {
       const creditAware = Number.isInteger(data.window) && data.window > 0
       const conn = {
         socket: relaySocket,
+        user: userSocket,
         closed: false,
+        // Half-close only if the host said so in its ok (it understood our connect's halfClose).
+        halfClose: data.halfClose === true,
+        localEnded: false, remoteEnded: false, lastActive: Date.now(), idleTimer: null,
         tx: new CreditSender({
           window: creditAware ? Math.min(data.window, this.#flow.maxBufferedBytesPerConnection) : 0,
           lowWater: this.#flow.lowWaterBytes,
@@ -260,7 +266,7 @@ function resolveMeshRelayBackendClass() {
           maxBuffered: this.#flow.maxBufferedBytesPerConnection,
           creditAware,
           grant: (bytes) => {
-            if (!conn.closed) this.#send({ op: 'credit', connId, bytes }).catch(() => {})
+            if (!conn.closed) { conn.lastActive = Date.now(); this.#send({ op: 'credit', connId, bytes }).catch(() => {}) }
           },
         }),
       }
@@ -287,6 +293,8 @@ function resolveMeshRelayBackendClass() {
 
     if (op === 'data') {
       if (typeof data.data !== 'string') return
+      if (conn.remoteEnded) return // the host said it was done sending: nothing more is taken from it
+      conn.lastActive = Date.now()
       const approx = Math.floor((data.data.length * 3) / 4)
       if (approx > this.#flow.maxBufferedBytesPerConnection
         || (conn.rx.creditAware && approx > this.#flow.maxFrameBytes + 3)) {
@@ -315,7 +323,22 @@ function resolveMeshRelayBackendClass() {
     if (op === 'credit') {
       if (conn.tx.enabled && !conn.tx.credit(data.bytes)) {
         this.#closeConnection(connId, conn, { notifyHost: true, reason: 'flow control violation' })
+      } else {
+        conn.lastActive = Date.now()
       }
+      return
+    }
+
+    if (op === 'end') {
+      // The host will send no more (the service finished sending), on a connection that negotiated half-close: the application
+      // reads the end of stream and may go on writing. Without that negotiation an `end` is not a frame this backend was told to expect.
+      if (!conn.halfClose || conn.remoteEnded) return
+      conn.remoteEnded = true
+      conn.lastActive = Date.now()
+      try { await conn.socket.end() } catch { /* the application closed meanwhile */ }
+      if (conn.closed) return
+      if (conn.localEnded) this.#finish(connId, conn)
+      else this.#watchIdle(connId, conn)
       return
     }
 
@@ -339,9 +362,39 @@ function resolveMeshRelayBackendClass() {
     if (conn.closed) return
     conn.closed = true
     this.#connections.delete(connId)
+    clearTimeout(conn.idleTimer)
     conn.tx.close()
     try { await conn.socket.close(reason) } catch { /* already closed */ }
     if (notifyHost) await this.#send({ op: 'close', connId, reason }).catch(() => {})
+  }
+
+  /**
+   * Half-closed: close the connection when nothing has moved in either direction for `halfCloseIdleMs`. One timer; traffic only
+   * stamps `lastActive`, and the timer re-arms for what is left of the bound when it fires.
+   */
+  #watchIdle(connId, conn) {
+    const ms = this.#flow.halfCloseIdleMs
+    conn.lastActive = Date.now()
+    if (!(ms > 0) || conn.idleTimer || conn.closed) return
+    const check = () => {
+      conn.idleTimer = null
+      if (conn.closed) return
+      const left = conn.lastActive + ms - Date.now()
+      if (left > 0) { conn.idleTimer = setTimeout(check, left); conn.idleTimer.unref?.(); return }
+      this.#closeConnection(connId, conn, { notifyHost: true, reason: 'idle timeout' })
+    }
+    conn.idleTimer = setTimeout(check, ms)
+    conn.idleTimer.unref?.()
+  }
+
+  /** Both sides have finished sending: the connection is over; nothing needs saying to the host, which finishes the same way. */
+  #finish(connId, conn) {
+    if (conn.closed) return
+    conn.closed = true
+    this.#connections.delete(connId)
+    clearTimeout(conn.idleTimer)
+    conn.tx.close()
+    Promise.resolve(conn.socket.close()).catch(() => {})
   }
 
   /**
@@ -373,10 +426,12 @@ function resolveMeshRelayBackendClass() {
    */
   #pumpToRemote(connId, conn) {
     (async () => {
+      let eof = false
       try {
         outer: while (!conn.closed) {
           const chunk = await conn.socket.read()
-          if (chunk === null) break
+          if (chunk === null) { eof = true; break }
+          conn.lastActive = Date.now()
           for (let off = 0; off < chunk.length;) {
             const want = Math.min(chunk.length - off, this.#flow.maxFrameBytes)
             const n = await conn.tx.reserve(want)
@@ -387,6 +442,18 @@ function resolveMeshRelayBackendClass() {
         }
       } catch (err) {
         if (!conn.closed) this.#onLog('mesh-relay-backend:pump:error', { connId, error: err?.message || String(err) })
+      }
+      // The application finished sending (`end()`): with a host that understands half-close that is only "no more from me", the
+      // host's answer is still delivered, and the connection is over when the host has finished too. An application that closed
+      // or destroyed its socket has discarded the connection and reads nothing more: that, and any host that predates half-close,
+      // is a full close, as before.
+      if (eof && conn.halfClose && !conn.closed && !conn.user.closed) {
+        conn.localEnded = true
+        await this.#send({ op: 'end', connId }).catch(() => {})
+        if (conn.closed) return
+        if (conn.remoteEnded) this.#finish(connId, conn)
+        else this.#watchIdle(connId, conn)
+        return
       }
       await this.#closeConnection(connId, conn, { notifyHost: true, reason: 'closed by client' })
     })()

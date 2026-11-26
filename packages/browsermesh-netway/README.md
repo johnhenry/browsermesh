@@ -104,7 +104,8 @@ flight. `GatewayBackend` follows that, on every connection it opens or accepts, 
 - **Reading from the origin**: the socket has a 256 KiB receive window, and credit goes back to the host as bytes are
   taken into that window, which happens as the consumer reads. A consumer that stops reading stops the origin, and what is
   held is at most the window plus the credit granted (`2 x 256 KiB`).
-- A wait for credit ends when the host closes the connection, the user destroys the socket, the backend is closed, or the
+- A wait for credit ends when the host discards the connection (a plain half-close from the host does not end it: the host
+  still reads and grants credit), the user destroys the socket, the backend is closed, or the
   client's transport closes (`GatewayBackend` wraps the client's `onClose` if it has one, and calls the handler that was
   there): the write rejects with `SocketClosedError` and reads return `null`. A `close()` (not `destroy()`) on the socket
   lets what it already wrote go out as credit arrives. The failure codes are unchanged (8 is an `OperationTimeoutError`;
@@ -114,6 +115,29 @@ flight. `GatewayBackend` follows that, on every connection it opens or accepts, 
   chunks are queued unread. wsh's own hosts then bound what a client makes them hold with byte caps (4 MiB per connection by
   default) and close a connection that exceeds them, so a large transfer against such a host works while the consumer reads.
   This is covered against the mock only, not against a real older host.
+
+#### Half-close (wsh 0.57)
+
+A `GatewayClose` is a half-close: the side that sends it sends no more and goes on receiving. wsh 0.57 keeps a half-closed
+connection open until both sides have sent one, an error occurs, a side discards it (a `GatewayClose` with the reason
+`discarded`), or nothing has moved in either direction for the host's `gateway.halfCloseIdleMs` (default five minutes). Before
+that, a host ended the connection about a second after the client's close, and `GatewayBackend` ended it for good when the
+host's close arrived. Now `GatewayBackend`:
+
+- sends a `GatewayClose` when the application calls `end()` and goes on delivering what the host sends later (an answer that
+  arrives seconds after the request was finished, however large);
+- on the host's `GatewayClose` ends the application's reads and leaves its writes working: what it writes afterwards still
+  reaches the origin, which may be half-open;
+- on `close()` and `destroy()` sends `GatewayClose` with the reason `discarded` (the application reads nothing more), and on
+  the host's `discarded` ends both directions and sends nothing back;
+- ends a half-closed connection that nothing has moved on for `halfCloseIdleMs` (constructor option; default 300000, the same
+  as wsh's; `0` = never): its socket reads end of stream, its writes fail with the reason `idle timeout`, and the host is told.
+  A connection that is not half-closed is never ended by it. Data and credit in either direction count as movement.
+
+An application that never closes its side when it reads the end of the other side's now keeps the connection, and the host's
+slot (`maxConnections`), for up to the bound where the one-second timer used to free it; close or `end()` the socket on end
+of stream. Against a host that predates the rule (wsh 0.56 and earlier) the host still ends a connection a second after the
+client's close, and the backend treats that as the host's half-close: the same code works, without the late answer.
 
 #### UDP through the gateway is send-only
 

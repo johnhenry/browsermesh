@@ -689,7 +689,11 @@ destination while a chunk waits for credit, and reads the consumer's stream only
 writes. A consumer that stops reading stops the destination once its socket window and the stream window are full (256
 KiB each by default: 576 KiB had moved in the real-peer run, and the tests assert a bound of 1 MiB); a destination that
 stops reading stops the consumer's `write()`. Each half closes on its own: a destination that has finished sending still
-accepts what the consumer sends, and the reverse.
+accepts what the consumer sends, and the reverse. A consumer that has finished sending and keeps reading gets an answer
+that arrives later, however much later within `limits.idleMs` of the last byte moving in either direction (tested with a
+destination that answers two seconds after the consumer's end of stream, and with a large answer); a connection both
+sides have finished ends at once and frees its slot, and one that is half-closed and silent ends `idle` after `limits.idleMs`
+(five minutes by default; lower it where a provider serves many consumers and a slot is worth more than a slow answer).
 
 ## Refusals, in one place
 

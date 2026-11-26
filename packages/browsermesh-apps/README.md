@@ -407,7 +407,7 @@ A relayed connection lasts only as long as the permission that allowed it:
 - `host.stats()` and `backend.stats()` report `connections`, `bufferedBytes`
   and `inFlightBytes` (the host also per peer), for monitoring.
 
-| Option (`MeshRelayHost`; the client takes the first four) | Default |
+| Option (`MeshRelayHost`; the client takes the first four and `halfCloseIdleMs`) | Default |
 | --- | --- |
 | `highWaterBytes` (window per connection; pause point) | 262144 |
 | `lowWaterBytes` (resume point) | 65536 |
@@ -416,6 +416,7 @@ A relayed connection lasts only as long as the permission that allowed it:
 | `maxBufferedBytesPerPeer` (hard cap, host) | 4194304 |
 | `maxConnectionsPerPeer` (host) | 16 |
 | `recheckIntervalMs` (host; 0 turns the interval off) | 30000 |
+| `halfCloseIdleMs` (a half-closed connection nothing moves on is closed; 0 = never) | 300000 |
 
 With `createMeshNode({ enableRelayHost })` pass these as `relayHostOptions`.
 The memory held for one connection is bounded by `maxBufferedBytesPerConnection`
@@ -427,6 +428,25 @@ cannot be paused; it is held to the byte caps and gets a `close` frame (which
 it already understands) when a cap or a revocation ends its connection. An
 older host answers `ok` without a window; the client then sends no `credit`
 frames and holds the host to the byte cap.
+
+**Half-close.** A client that has finished sending (`socket.end()`) still gets
+the answer the service sends later, and a service that finishes first still
+receives what the client sends after it (this was a full close in both
+directions before). `connect` and `ok` carry `halfClose: true`; only when both
+sides said so is the end of one side's stream sent as an `end` frame ("no more
+from me") instead of a `close`. The connection is over when both sides have
+finished, on a `close` (an error, a revocation, a cap, or the application
+closing or destroying its socket, which discards the connection), or when it is
+half-closed and nothing has moved in either direction for `halfCloseIdleMs`
+(then `close` with the reason `idle timeout`, and the slot counted against
+`maxConnectionsPerPeer` is free again). An older peer is never sent an `end`: an
+older host answers `ok` without `halfClose`, and the client then closes in full
+at the end of its stream, as it always did; an older client's `connect` has none,
+and the host then closes in full at the end of the service's stream. One
+consequence of the new rule between two current peers: a service that never
+closes its side when it reads the client's end of stream keeps the connection,
+and one of the client's slots, for up to `halfCloseIdleMs` (five minutes), where
+it used to be freed at once.
 
 TCP-only for now (`listen()`/`bindDatagram()` on `MeshRelayBackend` are the
 inherited `Backend` "not implemented" throws). See

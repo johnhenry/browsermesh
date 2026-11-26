@@ -8,15 +8,35 @@ the version built and tested against. wsh's own view of the same boundary is
 [`spec/wsh-and-browsermesh.md`](https://github.com/johnhenry/wsh/blob/main/spec/wsh-and-browsermesh.md) in the wsh
 repository (written against wsh 0.52.0); the two pages describe one boundary and should agree.
 
-**Versions.** The repository installs `@johnhenry/wsh` `^0.56.1` as a dev dependency (the root and `browsermesh-mcp`,
+**Versions.** The repository installs `@johnhenry/wsh` `^0.57.0` as a dev dependency (the root and `browsermesh-mcp`,
 `browsermesh-netway`, `browsermesh-objects`, `browsermesh-primitives`, `browsermesh-transport`, `browsermesh-egress` and
-`browsermesh-meshctl`), so what its tests ran against is wsh **0.56.1**. The peer ranges are `>=0.49.0 <1.0.0` for `browsermesh-objects` and
+`browsermesh-meshctl`), so what its tests ran against is wsh **0.57.0**. The peer ranges are `>=0.49.0 <1.0.0` for `browsermesh-objects` and
 `browsermesh-mcp`, an optional `*` for `browsermesh-transport` (its floors are listed under "Not verified") and an optional
 `>=0.55.0 <1.0.0` for `browsermesh-egress` (its provider half takes wsh's address guard, `@johnhenry/wsh/address-guard`,
 which first shipped in 0.55.0); `browsermesh-netway` and `browsermesh-primitives` have no wsh dependency beyond the dev one.
 No package here needs anything that is new in 0.56 (`client.forwardEndpoint`, the fixes to a local forward's `close()` and to a
 reverse forward, and a forward or the Node gateway's unix listener removing only the socket it made): none of them uses a wsh
-forward, so every peer range above is unchanged and still admits everything it did.
+forward, so every peer range above is unchanged and still admits everything it did. Nor does any package need 0.57 (below): the
+half-close rule is a change in what a wsh host does, and every peer range keeps admitting the hosts it admitted. What 0.57 changed
+for the code here is under "Half-close".
+
+## Half-close (wsh 0.57)
+
+A wsh gateway connection (`OpenTcp`, `OpenEndpoint`, a listener's connections) used to be ended about a second after one side sent
+`GatewayClose`. From 0.57 `GatewayClose` is a half-close ("I will send no more, and I go on receiving"): the connection stays open
+until both sides have sent one, an error, a side that discards it (a `GatewayClose` with the reason `discarded`), or an idle bound
+with nothing moving in either direction (`gateway.halfCloseIdleMs` on a Node host, `gatewayHalfCloseIdleMs` on the client; five
+minutes by default, 0 = never). An application that never closes its side when it reads the end of the other side's now holds a
+connection for up to the bound, where the one-second timer used to free it. What each part of this repository does with that:
+
+| Where | What it does with a half-close |
+| --- | --- |
+| `browsermesh-netway` `GatewayBackend` | The application's `end()` sends a `GatewayClose` and the answer that comes later is delivered. The host's `GatewayClose` ends the application's reads and leaves its writes working (they were failing). `close()` and `destroy()` send `GatewayClose` with `discarded`; a host's `discarded` ends both directions. New option `halfCloseIdleMs` (default 300000, 0 = never) ends a half-closed connection nothing moves on, the same rule as the host's. |
+| `browsermesh-apps` mesh relay (`MeshRelayHost`, `createMeshRelayBackend`) | Its own protocol over the mesh, not wsh's: an end of stream used to be a full close in both directions. A new `end` frame, negotiated (`halfClose: true` in `connect` and `ok`), carries the half-close; an older peer is never sent it and gets the old full close. New option `halfCloseIdleMs` (default 300000, 0 = never). |
+| `browsermesh-egress` | Its own protocol over a mesh channel; already half-closed correctly (the consumer's end is passed to the destination, whose socket is half-open, and its answer comes back). Its `idleMs` (five minutes) is the bound. Tests added, no change. |
+| `browsermesh-ingress` | Plain HTTP in. A client that sent its whole request and finished sending (`nc -N`) loses the answer, because Node ends the connection at the client's end of file. New `listenNode` option `halfClosedClients` (off by default, because an aborted fetch in Firefox and WebKit is also only an end of file) keeps it open for the answer. |
+| `browsermesh-transport` wsh links | A link is a wsh endpoint connection and ends when it reads the peer's end of stream, so a half-close from the peer ends it at once; nothing waits for the bound. |
+| `browsermesh-objects`, `-mcp`, `-meshctl` | No gateway connection: a protocol channel, wsh's objects and MCP rpc. Nothing to change. |
 
 ## What each is
 
@@ -121,11 +141,14 @@ The grants are the same scopes as above. Design: [`design/wsh-services-on-a-pod.
 
 ## Not verified
 
-* Built and run against wsh 0.49.0, 0.50.0, 0.51.0, 0.52.0, 0.54.0, 0.54.1, 0.55.0 and 0.56.1 (tested range of `browsermesh-objects` and
-  `browsermesh-mcp`: 0.49.0 to 0.56.1, the peer range starts at 0.49.0; the earlier ones were run when they were the newest,
+* Built and run against wsh 0.49.0, 0.50.0, 0.51.0, 0.52.0, 0.54.0, 0.54.1, 0.55.0, 0.56.1 and 0.57.0 (tested range of `browsermesh-objects` and
+  `browsermesh-mcp`: 0.49.0 to 0.57.0, the peer range starts at 0.49.0; the earlier ones were run when they were the newest,
   the last is what the repository now installs; 0.53.0 and 0.56.0 were never installed on their own, the repository went from
   0.52.0 to 0.54.0 and from 0.55.0 to 0.56.1, so what those changed was run only as part of the next one). The unit suites of every
-  package, the real-peer suites (WebRTC), the examples and the browser specs (Chromium, Firefox and WebKit) were all run on 0.56.1.
+  package, the real-peer suites (WebRTC), the examples and the browser specs were all run on 0.57.0 (see the pull request for which
+  browsers).
+* The half-close rule against a host that predates it (wsh 0.56 and earlier) is covered at the message level only (the mock host
+  of `gateway-backend.test.mjs` and `gateway-half-close.test.mjs`), not against a real older host: the repository installs one wsh.
 * wsh 0.53.0 and 0.54.0 put two deadlines on a wsh host: a connection that has not completed its login `loginTimeoutMs`
   (60 s) after the host accepted it is closed (refusal reason `login-timeout`), and with `sealSession: 'require'` a login that
   does not seal within `sealTimeoutMs` (30 s) is closed (`seal-timeout`). Here: `WshServices` and `WshPeerLinks` accept a host
