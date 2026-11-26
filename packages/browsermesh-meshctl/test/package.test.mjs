@@ -84,7 +84,10 @@ describe('the README', () => {
     assert.doesNotMatch(readme, /private, not yet published/i)
   })
 
-  it('says the real-mesh path has not been run against a deployed host', () => {
-    assert.match(readme, /not (yet )?(been )?(run|exercised)[^\n]*deployed/i)
+  it('says what the one real run covered, and what has still not been run', () => {
+    // Line wraps and blockquote markers are not part of the claim.
+    const flat = readme.replace(/\s*\n>?\s*/g, ' ')
+    assert.match(flat, /been run once against a deployed pod host over `--wsh-relay`/i)
+    assert.match(flat, /not been run against a host backed by a real VMM or isolate runtime, nor over `--signaling`/i)
   })
 })
