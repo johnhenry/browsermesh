@@ -207,6 +207,39 @@ A mapping can opt out of the response policy explicitly, per mapping, in `resolv
 The README carries the one table of every status and reason the ingress produces (pinned to the code by a test) and the
 one table of the headers that cross by default.
 
+## Additions after the first release
+
+Each is optional, off unless used, and invisible to a peer that does not use it. The package README has the API and the
+tables; this is why they are shaped as they are.
+
+**Named services (several routes per pod).** One pod behind one hostname could only be one handler. A route now names a
+service (`{ peer, service }`; CLI `--map HOST[/PREFIX]=PODID#SERVICE`) and the pod declares which it serves
+(`serveHttpOnMesh(..., { services })`). The declaration is a channel request, `services`, that only a pod with services
+answers; the ingress asks it once per link and only for a route that names a service, and refuses a name that was not
+declared (502 `provider-no-service`) instead of sending it. That is the whole compatibility story: a pod that does not know
+the word `service` would serve its one handler for every name, so the ingress never sends the word to a pod that did not
+first say it knows it. The head's new `service` field is covered by the request signature only when present.
+
+**Names a pod may claim.** Mapping hostnames to pod ids by hand does not scale to pods that come and go. With a name table the
+operator lets a pod claim `label.<zone>` for as long as its link is up. A second protocol, `ingress-names` v1, carries it (a
+claim is a request on a channel the pod opened, so its lifetime is the channel's and the claimant is the channel's verified
+peer). The operator's control is the registry: `protocol:ingress-names:open` and `ingress:name:<label>:claim`, in the notation
+of [`docs/capability-notation.md`](../capability-notation.md). A name's holder keeps it for a short hold after its link drops,
+for itself only, so a flapping pod gets its name back and a stranger cannot slip in between; the table has bounds per pod, per
+zone and per time, a deny-list of confusing labels (and no `xn--`-style labels), audit lines, and no timers (an injected clock,
+holds expire when the table is read). It is a table the operator builds and serves: the library does not start it.
+
+**The first request.** An ingress was told nothing about the pods it would be asked for, so the first request after it started
+was the first dial, and a pod that was a moment late was a 502. `expect(podId)` (and the CLI, for every mapped pod) dials at start
+and keeps dialling, and a request for such a pod waits for the link for a bounded time that never outlasts its own deadline.
+Readiness is a count, never a pod id, and the Node listener answers it only on a path the operator names.
+
+**What it does not do.** There is still no end-to-end confidentiality from the ingress operator: TLS ends in front of the
+listener and the operator reads and can change both directions (the README says so plainly). TLS passthrough, where the ingress
+routes by SNI and relays bytes a pod decrypts itself, would remove the operator from the content. It needs a byte-stream
+protocol to a pod, which `http` v1 is not, and is not built: it would be a new protocol with the same pin, caps and grants, not
+a change to this one.
+
 ## Not built in v1
 
 - WebSocket (`Upgrade`) is refused with 426. A later bridge would map each upgrade onto `mesh-websocket` frames

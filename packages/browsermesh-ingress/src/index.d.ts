@@ -81,6 +81,12 @@ export interface ProviderOptions {
   node?: MeshNodeLike
   /** A custom source for `peer`, in place of `node`. */
   linkIdentity?: LinkIdentity
+  /**
+   * Named services this pod serves besides (or instead of) the one handler. A route that names a service reaches that handler,
+   * which finds the name in `context.service`. A pod that declares nothing is never sent a service name. With `services`, the
+   * handler argument may be `null` (no default: a route with no service is refused).
+   */
+  services?: Record<string, Handler | { fetch: Handler }>
   protocol?: string
   onLog?: (event: string, data: object) => void
 }
@@ -96,12 +102,12 @@ export const PROVIDER_LIMIT_DEFAULTS: Readonly<{
   maxTargetLength: number
 }>
 
-export type Handler = (request: Request, context: { peer: string; signal: AbortSignal; client: string | undefined }) => Response | Promise<Response>
+export type Handler = (request: Request, context: { peer: string; signal: AbortSignal; client: string | undefined; service?: string }) => Response | Promise<Response>
 
-/** Serve `handler` over protocol `http` v1 to the ingress pods `allowFrom` names. */
+/** Serve `handler` over protocol `http` v1 to the ingress pods `allowFrom` names. `handler` may be `null` when `options.services` is given. */
 export function serveHttpOnMesh(
   service: object,
-  handler: Handler | { fetch: Handler },
+  handler: Handler | { fetch: Handler } | null,
   options: ProviderOptions,
 ): { stop(): void; stats(): Record<string, number | Record<string, number>> & { refusals: Record<string, number> } }
 
@@ -113,6 +119,8 @@ export function fromSiteHandler(onRequest: (req: { fromPubKey?: string; method: 
 
 export interface IngressMapping {
   peer: string
+  /** The named service on that pod the route is for (the pod must have declared it with `serveHttpOnMesh`'s `services`). */
+  service?: string
   path?: string
   headers?: Record<string, string>
   response?: { contentSecurityPolicy?: string | false; cacheControl?: string | false; allowSetCookie?: boolean; addHeaders?: Record<string, string> }
@@ -121,7 +129,10 @@ export interface IngressMapping {
 export interface IngressOptions {
   service?: object
   node?: object
-  resolve: (request: Request, attempt: { attempt: number; tried: string[] }) => IngressMapping | null | Promise<IngressMapping | null>
+  /** Required unless `names` is given. The operator's mappings are asked first, names pods claimed after. */
+  resolve?: (request: Request, attempt: { attempt: number; tried: string[] }) => IngressMapping | null | Promise<IngressMapping | null>
+  /** A name table (`createNameTable`): hosts under its zone that pods claimed are served, and a name in its hold waits for its pod. */
+  names?: NameTable
   retry?: { attempts: number; on?: string[]; nonIdempotent?: boolean }
   /** Sign each request for the provider's `verifyRequest`. `link` (third argument) says what the link to the provider proved. */
   signRequest?: (bytes: Uint8Array, info: { peer: string }, link: PeerIdentity) => string | Promise<string>
@@ -144,9 +155,73 @@ export interface IngressOptions {
 
 export interface MeshIngress {
   handle(request: Request, info?: { clientAddress?: string }): Promise<Response>
+  /**
+   * Tell the ingress a pod is about to be wanted: it is dialled now and, with `persist` (the default), kept dialled; a request for it
+   * that arrives while the link is not up waits up to `graceMs` (default `limits.linkWaitMs`, 5 s) and never past its own deadline.
+   */
+  expect(podId: string, options?: { graceMs?: number; persist?: boolean; retryMs?: number }): void
+  /** `ready` is true when every pod expected for good has a live link. It never names a pod. */
+  readiness(): { ready: boolean; peers: { up: number; total: number } }
+  whenReady(options?: { timeoutMs?: number }): Promise<boolean>
   stats(): Record<string, unknown>
   close(): Promise<void>
 }
+
+export const NAMES_PROTOCOL: 'ingress-names'
+export const NAMES_VERSIONS: readonly number[]
+export const NAME_DENY_DEFAULTS: readonly string[]
+export class NameRefusal extends Error {
+  constructor(reason: string, message?: string, extra?: { retryAfterMs?: number })
+  readonly reason: string
+  readonly retryAfterMs?: number
+}
+export function checkLabel(label: unknown): string
+export function checkService(service: unknown): string | undefined
+
+export interface NameTableOptions {
+  /** The hostname names live under: a claim for `app` is the host `app.<zone>`. */
+  zone: string
+  /** The operator's grant per pod and name; only `true` allows. Without it nothing is claimable. */
+  allow?: (podId: string, label: string) => boolean | Promise<boolean>
+  /** Labels (a trailing `*` is a prefix) refused on top of `NAME_DENY_DEFAULTS`, even when `allow` says yes. */
+  deny?: string[]
+  maxNames?: number
+  maxPerPod?: number
+  /** How long a name stays its holder's after the holder's link goes (default 30000; 0 frees it at once). */
+  holdMs?: number
+  claimRate?: { limit: number; windowMs: number }
+  /** Hosts the operator maps by hand: not claimable. */
+  reserved?: (host: string) => boolean
+  clock?: { now: () => number }
+  onAudit?: (record: { type: 'name'; action: 'claim' | 'refuse' | 'release' | 'hold' | 'expire'; pod: string; name: string; reason?: string }) => void
+  onChange?: (event: { type: 'claimed' | 'released' | 'held' | 'expired'; pod: string; name: string; service?: string; holdMs?: number }) => void
+}
+
+export interface NameTable {
+  readonly zone: string
+  claim(podId: string, label: string, options?: { link?: unknown; service?: string }): Promise<{ name: string; host: string; service: string | undefined }>
+  release(podId: string, label: string): boolean
+  linkLost(podId: string, link: unknown): void
+  lookup(host: string): { peer: string; service: string | undefined; name: string; held: boolean } | null
+  namesOf(podId: string): Array<{ name: string; host: string; service: string | undefined; held: boolean }>
+  subscribe(listener: NonNullable<NameTableOptions['onChange']>): () => boolean
+  stats(): { names: number; held: number }
+}
+
+export function createNameTable(options: NameTableOptions): NameTable
+/** `allow` for `createNameTable` from a PeerRegistry: the scope `ingress:name:<label>:claim`. */
+export function registryAllow(registry: { checkAccess(podId: string, resource: string, action: string): { allowed: boolean } }): (podId: string, label: string) => boolean
+/** The ingress end of protocol `ingress-names` v1. */
+export function serveIngressNames(service: object, table: NameTable): { stop(): void; stats(): Record<string, number> }
+/** The pod's end: claim, release and list names over one channel; the channel is the claim's lifetime. */
+export function openNameClient(service: object, ingressPodId: string, options?: { timeoutMs?: number }): Promise<{
+  channel: object
+  claim(name: string, options?: { service?: string }): Promise<{ name: string; host: string; service?: string }>
+  release(name: string): Promise<{ released: boolean }>
+  names(): Promise<Array<{ name: string; host: string; service?: string; held: boolean }>>
+  onClose(callback: () => void): void
+  close(): void
+}>
 
 export function createMeshIngress(options: IngressOptions): MeshIngress
 
@@ -168,4 +243,4 @@ export const DEFAULT_PASS_RESPONSE_HEADERS: readonly string[]
 export const HTTP_PROTOCOL: 'http'
 export const HTTP_VERSIONS: readonly number[]
 export function signedBytes(parts: { rid: number; nonce: string; host: string; method: string; target: string; status: number; headers: Array<[string, string]>; digest: string }): Uint8Array
-export function signedRequestBytes(parts: { rid: number; nonce: string; host: string; method: string; target: string; headers: Array<[string, string]>; client?: string; digest: string }): Uint8Array
+export function signedRequestBytes(parts: { rid: number; nonce: string; host: string; method: string; target: string; headers: Array<[string, string]>; client?: string; digest: string; service?: string }): Uint8Array

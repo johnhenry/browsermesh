@@ -41,6 +41,37 @@ refuses two different pods under one hostname, and warns when mappings share an 
 
 The listener speaks plain HTTP: put TLS in front of it. Nothing public is on by default.
 
+### What the operator can see and change
+
+Between the HTTP client and the pod there is an ingress process, and a TLS terminator in front of it. Whoever runs those is
+**in the path**, by design: that is what makes it an ingress. Stated plainly, the operator:
+
+- **can read** every request (method, path, query, headers, body) and every response the pod sends, because TLS ends in
+  front of the listener and the mesh link to the pod carries what remains. The audit record the CLI prints does not hold
+  paths, queries or bodies, but nothing stops the operator logging more;
+- **can change** what either side sees: add or drop headers (`forwardHeaders`, `exposeHeaders`, `addHeaders`), answer instead of
+  the pod, or send a request to another pod than the one the client meant;
+- **can see** which pods exist, when they are linked (`stats()`, the audit lines, the names they claim) and how much they transfer;
+- **cannot** make a pod do what its own handler and its own grants (`allowFrom`, `protocol:http:open`) do not allow, and cannot
+  claim a pod's identity: the pod is addressed by its id on a link, and with `signRequest`/`verifyRequest` and `requireLinkKey` a
+  pod can insist that a request was made by the ingress key it expects.
+
+This is a property of the design, not something a setting removes: **there is no end-to-end confidentiality between the HTTP
+client and the pod against the ingress operator.** Use an ingress you run yourself, or one whose operator you trust with the
+traffic, exactly as you would a reverse proxy, a CDN or a hosting platform.
+
+What is possible today for confidentiality from the operator: keep the secret at a layer the operator never holds. The
+pod can sign what it serves (`sign`/`verifyResponse`, with the verifying key distributed another way), which stops an
+operator changing a response unnoticed but does not hide it; and an application can encrypt its own payloads end to end
+(for example with a key the browser and the pod share), which hides the payload but not the metadata above.
+
+What would give the client TLS to the pod itself (the operator then sees only the server name and the byte counts) is
+**TLS passthrough**: the ingress reads the SNI from the first bytes of a connection, maps it to a pod, and relays the raw
+bytes both ways while the pod terminates TLS with its own certificate. That needs a raw byte stream to a pod, which
+protocol `http` v1 is not (it is request/response with a head, and the ingress reads the request before it asks the pod). A
+byte-stream protocol with the same pin, caps and grants as `http` is the missing piece; it is **not built**, and is listed under
+"What is not built".
+
 ## Library
 
 ```js
@@ -61,12 +92,13 @@ const { port, close } = await listenNode(ingress, { port: 8080, host: '127.0.0.1
 //   export default { fetch: (request) => ingress.handle(request, { clientAddress }) }
 ```
 
-`createMeshIngress({ node | service, resolve, authorize?, deny?, limits?, methods?, forwardHeaders?, exposeHeaders?,
+`createMeshIngress({ node | service, resolve, names?, authorize?, deny?, limits?, methods?, forwardHeaders?, exposeHeaders?,
 forwardClientAddress?, verifyResponse?, signRequest?, linkIdentity?, retry?, rpc?, onAudit?, clock? })` returns
-`{ handle(request, { clientAddress }), stats(), close() }`.
+`{ handle(request, { clientAddress }), expect(podId), readiness(), whenReady(), stats(), close() }`. `resolve` may be left out
+when `names` is given.
 
-- `resolve(request, { attempt, tried }) -> Promise<{ peer, path?, headers?, response? } | null>`: `peer` is the pod id the
-  answer is pinned to; `path` replaces the request's path (the query is kept); `headers` are added to what the provider
+- `resolve(request, { attempt, tried }) -> Promise<{ peer, service?, path?, headers?, response? } | null>`: `peer` is the pod id the
+  answer is pinned to; `service` names the service on that pod (see "Several services on one pod"); `path` replaces the request's path (the query is kept); `headers` are added to what the provider
   is sent; `response` is `{ contentSecurityPolicy, cacheControl, allowSetCookie, addHeaders }` to opt this mapping out of
   the response policy or to add headers you author (`nosniff` is not optional). `null` is a 404. The second argument is
   `{ attempt: 0, tried: [] }` unless `retry` is set (see Retry).
@@ -223,6 +255,120 @@ the source) are the request's id and a fresh nonce, host, method and target, the
 them and the SHA-256 of the body; the provider buffers a signed response. A response with no signature, or one the hook
 does not accept, is a 502 (`response-unsigned`, `response-signature-invalid`). The package chooses no cryptography.
 
+## Several services on one pod
+
+A pod can serve more than one thing (a site and an API, two local ports) and say which, by name. The pod declares them; the
+route names one; the ingress asks for nothing the pod did not declare.
+
+```js
+serveHttpOnMesh(service, null, {                       // null: no default handler; or pass one as before
+  allowFrom: [ingressPodId],
+  services: { web: (request, ctx) => proxyTo(8080, request), api: { fetch: (request) => proxyTo(8081, request) } },
+})
+createMeshIngress({ service, resolve: (request) => ({ peer: podId, service: 'api', path: '/v1' }) })
+// CLI: --map site.example.test/web=<podId>#web --map site.example.test/api=<podId>#api --map db.example.test=<podId>#db
+```
+
+A handler that serves several services finds the name in `ctx.service`. A route with no service reaches the pod's default
+handler; a pod declared with `handler: null` and no default refuses it. A service name is `[a-z0-9][a-z0-9._-]{0,63}`; a pod
+declares at most 32. One pod behind several hostnames or paths is the same trust domain, so it does not need
+`--allow-shared-origin` (two different pods under one hostname still do).
+
+- **Wire (additive).** The `fetch` head may carry `service`, and a pod that declares services answers one more channel
+  request, `services {} -> { services: string[], default: boolean }` (the ingress asks once per link, and only for a route that
+  names a service). A request signature (`signRequest`/`verifyRequest`) covers `service` when there is one and is byte for byte
+  what it was when there is none.
+- **An older pod** knows neither: asked `services`, it answers "unknown method", which the ingress reads as "no named services",
+  so a route that names a service is a 502 `provider-no-service` and nothing is sent. A route that names none works as before.
+  **An older ingress** never sends `service` or asks `services`; a pod that declares services serves its default to it (or
+  refuses, when it has none).
+
+## Names a pod may claim (off by default)
+
+An operator can let pods choose their own names under a zone the operator owns (`app.pods.example.test`), instead of mapping
+hostnames to pod ids by hand. Nothing here runs unless the operator builds a name table and serves it.
+
+```js
+import { createNameTable, serveIngressNames, registryAllow, createMeshIngress, openNameClient } from '@johnhenry/browsermesh-ingress'
+
+// ingress side
+const names = createNameTable({ zone: 'pods.example.test', allow: registryAllow(node.registry), holdMs: 30_000 })
+serveIngressNames(service, names)                       // protocol `ingress-names` v1 on the protocol channel
+node.registry.grantCapabilities(podId, ['protocol:ingress-names:open', 'ingress:name:app:claim'])
+const ingress = createMeshIngress({ service, names })   // mappings of your own (`resolve`) are asked first, claimed names after
+
+// pod side: the channel is the claim's lifetime
+const client = await openNameClient(service, ingressPodId)
+await client.claim('app', { service: 'web' })           // -> { name: 'app', host: 'app.pods.example.test', service: 'web' }
+```
+
+The rules, each with a test:
+
+- **A grant per name, written by the operator.** The pod needs `protocol:ingress-names:open` (the protocol channel's own default
+  deny) and then the registry scope `ingress:name:<label>:claim` for that label (`ingress:name:*:claim` for any). `registryAllow`
+  reads exactly that; `allow` may be any function. Without `allow` nothing is claimable. The pod is the channel's verified peer, never
+  a field of the message. A grant revoked stops the next claim.
+- **Never a name another live pod holds**, and two claims racing for one name give it to one. A pod that holds a name and claims it
+  again is changing its service, not taking a second slot.
+- **Held while the link is up, released a short while after it drops.** When the claiming channel closes the name is held for
+  `holdMs` (default 30 s; 0 frees it at once) for that pod only: a stranger cannot take it in between, the same pod gets it back at
+  once by claiming on its new channel, and a channel that closes late (after the pod came back) takes nothing from the new claim.
+  After the hold the name is free for anyone with a grant. A request for a held name waits for its pod (see below).
+- **Bounded**: `maxPerPod` (4), `maxNames` for the zone (64; held names count), and `claimRate` (30 attempts per pod per
+  minute, refused ones included). A pod flapping its link re-claims within the same allowance.
+- **Names are plain DNS labels**: lowercase letters, digits and hyphens, 1 to 63 characters, no hyphen at either end, no case
+  folding, **no hyphens in the third and fourth places** (which refuses punycode `xn--` labels and what is built to look like
+  them), and a **deny-list** of labels that read as something an operator owns (`www`, `api`, `admin`, `mail`, `login`, `auth`,
+  `ns1`, `localhost`, and more: `NAME_DENY_DEFAULTS`). The operator adds to it with `deny` (a trailing `*` is a prefix). A denied
+  label is refused even when a grant names it: map those by hand. A host the operator maps by hand (`reserved`) is not claimable.
+- **Audit**: `onAudit` gets `{ type: 'name', action: 'claim'|'refuse'|'release'|'hold'|'expire', pod, name, reason? }`; the CLI
+  prints them.
+
+<!-- names-table:begin -->
+| Reason | Refused because |
+| --- | --- |
+| `bad-name` | the label is not a plain lowercase DNS label (or has hyphens in the third and fourth places) |
+| `bad-service` | the service is not a short plain name |
+| `claim-rate` | too many claims from this pod in the window (the refusal carries `retryAfterMs`) |
+| `denied-name` | the label is on the deny-list |
+| `name-reserved` | the host is mapped by the operator |
+| `name-taken` | another pod holds the name (live, or in its hold) |
+| `not-granted` | the pod holds no grant for that name |
+| `too-many-names` | the pod holds its limit |
+| `zone-full` | the zone holds its limit |
+<!-- names-table:end -->
+
+CLI: `--names-zone pods.example.test --names-allow <podId>=app,blog [--names-allow ...] [--names-deny staff,ops-*] [--names-max N]
+[--names-max-per-pod N] [--names-hold 30s]`; the grants are written into the node's registry, and every `--names-*` flag without
+`--names-zone` is refused.
+
+- **Wire (additive).** A new protocol, `ingress-names` v1, on the protocol channel, served only when the operator serves it:
+  `claim { name, service? } -> { name, host, service? }`, `release { name } -> { released }`, `names {} -> [{ name, host,
+  service?, held }]`; a refusal is a channel error whose `reason` is one of the table above.
+- **An older ingress** does not serve the protocol: the pod's `openNameClient` fails (unknown protocol) and nothing else changes.
+  **An older pod** never opens it. The `http` protocol is unchanged, so a claimed name is served over `http` v1 as any mapping is.
+- **Not built, on purpose**: names for a pod that has no link to the ingress (a claim needs the channel, so the pod has dialled
+  or been dialled), per-name TLS certificates (TLS is in front of the listener, as always), and DNS (the operator points a
+  wildcard record at the listener; the ingress does not publish names).
+
+## The first request, and readiness
+
+A pod the ingress was told to expect (`ingress.expect(podId)`; the CLI does it for every mapped pod) is dialled at start and
+kept dialled, and **a request that arrives before the link is up waits for it** instead of failing: up to `limits.linkWaitMs`
+(5 s; `--link-wait`), never past the request's own deadline, and then with the original failure. The same wait covers a link that
+dropped (it is dialled again), and a request for a name in its hold (the pod is expected for the length of the hold). A pod nobody
+expects behaves exactly as before: the first failed open is the answer.
+
+`ingress.readiness()` is `{ ready, peers: { up, total } }` (ready when every pod expected for good has a live link; it never names
+a pod), and `await ingress.whenReady({ timeoutMs })` waits for it. `listenNode(ingress, { readyPath: '/_ready' })` (CLI:
+`--ready-path /_ready`) answers `GET` and `HEAD` for exactly that path with 200 or 503 and that JSON. It is off unless asked for, it is
+answered before any request reaches a pod, and it shadows that one path for every hostname, so pick a path no pod serves.
+
+**Who dials.** The CLI's node dials the pods it serves (WebRTC through the signaling server, `connectToPeer`) and also accepts a
+pod that dials it, so either side can start the link; a pod that cannot accept inbound connections dials the ingress's pod id
+(printed at start) and the ingress uses that link. Nothing about this is new; what is new is that the dialling now starts when the
+ingress starts rather than at the first request.
+
 ## Headers, by default and on purpose
 
 What crosses, with no option set (a test pins both lists to the code):
@@ -296,6 +442,7 @@ fails it until the table says so.
 | 502 | `provider-error` | the provider's handler failed (an internal error on its side) |
 | 502 | `provider-failed` | the provider failed to answer |
 | 502 | `provider-no-http` | the provider does not serve the `http` protocol |
+| 502 | `provider-no-service` | the route names a service the provider did not declare (or serves none by name) |
 | 502 | `provider-not-authorized` | the provider has not granted this ingress the protocol, or no longer does |
 | 502 | `provider-pin-mismatch` | the channel is bound to another pod than the mapping names, retryable |
 | 502 | `provider-redirect-refused` | a `Location` that is not a path on this origin |
@@ -339,6 +486,8 @@ A provider's own answer, including its own 4xx and 5xx and a plain 421, passes t
 | Request body | 64 KiB (`maxRequestBodyBytes`); over it is a 413; read in full before the provider is asked |
 | Response | 8 MiB (`maxResponseBytes`); a declared length over it is refused before anything is sent |
 | Whole request | 30 s (`timeoutMs`), 504 `provider-timeout` |
+| Link wait | 5 s (`linkWaitMs`), only for a pod told to be expected (`expect`, the CLI's mapped pods, a held name); any other pod fails at once |
+| Names, readiness | off: nothing is claimable and no readiness path is answered until the operator turns them on |
 | Slow body / idle response | 10 s (`bodyIdleMs`, 408) / 15 s (`responseIdleMs`) between chunks |
 | Headers / target | 64 headers, 16 KiB, 2048 characters |
 | In flight | 64 total, 8 per client, 16 per provider (429 / 503, `Retry-After`) |
@@ -357,14 +506,17 @@ A provider's own answer, including its own 4xx and 5xx and a plain 421, passes t
 ```
 browsermesh-ingress --listen 127.0.0.1:8080 --signaling wss://signal.example \
   --map app.example.test=<podId> [--map ...] [--allow-methods GET,HEAD,POST] [--max-body 64k] [--timeout 30s] \
-  [--auth bearer:<file>] [--identity <file>] [--config file.json]
+  [--auth bearer:<file>] [--identity <file>] [--config file.json] \
+  [--link-wait 5s] [--ready-path /_ready] \
+  [--names-zone pods.example.test --names-allow <podId>=app,blog ...]
 ```
 
 It joins the mesh as a pod (its identity is kept in `--identity`, created at mode 0600 on first run; the printed pod id
 is what a provider names in `allowFrom` and grants `protocol:http:open`), prints what it serves and where it listens, and
 exits non-zero with one sentence on bad input (2) or when the node cannot start (1). `--listen` must be loopback unless
 `--public` is given together with `--tls-terminated-in-front` (a statement that TLS is terminated in front of it).
-`--map HOST[/PREFIX]=PODID` (a prefix is stripped; two different pods under one hostname are refused). `--auth
+`--map HOST[/PREFIX]=PODID[#SERVICE]` (a prefix is stripped; `#SERVICE` names the service on that pod, see above; two different pods
+under one hostname are refused). The mapped pods are dialled at start (`--link-wait 0` turns that and the wait off). `--auth
 bearer:FILE` requires `Authorization: Bearer <token in FILE>` on every request. `--config` takes the same options in JSON.
 Without `node-datachannel` the CLI cannot reach any pod and says so; the library works over any transport you attach a
 protocol service to.
@@ -375,6 +527,8 @@ protocol service to.
   with the same pin, per-connection byte and idle limits and an explicit `Origin` policy.
 - Routed (multi-hop) delivery: only direct links. Carrying `http` over routed messages would need `requireSealed` end to
   end and the verified originator of each sealed message compared with the mapped pod.
+- TLS passthrough (the pod terminates TLS itself and the operator relays bytes it cannot read): needs a byte-stream protocol to a
+  pod, selected by SNI, with the same pin, caps and grants as `http`. See "What the operator can see and change".
 - Streaming the client's request body to the provider while the client is still sending (it is read first, bounded).
 - TLS, caching, compression, per-root authorisation on the provider (`http:<root>:<action>`).
 
@@ -382,6 +536,7 @@ protocol service to.
 
 Protocol `http` v1 on a protocol channel: one channel request `fetch { rid, nonce, method, target, host, headers, body,
 client?, sig? } -> { status, headers, body, sig?, declined? }`; bodies are protocol streams (`{ rid, kind: 'request' }` ingress to
-provider, `{ rid, kind: 'response' }` opened by the provider before it answers). No new framing; a peer without the
+provider, `{ rid, kind: 'response' }` opened by the provider before it answers). Additions since v1's first release, all optional: `service` in
+the head and the `services` request (above), and the separate `ingress-names` protocol. No new framing; a peer without the
 protocol answers the open with `unknown-protocol` and is sent nothing else. Design: [`docs/design/http-ingress.md`](../../docs/design/http-ingress.md);
 threat model: [`docs/security.md`](../../docs/security.md#http-ingress).
