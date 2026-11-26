@@ -33,8 +33,14 @@ export function validateRequestHead(head, { maxHeaderCount, maxHeaderBytes, maxT
   if (head.client !== undefined && (typeof head.client !== 'string' || head.client.length > 64)) throw new IngressError(400, 'bad-request-head', 'The client field is not a short string.')
   if (typeof head.nonce !== 'string' || !/^[0-9a-f]{16,64}$/.test(head.nonce)) throw new IngressError(400, 'bad-request-head', 'The nonce is not 16 to 64 hex characters.')
   if (head.sig !== undefined && (typeof head.sig !== 'string' || head.sig.length > 2048)) throw new IngressError(400, 'bad-request-head', 'The signature is not a short string.')
+  if (head.service !== undefined && (typeof head.service !== 'string' || !SERVICE_NAME_RE.test(head.service))) throw new IngressError(400, 'bad-request-head', 'The service is not a short plain name.')
   return head
 }
+
+/** A service a pod serves under a name: short, lowercase, plain. */
+export const SERVICE_NAME_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/
+/** The channel request a provider that serves named services answers: `services {} -> { services: string[], default: boolean }`. */
+export const SERVICES_METHOD = 'services'
 
 /** @param {object} head the result of `fetch`, from a pod this side does not control */
 export function validateResponseHead(head, { maxHeaderCount, maxHeaderBytes }) {
@@ -79,7 +85,8 @@ export function signedBytes({ rid, nonce, host, method, target, status, headers,
  * and the SHA-256 of the body. `dir: 'request'` keeps it apart from a response's bytes.
  * @returns {Uint8Array}
  */
-export function signedRequestBytes({ rid, nonce, host, method, target, headers, client, digest }) {
+export function signedRequestBytes({ rid, nonce, host, method, target, headers, client, digest, service }) {
   for (const [name] of headers) if (!isToken(name)) throw new TypeError('bad header name')
-  return new TextEncoder().encode(JSON.stringify({ v: 1, dir: 'request', rid, nonce, host, method, target, headers, client, digest }))
+  // `service` is covered only when the request names one: a request without it signs the bytes it always did.
+  return new TextEncoder().encode(JSON.stringify({ v: 1, dir: 'request', rid, nonce, host, method, target, headers, client, digest, ...(service === undefined ? {} : { service }) }))
 }

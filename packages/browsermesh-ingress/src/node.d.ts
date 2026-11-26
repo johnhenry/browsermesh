@@ -13,6 +13,11 @@ export interface ListenOptions {
   maxHeaderBytes?: number
   headersTimeoutMs?: number
   requestTimeoutMs?: number
+  /**
+   * Answer `GET` and `HEAD` for exactly this path (no query) with `{ ready, peers: { up, total } }`: 200 when the pods the ingress was told
+   * to expect are linked, 503 before. Off unless given; it needs an ingress with `readiness()`. It shadows that path for every host.
+   */
+  readyPath?: string
 }
 
 export function listenNode(ingress: Pick<MeshIngress, 'handle'>, options?: ListenOptions): Promise<{ port: number; host: string; close(): Promise<void> }>

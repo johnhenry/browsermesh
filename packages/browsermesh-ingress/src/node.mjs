@@ -41,10 +41,23 @@ export function clientAddressOf(socketAddress, xForwardedFor, trustProxy) {
  * @param {number} [opts.maxConnections=256]
  * @returns {Promise<{ port: number, host: string, close(): Promise<void>, server: http.Server }>}
  */
-export async function listenNode(ingress, { port = 0, host = '127.0.0.1', public: isPublic = false, trustProxy = false, maxConnections = 256, maxHeaderBytes = 16 * 1024, headersTimeoutMs = 10_000, requestTimeoutMs = 60_000 } = {}) {
+export async function listenNode(ingress, { port = 0, host = '127.0.0.1', public: isPublic = false, trustProxy = false, maxConnections = 256, maxHeaderBytes = 16 * 1024, headersTimeoutMs = 10_000, requestTimeoutMs = 60_000, readyPath } = {}) {
   if (!ingress || typeof ingress.handle !== 'function') throw new TypeError('listenNode: an ingress with handle() is required')
   if (!isLoopbackHost(host) && isPublic !== true) throw new Error(`listenNode: ${host} is not a loopback address; pass public: true once TLS is terminated in front of this listener`)
+  if (readyPath !== undefined) {
+    if (typeof readyPath !== 'string' || !/^\/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*$/.test(readyPath) || readyPath.startsWith('//')) throw new TypeError('listenNode: readyPath must be a plain absolute path such as /_ready')
+    if (typeof ingress.readiness !== 'function') throw new TypeError('listenNode: readyPath needs an ingress with readiness()')
+  }
   const server = http.createServer({ maxHeaderSize: maxHeaderBytes, insecureHTTPParser: false, requestTimeout: requestTimeoutMs, headersTimeout: headersTimeoutMs, keepAliveTimeout: 5000, connectionsCheckingInterval: Math.min(5000, headersTimeoutMs) }, (req, res) => {
+    // The one path this listener answers itself, when asked to: whether the pods the ingress was told to expect are linked. It
+    // names no pod, takes no query and shadows that exact path for every host, so choose one no pod serves.
+    if (readyPath !== undefined && req.url === readyPath && (req.method === 'GET' || req.method === 'HEAD')) {
+      const state = ingress.readiness()
+      const body = JSON.stringify(state)
+      res.writeHead(state.ready ? 200 : 503, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' })
+      res.end(req.method === 'HEAD' ? undefined : body)
+      return
+    }
     serve(ingress, req, res, trustProxy).catch(() => { if (!res.headersSent) fail(res, new IngressError(500, 'internal-error', 'The ingress failed.')); else res.destroy() })
   })
   server.maxConnections = maxConnections

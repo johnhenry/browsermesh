@@ -7,7 +7,8 @@
 import { createHash, timingSafeEqual } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { createMeshIngress } from '../ingress.mjs'
-import { applyForcedHeaders } from '../headers.mjs'
+import { applyForcedHeaders, hostName } from '../headers.mjs'
+import { NAMES_PROTOCOL, createNameTable, registryAllow, serveIngressNames } from '../names.mjs'
 import { listenNode } from '../node.mjs'
 import { UsageError, USAGE, createResolver, fromConfig, merge, parseArgv, resolveOptions } from './args.mjs'
 import { MeshStartError, startMeshNode } from './mesh-node.mjs'
@@ -70,18 +71,52 @@ export async function main(argv, { stdout, stderr, startNode = startMeshNode, pr
   const limits = {}
   if (options.maxBody) limits.maxRequestBodyBytes = options.maxBody
   if (options.timeoutMs) limits.timeoutMs = options.timeoutMs
+  const waiting = options.linkWaitMs !== 0
+  if (options.linkWaitMs) limits.linkWaitMs = options.linkWaitMs
+
+  // Names pods may claim: off unless the operator gave a zone. The grants are the operator's, written into the node's registry in
+  // the family's notation (`protocol:ingress-names:open`, `ingress:name:<label>:claim`); nothing else can claim anything.
+  let names = null
+  let namesServed = null
+  if (options.names) {
+    const registry = mesh.node?.registry
+    if (typeof registry?.grantCapabilities !== 'function') {
+      warn('browsermesh-ingress: cannot start names: this mesh node has no registry to hold the grants.')
+      await mesh.close()
+      return 1
+    }
+    for (const { pod, labels } of options.names.allow) registry.grantCapabilities(pod, [`protocol:${NAMES_PROTOCOL}:open`, ...labels.map((l) => `ingress:name:${l}:claim`)])
+    const mapped = new Set(options.mappings.map((m) => hostName(m.host)))
+    names = createNameTable({
+      zone: options.names.zone,
+      allow: registryAllow(registry),
+      deny: options.names.deny,
+      ...(options.names.maxNames ? { maxNames: options.names.maxNames } : {}),
+      ...(options.names.maxPerPod ? { maxPerPod: options.names.maxPerPod } : {}),
+      ...(options.names.holdMs !== undefined ? { holdMs: options.names.holdMs } : {}),
+      reserved: (host) => mapped.has(host),
+      onAudit: (r) => say(`name ${r.action} ${r.name}.${options.names.zone} ${r.action === 'claim' || r.action === 'refuse' ? '<-' : 'of'} ${r.pod}${r.reason ? ` (${r.reason})` : ''}`),
+    })
+    namesServed = serveIngressNames(mesh.service, names)
+  }
+
   const ingress = createMeshIngress({
     service: mesh.service,
     resolve: createResolver(options.mappings),
+    ...(names ? { names } : {}),
     methods: options.methods,
     limits,
     deny: token ? bearerDeny(token) : undefined,
     onAudit: (r) => say(`${r.method} ${r.host} -> ${r.peer ?? '-'} ${r.status}${r.reason ? ` (${r.reason})` : ''} in ${r.requestBytes}B out ${r.responseBytes}B ${r.durationMs}ms`),
   })
+  // The mapped pods are dialled now and kept dialled; a request that arrives before a link is up waits for it (bounded)
+  // instead of being answered 502.
+  if (waiting) for (const peer of new Set(options.mappings.map((m) => m.peer))) ingress.expect(peer, { retryMs: 250 })
   let listener
   try {
-    listener = await listenNode(ingress, { host: options.host, port: options.port, public: options.public, trustProxy: false })
+    listener = await listenNode(ingress, { host: options.host, port: options.port, public: options.public, trustProxy: false, ...(options.readyPath ? { readyPath: options.readyPath } : {}) })
   } catch (e) {
+    namesServed?.stop()
     await ingress.close()
     await mesh.close()
     warn(`browsermesh-ingress: cannot listen on ${options.host}:${options.port}: ${e?.code ?? e?.message}`)
@@ -89,7 +124,9 @@ export async function main(argv, { stdout, stderr, startNode = startMeshNode, pr
   }
 
   say(`browsermesh-ingress pod id: ${mesh.podId}${mesh.created ? ' (new identity)' : ''}`)
-  for (const mp of options.mappings) say(`serving ${mp.host}${mp.prefix} -> ${mp.peer}`)
+  for (const mp of options.mappings) say(`serving ${mp.host}${mp.prefix} -> ${mp.peer}${mp.service ? ` (service ${mp.service})` : ''}`)
+  if (names) say(`names: claimable under *.${options.names.zone} by ${options.names.allow.length} pod${options.names.allow.length === 1 ? '' : 's'}`)
+  if (options.readyPath) say(`readiness: GET ${options.readyPath}`)
   say(`methods: ${options.methods.join(', ')}; body cap ${limits.maxRequestBodyBytes ?? 65536} bytes; auth: ${token ? 'bearer token required' : 'none'}`)
   say(`listening on http://${options.host.includes(':') ? `[${options.host}]` : options.host}:${listener.port}`)
 
@@ -98,6 +135,7 @@ export async function main(argv, { stdout, stderr, startNode = startMeshNode, pr
     if (stopping) return
     stopping = true
     await listener.close()
+    namesServed?.stop()
     await ingress.close()
     await mesh.close()
     proc.exit?.(0)
