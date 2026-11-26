@@ -186,6 +186,25 @@ const node = await createMeshNode({
 });
 ```
 
+### Keeping an identity across reloads: `identity`
+
+By default `createMeshNode()` creates a fresh identity on every call. To keep
+one key, give it a manager that holds the identity (for example one backed by
+`IndexedDBIdentityStorage`, with the pod id remembered by your page) and name it:
+
+```js
+const node = await createMeshNode({
+  signalingTransport,
+  identityManager,                 // already holds the identity
+  identity: { podId },             // adopt it; nothing is created
+});
+```
+
+`options.identity` requires `options.identityManager` and throws if the pod id is
+not in it. The adopted identity becomes the manager's default (that is what
+`node.podId` reports). `label` is ignored when `identity` is given. Without the
+option nothing changes.
+
 ### TURN server configuration
 
 **WebRTC identity binding is on by default.** `createMeshNode()` wires the node's
