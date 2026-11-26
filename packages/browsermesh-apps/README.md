@@ -547,6 +547,46 @@ Everything that holds a grant open follows these events: relayed connections,
 protocol channels, swarm members admitted by the join gate, and wsh links under
 the default authorizer (`watchWshAccess()`).
 
+### Realm grants (a separate source, honoured only by host policy)
+
+A realm (see `docs/design/realms.md`) is a membership domain whose credentials say a key holds a role. Its grants do
+not go through `grantCapabilities()`: that keeps one expiring token per (peer, scope string) with no record of who
+granted it, so a realm's renewal would be ignored, its expiry would cut an operator's permanent grant of the same
+scope, an expired realm wildcard would deny a permanent narrow operator grant, its revocation would delete the
+operator's identical grant, and a restored registry would honour an expired grant again. `PeerRegistry` therefore has
+a second grant source, unioned with the operator's in `checkAccess()`: it allows if the operator's grants allow or a
+live realm grant covers the scope. Nothing in it can change an operator grant.
+
+```js
+const registry = new PeerRegistry({
+  localPodId,
+  // Default is no policy: no realm grants anything. The host decides which realms it honours and, per role, the most
+  // a role may be granted here. A descriptor's role is only an upper bound.
+  realmPolicy: { 'realm-id': { roles: { member: ['protocol:mcp:open', 'files:*:read'] } } },
+  onRealmGrantDropped: ({ realmId, peerKey, role, scope, reason }) => log(reason, scope),
+})
+
+// serial, notAfter (ms epoch, the registry's clock) and epoch come from the verified credential
+registry.grantRealmScopes({ realmId, serial, peerKey, role: 'member', scopes: ['protocol:mcp:open'], notAfter, epoch })
+registry.revokeRealmGrants({ realmId, peerKey })        // or { realmId, serial }, or { realmId, belowEpoch: N }
+registry.listRealmGrants({ realmId, peerKey })          // live grants, copies; both filters optional
+registry.setRealmPolicy(policy)                         // replaces the policy and cuts held grants back to it
+```
+
+- `grantRealmScopes()` keeps what the policy admits and returns `{ granted, dropped }`. A realm id or role the policy
+  does not list grants nothing (`realm-not-honoured`, `role-not-allowed`); a scope outside the role's allow list is
+  dropped (`scope-not-allowed`); `egress:`, `ingress:`, `pod-host` and `wsh-` scopes are dropped
+  (`sensitive-scope-not-named`) unless an allow-list pattern that itself begins that way admits them. Each drop goes to
+  `onRealmGrantDropped`. A scope that is a wildcard, or has an empty or missing segment (which `matchScope` reads as
+  `*`), or fewer than three segments, makes the call throw and grants nothing.
+- Renewal: a grant for the same (realm, peer, role) replaces the earlier one whole, so a later `notAfter` extends
+  access and scopes the new credential lacks are gone. A grant has to expire (`notAfter` is required) and carries the
+  realm `epoch` it was issued under; `revokeRealmGrants({ realmId, belowEpoch })` removes everything older.
+- Realm grants are never persisted: `toJSON()` leaves them out and `fromJSON()` restores none, nor the policy. An
+  expired grant is dropped by the registry's single expiry timer, which announces it as `kind: 'expired'` like an
+  operator grant. Adding, replacing and removing announce `realm-granted`, `realm-replaced` and `realm-revoked`, so
+  open links re-check. `removePeer()` drops a peer's realm grants too.
+
 ## CloudStorage bucket authorization and key distribution
 
 `grant-log.mjs`'s `GrantLog` (`createGrantLogService()`) is a replicated,
