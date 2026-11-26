@@ -714,7 +714,12 @@ Package: `browsermesh-apps`.
   so three-segment scopes such as `mesh-relay:<svc>:connect` matched only through
   `*:*`, and the shared matcher ignored every segment past the third. A grant
   with `expiresAt` is announced like a revocation (`onAccessChange`, kind
-  `expired`) by one timer per registry, for the nearest expiry. `grant-log` replicates signed grant records (Ed25519,
+  `expired`) by one timer per registry, for the nearest expiry. Realm grants
+  (`docs/design/realms.md`) are a separate source, unioned with these in
+  `checkAccess` and never persisted: a host honours no realm unless its
+  `realmPolicy` lists the realm id and, per role, the scope patterns it may
+  grant; `egress:`, `ingress:`, `pod-host` and `wsh-` scopes only when named
+  there, and a wildcard or short scope is refused. `grant-log` replicates signed grant records (Ed25519,
   self-verifying pod ids, authorization replayed deterministically; `at` is
   caller-supplied, revoking an admin is not retroactive). The audit chain
   (hash-linked, signed per entry) is off unless `enableAudit`. Unit only.
