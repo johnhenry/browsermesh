@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.29.0
+
+### Minor Changes
+
+- 47c9898: `createMeshNode({ identity: { podId } })` adopts an identity that already exists in the supplied `identityManager` instead of creating a new one, so a page can keep its key across a reload. It throws if the pod id is not in the manager, if no `identityManager` is given, or if the option is malformed. The adopted identity becomes the manager's default (what `node.podId` reports). Without the option nothing changes.
+- 49160a3: `PeerRegistry` gains a realm grant source, a prerequisite for realms (`docs/design/realms.md`).
+
+  - **A separate source, not the operator's slot.** `grantRealmScopes({ realmId, serial, peerKey, role, scopes, notAfter, epoch })`, `revokeRealmGrants({ realmId, peerKey | serial | belowEpoch })`, `listRealmGrants()` and `setRealmPolicy()`. `checkAccess()` allows if the operator's grants allow or a live realm grant covers the scope, so a realm's renewal, expiry or revocation can no longer extend, shorten, poison or delete a grant the operator made. Realm grants are keyed by (realm, role, peer), carry their own expiry and epoch, and are never written by `toJSON()` nor restored by `fromJSON()`.
+  - **Host policy decides.** New `realmPolicy` and `onRealmGrantDropped` constructor options. The default honours no realm, so nothing changes for existing users. A role scope outside the host's allow list is dropped and reported; `egress:`, `ingress:`, `pod-host` and `wsh-` scopes are granted only if a pattern in the allow list begins that way; a wildcard or short scope is refused.
+  - **Events.** Added, replaced, removed and expired realm grants announce through `onAccessChange` (`realm-granted`, `realm-replaced`, `realm-revoked`, `realm-policy`, `expired`), and expiry shares the registry's one timer.
+
+- 0ec7933: A request in flight when a pod is torn down in the README's order is ended at once with a status and a reason, instead of waiting for its deadline. `serveHttpOnMesh(...).stop()` now returns a promise that resolves once the close notices of its `http` channels have left the pod (it used to return before they were sent, and the node's close that followed lost them, so the ingress was never told); `await` it before closing the node (README, "Closing a pod: the order", now says so). New option `stop({ graceMs })` (default 0, unchanged behaviour: end everything now) lets the requests being answered finish first, for at most `graceMs`; a request that arrives meanwhile is refused and the visitor gets 503 `provider-stopping` (new reason, with `Retry-After`; an older ingress shows it as 502 `provider-failed`). `openNameClient(...).close()` also waits for its channel's close notice. Apps: a protocol channel's `close()` returns a promise that settles (never rejects) once the notice to the other end has left; callers that ignore the return value are unaffected, and an older apps gives `undefined`, which `stop()` and `close()` accept (they then have nothing to wait for).
+- 8a062dd: Link admission: `createLinkAdmission({ maxRestricted, deadlineMs, maxFrameBytes, decide, handler, onEvent })` (a restricted state for links whose peer is not yet known: cap, deadline, one-shot promote/close, frame cap, counters) and `createWshAdmissionAuthorize`. `createMeshNode({ admission })` gates inbound WebRTC sessions through `decide` (reporting `proven: false` for a link whose key the identity binding did not verify) and, with `wsh`, admits unknown wsh peers to a restricted link; `node.admission` is the seam. Opt-in: without the option nothing changes.
+
+### Patch Changes
+
+- c7c6cda: A node whose peer starts over on the WebRTC connection it holds open (a fresh offer for an open connection: a page loaded again, a node made anew) now ends the channel link that ran over the old connection. Before, the link stayed: a restarted pod that only serves (a hand `--map` at the ingress, no name claimed) sends no hello of its own, so the ingress went on sending over a link the new node knows nothing of, and every request waited out the open timeout for a 504 `provider-timeout`. Now the requests on the old link end at once (502 `provider-closed`) and the next request opens a new link on the new connection. `onIncomingConnection` gets a fourth argument `{ restarted }`, `adoptIncomingSession` takes `{ restarted }` and emits `peer:transport-restart`, and the mesh channel service follows it. Nothing is added to the wire: an older pod is served as before, and an older ingress behaves as it did. The ingress README says so.
+
 ## 0.28.0
 
 ### Minor Changes
