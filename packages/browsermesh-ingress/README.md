@@ -129,8 +129,17 @@ const served = serveHttpOnMesh(service, async (request, { peer, signal, client }
   limits: { maxInflight: 16, maxRequestBodyBytes: 1024 * 1024, maxResponseBytes: 8 * 1024 * 1024, handlerTimeoutMs: 30_000 },
 })
 node.registry.grantCapabilities(ingressPodId, ['protocol:http:open'])   // the registry grant is required too
-// served.stop(); served.stats()
+// await served.stop(); served.stats()
 ```
+
+`await served.stop()` stops taking links and closes the `http` channels, and resolves once the notices that they closed have
+left this pod: that is how the ingress learns, at once, that the requests it was waiting on are over (a visitor of a request
+in flight is answered 502 `provider-closed`, not left to the request deadline). Do not close the node before it resolves: a
+close notice that has not left is lost with the link. `stop({ graceMs })` (default `0`: end everything now) first lets the
+requests being answered finish, for at most `graceMs` milliseconds; a request that arrives meanwhile is refused and the visitor
+is told 503 `provider-stopping` (with `Retry-After`); what is still being answered when the grace runs out is ended as above.
+With `@johnhenry/browsermesh-apps` 0.28 or older on the pod the close notice is still sent but `stop()` has nothing to wait for
+(a channel's `close()` gave no promise), so it resolves at once and the notice can still be lost to a node closed straight after.
 
 `handler` is a function or `{ fetch }`. `peer` is the ingress pod, the pod id the channel is addressed by (never a header);
 whether that id was proven on the link is a separate question, answered by the `peer` object the hooks get (next
@@ -375,12 +384,16 @@ Say goodbye first, take the services down, close the node last, and wait for eac
 
 ```js
 await client.close()      // the names are given up and the ingress has heard it (it answers `bye`); at most `closeTimeoutMs`, 2 s
-served.stop()             // the `http` channels close
+await served.stop()       // the `http` channels close, and their close notices have left (add { graceMs } to let requests finish first)
 await node.shutdown()     // then the node
 node.meshManager.closeAll()   // and its connections, if the page is going to keep running
 ```
 
-Closing the node first (or not waiting for `client.close()`) can cut the goodbye off before it leaves, and the ingress then
+The goodbye goes first so that no visitor is sent to a pod that is leaving (the name is gone at once: a 404), and the services
+next, so that the requests still being answered end (or finish, within `graceMs`) with a status. **`served.stop()` must be
+waited for.** It used to return before the close notices had left, and the node's close that followed cut them off: the
+ingress was never told, and a request in flight waited for its whole deadline (`timeoutMs`, 30 s) before a 504 `provider-timeout`.
+Closing the node first (or not waiting for `client.close()`) can likewise cut the goodbye off before it leaves, and the ingress then
 learns the pod is gone only from the link ending, so the names are held for `holdMs` and a request for one waits for a pod that
 is not coming back. Closing a names client does not touch the `http` channels or the link: only the names it claimed go.
 If the link ends without any of this (a tab closed, a network lost), the ingress still sees it end: a node whose connection
@@ -533,6 +546,7 @@ fails it until the table says so.
 | 503 | `overloaded` | the ingress is at its global in-flight cap (with `Retry-After`) |
 | 503 | `provider-inflight` | this provider is at its in-flight cap (with `Retry-After`) |
 | 503 | `provider-rate` | this provider is over its rate (with `Retry-After`) |
+| 503 | `provider-stopping` | the provider is being stopped (`served.stop()`) and takes no new request (with `Retry-After`) |
 | 504 | `provider-idle` | the provider announced a body and did not send it, or stalled |
 | 504 | `provider-timeout` | the whole request ran past `timeoutMs`, or the provider did not answer the open |
 <!-- failures-table:end -->

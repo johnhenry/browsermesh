@@ -109,7 +109,11 @@ export function serveHttpOnMesh(
   service: object,
   handler: Handler | { fetch: Handler } | null,
   options: ProviderOptions,
-): { stop(): void; stats(): Record<string, number | Record<string, number>> & { refusals: Record<string, number> } }
+): {
+  /** Stop serving; resolves once the channels' close notices have left this pod. `graceMs` (default 0) lets the requests being answered finish first, for at most that long; requests that arrive meanwhile are refused (the ingress answers 503 `provider-stopping`). */
+  stop(options?: { graceMs?: number }): Promise<void>
+  stats(): Record<string, number | Record<string, number>> & { refusals: Record<string, number> }
+}
 
 /** A handler's way to say "not me, try another". */
 export function declineRequest(): Response

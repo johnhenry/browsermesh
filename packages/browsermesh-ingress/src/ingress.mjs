@@ -565,6 +565,7 @@ export function createMeshIngress({
       if (e?.reason === 'timeout') throw new IngressError(504, 'provider-timeout', 'The provider did not answer in time.')
       if (e?.reason === 'not-authorized') throw new IngressError(502, 'provider-not-authorized', 'The provider no longer accepts this ingress.')
       if (e?.reason === 'unknown-service') throw new IngressError(502, 'provider-no-service', 'The provider does not serve that service.')
+      if (e?.reason === 'stopping') throw new IngressError(503, 'provider-stopping', 'The provider is shutting down.', { headers: { 'retry-after': '1' } })
       if (e?.reason === 'request-unverified') throw new IngressError(502, 'provider-refused-request', 'The provider did not accept the request\'s signature.')
       if (e?.reason === 'too-large' || e?.reason === 'stream-too-large') throw new IngressError(502, 'provider-refused-body', 'The provider would not take the request body.')
       throw new IngressError(502, e?.code === -32603 ? 'provider-error' : 'provider-failed', 'The provider failed to answer.')
