@@ -315,7 +315,7 @@ the optional peer `@johnhenry/browsermesh-realm`; without it, `meshctl realm ...
 ```
 meshctl realm create <name> [--mode open|invite] [--authority-less] [--ttl 7d] [--issuer-ttl 365d]
                             [--rendezvous <json|file>] [--roles <json|file>]
-meshctl realm issue  <realm> --role <r> --key <public key> [--ttl 7d] [--out <file>]
+meshctl realm issue  <realm> --role <r> (--pod-id <id> | --public-key <key>) [--ttl 7d] [--out <file>]
 meshctl realm revoke <realm> --serial <n> | --epoch
 meshctl realm rotate <realm>
 meshctl realm ledger <realm>
@@ -333,7 +333,7 @@ return a summary object (`id`, `name`, `mode`, `form`, `serial`, `epoch`, `ttl`)
 | Command | Needs | Result (besides `realm`) |
 | --- | --- | --- |
 | `create` | passphrase (not with `--authority-less`) | `realmDir`, `descriptor` (the signed text, public), `root`/`issuer` (`publicKey`, `file`), both `null` for `--authority-less` |
-| `issue` | passphrase, the issuer key | `credential` (text), `serial`, `subject`, `role`, `notBefore`, `notAfter` (whole seconds), `epoch`, `issuer`, `verified` |
+| `issue` | passphrase, the issuer key | `credential` (text), `serial`, `subject` (pod id), `role`, `notBefore`, `notAfter` (whole seconds), `epoch`, `issuer`, `verified` |
 | `revoke` | passphrase, the **root** key | `action` (`serial` or `epoch`), `descriptorSerial`, `epoch`, `revoked`, `descriptor` |
 | `rotate` | passphrase, the root key | `descriptorSerial`, `chainLength`, `root` (`publicKey`, `previous`), `descriptor` |
 | `ledger` | | `nextSerial`, `entries`, `revoked` |
@@ -369,9 +369,11 @@ there is no command yet to replace or renew an issuer (see below).
 
 `issue` allocates the serial from the realm's **one ledger**, shared by the root and the issuer key this machine holds,
 so serials never collide (`descriptor.revoked` is a flat list of serials with no issuer, so serials are per ledger).
-It verifies its own output with `verifyCredential` before printing and records the serial in the ledger. `--key` is the
-member's **public key** (base64url, as `realm join` prints it), not the pod id (a hash of it): a credential is bound to
-the key the link proves.
+It verifies its own output with `verifyCredential` before printing and records the serial in the ledger. A credential's
+`subject` is the member's **pod id** (the hash of its public key), because that is all a link exposes to the exchange.
+Give exactly one of `--pod-id <id>` (used as is) or `--public-key <key>` (converted to its pod id); meshctl never
+guesses which a bare string is, and the old `--key` is refused. Ledger entries, `export` and `inspect` show the subject
+(pod id) the same way.
 
 `revoke --serial` adds the serial to `descriptor.revoked` and re-signs at `serial + 1`; `revoke --epoch` raises the
 epoch (every credential of the older epoch stops verifying) and also bumps the serial. Eventual revocation: a peer keeps
@@ -403,9 +405,9 @@ trusts the first descriptor you were given: pass `--id` when you know the id) an
 verify; it never needs the network. A newer descriptor of a realm already held is adopted only if it verifies and its
 serial is higher. `join` also makes this machine's **identity for that realm**: in v1 an independent random Ed25519
 key per realm, stored in the realm's `profile/` (mode `0600`), so two realms cannot correlate this machine by its key.
-To get a credential: `realm join <descriptor>` (prints `identity.publicKey`), the issuer runs `realm issue --key
-<that key>`, then `realm join <descriptor> --credential <file>` verifies it (including that its subject is this
-identity's key) and stores it.
+To get a credential: `realm join <descriptor>` (prints `identity.podId` and `identity.publicKey`), you send the **pod id** (or the public key) to the issuer, who runs
+`realm issue --pod-id <pod id>` (or `--public-key <key>`), then `realm join <descriptor> --credential <file>` verifies it (including that its subject, a pod id, is this
+identity's pod id) and stores it.
 
 **Follow-up:** the design derives per-realm keys from one seed (HKDF, one backup recovers every realm). The derivation
 exists in `browsermesh-core`, but wiring a seed into meshctl is not done: today each realm identity needs its own backup.

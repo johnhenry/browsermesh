@@ -56,3 +56,16 @@ export async function freshKey() {
   const id = await PodIdentity.generate()
   return encodeBase64url(await id.rawPublicKey())
 }
+
+/** A fresh identity's pod id (the hash of its public key): what a credential's subject is. */
+export async function freshPodId() {
+  const { PodIdentity } = await import('@johnhenry/browsermesh-primitives')
+  return (await PodIdentity.generate()).podId
+}
+
+/** A fresh identity as both forms: { publicKey, podId }. */
+export async function freshIdentity() {
+  const { PodIdentity, encodeBase64url } = await import('@johnhenry/browsermesh-primitives')
+  const id = await PodIdentity.generate()
+  return { publicKey: encodeBase64url(await id.rawPublicKey()), podId: id.podId }
+}

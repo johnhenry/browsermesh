@@ -1,7 +1,7 @@
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { chmod } from 'node:fs/promises'
-import { realmFixture, PP, PASSPHRASE, freshKey } from './realm-helpers.mjs'
+import { realmFixture, PP, PASSPHRASE, freshPodId } from './realm-helpers.mjs'
 
 describe('realm key custody', () => {
   let fx
@@ -10,11 +10,11 @@ describe('realm key custody', () => {
   before(async () => {
     fx = await realmFixture()
     realm = (await fx.ok(['realm', 'create', 'vault', ...PP])).realm.id
-    subject = await freshKey()
+    subject = await freshPodId()
   })
   after(async () => { await fx.cleanup() })
 
-  const issue = (...extra) => ['realm', 'issue', realm, '--role', 'member', '--key', subject, ...extra]
+  const issue = (...extra) => ['realm', 'issue', realm, '--role', 'member', '--pod-id', subject, ...extra]
 
   it('a wrong passphrase is refused as EACCES (exit 3), with a stable code', async () => {
     const r = await fx.run(issue(...PP), { env: { MESHCTL_TEST_PP: 'not it at all' } })

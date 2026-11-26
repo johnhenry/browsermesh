@@ -17,6 +17,7 @@ import { readFile, readdir, writeFile } from 'node:fs/promises'
 import { UsageError, RealmCliError, building, verifyError } from './errors.mjs'
 import { loadRealmPackage } from './load.mjs'
 import { join } from 'node:path'
+import { derivePodId, decodeBase64url } from '@johnhenry/browsermesh-primitives'
 import { createStore, DEFAULT_REALM_DIR, FILES, credentialFile, issuedFile } from './store.mjs'
 import { readPassphrase, generateKey, sealKey, sealedHeader, unsealKey } from './custody.mjs'
 import { loadOrCreateIdentity } from '../identity.mjs'
@@ -27,8 +28,8 @@ const DAY = 86400
 const DEFAULT_ISSUER_TTL = 365 * DAY
 const INSPECT_NOTE = 'meshctl keeps no session between invocations, so it cannot list live peers: this shows the stored descriptor and the local profile only.'
 const NOT_IMPLEMENTED = 'realm invite is not implemented in v1: there is no keyless credential, so no tickets or admitters. '
-  + 'Issue a key-bound credential instead: meshctl realm issue <realm> --role <role> --key <public key> '
-  + '(the member runs meshctl realm join first to get its per-realm public key).'
+  + 'Issue a key-bound credential instead: meshctl realm issue <realm> --role <role> --pod-id <pod id> '
+  + '(the member runs meshctl realm join first and sends the printed pod id).'
 
 const DEFAULT_ROLES = { guest: ['protocol:mcp:open'], member: ['protocol:mcp:open', 'mcp:tool:call'] }
 
@@ -219,8 +220,22 @@ async function cmdIssue(ctx) {
   const realm = await loadRealm(ctx, positionals[0])
   requireAuthority(realm, 'issue')
   const role = stringFlag(flags, 'role')
-  const subject = stringFlag(flags, 'key')
-  if (!role || !subject) throw new UsageError('realm issue <realm> --role <role> --key <public key> [--ttl 7d] [--out <file>]')
+  if (flags.key !== undefined) throw new UsageError('--key is not accepted: a credential subject is a POD ID, so give --pod-id <id> (used as is) or --public-key <key> (converted to its pod id); never both')
+  const podIdFlag = stringFlag(flags, 'pod-id')
+  const publicKeyFlag = stringFlag(flags, 'public-key')
+  if (!role || (podIdFlag === undefined) === (publicKeyFlag === undefined)) {
+    throw new UsageError('realm issue <realm> --role <role> (--pod-id <id> | --public-key <key>) [--ttl 7d] [--out <file>]: exactly one of --pod-id and --public-key')
+  }
+  let subject = podIdFlag
+  if (publicKeyFlag !== undefined) {
+    try {
+      const raw = decodeBase64url(publicKeyFlag)
+      if (raw.length !== 32) throw new Error('not 32 bytes')
+      subject = await derivePodId(await crypto.subtle.importKey('raw', raw, { name: 'Ed25519' }, true, ['verify']))
+    } catch {
+      throw new UsageError('--public-key is not a base64url Ed25519 public key')
+    }
+  }
   const d = realm.descriptor
   if (!Object.hasOwn(d.roles, role)) throw new UsageError(`the realm does not define role '${role}' (it defines: ${Object.keys(d.roles).join(', ')})`)
   const ttl = flags.ttl === undefined ? d.ttl : parseDuration(flags.ttl, '--ttl')
@@ -251,7 +266,7 @@ async function cmdIssue(ctx) {
     realm: realm.id,
     credential: issued.text,
     serial: entry.serial,
-    subject,
+    subject, // the member's pod id
     role,
     notBefore: now,
     notAfter,
@@ -410,9 +425,9 @@ async function cmdJoin(ctx) {
     const checked = await pkg.verifyCredential(credText, effective, { now })
     if (!checked.ok) throw verifyError('the credential', checked)
     const mine = await readIdentitySummary(ctx, id)
-    if (!mine) throw new RealmCliError('EREALM_VERIFY', 'this machine has no identity for the realm yet: run realm join without --credential, give the printed public key to the issuer, then join again with the credential')
-    if (pkg.checkSubject(checked, mine.publicKey).ok !== true) {
-      throw new RealmCliError('EREALM_VERIFY', "the credential's subject is not this realm identity's public key (it was issued to another key)")
+    if (!mine) throw new RealmCliError('EREALM_VERIFY', 'this machine has no identity for the realm yet: run realm join without --credential, give the printed pod id to the issuer, then join again with the credential')
+    if (pkg.checkSubject(checked, mine.podId).ok !== true) {
+      throw new RealmCliError('EREALM_VERIFY', "the credential's subject (pod id) is not this realm identity's pod id (it was issued to another key)")
     }
     credential = { text: credText, checked }
   }
@@ -501,7 +516,7 @@ async function cmdInspect(ctx) {
     const text = await ctx.store.read(realm.id, file)
     const c = realm.form === 'signed' ? await pkg.verifyCredential(text, realm.descriptor, { now }) : { ok: false, reason: 'no-credentials' }
     const doc = JSON.parse(text)
-    credentials.push({ serial, role: doc.role, notAfter: c.ok ? c.effective.notAfter : doc.notAfter, valid: c.ok, ...(c.ok ? {} : { reason: c.reason }), file })
+    credentials.push({ serial, subject: doc.subject, role: doc.role, notAfter: c.ok ? c.effective.notAfter : doc.notAfter, valid: c.ok, ...(c.ok ? {} : { reason: c.reason }), file })
   }
   return {
     realm: summary(realm),

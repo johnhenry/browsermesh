@@ -2,8 +2,8 @@ import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile, readdir, rm, stat } from 'node:fs/promises'
 import { join } from 'node:path'
-import { verifyDescriptor, verifyCredential, adoptDescriptor, importLedger } from '@johnhenry/browsermesh-realm'
-import { realmFixture, PP, freshKey } from './realm-helpers.mjs'
+import { verifyDescriptor, verifyCredential, checkSubject, adoptDescriptor, importLedger } from '@johnhenry/browsermesh-realm'
+import { realmFixture, PP, freshPodId, freshIdentity } from './realm-helpers.mjs'
 
 describe('realm issue', () => {
   let fx
@@ -15,8 +15,8 @@ describe('realm issue', () => {
   after(async () => { await fx.cleanup() })
 
   it('issues a key-bound credential that verifies against the descriptor, and says so', async () => {
-    const key = await freshKey()
-    const res = await fx.ok(['realm', 'issue', created.realm.id, '--role', 'member', '--key', key, '--ttl', '1d', ...PP])
+    const key = await freshPodId()
+    const res = await fx.ok(['realm', 'issue', created.realm.id, '--role', 'member', '--pod-id', key, '--ttl', '1d', ...PP])
     assert.equal(res.realm, created.realm.id)
     assert.equal(res.subject, key)
     assert.equal(res.role, 'member')
@@ -33,8 +33,8 @@ describe('realm issue', () => {
   })
 
   it('defaults the lifetime to the realm ttl, allocates serials from one ledger, and records them', async () => {
-    const a = await fx.ok(['realm', 'issue', created.realm.id, '--role', 'member', '--key', await freshKey(), ...PP])
-    const b = await fx.ok(['realm', 'issue', created.realm.id, '--role', 'guest', '--key', await freshKey(), ...PP])
+    const a = await fx.ok(['realm', 'issue', created.realm.id, '--role', 'member', '--pod-id', await freshPodId(), ...PP])
+    const b = await fx.ok(['realm', 'issue', created.realm.id, '--role', 'guest', '--pod-id', await freshPodId(), ...PP])
     assert.equal(a.notAfter - a.notBefore, 7 * 86400)
     assert.equal(b.serial, a.serial + 1)
     const led = await fx.ok(['realm', 'ledger', created.realm.id])
@@ -46,40 +46,71 @@ describe('realm issue', () => {
     assert.equal(onDisk.nextSerial, led.nextSerial)
   })
 
+  it('--public-key and --pod-id for the same identity give the same subject (the pod id), which checkSubject accepts', async () => {
+    const me = await freshIdentity()
+    const byPod = await fx.ok(['realm', 'issue', created.realm.id, '--role', 'member', '--pod-id', me.podId, ...PP])
+    const byKey = await fx.ok(['realm', 'issue', created.realm.id, '--role', 'member', '--public-key', me.publicKey, ...PP])
+    assert.equal(byPod.subject, me.podId)
+    assert.equal(byKey.subject, me.podId)
+    const a = JSON.parse(byPod.credential)
+    const b = JSON.parse(byKey.credential)
+    for (const k of ['v', 'realm', 'subject', 'role', 'epoch', 'issuer']) assert.equal(a[k], b[k], k)
+    const v = await verifyDescriptor(created.descriptor, { pinnedId: created.realm.id })
+    const c = await verifyCredential(byKey.credential, v.descriptor)
+    assert.equal(c.ok, true)
+    assert.equal(checkSubject(c, me.podId).ok, true)
+    assert.equal(checkSubject(c, me.publicKey).ok, false)
+    const led = await fx.ok(['realm', 'ledger', created.realm.id])
+    assert.ok(led.entries.some((e) => e.subject === me.podId))
+  })
+
+  it('--key is refused naming the new flags; both or neither of --pod-id/--public-key is a usage error', async () => {
+    const me = await freshIdentity()
+    const base = ['realm', 'issue', created.realm.id, '--role', 'member']
+    for (const extra of [['--key', me.publicKey], ['--pod-id', me.podId, '--public-key', me.publicKey], [], ['--public-key', 'nope']]) {
+      const r = await fx.run([...base, ...extra, ...PP])
+      assert.equal(r.code, 2, extra.join(' '))
+      assert.equal(r.error.code, 'EUSAGE')
+    }
+    const k = await fx.run([...base, '--key', me.publicKey, ...PP])
+    assert.match(k.error.message, /--pod-id/)
+    assert.match(k.error.message, /--public-key/)
+  })
+
   it('--out writes the credential text', async () => {
     const out = join(fx.dir, 'cred.json')
-    const res = await fx.ok(['realm', 'issue', created.realm.id, '--role', 'member', '--key', await freshKey(), '--out', out, ...PP])
+    const res = await fx.ok(['realm', 'issue', created.realm.id, '--role', 'member', '--pod-id', await freshPodId(), '--out', out, ...PP])
     assert.equal(await readFile(out, 'utf8'), res.credential)
   })
 
   it('refuses a bad key, an undefined role, a lifetime past the realm ttl, and an unknown realm', async () => {
-    const key = await freshKey()
+    const key = await freshPodId()
     const cases = [
-      [['--role', 'member', '--key', 'not-a-key'], 2],
-      [['--role', 'wizard', '--key', key], 2],
+      [['--role', 'member', '--pod-id', 'not-a-key'], 2],
+      [['--role', 'wizard', '--pod-id', key], 2],
       [['--role', 'member'], 2],
-      [['--role', 'member', '--key', key, '--ttl', '60d'], 2],
+      [['--role', 'member', '--pod-id', key, '--ttl', '60d'], 2],
     ]
     for (const [extra, code] of cases) {
       const r = await fx.run(['realm', 'issue', created.realm.id, ...extra, ...PP])
       assert.equal(r.code, code, extra.join(' '))
       assert.equal(r.error.code, 'EUSAGE')
     }
-    const r = await fx.run(['realm', 'issue', 'no-such-realm-at-all', '--role', 'member', '--key', key, ...PP])
+    const r = await fx.run(['realm', 'issue', 'no-such-realm-at-all', '--role', 'member', '--pod-id', key, ...PP])
     assert.equal(r.code, 4)
     assert.equal(r.error.code, 'EREALM_NOT_FOUND')
   })
 
   it('a failed issue does not burn a serial', async () => {
     const before = (await fx.ok(['realm', 'ledger', created.realm.id])).nextSerial
-    await fx.run(['realm', 'issue', created.realm.id, '--role', 'wizard', '--key', await freshKey(), ...PP])
+    await fx.run(['realm', 'issue', created.realm.id, '--role', 'wizard', '--pod-id', await freshPodId(), ...PP])
     assert.equal((await fx.ok(['realm', 'ledger', created.realm.id])).nextSerial, before)
   })
 
   it('issuing needs only the issuer key: it works with the root key moved away', async () => {
     const r2 = await fx.ok(['realm', 'create', 'cold-root', ...PP])
     await rm(join(fx.realmDir, r2.realm.id, r2.root.file))
-    const ok = await fx.run(['realm', 'issue', r2.realm.id, '--role', 'member', '--key', await freshKey(), ...PP])
+    const ok = await fx.run(['realm', 'issue', r2.realm.id, '--role', 'member', '--pod-id', await freshPodId(), ...PP])
     assert.equal(ok.code, 0, ok.stderr)
     const revoke = await fx.run(['realm', 'revoke', r2.realm.id, '--epoch', ...PP])
     assert.equal(revoke.code, 3)
@@ -95,7 +126,7 @@ describe('realm revoke', () => {
   before(async () => {
     fx = await realmFixture()
     created = await fx.ok(['realm', 'create', 'club', ...PP])
-    cred = await fx.ok(['realm', 'issue', created.realm.id, '--role', 'member', '--key', await freshKey(), ...PP])
+    cred = await fx.ok(['realm', 'issue', created.realm.id, '--role', 'member', '--pod-id', await freshPodId(), ...PP])
     before1 = created.descriptor
   })
   after(async () => { await fx.cleanup() })
@@ -130,7 +161,7 @@ describe('realm revoke', () => {
   })
 
   it('--epoch bumps the epoch and raises the serial; credentials of the old epoch stop verifying', async () => {
-    const live = await fx.ok(['realm', 'issue', created.realm.id, '--role', 'member', '--key', await freshKey(), ...PP])
+    const live = await fx.ok(['realm', 'issue', created.realm.id, '--role', 'member', '--pod-id', await freshPodId(), ...PP])
     const res = await fx.ok(['realm', 'revoke', created.realm.id, '--epoch', ...PP])
     assert.equal(res.action, 'epoch')
     assert.equal(res.epoch, 1)
@@ -140,7 +171,7 @@ describe('realm revoke', () => {
     assert.equal(v.descriptor.epoch, 1)
     const stale = await verifyCredential(live.credential, v.descriptor)
     assert.deepEqual([stale.ok, stale.reason], [false, 'epoch-too-old'])
-    const fresh = await fx.ok(['realm', 'issue', created.realm.id, '--role', 'member', '--key', await freshKey(), ...PP])
+    const fresh = await fx.ok(['realm', 'issue', created.realm.id, '--role', 'member', '--pod-id', await freshPodId(), ...PP])
     assert.equal(fresh.epoch, 1)
     assert.equal((await verifyCredential(fresh.credential, v.descriptor)).ok, true)
   })
@@ -163,7 +194,7 @@ describe('realm rotate', () => {
   after(async () => { await fx.cleanup() })
 
   it('produces a new root, a rotation chain a fresh verifier accepts, and the same realm id', async () => {
-    const cred = await fx.ok(['realm', 'issue', created.realm.id, '--role', 'member', '--key', await freshKey(), ...PP])
+    const cred = await fx.ok(['realm', 'issue', created.realm.id, '--role', 'member', '--pod-id', await freshPodId(), ...PP])
     const res = await fx.ok(['realm', 'rotate', created.realm.id, ...PP])
     assert.equal(res.realm, created.realm.id)
     assert.equal(res.descriptorSerial, 2)
@@ -210,7 +241,7 @@ describe('realm rotate', () => {
       const r = await fx.run(['realm', cmd, al.realm.id, '--epoch', ...PP])
       assert.equal(r.code, 2, cmd)
     }
-    const issue = await fx.run(['realm', 'issue', al.realm.id, '--role', 'guest', '--key', await freshKey(), ...PP])
+    const issue = await fx.run(['realm', 'issue', al.realm.id, '--role', 'guest', '--pod-id', await freshPodId(), ...PP])
     assert.equal(issue.code, 2)
   })
 

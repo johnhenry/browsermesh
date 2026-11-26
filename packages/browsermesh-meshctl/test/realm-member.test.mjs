@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { readFile, readdir, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { verifyDescriptor, verifyCredential, checkSubject } from '@johnhenry/browsermesh-realm'
-import { realmFixture, PP, freshKey } from './realm-helpers.mjs'
+import { realmFixture, PP, freshPodId } from './realm-helpers.mjs'
 
 const modeOf = async (p) => (await stat(p)).mode & 0o777
 
@@ -75,8 +75,8 @@ describe('realm join, ls, inspect, export (a member machine)', () => {
 
   it('join stores a credential issued to this realm identity, after verifying it and its subject', async () => {
     const inspect = await memberOk(['realm', 'inspect', created.realm.id])
-    const mine = inspect.profile.identity.publicKey
-    const issued = await fx.ok(['realm', 'issue', created.realm.id, '--role', 'member', '--key', mine, ...PP])
+    const mine = inspect.profile.identity.podId
+    const issued = await fx.ok(['realm', 'issue', created.realm.id, '--role', 'member', '--pod-id', mine, ...PP])
     const file = join(fx.dir, 'mine.cred.json')
     await writeFile(file, issued.credential)
     const res = await memberOk(['realm', 'join', created.descriptor, '--credential', file])
@@ -91,6 +91,16 @@ describe('realm join, ls, inspect, export (a member machine)', () => {
     assert.equal(insp.profile.credentials.length, 1)
     assert.equal(insp.profile.credentials[0].serial, issued.serial)
     assert.equal(insp.profile.credentials[0].valid, true)
+  })
+
+  it('end to end: the pod id join printed is the subject checkSubject accepts for the issued credential', async () => {
+    const joined = await memberOk(['realm', 'join', created.descriptor])
+    const issued = await fx.ok(['realm', 'issue', created.realm.id, '--role', 'member', '--pod-id', joined.identity.podId, ...PP])
+    const v = await verifyDescriptor(created.descriptor, { pinnedId: created.realm.id })
+    const c = await verifyCredential(issued.credential, v.descriptor)
+    assert.equal(checkSubject(c, joined.identity.podId).ok, true)
+    const byKey = await fx.ok(['realm', 'issue', created.realm.id, '--role', 'member', '--public-key', joined.identity.publicKey, ...PP])
+    assert.equal(byKey.subject, joined.identity.podId)
   })
 
   it('export --credential returns the stored credential; --descriptor (the default) returns the descriptor; never a key', async () => {
@@ -116,7 +126,7 @@ describe('realm join, ls, inspect, export (a member machine)', () => {
   })
 
   it('refuses a credential issued to some other key', async () => {
-    const issued = await fx.ok(['realm', 'issue', created.realm.id, '--role', 'member', '--key', await freshKey(), ...PP])
+    const issued = await fx.ok(['realm', 'issue', created.realm.id, '--role', 'member', '--pod-id', await freshPodId(), ...PP])
     const file = join(fx.dir, 'theirs.cred.json')
     await writeFile(file, issued.credential)
     const r = await member(['realm', 'join', created.descriptor, '--credential', file])

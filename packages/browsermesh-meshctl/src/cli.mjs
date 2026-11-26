@@ -81,7 +81,7 @@ function usageDocument() {
       'vm drain <name> --dry-run',
       'vm status',
       'realm create <name> [--mode open|invite] [--authority-less] [--ttl 7d] [--issuer-ttl 365d] [--rendezvous <json|file>] [--roles <json|file>]  (signs with a fresh root; sealed keys need a passphrase option unless --authority-less)',
-      'realm issue <realm> --role <r> --key <public key> [--ttl 7d] [--out <file>]  (key-bound credential, signed by the issuer key, verified before it is printed)',
+      'realm issue <realm> --role <r> (--pod-id <id> | --public-key <key>) [--ttl 7d] [--out <file>]  (key-bound credential, signed by the issuer key, verified before it is printed)',
       'realm revoke <realm> --serial <n> | --epoch  (a new root-signed descriptor, serial+1; --epoch revokes every credential of the old epoch)',
       'realm rotate <realm>  (a new root, a rotation statement, a new descriptor)',
       'realm ledger <realm>',
