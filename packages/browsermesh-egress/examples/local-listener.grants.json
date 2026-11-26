@@ -1,0 +1,8 @@
+{
+  "grants": [
+    {
+      "peer": "<the pod id local-listener.mjs prints with --print-pod-id>",
+      "scopes": ["egress:tcp:db.internal.example:5432:connect"]
+    }
+  ]
+}

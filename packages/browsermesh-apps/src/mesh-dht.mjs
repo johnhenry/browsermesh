@@ -72,6 +72,9 @@ import { createLazyRequire } from './internal/lazy-node-require.mjs'
 /** Default `type` tag for DHT wire messages multiplexed onto a shared transport. */
 const DEFAULT_MESSAGE_TYPE = 'dht-relay'
 
+/** How long a signed store stays valid when `storeLifetimeMs` is not given (the node's own `owned` limit is 7 days). */
+const DEFAULT_STORE_LIFETIME_MS = 24 * 3600 * 1000
+
 // ---------------------------------------------------------------------------
 // shareTransport
 // ---------------------------------------------------------------------------
@@ -145,6 +148,19 @@ export function shareTransport(rawTransport) {
  *   distinguish DHT wire messages from other traffic sharing `transport`
  *   (e.g. `signaling.mjs`'s `'webrtc-offer'|'webrtc-answer'|'webrtc-ice'`).
  * @param {Function} [opts.onLog]
+ * @param {boolean} [opts.signStores=false] - Opt-in. Sign the record this node stores (its own, under its pod id) with `opts.identity`
+ *   (`signDhtStore`: the pod's Ed25519 key, a `seq` that rises with every announce, an expiry `storeLifetimeMs` ahead), so a node that
+ *   checks stores can tell the record is the pod's own. A node that does not check ignores the proof and stores the value as it always
+ *   did, so this is safe to turn on in a mixed swarm. Needs `@johnhenry/browsermesh-discovery` with `DhtDiscoveryStrategy`'s
+ *   `signStore` (0.7.0 or later); with an older one this throws instead of quietly storing unsigned.
+ * @param {{ sign: Function, rawPublicKey: Function }} [opts.identity] - The pod's identity (`createMeshNode` passes its own); required with `signStores`.
+ * @param {'open'|'owned'|object} [opts.storePolicy] - Opt-in. Who may store under which key on THIS node (`DhtNode`'s `storePolicy`; a
+ *   string is `{ mode }`). Absent (the default): any store from anyone is accepted, as it always was. `'open'`: unsigned stores are still
+ *   accepted, a signed one takes ownership of a pod-id key. `'owned'`: every store needs a valid proof, so a record from a node that
+ *   does not sign is not held here (counted in `dhtNode.storeStats.refused`). A node that announces its own record under `'owned'`
+ *   needs `signStores` too, or its own announces are refused (reported as `mesh-dht:store-refused`).
+ * @param {number} [opts.storeLifetimeMs=86400000] - How long a signed store is valid (24 h), re-signed with every announce.
+ * @param {() => number} [opts.now=Date.now] - The clock of the proofs (`seq` and expiry), in ms; a test passes its own.
  * @returns {{strategy: DhtDiscoveryStrategy, dhtNode: import('@johnhenry/browsermesh-discovery').DhtNode, teardown: () => void}}
  */
 export function createMeshDht({
@@ -154,6 +170,11 @@ export function createMeshDht({
   k,
   messageType = DEFAULT_MESSAGE_TYPE,
   onLog = () => {},
+  identity,
+  signStores = false,
+  storePolicy,
+  storeLifetimeMs = DEFAULT_STORE_LIFETIME_MS,
+  now = Date.now,
 }) {
   if (!localPodId || typeof localPodId !== 'string') {
     throw new Error('createMeshDht: options.localPodId is required and must be a non-empty string')
@@ -161,22 +182,56 @@ export function createMeshDht({
   if (!transport || typeof transport.send !== 'function' || typeof transport.onMessage !== 'function') {
     throw new Error('createMeshDht: options.transport is required and must implement send(msg)/onMessage(cb)')
   }
+  if (typeof signStores !== 'boolean') throw new Error('createMeshDht: options.signStores must be a boolean')
+  if (!Number.isSafeInteger(storeLifetimeMs) || storeLifetimeMs <= 0) throw new Error('createMeshDht: options.storeLifetimeMs must be a positive integer (ms)')
+  if (signStores && (!identity || typeof identity.sign !== 'function' || typeof identity.rawPublicKey !== 'function')) {
+    throw new Error('createMeshDht: options.signStores needs options.identity, an identity that can sign (sign(bytes) and rawPublicKey())')
+  }
+  let policy
+  if (storePolicy !== undefined) {
+    policy = typeof storePolicy === 'string' ? { mode: storePolicy } : storePolicy
+    if (!policy || typeof policy !== 'object' || Array.isArray(policy) || (policy.mode ?? 'open') !== 'open' && policy.mode !== 'owned') {
+      throw new Error("createMeshDht: options.storePolicy must be 'open', 'owned' or a policy object with mode 'open' or 'owned'")
+    }
+    // A node that holds other pods' records and never announces its own needs no signer; one that does announce would have every
+    // announce refused by its own policy, which `onStoreRefused` reports as `mesh-dht:store-refused` (`createMeshNode` always
+    // announces, and so refuses the combination outright).
+  }
 
   // Lazy, synchronous (see module doc comment) -- only reached once
   // validation above has already passed.
   const require = createLazyRequire(import.meta.url)
-  const { DhtDiscoveryStrategy } = require('@johnhenry/browsermesh-discovery')
+  const { DhtDiscoveryStrategy, signDhtStore } = require('@johnhenry/browsermesh-discovery')
 
   const sendFn = (targetId, msg) => {
     transport.send({ type: messageType, from: localPodId, to: targetId, payload: msg })
   }
+
+  // One `seq` per key, always rising (a millisecond clock, or one more than the last), so a node that replaces on a higher `seq` only
+  // takes every re-announce, across restarts too.
+  const lastSeq = new Map()
+  const signStore = signStores
+    ? async (key, record) => {
+      const t = now()
+      const seq = Math.max(t, (lastSeq.get(key) ?? 0) + 1)
+      lastSeq.set(key, seq)
+      return signDhtStore({ signer: identity, key, value: record, seq, exp: t + storeLifetimeMs })
+    }
+    : undefined
 
   const strategy = new DhtDiscoveryStrategy({
     localId: localPodId,
     sendFn,
     k,
     bootstrapContacts: bootstrapPeers.map((p) => (typeof p === 'string' ? { podId: p } : p)),
+    ...(policy ? { storePolicy: policy } : {}),
+    ...(signStore ? { signStore } : {}),
+    onStoreRefused: (info) => onLog('mesh-dht:store-refused', info),
   })
+  // An older discovery package ignores both options without a word; for a pod that asked for them that would be a quiet downgrade.
+  if ((policy || signStores) && strategy.storePolicy === undefined) {
+    throw new Error('createMeshDht: signStores and storePolicy need @johnhenry/browsermesh-discovery 0.7.0 or later (the installed one ignores them)')
+  }
 
   const unsubscribe = transport.onMessage((raw) => {
     if (!raw || typeof raw !== 'object') return
@@ -184,7 +239,9 @@ export function createMeshDht({
     if (raw.to !== localPodId) return // not addressed to us
     if (raw.from === localPodId) return // ignore our own broadcast echo
     try {
-      strategy.dhtNode.handleMessage(raw.from, raw.payload)
+      // With a store policy a store is answered asynchronously; the answer (a refusal included) is counted by the node, not sent on.
+      const handled = strategy.dhtNode.handleMessage(raw.from, raw.payload)
+      if (typeof handled?.then === 'function') handled.catch((err) => onLog('mesh-dht:handle-message-failed', { from: raw.from, error: err?.message || String(err) }))
     } catch (err) {
       onLog('mesh-dht:handle-message-failed', {
         from: raw.from,
