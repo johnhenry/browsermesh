@@ -341,16 +341,18 @@ keys as the fallback; adoption of a descriptor only after verification.
 Settled by reading the code (5.5 and 7): the wsh login cannot carry realm data to `authorize` today, and the signalling
 server has no membership concept.
 
+Settled by running it (2026-11-26): **seed derivation works in all three browsers.** A browser spec
+(`tests/browser/realm-derivation.spec.mjs`, pull request #407) derives the key from a fixed seed and asserts the derived
+bytes, the public key and the deterministic signature against the vector pinned from Node 26, and that the kept key is
+non-extractable and refuses export. The repository's CI ran it in Chromium, Firefox and WebKit and it passed in each. So v1
+takes derivation, not the fallback, and the fallback stays only as a guard if a later browser release regresses. Caveat: the
+check ran against the browser builds CI uses on that day, and not on mobile Safari or any other engine.
+
 Still open:
 
-1. **The browser check.** Run as a spike on 2026-11-26. **Chromium 156 and 159 pass** and match Node 26 exactly (derived
-   bytes, public key and signature; the key is non-extractable and refuses export). **Firefox and WebKit could not be
-   launched on the author's machine** (a NixOS box with only Chromium's libraries), so nothing is known about them yet. The
-   same check is now a browser spec in a separate pull request (#407) that the repository's CI runs in all three browsers;
-   its result closes this item, and a failure in either decides the fallback.
-2. **The exact strings and record shape.** Proposed in 5.10 from the prior art above, with the first vector. Closed when the
+1. **The exact strings and record shape.** Proposed in 5.10 from the prior art above, with the first vector. Closed when the
    wallet code lands and the vector is pinned in its tests.
-3. **A wsh change for a pre-authentication realm hint** (5.5). Deferred, and tracked as johnhenry/wsh#274 with a trigger
+2. **A wsh change for a pre-authentication realm hint** (5.5). Deferred, and tracked as johnhenry/wsh#274 with a trigger
    (slot exhaustion by strangers seen in tests or real use), not part of this plan.
 
 ## 11. Staged order
