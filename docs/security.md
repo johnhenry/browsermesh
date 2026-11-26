@@ -339,6 +339,37 @@ key and host proof are readable by the relay, and are not secrets); a
 compromised peer; availability; anything forwarded onward over a link that is
 not sealed; peers that do not run it.
 
+### Link admission
+
+Opt in (`createMeshNode({ admission })`, or `createLinkAdmission()` and `WshPeerLinks({ admission })` by hand); off by
+default, and without it nothing here applies. A link whose peer is not yet known is held in a restricted state until a
+handler you supply promotes or closes it. Design: [`design/link-admission.md`](design/link-admission.md).
+
+Authenticated: over wsh the restricted peer's key is the one wsh verified (`proven: true`); over WebRTC `proven` is true only
+when the identity binding verified the peer, and `decide` is told which. The seam does not interpret a frame: whether a
+frame proves anything is the handler's.
+
+Bounded: at most `maxRestricted` restricted links (default 8; the next is refused `restricted-full`), each closed after
+`deadlineMs` (default 10 s) unless promoted or closed, each inbound frame over `maxFrameBytes` (default 16 KiB) dropped before
+the handler, each outbound frame over it refused. A restricted wsh peer holds `endpoint:mesh-admission`, not `endpoint:mesh`,
+so wsh's own capability check keeps it off the mesh endpoint; its link is not a peer, so no mesh service, `peer-up` or
+`onIncomingData` sees it. An older transport that cannot hold a restricted peer is not trusted to: the admission authorizer
+returns the restricted verdict only to a transport that passed `{ restricted: true }`, and refuses otherwise.
+
+Not protected: memory per restricted wsh link is bounded by the hub's `maxFrameBytes` (1 MiB), since the seam's smaller cap
+drops frames after they are decoded; a burst of strangers larger than the waiting halves can leave an honest dialler unpaired
+for one relay round trip (the cap counts strangers only once restricted); over WebRTC a local `connectToPeer()` to a peer
+whose inbound link is held adopts that connection as a caller session; links this node dials are never restricted; a
+registry access re-check does not cover a restricted link; the seam ships no realm messages, credentials or grants (the
+handler is the caller's, and its correctness is not covered here).
+
+Verified: unit tests of the seam (cap, deadline, one-shot promote and close, frame cap, counters); wsh over the in-process
+pipe relay with real sealed sessions, through `createMeshNode` (a stranger held, handler frames only, nothing reaching
+`onIncomingData`, promote adopting it) and through `WshPeerLinks` directly; the WebRTC gate over mock transports; the
+fail-closed negotiation (an authorizer called with one argument refuses, and a stub that grants on any truthy verdict
+refuses). Never: a real relay, a real WebRTC connection through the gate, a published older transport release (a stub with
+its grant rule is tested, not the release).
+
 ### wsh services on a pod
 
 Package: `browsermesh-transport` (`WshServices`, `wsh-services.mjs`). Design:

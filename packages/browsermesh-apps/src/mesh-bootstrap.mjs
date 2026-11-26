@@ -392,7 +392,7 @@ import { registerOrchestratorTools } from './mesh-orchestrator-tools.mjs'
  *   whether the identity binding verified the peer's key. With `wsh` also given, a peer the wsh authorizer refuses is put to the
  *   same `decide` (`transport: 'wsh'`), and `restrict` admits it to a restricted wsh link. Off unless given: nothing changes. The
  *   seam is `node.admission`.
- * @param {object} [options.wsh] - Opt in to the sealed wsh peer link
+ * @param {object} [options.wsh] - Opt in to the sealed wsh peer link (`wsh.WshPeerLinks` substitutes the class, for tests)
  *   (`@johnhenry/browsermesh-transport/wsh`'s `WshPeerLinks`, which needs the
  *   optional peer `@johnhenry/wsh`). Off unless given. The node's own identity
  *   is the wsh identity. `relays` (pipe relay URLs) and any other
@@ -1211,12 +1211,19 @@ export async function createMeshNode(options = {}) {
   // registry grants it mesh:link:connect unless `wsh.authorize` says otherwise.
   if (wsh) {
     // The wsh links live at the transport's `/wsh` subpath from 0.11; an older transport serves them from its root.
-    const { WshPeerLinks } = await import('@johnhenry/browsermesh-transport/wsh').catch(() => import('@johnhenry/browsermesh-transport'))
-    const { require: _require, listen = true, authorize, ...hubOptions } = wsh
+    const { require: _require, listen = true, authorize, WshPeerLinks: LinksOverride, ...hubOptions } = wsh
+    const WshPeerLinks = LinksOverride || (await import('@johnhenry/browsermesh-transport/wsh').catch(() => import('@johnhenry/browsermesh-transport'))).WshPeerLinks
+    // A transport from before the restricted verdict grants a full mesh link on any truthy verdict. The admission authorizer
+    // refuses a `restrict` decision unless the transport says it understands it; say so, since every stranger is then refused.
+    if (admissionSeam && WshPeerLinks.supportsRestrictedAdmission !== true) {
+      onLog('mesh-bootstrap:admission-restricted-unsupported', {
+        message: 'admission is configured but the loaded WshPeerLinks does not advertise supportsRestrictedAdmission: peers the admission seam would restrict are refused (upgrade @johnhenry/browsermesh-transport)',
+      })
+    }
     const baseAuthorize = authorize || createWshAuthorizer(registry)
     const links = new WshPeerLinks({
       identity: identityManager.getIdentity(podId),
-      authorize: admissionSeam ? createWshAdmissionAuthorize(admissionSeam, baseAuthorize) : baseAuthorize,
+      authorize: admissionSeam ? createWshAdmissionAuthorize(admissionSeam, baseAuthorize, { onEvent: (e) => onLog('mesh-bootstrap:admission-event', e) }) : baseAuthorize,
       ...(admissionSeam ? { admission: admissionSeam } : {}),
       onLog: (line) => onLog('mesh-bootstrap:wsh', { line }),
       ...hubOptions,

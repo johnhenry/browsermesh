@@ -340,7 +340,7 @@ describe('createWshAdmissionAuthorize', () => {
     const authorize = createWshAdmissionAuthorize(admission, ({ podId }) => (podId === 'friend' ? { expires: 5 } : false))
     assert.deepEqual(await authorize({ podId: 'friend' }), { expires: 5 })
     assert.equal(asked.length, 0)
-    assert.deepEqual(await authorize({ podId: 'stranger' }), { restricted: true })
+    assert.deepEqual(await authorize({ podId: 'stranger' }, { restricted: true }), { restricted: true })
     assert.deepEqual(asked, [{ peerKey: 'stranger', transport: 'wsh', proven: true }])
   })
 
@@ -356,5 +356,52 @@ describe('createWshAdmissionAuthorize', () => {
   it('an inner authorizer that throws is a deny, as in wsh-links', async () => {
     const { admission } = seam({ decide: () => 'allow' })
     assert.equal(await createWshAdmissionAuthorize(admission, () => { throw new Error('x') })({ podId: 's' }), false)
+  })
+})
+
+describe('createWshAdmissionAuthorize: fail closed against a transport that cannot hold a restricted peer', () => {
+  // A transport before the negotiation calls `authorize(peer)` with ONE argument and grants endpoint:mesh on any truthy verdict.
+  it('a restrict decision called with one argument (an older transport) is a refusal, and says why', async () => {
+    const events = []
+    const { admission } = seam({ decide: () => 'restrict' })
+    const authorize = createWshAdmissionAuthorize(admission, () => false, { onEvent: (e) => events.push(e) })
+    assert.equal(await authorize({ podId: 'stranger' }), false)
+    assert.equal(events.length, 1)
+    assert.equal(events[0].type, 'restricted-unsupported')
+    assert.equal(events[0].peerKey, 'stranger')
+  })
+
+  it('a context without restricted: true is the same refusal', async () => {
+    const { admission } = seam({ decide: () => 'restrict' })
+    const authorize = createWshAdmissionAuthorize(admission, () => false)
+    assert.equal(await authorize({ podId: 's' }, {}), false)
+    assert.equal(await authorize({ podId: 's' }, { restricted: 'yes' }), false)
+  })
+
+  it('with { restricted: true } the restricted verdict is returned', async () => {
+    const { admission } = seam({ decide: () => 'restrict' })
+    assert.deepEqual(await createWshAdmissionAuthorize(admission, () => false)({ podId: 's' }, { restricted: true }), { restricted: true })
+  })
+
+  it('allow and deny do not depend on the context', async () => {
+    for (const ctx of [undefined, { restricted: true }]) {
+      const a = seam({ decide: () => 'allow' }).admission
+      const d = seam({ decide: () => 'deny' }).admission
+      assert.equal(await createWshAdmissionAuthorize(a, () => false)({ podId: 's' }, ctx), true)
+      assert.equal(await createWshAdmissionAuthorize(d, () => false)({ podId: 's' }, ctx), false)
+    }
+  })
+
+  it('an inner verdict (true, { expires }) passes through untouched for an older transport', async () => {
+    const { admission } = seam({ decide: () => 'restrict' })
+    assert.deepEqual(await createWshAdmissionAuthorize(admission, () => ({ expires: 5 }))({ podId: 'f' }), { expires: 5 })
+  })
+
+  it('the combination the published transport (0.12.3) makes dangerous: a stub that grants on ANY truthy verdict now refuses', async () => {
+    const { admission } = seam({ decide: () => 'restrict' })
+    const authorize = createWshAdmissionAuthorize(admission, () => false)
+    // wsh-links 0.12.3 #authorizePeer, reduced: one argument, any truthy verdict grants endpoint:mesh.
+    const oldTransportGrants = async (peer) => { const v = await authorize(peer); return v ? { capabilities: 'endpoint:mesh' } : false }
+    assert.equal(await oldTransportGrants({ podId: 'stranger' }), false)
   })
 })

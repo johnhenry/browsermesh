@@ -177,3 +177,19 @@ describe('wsh authorize: the other verdicts are unchanged', () => {
     await assert.rejects(() => stranger.connect(ids[0].podId, { keep: false }), (e) => e.code === 'WSH_REFUSED');
   });
 });
+
+describe('wsh authorize: the restricted capability is advertised', () => {
+  it('WshPeerLinks.supportsRestrictedAdmission is true', async () => {
+    const { WshPeerLinks } = await import('../src/wsh.mjs');
+    assert.equal(WshPeerLinks.supportsRestrictedAdmission, true);
+  });
+
+  it('authorize gets (peer, { restricted: true }), and an authorizer that ignores the second argument still works', async () => {
+    const seen = [];
+    const admission = fakeAdmission();
+    const { ids, stranger } = await rig({ verdict: (peer, ctx) => { seen.push(ctx); return { restricted: true }; }, admission });
+    await stranger.connect(ids[0].podId);
+    await waitFor(() => admission.calls.length === 1, { label: 'admit called' });
+    assert.deepEqual(seen, [{ restricted: true }]);
+  });
+});
