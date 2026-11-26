@@ -1,5 +1,11 @@
 # @johnhenry/browsermesh-objects
 
+## 0.1.4
+
+### Patch Changes
+
+- e26b7e4: The READMEs now say these packages are tested against `@johnhenry/wsh` up to 0.56.1. Nothing in the code changed and every peer range is unchanged: none of these packages uses a wsh forward, so nothing here needs what 0.56 added.
+
 ## 0.1.3
 
 ### Patch Changes
