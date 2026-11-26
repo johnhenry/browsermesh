@@ -406,8 +406,8 @@ node.admission.stats();                         // restricted now, opened, promo
   the identity binding verified it (false under `webrtcAllowUnboundPeers` with a peer that sent no proof).
 - **`handler({ peerKey, transport, proven, send, onFrame, onClose, promote, close })`** owns the exchange. `promote()` and
   `close()` are one-shot together (the first wins). `link.send(frame)` throws synchronously for a programmer error (the link
-  is no longer restricted; a frame over `maxFrameBytes`, a `RangeError`) and otherwise returns a promise that never rejects:
-  `true` once the transport accepted the frame, `false` if it failed or the link closed under it. A handler may fire and
+  was already promoted; a frame over `maxFrameBytes`, a `RangeError`) and otherwise returns a promise that never rejects:
+  `true` once the transport accepted the frame, `false` if it failed or the link is closed (a send after the deadline or after the peer left is `false`, not a throw). A handler may fire and
   forget a send safely, and checks the result only if it needs delivery. Frames over `maxFrameBytes` are dropped before the handler sees them, and
   an outbound frame over it throws. The deadline closes a link that was neither promoted nor closed (`deadline`); a link
   past the cap is refused (`restricted-full`) and never reaches the handler.

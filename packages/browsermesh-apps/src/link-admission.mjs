@@ -50,8 +50,8 @@ const isThenable = (v) => v && typeof v.then === 'function'
  *   A throw, a rejection or any other value is a deny.
  * @param {(link: { peerKey: string, transport: string, proven: boolean, send: (frame: object) => Promise<boolean>, onFrame: (cb: (frame: any) => any) => void, onClose: (cb: (reason: string) => void) => void, promote: () => boolean, close: (reason?: string) => boolean }) => any} opts.handler
  *   Called once per restricted link, synchronously inside `admit()`, and owns the exchange. `link.send(frame)` throws synchronously for a
- *   programmer error (the link is no longer restricted, or the frame is over `maxFrameBytes`: `RangeError`); otherwise it returns a promise
- *   that NEVER rejects: `true` once the transport accepted the frame, `false` if the transport failed or the link closed under it. A handler
+ *   programmer error (the link was already promoted, or the frame is over `maxFrameBytes`: `RangeError`); otherwise it returns a promise
+ *   that NEVER rejects: `true` once the transport accepted the frame, `false` if the transport failed or the link is closed (also when it closed before the call). A handler
  *   may fire and forget a send; it checks the result only if it needs delivery. A throw or a rejection closes the link
  *   with `handler-error`. Inbound text frames that are JSON objects arrive as objects.
  * @param {(event: { type: string, peerKey?: string, transport?: string, reason?: string }) => void} [opts.onEvent]
@@ -111,6 +111,8 @@ export function createLinkAdmission({
     const link = {
       peerKey, transport, proven: proven === true,
       send(frame) {
+        // A closed link is a normal race for a handler (the deadline, the peer leaving): `false`. A promoted one was handed over: a bug.
+        if (rec.state === 'closed') return Promise.resolve(false)
         if (rec.state !== 'restricted') throw new Error('link is not restricted')
         if (frameSize(frame) > maxFrameBytes) {
           stats.framesRefusedOut++
