@@ -14,10 +14,11 @@ import { UsageError } from './output.mjs'
 /** Long flags that never take a value -- `--foo` alone means `true`. */
 const BOOLEAN_FLAGS = new Set([
   'json', 'pretty', 'quiet', 'help', 'dry-run', 'cascade', 'loopback',
+  'authority-less', 'epoch', 'descriptor',
 ])
 
 /** Groups whose second token is a subcommand (`meshctl <group> <cmd> ...`). */
-const GROUPS_WITH_SUBCOMMAND = new Set(['host', 'pods', 'vm'])
+const GROUPS_WITH_SUBCOMMAND = new Set(['host', 'pods', 'vm', 'realm'])
 
 /** Groups with no subcommand (`meshctl <group> [args]`). */
 const GROUPS_WITHOUT_SUBCOMMAND = new Set(['identity', 'hosts', 'watch'])

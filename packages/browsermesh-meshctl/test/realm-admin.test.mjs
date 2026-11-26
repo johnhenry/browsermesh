@@ -1,6 +1,6 @@
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
+import { readFile, readdir, rm, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { verifyDescriptor, verifyCredential, adoptDescriptor, importLedger } from '@johnhenry/browsermesh-realm'
 import { realmFixture, PP, freshKey } from './realm-helpers.mjs'
@@ -220,6 +220,5 @@ describe('realm rotate', () => {
     assert.equal(r.code, 3)
     assert.equal(await readFile(join(fx.realmDir, created.realm.id, 'descriptor.json'), 'utf8'), before)
     assert.ok((await stat(join(fx.realmDir, created.realm.id, created.root.file))).isFile())
-    void writeFile
   })
 })

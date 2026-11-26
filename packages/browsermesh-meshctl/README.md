@@ -9,7 +9,9 @@ same `pod-host:request` envelopes the in-mesh `createPodHostClient()` uses. It
 spawns, lists, sends to, snapshots and drains pods on the hosts that allow it.
 There is no separate admin API: `meshctl` has no more authority over a host
 than any other granted peer does, and a host decides, per verb, what this
-identity may do.
+identity may do. The one thing it can hold beyond its own identity is a
+**realm's signing keys** ([Realms](#realms)); that admin half is local key
+custody and offline signing, and it grants nothing on anyone else's host.
 
 > **Status.** The commands are tested in full against in-process hosts
 > (`--loopback`), and the sealed relay path (`--wsh-relay`) against the
@@ -32,6 +34,7 @@ identity may do.
 - [Identity](#identity)
 - [Transports](#transports)
 - [Commands](#commands)
+- [Realms](#realms)
 - [`vm`: a different animal](#vm-a-different-animal)
 - [What is not supported](#what-is-not-supported)
 - [Peer dependencies](#peer-dependencies)
@@ -300,6 +303,130 @@ meshctl pods supervised --loopback
 meshctl pods crash node-host web --loopback   # dev-only: demo a restart
 ```
 
+## Realms
+
+A **realm** is a membership and policy domain: an id, a root authority, rendezvous information and a set of roles
+(design: `docs/design/realms.md` in the repository). `meshctl realm ...` is its operator and member front end. It works
+on **local files only** (no mesh connection, no network): the admin half is **local key custody and offline signing**,
+and it grants nothing on anyone else's host (a host decides what a realm's role may do, with its own policy). It needs
+the optional peer `@johnhenry/browsermesh-realm`; without it, `meshctl realm ...` exits 2 and says `npm install
+@johnhenry/browsermesh-realm`, and every other command works as before.
+
+```
+meshctl realm create <name> [--mode open|invite] [--authority-less] [--ttl 7d] [--issuer-ttl 365d]
+                            [--rendezvous <json|file>] [--roles <json|file>]
+meshctl realm issue  <realm> --role <r> --key <public key> [--ttl 7d] [--out <file>]
+meshctl realm revoke <realm> --serial <n> | --epoch
+meshctl realm rotate <realm>
+meshctl realm ledger <realm>
+meshctl realm join   <descriptor-file|text> [--id <realm id>] [--credential <file>]
+meshctl realm ls
+meshctl realm inspect <realm>
+meshctl realm export <realm> [--descriptor | --credential <serial>] [--out <file>]
+meshctl realm invite ...                       # not implemented in v1: exits 2, EREALM_NOT_IMPLEMENTED
+```
+
+`<realm>` is the realm id, an id prefix of six or more characters, or its name. Every command prints one JSON document,
+as everywhere in meshctl. Commands that act on an existing realm echo its id as `realm`; `create`, `join` and `inspect`
+return a summary object (`id`, `name`, `mode`, `form`, `serial`, `epoch`, `ttl`).
+
+| Command | Needs | Result (besides `realm`) |
+| --- | --- | --- |
+| `create` | passphrase (not with `--authority-less`) | `realmDir`, `descriptor` (the signed text, public), `root`/`issuer` (`publicKey`, `file`), both `null` for `--authority-less` |
+| `issue` | passphrase, the issuer key | `credential` (text), `serial`, `subject`, `role`, `notBefore`, `notAfter` (whole seconds), `epoch`, `issuer`, `verified` |
+| `revoke` | passphrase, the **root** key | `action` (`serial` or `epoch`), `descriptorSerial`, `epoch`, `revoked`, `descriptor` |
+| `rotate` | passphrase, the root key | `descriptorSerial`, `chainLength`, `root` (`publicKey`, `previous`), `descriptor` |
+| `ledger` | | `nextSerial`, `entries`, `revoked` |
+| `join` | | `adopted`, `pinned` (`given`/`computed`), `identity` (`podId`, `publicKey`, `file`, `created`), `credential` or `null` |
+| `ls` | | `realms[]` with `holds` (`root`, `issuers`) and `member` |
+| `inspect` | | `descriptor`, `custody`, `ledger`, `profile`, `note` |
+| `export` | | `descriptor`, or `serial` and `credential` |
+
+### Key custody
+
+The **root key is the realm's whole authority**, so unlike meshctl's own identity file (a plaintext JWK) it is never
+stored in the clear. `create` makes a fresh root and (unless `--authority-less`) one **issuer** key, and **seals** both
+with `@johnhenry/keyvault` (`seal(pkcs8, passphrase, { type: 'browsermesh-realm-root', header })`: AES-GCM under a
+PBKDF2-derived key, the type, KDF parameters and header authenticated). A key is unsealed only for the one signing call
+that needs it, imported **non-extractable**, and the decrypted buffer is zeroed; the root key is never printed and
+`export` never returns it. (JavaScript cannot wipe a string or a `CryptoKey`, so this is best effort.)
+
+The passphrase is **never taken from argv**. Commands that sign accept exactly:
+
+- `--passphrase-env <VAR>`: the name of an environment variable holding it, or
+- `--passphrase-file <path>`: a file holding it (one trailing newline is ignored). The file must belong to you and be
+  mode `0600`, or the command refuses (`EREALM_PASSPHRASE_FILE_MODE`, exit 3).
+
+An unset or empty passphrase, both options together, or a `--passphrase` flag is a usage error (exit 2); a wrong one is
+`EREALM_BAD_PASSPHRASE` (exit 3). `--authority-less` realms have no keys and need none. One passphrase seals the root
+and the issuer of a realm.
+
+**Who signs what.** Only the **root** signs descriptors, so `revoke` (a new descriptor), `rotate` and anything that
+changes the issuers need the root. Only an **issuer** signs credentials, so `issue` needs the issuer key and never
+touches the root: keep the root off the machine that issues (move `root.key.json` out of the realm directory; `issue`
+keeps working, `revoke` and `rotate` say `EREALM_NO_KEY`). The issuer key lives one year by default (`--issuer-ttl`);
+there is no command yet to replace or renew an issuer (see below).
+
+`issue` allocates the serial from the realm's **one ledger**, shared by the root and the issuer key this machine holds,
+so serials never collide (`descriptor.revoked` is a flat list of serials with no issuer, so serials are per ledger).
+It verifies its own output with `verifyCredential` before printing and records the serial in the ledger. `--key` is the
+member's **public key** (base64url, as `realm join` prints it), not the pod id (a hash of it): a credential is bound to
+the key the link proves.
+
+`revoke --serial` adds the serial to `descriptor.revoked` and re-signs at `serial + 1`; `revoke --epoch` raises the
+epoch (every credential of the older epoch stops verifying) and also bumps the serial. Eventual revocation: a peer keeps
+honouring a credential until it adopts the new descriptor, or until `notAfter`. `rotate` makes a new root, a rotation
+statement signed by the old root and countersigned by the new, and a new descriptor; the realm id does not change and a
+fresh verifier that knows only the id accepts the chain. The retired root key file is replaced. A compromised *current*
+root ends the realm; rotation limits aging, not compromise (design note 5.1).
+
+### Files
+
+`--realm-dir <dir>` (default `~/.config/browsermesh/realms/`) holds one directory per realm id, owner-only (`0700`
+directories, `0600` files):
+
+```
+<realm-dir>/<realm id>/
+  descriptor.json        the signed descriptor text, exactly as signed
+  ledger.json            the issuer ledger (where keys are held)
+  root.key.json          sealed root key (only where it is held)
+  issuer.key.json        sealed issuer key
+  issued/<serial>.json   credentials issued here
+  profile/identity.json  this machine's own identity for the realm (a JWK, 0600, like the global identity file)
+  profile/credentials/<serial>.json
+```
+
+### Joining, and one identity per realm
+
+`join` verifies the descriptor against the pinned realm id (`--id`, or, without it, the id the descriptor claims, which
+trusts the first descriptor you were given: pass `--id` when you know the id) and refuses anything that does not
+verify; it never needs the network. A newer descriptor of a realm already held is adopted only if it verifies and its
+serial is higher. `join` also makes this machine's **identity for that realm**: in v1 an independent random Ed25519
+key per realm, stored in the realm's `profile/` (mode `0600`), so two realms cannot correlate this machine by its key.
+To get a credential: `realm join <descriptor>` (prints `identity.publicKey`), the issuer runs `realm issue --key
+<that key>`, then `realm join <descriptor> --credential <file>` verifies it (including that its subject is this
+identity's key) and stores it.
+
+**Follow-up:** the design derives per-realm keys from one seed (HKDF, one backup recovers every realm). The derivation
+exists in `browsermesh-core`, but wiring a seed into meshctl is not done: today each realm identity needs its own backup.
+
+### Limits, stated plainly
+
+- **`inspect` cannot list live peers.** meshctl keeps no session between invocations, so `inspect` shows the stored
+  descriptor, the custody (public keys only) and the local profile, and its `note` says so.
+- **There is no `realm leave`.** With no roster it has no protocol meaning: a member deletes its realm directory (or
+  just `profile/`).
+- **`realm invite` is not implemented.** There is no keyless credential in v1, so no tickets and no admitters; the
+  command exists only to answer `EREALM_NOT_IMPLEMENTED` (exit 2) and point at key-bound `realm issue`.
+- No command to replace or renew an issuer, and no `--valid-until`; both need a root-signed descriptor change and are
+  not built.
+- A rotation writes the new sealed root, then the descriptor, then retires the old key; if it stops in between, the next
+  command finds the key the stored descriptor names.
+
+Error codes: `EUSAGE` (2), `EREALM_NOT_IMPLEMENTED` (2), `EREALM_AMBIGUOUS` (2), `EREALM_BAD_PASSPHRASE` (3),
+`EREALM_PASSPHRASE_FILE_MODE` (3), `EREALM_NO_KEY` (3), `EREALM_NOT_FOUND` (4), `ENOENT` (4), `EREALM_VERIFY` (1),
+`EREALM_EXISTS` (1), `EREALM_CORRUPT` (1).
+
 ## `vm`: a different animal
 
 **`vm` needs a repository checkout, and is not available from the npm
@@ -381,7 +508,9 @@ peers: `@johnhenry/browsermesh-primitives`, `@johnhenry/browsermesh-pod`,
 are required; `@johnhenry/browsermesh-transport` (0.11 or later, the release
 with the `/wsh` subpath) and `@johnhenry/wsh` are optional peers, needed only
 for the real-mesh paths (`--wsh-relay`, `--signaling`). Without them, those
-flags say what is missing and the other commands still work. The lower bounds
+flags say what is missing and the other commands still work. The same goes for
+`@johnhenry/browsermesh-realm`, an optional peer needed only by `meshctl realm ...` (install it
+once it is released). `@johnhenry/keyvault`, which seals realm keys, is an ordinary dependency. The lower bounds
 are the releases that carry what `meshctl` calls; they are not tested against
 older releases.
 

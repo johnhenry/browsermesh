@@ -43,6 +43,9 @@ function usageDocument() {
       '--relay <ws://...>': 'optional relay fallback transport, used with --signaling (opened, not yet used for pod-host traffic; it is not sealed -- see --wsh-relay)',
       '--wsh-relay <wss://...>': 'reach hosts through a pipe relay over a sealed, key-authenticated wsh link (repeatable); works alone (no WebRTC, no --signaling) or with --signaling, where the sealed link is tried first',
       '--identity <file>': `identity file path (default: ${DEFAULT_IDENTITY_PATH})`,
+      '--realm-dir <dir>': 'realm store for the realm commands (default: ~/.config/browsermesh/realms/); one owner-only directory per realm id',
+      '--passphrase-env <VAR>': 'realm commands that sign: the NAME of the environment variable holding the key passphrase (the passphrase is never taken from argv)',
+      '--passphrase-file <path>': 'realm commands that sign: a file holding the key passphrase; it must be mode 0600 or the command refuses',
       '--host <ref>': 'a known host pubKey (repeatable); required for hosts/pods spawn auto in real mode',
       '--timeout <ms>': 'pod-host request timeout in ms (default: 10000)',
       '--json': 'force compact JSON output',
@@ -77,9 +80,19 @@ function usageDocument() {
       'vm restore <name> --dry-run',
       'vm drain <name> --dry-run',
       'vm status',
+      'realm create <name> [--mode open|invite] [--authority-less] [--ttl 7d] [--issuer-ttl 365d] [--rendezvous <json|file>] [--roles <json|file>]  (signs with a fresh root; sealed keys need a passphrase option unless --authority-less)',
+      'realm issue <realm> --role <r> --key <public key> [--ttl 7d] [--out <file>]  (key-bound credential, signed by the issuer key, verified before it is printed)',
+      'realm revoke <realm> --serial <n> | --epoch  (a new root-signed descriptor, serial+1; --epoch revokes every credential of the old epoch)',
+      'realm rotate <realm>  (a new root, a rotation statement, a new descriptor)',
+      'realm ledger <realm>',
+      'realm join <descriptor-file|text> [--id <realm id>] [--credential <file>]  (verifies against the pinned id, stores it, makes a per-realm identity; never touches the network)',
+      'realm ls',
+      'realm inspect <realm>  (the stored descriptor and local profile; cannot list live peers)',
+      'realm export <realm> [--descriptor | --credential <serial>] [--out <file>]  (never the root key)',
+      'realm invite ...  (not implemented in v1: use realm issue)',
     ],
     exitCodes: EXIT_CODE,
-    note: '`vm` talks to a LOCAL VmPodHost directly (no mesh connection); `pods`/`hosts`/`watch` go over the mesh.',
+    note: '`vm` talks to a LOCAL VmPodHost directly (no mesh connection); `realm` works on local files only (no mesh connection); `pods`/`hosts`/`watch` go over the mesh.',
   }
 }
 
@@ -114,6 +127,7 @@ function dispatchPods(cmd, session, parsed) {
  * @param {(msg: string) => void} ctx.log
  * @param {AbortSignal} [ctx.signal]
  * @param {Function} [ctx.WebSocketCtor]
+ * @param {Record<string, string|undefined>} [ctx.env] - where `--passphrase-env` reads from (default `process.env`).
  * @returns {Promise<*>}
  */
 async function dispatch(parsed, ctx) {
@@ -127,6 +141,12 @@ async function dispatch(parsed, ctx) {
     return {
       podId: identity.podId, label: identity.label, identityPath: identity.identityPath, created: identity.created,
     }
+  }
+
+  if (group === 'realm') {
+    // Local files and offline signing only; the realm package is loaded inside, so other groups never need it.
+    const { runRealmCommand } = await import('./realm/index.mjs')
+    return runRealmCommand({ cmd, positionals, flags, env: ctx.env })
   }
 
   if (group === 'vm') {
@@ -195,6 +215,7 @@ async function dispatch(parsed, ctx) {
  * @param {{write: Function}} [io.stderr]
  * @param {AbortSignal} [io.signal] - Aborts `watch`; `bin/meshctl.mjs` wires SIGINT to this.
  * @param {Function} [io.WebSocketCtor] - Injectable `WebSocket`, for tests of the real-mesh path.
+ * @param {Record<string, string|undefined>} [io.env] - Test-only: the environment `realm` reads passphrases from.
  * @param {import('./connect.mjs').MeshctlSession} [io.session] - Test-only: reuse an
  *   already-connected session instead of building (and closing) a fresh one -- see
  *   `dispatch()`'s own comment on why `--loopback` otherwise can't share pod state
@@ -237,7 +258,7 @@ export async function main(argv, io = {}) {
   const keepAlive = setInterval(() => {}, 60_000)
   try {
     const result = await dispatch(parsed, {
-      stdout, log, signal: io.signal, WebSocketCtor: io.WebSocketCtor, session: io.session,
+      stdout, log, signal: io.signal, WebSocketCtor: io.WebSocketCtor, session: io.session, env: io.env,
     })
     stdout.write(`${formatDocument(okEnvelope(result), format)}\n`)
     return EXIT_CODE.OK
