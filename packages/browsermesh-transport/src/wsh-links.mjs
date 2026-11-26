@@ -16,7 +16,9 @@
  *  - the session is sealed (there is no setting that makes it plain) and the
  *    dialler checks `client.sessionSealed` after login;
  *  - a peer is allowed only if the `authorize` callback says so (default:
- *    nobody), and the key is given nothing but the `endpoint:mesh` capability;
+ *    nobody), and the key is given nothing but the `endpoint:mesh` capability
+ *    (or, for a `{ restricted: true }` verdict, `endpoint:mesh-admission`: see
+ *    `docs/design/link-admission.md`);
  *  - frames are length-prefixed with a maximum enforced on the header.
  *
  * `@johnhenry/wsh` is an optional peer dependency, imported lazily on first
@@ -138,6 +140,11 @@ function pipeUrl(relay, id, role, notifyPaired = false) {
 }
 
 const ENDPOINT = 'mesh';
+/**
+ * The endpoint a peer with a RESTRICTED verdict may open instead of `mesh` (see `authorize`'s `{ restricted: true }`). wsh's own
+ * capability check keeps the two apart: a key granted `endpoint:mesh-admission` cannot open `mesh`, whatever races.
+ */
+const ADMISSION_ENDPOINT = 'mesh-admission';
 
 /**
  * wsh logins take a user name that starts with a letter or an underscore, and a
@@ -202,6 +209,9 @@ export class WshPeerLinks {
   #userOnRefused;
   #onLog;
   #bindTimeoutMs;
+  #admission;
+  /** @type {Set<object>} restricted connections (not peers: they are in no `#peers` entry until promoted) */
+  #restricted = new Set();
 
   #listeners = new Map();
   /** @type {Map<string, { active: object|null, all: Set<object> }>} */
@@ -235,6 +245,12 @@ export class WshPeerLinks {
    *   Opens the WebSocket-like socket for a pipe; the seam for a test relay, a direct URL or a pipe carried some other way.
    * @param {(peer: { podId: string, fingerprint: string, publicKey: Uint8Array }) => boolean | { expires?: string|Date|number } | Promise<boolean | { expires?: string|Date|number }>} [opts.authorize]
    *   Who may link to this pod. Asked after the key's signature verified and before any mesh frame. Default: nobody.
+   *   It may also return `{ restricted: true }` (with an optional `expires`): the peer is logged in but may open only the admission
+   *   endpoint, its link is not a peer (no `peer-up`, no `message`), and its frames go to `opts.admission` until that promotes it.
+   *   Without `opts.admission` a restricted verdict is a refusal.
+   * @param {{ admit: (info: { peerKey: string, transport: 'wsh', proven: true, channel: object }) => Promise<{ state: string, reason?: string }> }} [opts.admission]
+   *   The admission seam (`createLinkAdmission()` from browsermesh-apps, or any object with `admit`). It owns the cap, the
+   *   deadline and the frame limit of restricted links. `channel` is `{ send(frame), onFrame(cb), onClose(cb), close(reason), adopt() }`.
    * @param {(info: { podId: string }) => void | Promise<void>} [opts.beforeDial] - Called before each outbound dial; throw to veto.
    * @param {number} [opts.maxFrameBytes=1048576]
    * @param {number} [opts.maxQueuedBytes=4194304] - Bytes a link may queue behind the endpoint's credit window.
@@ -275,6 +291,8 @@ export class WshPeerLinks {
     this.#userOnRefused = typeof opts.onRefused === 'function' ? opts.onRefused : null;
     this.#onLog = opts.onLog ?? (() => {});
     this.#bindTimeoutMs = opts.bindTimeoutMs;
+    if (opts.admission !== undefined && typeof opts.admission?.admit !== 'function') throw new TypeError('admission must have an admit() function');
+    this.#admission = opts.admission ?? null;
   }
 
   // -- Public ---------------------------------------------------------------
@@ -346,7 +364,10 @@ export class WshPeerLinks {
       // minute, so there the hosts carry no deadline at all (0.53 and earlier have none and ignore this).
       ...(this.#watchPairing ? {} : { loginTimeoutMs: 0 }),
       auth: (who) => this.#authorizePeer(who),
-      endpoints: { [ENDPOINT]: (duplex, who) => this.#serve(duplex, who) },
+      endpoints: {
+        [ENDPOINT]: (duplex, who) => this.#serve(duplex, who),
+        ...(this.#admission ? { [ADMISSION_ENDPOINT]: (duplex, who) => this.#serveRestricted(duplex, who) } : {}),
+      },
       onRefused: (r) => this.#onWshRefused(r),
       onLog: (line) => this.#onLog(line),
       ...(this.#bindTimeoutMs ? { bindTimeoutMs: this.#bindTimeoutMs } : {}),
@@ -429,6 +450,7 @@ export class WshPeerLinks {
     this.#slotRetry.clear();
     this.#slotAttempts.clear();
     for (const e of [...this.#peers.values()]) for (const c of [...e.all]) this.#end(c, 'local-close');
+    for (const c of [...this.#restricted]) this.#end(c, 'local-close');
     for (const set of this.#slots.values()) for (const s of set) { try { s.ws?.close(); } catch { /* already closed */ } }
     this.#slots.clear();
     await this.#host?.close();
@@ -465,7 +487,12 @@ export class WshPeerLinks {
       return false;
     }
     if (!verdict) return false;
-    const grant = { capabilities: `endpoint:${ENDPOINT}` };
+    const restricted = typeof verdict === 'object' && verdict.restricted === true;
+    if (restricted && !this.#admission) {
+      this.#pendingReasons.set(who.fingerprint, 'no-admission');
+      return false;
+    }
+    const grant = { capabilities: `endpoint:${restricted ? ADMISSION_ENDPOINT : ENDPOINT}` };
     if (typeof verdict === 'object' && verdict.expires !== undefined) grant.expires = verdict.expires;
     return grant;
   }
@@ -572,6 +599,56 @@ export class WshPeerLinks {
     await done;
   }
 
+  /**
+   * The listening side's link to a peer whose verdict was `{ restricted: true }`. It is not registered: no `peer-up`, no `message`
+   * event, no entry in `peers()`. Its frames go to the admission seam, its writes come from the seam's handler, and `adopt()`
+   * (the seam's promote) registers it like any inbound link. The read loop starts only after the seam has set the link up, so the
+   * handler is in place before the first frame.
+   */
+  async #serveRestricted(duplex, who) {
+    let podId;
+    try { podId = fingerprintToPodId(who.fingerprint); } catch { duplex.destroy?.('bad identity'); return; }
+    if (who.username !== usernameForPodId(podId)) { duplex.destroy?.('identity mismatch'); return; }
+    const conn = this.#newConn({ role: 'host', podId, initiatorPodId: podId, duplex });
+    const done = new Promise((resolve) => { conn.onEnd = resolve; });
+    conn.writer = duplex.writable.getWriter();
+    conn.reader = duplex.readable.getReader();
+    conn.restricted = { sink: null, onClose: null };
+    this.#restricted.add(conn);
+    const channel = {
+      send: (frame) => {
+        let bytes;
+        try { bytes = encodeFrame(frame, { maxFrameBytes: this.#maxFrame }); } catch (err) {
+          return Promise.reject(err instanceof WshFrameError ? new WshLinkError(err.code, err.message, { podId, cause: err }) : err);
+        }
+        return this.#enqueue(conn, bytes);
+      },
+      onFrame: (cb) => { conn.restricted.sink = cb; },
+      onClose: (cb) => { conn.restricted.onClose = cb; },
+      close: (reason) => this.#end(conn, reason ?? 'admission-closed'),
+      adopt: () => {
+        if (conn.ended || !conn.restricted) return;
+        conn.restricted = null;
+        this.#restricted.delete(conn);
+        this.#register(conn);
+      },
+    };
+    let admitted;
+    try {
+      admitted = this.#admission.admit({ peerKey: podId, transport: 'wsh', proven: true, channel });
+    } catch (e) {
+      this.#onLog(`admission.admit threw: ${e?.message ?? e}`);
+      this.#end(conn, 'admission-error');
+    }
+    // Reading starts at once, without waiting for admit() to settle: it has called the handler synchronously.
+    if (!conn.ended) void this.#readLoop(conn);
+    Promise.resolve(admitted).catch((e) => {
+      this.#onLog(`admission.admit failed: ${e?.message ?? e}`);
+      this.#end(conn, 'admission-error');
+    });
+    await done;
+  }
+
   // -- Dialling (the reaching side's link) --------------------------------------
 
   #dial(podId) {
@@ -636,7 +713,14 @@ export class WshPeerLinks {
         timeout: this.#connectTimeoutMs,
       });
       if (!client.sessionSealed) throw new WshLinkError('WSH_NOT_SEALED', `the session with ${podId} is not sealed`, { podId, reason: 'not-sealed' });
-      conn.duplex = await client.openEndpoint(ENDPOINT);
+      try {
+        conn.duplex = await client.openEndpoint(ENDPOINT);
+      } catch (err) {
+        // A host that logged this key in as RESTRICTED granted it only the admission endpoint: wsh refuses `mesh` by policy.
+        // Any other failure, or a host with no such endpoint, is the original error.
+        if (!/POLICY_DENIED|denied|not permitted|refus|capabilit/i.test(`${err?.code ?? ''} ${err?.name ?? ''} ${err?.message ?? ''}`)) throw err;
+        try { conn.duplex = await client.openEndpoint(ADMISSION_ENDPOINT); } catch { throw err; }
+      }
     })();
     let timer;
     const timeout = new Promise((_, reject) => {
@@ -663,6 +747,7 @@ export class WshPeerLinks {
     return {
       id: this.#nextConnId++, role, podId, initiatorPodId, duplex, client, writer: null, reader: null,
       queue: [], queued: 0, pumping: false, idle: [], ended: false, superseded: false, pause: null, endReason: null, onEnd: null, lastError: null,
+      restricted: null, reading: false, decoder: null,
     };
   }
 
@@ -670,8 +755,8 @@ export class WshPeerLinks {
   #register(conn) {
     let entry = this.#peers.get(conn.podId);
     if (!entry) this.#peers.set(conn.podId, (entry = { active: null, all: new Set() }));
-    conn.writer = conn.duplex.writable.getWriter();
-    conn.reader = conn.duplex.readable.getReader();
+    conn.writer ??= conn.duplex.writable.getWriter();
+    conn.reader ??= conn.duplex.readable.getReader();
     entry.all.add(conn);
     this.#stats.linksEstablished++;
     const current = entry.active;
@@ -688,7 +773,7 @@ export class WshPeerLinks {
       entry.active = winner;
       void this.#supersede(loser);
     }
-    void this.#readLoop(conn);
+    if (!conn.reading) void this.#readLoop(conn);
   }
 
   async #supersede(conn) {
@@ -709,7 +794,8 @@ export class WshPeerLinks {
   }
 
   async #readLoop(conn) {
-    const decoder = new FrameDecoder({ maxFrameBytes: this.#maxFrame });
+    conn.reading = true;
+    const decoder = (conn.decoder ??= new FrameDecoder({ maxFrameBytes: this.#maxFrame }));
     let reason = conn.endReason ?? 'closed';
     let error = null;
     try {
@@ -721,6 +807,12 @@ export class WshPeerLinks {
         for (const frame of decoder.push(value)) {
           if (conn.pause) await conn.pause.promise; // paused while this read was in flight: hold the frame
           if (conn.ended) return;
+          if (conn.restricted) {
+            // A restricted link's frames belong to the admission seam and to nothing else.
+            try { await conn.restricted.sink?.(frame); } catch (e) { this.#onLog(`restricted frame handler threw: ${e?.message ?? e}`); }
+            if (conn.ended) return;
+            continue;
+          }
           this.#stats.messagesIn++;
           this.#stats.bytesIn += typeof frame === 'string' ? frame.length : frame.length;
           const handlers = this.#emit('message', { from: conn.podId, data: frame });
@@ -797,6 +889,12 @@ export class WshPeerLinks {
     try { conn.reader?.cancel().catch(() => {}); } catch { /* ignore */ }
     try { conn.duplex?.destroy?.(reason); } catch { /* ignore */ }
     if (conn.client) { conn.client.onClose = null; conn.client.disconnect().catch(() => {}); }
+    if (conn.restricted) {
+      const { onClose } = conn.restricted;
+      conn.restricted = null;
+      try { onClose?.(reason); } catch { /* a seam callback may not break the close */ }
+    }
+    this.#restricted.delete(conn);
     conn.onEnd?.();
     const entry = this.#peers.get(conn.podId);
     if (!entry) return;

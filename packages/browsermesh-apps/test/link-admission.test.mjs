@@ -288,7 +288,7 @@ describe('createLinkAdmission: gate (a MeshTransport-shaped inbound link, the We
     assert.deepEqual(seen, [{ type: 'x:hello' }])
     assert.deepEqual(toNode, [])
     handled[0].send({ type: 'x:ask' })
-    assert.deepEqual(peer.sentMessages, [], 'peer sent nothing')
+    assert.deepEqual(peer.sentMessages, [{ type: 'x:hello' }], 'the peer sent only its own hello')
     assert.deepEqual(t.sentMessages, [{ type: 'x:ask' }], 'the only thing the node side sent is the handler\'s frame')
     handled[0].promote()
     assert.equal(adopted, 1)

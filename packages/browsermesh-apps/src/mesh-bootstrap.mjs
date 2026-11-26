@@ -310,6 +310,7 @@ import { PeerNode } from './peer-node.mjs'
 import { PeerRegistry } from './peer-registry.mjs'
 import { MeshSignalingChannel } from './signaling.mjs'
 import { createWebRTCTransportFactory } from './webrtc-negotiator.mjs'
+import { createLinkAdmission, createWshAdmissionAuthorize } from './link-admission.mjs'
 import { createWshAuthorizer, attachWshLinks, watchWshAccess } from './wsh-negotiator.mjs'
 import { createMeshSync } from './mesh-sync.mjs'
 import { MeshRelayHost } from './mesh-relay-host.mjs'
@@ -384,6 +385,13 @@ import { registerOrchestratorTools } from './mesh-orchestrator-tools.mjs'
  *   transport older than 0.6.0: this node still proves itself, but accepts a peer that never does (what such a
  *   peer sends is then delivered unverified). A proof that is sent and does not verify still closes the connection.
  * @param {number} [options.webrtcBindingTimeoutMs] - How long to wait for the peer's proof (default 10000).
+ * @param {object} [options.admission] - Opt in to link admission (`docs/design/link-admission.md`): `{ decide, handler,
+ *   maxRestricted = 8, deadlineMs = 10000, maxFrameBytes = 16384, onEvent }` as for `createLinkAdmission()`, or a seam it built.
+ *   Inbound WebRTC sessions are then asked of `decide({ peerKey, transport: 'webrtc', proven })` before they are adopted
+ *   (`allow` adopts as before, `deny` closes, `restrict` holds the link for `handler` until it promotes it), where `proven` is
+ *   whether the identity binding verified the peer's key. With `wsh` also given, a peer the wsh authorizer refuses is put to the
+ *   same `decide` (`transport: 'wsh'`), and `restrict` admits it to a restricted wsh link. Off unless given: nothing changes. The
+ *   seam is `node.admission`.
  * @param {object} [options.wsh] - Opt in to the sealed wsh peer link
  *   (`@johnhenry/browsermesh-transport/wsh`'s `WshPeerLinks`, which needs the
  *   optional peer `@johnhenry/wsh`). Off unless given. The node's own identity
@@ -855,6 +863,7 @@ export async function createMeshNode(options = {}) {
     discoveryChannelName = 'mesh-discovery',
     announceInterval,
     wsh,
+    admission,
     capabilities = [],
     signalingTransport,
     iceServers,
@@ -1122,6 +1131,12 @@ export async function createMeshNode(options = {}) {
     onLog,
   })
 
+  // Link admission (opt-in): one seam for both transports, so one cap counts every restricted link.
+  const admissionSeam = admission
+    ? (typeof admission.gate === 'function' && typeof admission.admit === 'function' ? admission : createLinkAdmission(admission))
+    : null
+  const gated = new WeakMap()
+
   const webrtcFactory = createWebRTCTransportFactory({
     localPodId: podId,
     meshManager,
@@ -1140,13 +1155,35 @@ export async function createMeshNode(options = {}) {
     // gives the caller side, so sendTo()/onIncomingData() work symmetrically
     // regardless of which side dialed.
     onIncomingConnection: (remotePodId, adapter, connectionId) => {
-      node.adoptIncomingSession(remotePodId, adapter, 'webrtc', { connectionId }).catch((err) => {
-        onLog('mesh-bootstrap:adopt-incoming-session-failed', {
-          remotePodId,
-          connectionId,
-          error: err?.message || String(err),
+      const adopt = () => {
+        node.adoptIncomingSession(remotePodId, adapter, 'webrtc', { connectionId }).catch((err) => {
+          onLog('mesh-bootstrap:adopt-incoming-session-failed', {
+            remotePodId,
+            connectionId,
+            error: err?.message || String(err),
+          })
         })
+      }
+      if (!admissionSeam) return adopt()
+      // Admission is on: the session is adopted only once `decide` says so, or the handler promotes the link. A connection that
+      // is handed out again (the peer started over on it) is gated once: adopted again if it was adopted, else left to its first hand-out.
+      const seen = gated.get(adapter)
+      if (seen === 'adopted') return adopt()
+      if (seen) return undefined
+      gated.set(adapter, 'pending')
+      const adoptGated = () => { gated.set(adapter, 'adopted'); adopt() }
+      admissionSeam.gate({
+        peerKey: remotePodId,
+        transport: 'webrtc',
+        // The binding verified the peer's key over the DTLS fingerprints; without it (webrtcAllowUnboundPeers) nothing proved it.
+        proven: adapter.peerConnection?.bound === true,
+        adapter,
+        adopt: adoptGated,
+      }).catch((err) => {
+        onLog('mesh-bootstrap:admission-gate-failed', { remotePodId, connectionId, error: err?.message || String(err) })
+        try { adapter.close() } catch { /* already gone */ }
       })
+      return undefined
     },
   })
   transportNegotiator.registerAdapter('webrtc', webrtcFactory)
@@ -1164,6 +1201,7 @@ export async function createMeshNode(options = {}) {
   // same instance).
   node.meshManager = meshManager
   node.signaling = signaling
+  if (admissionSeam) node.admission = admissionSeam
   node.transportNegotiator = transportNegotiator
 
   // -- wsh peer link (opt-in) -------------------------------------------------
@@ -1174,9 +1212,11 @@ export async function createMeshNode(options = {}) {
     // The wsh links live at the transport's `/wsh` subpath from 0.11; an older transport serves them from its root.
     const { WshPeerLinks } = await import('@johnhenry/browsermesh-transport/wsh').catch(() => import('@johnhenry/browsermesh-transport'))
     const { require: _require, listen = true, authorize, ...hubOptions } = wsh
+    const baseAuthorize = authorize || createWshAuthorizer(registry)
     const links = new WshPeerLinks({
       identity: identityManager.getIdentity(podId),
-      authorize: authorize || createWshAuthorizer(registry),
+      authorize: admissionSeam ? createWshAdmissionAuthorize(admissionSeam, baseAuthorize) : baseAuthorize,
+      ...(admissionSeam ? { admission: admissionSeam } : {}),
       onLog: (line) => onLog('mesh-bootstrap:wsh', { line }),
       ...hubOptions,
     })

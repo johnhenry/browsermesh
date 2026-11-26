@@ -47,9 +47,13 @@ handler's frames. It holds because a restricted link is not yet a session of the
 the same `endpoint:mesh` grant, but when the endpoint opens the link is NOT registered: no `peer-up`, no `message` events, no
 entry in `peers()`. Its frames go to `admission.admit(...)`, its sends come from the handler. `promote` registers it exactly
 as a normal inbound link (tie-break, `peer-up`, reading continues on the same decoder). A restricted verdict with no
-`admission` configured is a refusal. `browsermesh-apps`' `attachWshLinks({ ..., admission })` wires the seam and
-`createWshAdmissionAuthorize(admission, inner)` builds the `authorize`: the inner authorizer (the registry's, today's
-default) is asked first, and only a peer it refuses is put to `decide` with `transport: 'wsh'`, `proven: true`.
+`admission` configured is a refusal. The restricted peer is granted `endpoint:mesh-admission` instead of `endpoint:mesh`, and
+the host serves a second endpoint of that name, so wsh's own capability check (not a flag we correlate) keeps a restricted key
+off the mesh endpoint whatever races. A dialler that finds `mesh` refused by policy opens `mesh-admission`. `attachWshLinks`
+needs no change: a promoted link announces `peer-up` as any inbound link does. In `browsermesh-apps`,
+`createWshAdmissionAuthorize(admission, inner)` builds the `authorize`: the inner authorizer (the registry's, today's default)
+is asked first, and only a peer it refuses is put to `decide` with `transport: 'wsh'`, `proven: true`. `createMeshNode`
+does this when given `admission`.
 
 **WebRTC** (`createMeshNode({ admission })`). Opt-in. The factory's `onIncomingConnection` fires when an inbound data channel
 has opened; with `admission` it first asks `decide({ peerKey, transport: 'webrtc', proven: connection.bound })`: `allow` adopts
@@ -80,4 +84,7 @@ per id should keep `maxRestricted` below that limit. `maxRestricted` and the dea
   session: the restricted state binds what the REMOTE can make us deliver, not what our own code chooses to dial.
 - Outbound links (links we dial) are never restricted: we chose the peer.
 - No `Hello.features` pre-auth hint (5.5, optional later).
-- Registry access re-checks do not cover a restricted link; it has no registry entry until promoted.
+- Registry access re-checks do not cover a restricted link; it has no registry entry until promoted. After promotion the
+  default `watchWshAccess` still applies: a promoted peer the registry does not allow is closed at the next access change for
+  it, so a handler that promotes should first record the peer's grant (the realm package's job).
+- Over WebRTC a hand-out of the same connection twice is gated once.
