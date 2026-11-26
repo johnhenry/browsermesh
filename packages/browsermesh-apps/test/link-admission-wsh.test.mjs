@@ -44,14 +44,18 @@ async function makeNode(env, label, extra = {}) {
   return node
 }
 
-/** Bob admits strangers to a restricted link whose handler is `frames`-recording and answers the first frame. */
+/**
+ * Bob admits strangers to a restricted link whose handler is `frames`-recording and answers the first frame. `link.send()` returns a
+ * promise that rejects when the link closes under it; the handler keeps it (`seen.sends`) and records the rejection instead of
+ * leaving it unhandled, which under load surfaced after the test ended as "generated asynchronous activity after the test ended".
+ */
 function bobAdmission(extra = {}) {
-  const seen = { links: [], frames: [], events: [] }
+  const seen = { links: [], frames: [], events: [], sends: [], sendErrors: [] }
   const admission = {
     decide: () => 'restrict',
     handler: (link) => {
       seen.links.push(link)
-      link.onFrame((f) => { seen.frames.push({ from: link.peerKey, f }); link.send({ type: 'x:ack' }) })
+      link.onFrame((f) => { seen.frames.push({ from: link.peerKey, f }); seen.sends.push(Promise.resolve(link.send({ type: 'x:ack' })).catch((e) => { seen.sendErrors.push(e) })) })
     },
     onEvent: (e) => seen.events.push(e),
     ...extra,
