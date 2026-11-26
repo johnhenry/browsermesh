@@ -1,0 +1,368 @@
+{
+  "description": "Realm descriptor vectors (docs/design/realms.md 5.2, 5.9). Keys come from fixed 32-byte seeds. 'documents' give the canonical unsigned text, the signature and the exact signed bytes (UTF-8 domain, 0x00, canonical text). Times are whole seconds; 'now' is in 'options'. 'verifyDescriptor' and 'verifyAuthorityless' take the received text; 'adoptDescriptor' takes the held descriptor text (or null) and the offered text.",
+  "realmId": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+  "keys": {
+    "root0": {
+      "seed": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "publicKey": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+      "keyId": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw"
+    },
+    "rogue": {
+      "seed": "606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f",
+      "publicKey": "F0VTtFbd38aQjsqxwQH-arIeK6oGF3lbfUOmNIKZP9U",
+      "keyId": "aIlNWPGPLDTUnrL0sRDgQs0PMVCk3DkkPX9jvVmMB4M"
+    },
+    "issuerA": {
+      "seed": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "publicKey": "zRSzf5VulTGU_3-3Oz2B3MVh1hp1OAlLfD4aZD7l86o",
+      "keyId": "UZyuk-k60BHXhTVYlEBe2PqBYsblStoTO7ttu5Mt9Xs"
+    },
+    "issuerB": {
+      "seed": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+      "publicKey": "T9CZzNR9eJPf6ewkQU7LDZtUICMqrTDZHEZb4zy-ZcQ",
+      "keyId": "oYESsLe0Il_zBSfg9896HjdC9jKwO2X0VCcDw6VlTck"
+    }
+  },
+  "documents": [
+    {
+      "name": "valid invite-mode descriptor",
+      "domain": "browsermesh-realm/descriptor/1",
+      "signer": "root0",
+      "unsigned": "{\"admitters\":[],\"epoch\":0,\"extensions\":{},\"id\":\"Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw\",\"issuers\":[{\"key\":\"zRSzf5VulTGU_3-3Oz2B3MVh1hp1OAlLfD4aZD7l86o\",\"notAfter\":1807776000},{\"key\":\"T9CZzNR9eJPf6ewkQU7LDZtUICMqrTDZHEZb4zy-ZcQ\",\"notAfter\":1807776000}],\"labels\":{},\"mode\":\"invite\",\"name\":\"test realm\",\"rendezvous\":{\"bootstrap\":[\"https://boot.example.test/\"],\"ice\":[{\"urls\":[\"stun:stun.example.test:3478\"]}],\"relays\":[\"wss://relay.example.test/wsh\"],\"signaling\":[\"wss://sig.example.test/ws\"]},\"revoked\":[],\"roles\":{\"guest\":[\"protocol:mcp:open\"],\"member\":[\"mcp:search:call\",\"objects:window:get\",\"protocol:mcp:open\"]},\"root\":{\"chain\":[],\"key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\"},\"serial\":1,\"ttl\":604800,\"v\":1}",
+      "signature": "ZeboHL9RLA8-kLLJLTky2i5Rn6Vv-qTjMKfIbKz5sg9eOdLJL26YQqpiExU1iPGlfIuIibeCmfEYW6ZR_dlGBA",
+      "signed": "{\"admitters\":[],\"epoch\":0,\"extensions\":{},\"id\":\"Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw\",\"issuers\":[{\"key\":\"zRSzf5VulTGU_3-3Oz2B3MVh1hp1OAlLfD4aZD7l86o\",\"notAfter\":1807776000},{\"key\":\"T9CZzNR9eJPf6ewkQU7LDZtUICMqrTDZHEZb4zy-ZcQ\",\"notAfter\":1807776000}],\"labels\":{},\"mode\":\"invite\",\"name\":\"test realm\",\"rendezvous\":{\"bootstrap\":[\"https://boot.example.test/\"],\"ice\":[{\"urls\":[\"stun:stun.example.test:3478\"]}],\"relays\":[\"wss://relay.example.test/wsh\"],\"signaling\":[\"wss://sig.example.test/ws\"]},\"revoked\":[],\"roles\":{\"guest\":[\"protocol:mcp:open\"],\"member\":[\"mcp:search:call\",\"objects:window:get\",\"protocol:mcp:open\"]},\"root\":{\"chain\":[],\"key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\"},\"serial\":1,\"sig\":\"ZeboHL9RLA8-kLLJLTky2i5Rn6Vv-qTjMKfIbKz5sg9eOdLJL26YQqpiExU1iPGlfIuIibeCmfEYW6ZR_dlGBA\",\"ttl\":604800,\"v\":1}",
+      "signingBytesHex": "62726f777365726d6573682d7265616c6d2f64657363726970746f722f31007b2261646d697474657273223a5b5d2c2265706f6368223a302c22657874656e73696f6e73223a7b7d2c226964223a22566b64617031526a52307743686439647679764b747a326d555457494f656d336449477936724548634977222c2269737375657273223a5b7b226b6579223a227a52537a663556756c5447555f332d334f7a3242334d5668316870314f416c4c664434615a44376c38366f222c226e6f744166746572223a313830373737363030307d2c7b226b6579223a225439435a7a4e5239654a50663665776b5155374c445a745549434d717254445a48455a62347a792d5a6351222c226e6f744166746572223a313830373737363030307d5d2c226c6162656c73223a7b7d2c226d6f6465223a22696e76697465222c226e616d65223a2274657374207265616c6d222c2272656e64657a766f7573223a7b22626f6f747374726170223a5b2268747470733a2f2f626f6f742e6578616d706c652e746573742f225d2c22696365223a5b7b2275726c73223a5b227374756e3a7374756e2e6578616d706c652e746573743a33343738225d7d5d2c2272656c617973223a5b227773733a2f2f72656c61792e6578616d706c652e746573742f777368225d2c227369676e616c696e67223a5b227773733a2f2f7369672e6578616d706c652e746573742f7773225d7d2c227265766f6b6564223a5b5d2c22726f6c6573223a7b226775657374223a5b2270726f746f636f6c3a6d63703a6f70656e225d2c226d656d626572223a5b226d63703a7365617263683a63616c6c222c226f626a656374733a77696e646f773a676574222c2270726f746f636f6c3a6d63703a6f70656e225d7d2c22726f6f74223a7b22636861696e223a5b5d2c226b6579223a2241364548765f504f454c3464634e3059353076416d57666b316a436270513166486479475a424a564d6267227d2c2273657269616c223a312c2274746c223a3630343830302c2276223a317d"
+    },
+    {
+      "name": "descriptor with validUntil",
+      "domain": "browsermesh-realm/descriptor/1",
+      "signer": "root0",
+      "unsigned": "{\"admitters\":[],\"epoch\":0,\"extensions\":{},\"id\":\"Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw\",\"issuers\":[{\"key\":\"zRSzf5VulTGU_3-3Oz2B3MVh1hp1OAlLfD4aZD7l86o\",\"notAfter\":1807776000},{\"key\":\"T9CZzNR9eJPf6ewkQU7LDZtUICMqrTDZHEZb4zy-ZcQ\",\"notAfter\":1807776000}],\"labels\":{},\"mode\":\"invite\",\"name\":\"test realm\",\"rendezvous\":{\"bootstrap\":[\"https://boot.example.test/\"],\"ice\":[{\"urls\":[\"stun:stun.example.test:3478\"]}],\"relays\":[\"wss://relay.example.test/wsh\"],\"signaling\":[\"wss://sig.example.test/ws\"]},\"revoked\":[],\"roles\":{\"guest\":[\"protocol:mcp:open\"],\"member\":[\"mcp:search:call\",\"objects:window:get\",\"protocol:mcp:open\"]},\"root\":{\"chain\":[],\"key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\"},\"serial\":1,\"ttl\":604800,\"v\":1,\"validUntil\":1800086400}",
+      "signature": "-68gcIasOhj423HcDhxFicO1F4fuSOGcBGur4kP_exi4C35MtFSQ3ARa2YJzdo2vyCGU-xYks-Alc81mZ-nCDw",
+      "signed": "{\"admitters\":[],\"epoch\":0,\"extensions\":{},\"id\":\"Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw\",\"issuers\":[{\"key\":\"zRSzf5VulTGU_3-3Oz2B3MVh1hp1OAlLfD4aZD7l86o\",\"notAfter\":1807776000},{\"key\":\"T9CZzNR9eJPf6ewkQU7LDZtUICMqrTDZHEZb4zy-ZcQ\",\"notAfter\":1807776000}],\"labels\":{},\"mode\":\"invite\",\"name\":\"test realm\",\"rendezvous\":{\"bootstrap\":[\"https://boot.example.test/\"],\"ice\":[{\"urls\":[\"stun:stun.example.test:3478\"]}],\"relays\":[\"wss://relay.example.test/wsh\"],\"signaling\":[\"wss://sig.example.test/ws\"]},\"revoked\":[],\"roles\":{\"guest\":[\"protocol:mcp:open\"],\"member\":[\"mcp:search:call\",\"objects:window:get\",\"protocol:mcp:open\"]},\"root\":{\"chain\":[],\"key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\"},\"serial\":1,\"sig\":\"-68gcIasOhj423HcDhxFicO1F4fuSOGcBGur4kP_exi4C35MtFSQ3ARa2YJzdo2vyCGU-xYks-Alc81mZ-nCDw\",\"ttl\":604800,\"v\":1,\"validUntil\":1800086400}",
+      "signingBytesHex": "62726f777365726d6573682d7265616c6d2f64657363726970746f722f31007b2261646d697474657273223a5b5d2c2265706f6368223a302c22657874656e73696f6e73223a7b7d2c226964223a22566b64617031526a52307743686439647679764b747a326d555457494f656d336449477936724548634977222c2269737375657273223a5b7b226b6579223a227a52537a663556756c5447555f332d334f7a3242334d5668316870314f416c4c664434615a44376c38366f222c226e6f744166746572223a313830373737363030307d2c7b226b6579223a225439435a7a4e5239654a50663665776b5155374c445a745549434d717254445a48455a62347a792d5a6351222c226e6f744166746572223a313830373737363030307d5d2c226c6162656c73223a7b7d2c226d6f6465223a22696e76697465222c226e616d65223a2274657374207265616c6d222c2272656e64657a766f7573223a7b22626f6f747374726170223a5b2268747470733a2f2f626f6f742e6578616d706c652e746573742f225d2c22696365223a5b7b2275726c73223a5b227374756e3a7374756e2e6578616d706c652e746573743a33343738225d7d5d2c2272656c617973223a5b227773733a2f2f72656c61792e6578616d706c652e746573742f777368225d2c227369676e616c696e67223a5b227773733a2f2f7369672e6578616d706c652e746573742f7773225d7d2c227265766f6b6564223a5b5d2c22726f6c6573223a7b226775657374223a5b2270726f746f636f6c3a6d63703a6f70656e225d2c226d656d626572223a5b226d63703a7365617263683a63616c6c222c226f626a656374733a77696e646f773a676574222c2270726f746f636f6c3a6d63703a6f70656e225d7d2c22726f6f74223a7b22636861696e223a5b5d2c226b6579223a2241364548765f504f454c3464634e3059353076416d57666b316a436270513166486479475a424a564d6267227d2c2273657269616c223a312c2274746c223a3630343830302c2276223a312c2276616c6964556e74696c223a313830303038363430307d"
+    }
+  ],
+  "cases": [
+    {
+      "name": "valid descriptor",
+      "op": "verifyDescriptor",
+      "input": "{\"admitters\":[],\"epoch\":0,\"extensions\":{},\"id\":\"Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw\",\"issuers\":[{\"key\":\"zRSzf5VulTGU_3-3Oz2B3MVh1hp1OAlLfD4aZD7l86o\",\"notAfter\":1807776000},{\"key\":\"T9CZzNR9eJPf6ewkQU7LDZtUICMqrTDZHEZb4zy-ZcQ\",\"notAfter\":1807776000}],\"labels\":{},\"mode\":\"invite\",\"name\":\"test realm\",\"rendezvous\":{\"bootstrap\":[\"https://boot.example.test/\"],\"ice\":[{\"urls\":[\"stun:stun.example.test:3478\"]}],\"relays\":[\"wss://relay.example.test/wsh\"],\"signaling\":[\"wss://sig.example.test/ws\"]},\"revoked\":[],\"roles\":{\"guest\":[\"protocol:mcp:open\"],\"member\":[\"mcp:search:call\",\"objects:window:get\",\"protocol:mcp:open\"]},\"root\":{\"chain\":[],\"key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\"},\"serial\":1,\"sig\":\"ZeboHL9RLA8-kLLJLTky2i5Rn6Vv-qTjMKfIbKz5sg9eOdLJL26YQqpiExU1iPGlfIuIibeCmfEYW6ZR_dlGBA\",\"ttl\":604800,\"v\":1}",
+      "options": {
+        "pinnedId": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+        "now": 1800000000
+      },
+      "expect": {
+        "ok": true
+      }
+    },
+    {
+      "name": "non-canonical: leading whitespace",
+      "op": "verifyDescriptor",
+      "input": " {\"admitters\":[],\"epoch\":0,\"extensions\":{},\"id\":\"Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw\",\"issuers\":[{\"key\":\"zRSzf5VulTGU_3-3Oz2B3MVh1hp1OAlLfD4aZD7l86o\",\"notAfter\":1807776000},{\"key\":\"T9CZzNR9eJPf6ewkQU7LDZtUICMqrTDZHEZb4zy-ZcQ\",\"notAfter\":1807776000}],\"labels\":{},\"mode\":\"invite\",\"name\":\"test realm\",\"rendezvous\":{\"bootstrap\":[\"https://boot.example.test/\"],\"ice\":[{\"urls\":[\"stun:stun.example.test:3478\"]}],\"relays\":[\"wss://relay.example.test/wsh\"],\"signaling\":[\"wss://sig.example.test/ws\"]},\"revoked\":[],\"roles\":{\"guest\":[\"protocol:mcp:open\"],\"member\":[\"mcp:search:call\",\"objects:window:get\",\"protocol:mcp:open\"]},\"root\":{\"chain\":[],\"key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\"},\"serial\":1,\"sig\":\"ZeboHL9RLA8-kLLJLTky2i5Rn6Vv-qTjMKfIbKz5sg9eOdLJL26YQqpiExU1iPGlfIuIibeCmfEYW6ZR_dlGBA\",\"ttl\":604800,\"v\":1}",
+      "options": {
+        "pinnedId": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+        "now": 1800000000
+      },
+      "expect": {
+        "ok": false,
+        "reason": "not-canonical"
+      }
+    },
+    {
+      "name": "non-canonical: keys not sorted",
+      "op": "verifyDescriptor",
+      "input": "{\"v\":1,\"ttl\":604800,\"sig\":\"ZeboHL9RLA8-kLLJLTky2i5Rn6Vv-qTjMKfIbKz5sg9eOdLJL26YQqpiExU1iPGlfIuIibeCmfEYW6ZR_dlGBA\",\"serial\":1,\"root\":{\"chain\":[],\"key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\"},\"roles\":{\"guest\":[\"protocol:mcp:open\"],\"member\":[\"mcp:search:call\",\"objects:window:get\",\"protocol:mcp:open\"]},\"revoked\":[],\"rendezvous\":{\"bootstrap\":[\"https://boot.example.test/\"],\"ice\":[{\"urls\":[\"stun:stun.example.test:3478\"]}],\"relays\":[\"wss://relay.example.test/wsh\"],\"signaling\":[\"wss://sig.example.test/ws\"]},\"name\":\"test realm\",\"mode\":\"invite\",\"labels\":{},\"issuers\":[{\"key\":\"zRSzf5VulTGU_3-3Oz2B3MVh1hp1OAlLfD4aZD7l86o\",\"notAfter\":1807776000},{\"key\":\"T9CZzNR9eJPf6ewkQU7LDZtUICMqrTDZHEZb4zy-ZcQ\",\"notAfter\":1807776000}],\"id\":\"Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw\",\"extensions\":{},\"epoch\":0,\"admitters\":[]}",
+      "options": {
+        "pinnedId": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+        "now": 1800000000
+      },
+      "expect": {
+        "ok": false,
+        "reason": "not-canonical"
+      }
+    },
+    {
+      "name": "non-canonical: pretty-printed",
+      "op": "verifyDescriptor",
+      "input": "{\n  \"admitters\": [],\n  \"epoch\": 0,\n  \"extensions\": {},\n  \"id\": \"Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw\",\n  \"issuers\": [\n    {\n      \"key\": \"zRSzf5VulTGU_3-3Oz2B3MVh1hp1OAlLfD4aZD7l86o\",\n      \"notAfter\": 1807776000\n    },\n    {\n      \"key\": \"T9CZzNR9eJPf6ewkQU7LDZtUICMqrTDZHEZb4zy-ZcQ\",\n      \"notAfter\": 1807776000\n    }\n  ],\n  \"labels\": {},\n  \"mode\": \"invite\",\n  \"name\": \"test realm\",\n  \"rendezvous\": {\n    \"bootstrap\": [\n      \"https://boot.example.test/\"\n    ],\n    \"ice\": [\n      {\n        \"urls\": [\n          \"stun:stun.example.test:3478\"\n        ]\n      }\n    ],\n    \"relays\": [\n      \"wss://relay.example.test/wsh\"\n    ],\n    \"signaling\": [\n      \"wss://sig.example.test/ws\"\n    ]\n  },\n  \"revoked\": [],\n  \"roles\": {\n    \"guest\": [\n      \"protocol:mcp:open\"\n    ],\n    \"member\": [\n      \"mcp:search:call\",\n      \"objects:window:get\",\n      \"protocol:mcp:open\"\n    ]\n  },\n  \"root\": {\n    \"chain\": [],\n    \"key\": \"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\"\n  },\n  \"serial\": 1,\n  \"sig\": \"ZeboHL9RLA8-kLLJLTky2i5Rn6Vv-qTjMKfIbKz5sg9eOdLJL26YQqpiExU1iPGlfIuIibeCmfEYW6ZR_dlGBA\",\n  \"ttl\": 604800,\n  \"v\": 1\n}",
+      "options": {
+        "pinnedId": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+        "now": 1800000000
+      },
+      "expect": {
+        "ok": false,
+        "reason": "not-canonical"
+      }
+    },
+    {
+      "name": "wrong domain: signed under the credential domain",
+      "op": "verifyDescriptor",
+      "input": "{\"admitters\":[],\"epoch\":0,\"extensions\":{},\"id\":\"Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw\",\"issuers\":[{\"key\":\"zRSzf5VulTGU_3-3Oz2B3MVh1hp1OAlLfD4aZD7l86o\",\"notAfter\":1807776000},{\"key\":\"T9CZzNR9eJPf6ewkQU7LDZtUICMqrTDZHEZb4zy-ZcQ\",\"notAfter\":1807776000}],\"labels\":{},\"mode\":\"invite\",\"name\":\"test realm\",\"rendezvous\":{\"bootstrap\":[\"https://boot.example.test/\"],\"ice\":[{\"urls\":[\"stun:stun.example.test:3478\"]}],\"relays\":[\"wss://relay.example.test/wsh\"],\"signaling\":[\"wss://sig.example.test/ws\"]},\"revoked\":[],\"roles\":{\"guest\":[\"protocol:mcp:open\"],\"member\":[\"mcp:search:call\",\"objects:window:get\",\"protocol:mcp:open\"]},\"root\":{\"chain\":[],\"key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\"},\"serial\":1,\"sig\":\"KlBsf4qeKG5V-24MRTreKd8unwUiBDvljktrpT3p32drjc3vyvvyulonkH1v7IpQg4j6LtkXTi-OGBfSU4DnBg\",\"ttl\":604800,\"v\":1}",
+      "options": {
+        "pinnedId": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+        "now": 1800000000
+      },
+      "expect": {
+        "ok": false,
+        "reason": "bad-signature"
+      }
+    },
+    {
+      "name": "wrong domain: signed under the rotation domain",
+      "op": "verifyDescriptor",
+      "input": "{\"admitters\":[],\"epoch\":0,\"extensions\":{},\"id\":\"Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw\",\"issuers\":[{\"key\":\"zRSzf5VulTGU_3-3Oz2B3MVh1hp1OAlLfD4aZD7l86o\",\"notAfter\":1807776000},{\"key\":\"T9CZzNR9eJPf6ewkQU7LDZtUICMqrTDZHEZb4zy-ZcQ\",\"notAfter\":1807776000}],\"labels\":{},\"mode\":\"invite\",\"name\":\"test realm\",\"rendezvous\":{\"bootstrap\":[\"https://boot.example.test/\"],\"ice\":[{\"urls\":[\"stun:stun.example.test:3478\"]}],\"relays\":[\"wss://relay.example.test/wsh\"],\"signaling\":[\"wss://sig.example.test/ws\"]},\"revoked\":[],\"roles\":{\"guest\":[\"protocol:mcp:open\"],\"member\":[\"mcp:search:call\",\"objects:window:get\",\"protocol:mcp:open\"]},\"root\":{\"chain\":[],\"key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\"},\"serial\":1,\"sig\":\"9b0vOnLUpMUgXJHyxuebxjMoQB45uCCr1wHg9FxrzMfPaO02z5RuciOjVPrXneorEABeDg2M4uQgMFKNq7yJAg\",\"ttl\":604800,\"v\":1}",
+      "options": {
+        "pinnedId": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+        "now": 1800000000
+      },
+      "expect": {
+        "ok": false,
+        "reason": "bad-signature"
+      }
+    },
+    {
+      "name": "tampered name",
+      "op": "verifyDescriptor",
+      "input": "{\"admitters\":[],\"epoch\":0,\"extensions\":{},\"id\":\"Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw\",\"issuers\":[{\"key\":\"zRSzf5VulTGU_3-3Oz2B3MVh1hp1OAlLfD4aZD7l86o\",\"notAfter\":1807776000},{\"key\":\"T9CZzNR9eJPf6ewkQU7LDZtUICMqrTDZHEZb4zy-ZcQ\",\"notAfter\":1807776000}],\"labels\":{},\"mode\":\"invite\",\"name\":\"test realms\",\"rendezvous\":{\"bootstrap\":[\"https://boot.example.test/\"],\"ice\":[{\"urls\":[\"stun:stun.example.test:3478\"]}],\"relays\":[\"wss://relay.example.test/wsh\"],\"signaling\":[\"wss://sig.example.test/ws\"]},\"revoked\":[],\"roles\":{\"guest\":[\"protocol:mcp:open\"],\"member\":[\"mcp:search:call\",\"objects:window:get\",\"protocol:mcp:open\"]},\"root\":{\"chain\":[],\"key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\"},\"serial\":1,\"sig\":\"ZeboHL9RLA8-kLLJLTky2i5Rn6Vv-qTjMKfIbKz5sg9eOdLJL26YQqpiExU1iPGlfIuIibeCmfEYW6ZR_dlGBA\",\"ttl\":604800,\"v\":1}",
+      "options": {
+        "pinnedId": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+        "now": 1800000000
+      },
+      "expect": {
+        "ok": false,
+        "reason": "bad-signature"
+      }
+    },
+    {
+      "name": "tampered epoch",
+      "op": "verifyDescriptor",
+      "input": "{\"admitters\":[],\"epoch\":1,\"extensions\":{},\"id\":\"Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw\",\"issuers\":[{\"key\":\"zRSzf5VulTGU_3-3Oz2B3MVh1hp1OAlLfD4aZD7l86o\",\"notAfter\":1807776000},{\"key\":\"T9CZzNR9eJPf6ewkQU7LDZtUICMqrTDZHEZb4zy-ZcQ\",\"notAfter\":1807776000}],\"labels\":{},\"mode\":\"invite\",\"name\":\"test realm\",\"rendezvous\":{\"bootstrap\":[\"https://boot.example.test/\"],\"ice\":[{\"urls\":[\"stun:stun.example.test:3478\"]}],\"relays\":[\"wss://relay.example.test/wsh\"],\"signaling\":[\"wss://sig.example.test/ws\"]},\"revoked\":[],\"roles\":{\"guest\":[\"protocol:mcp:open\"],\"member\":[\"mcp:search:call\",\"objects:window:get\",\"protocol:mcp:open\"]},\"root\":{\"chain\":[],\"key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\"},\"serial\":1,\"sig\":\"ZeboHL9RLA8-kLLJLTky2i5Rn6Vv-qTjMKfIbKz5sg9eOdLJL26YQqpiExU1iPGlfIuIibeCmfEYW6ZR_dlGBA\",\"ttl\":604800,\"v\":1}",
+      "options": {
+        "pinnedId": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+        "now": 1800000000
+      },
+      "expect": {
+        "ok": false,
+        "reason": "bad-signature"
+      }
+    },
+    {
+      "name": "signed by a key that is not the root",
+      "op": "verifyDescriptor",
+      "input": "{\"admitters\":[],\"epoch\":0,\"extensions\":{},\"id\":\"Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw\",\"issuers\":[{\"key\":\"zRSzf5VulTGU_3-3Oz2B3MVh1hp1OAlLfD4aZD7l86o\",\"notAfter\":1807776000},{\"key\":\"T9CZzNR9eJPf6ewkQU7LDZtUICMqrTDZHEZb4zy-ZcQ\",\"notAfter\":1807776000}],\"labels\":{},\"mode\":\"invite\",\"name\":\"test realm\",\"rendezvous\":{\"bootstrap\":[\"https://boot.example.test/\"],\"ice\":[{\"urls\":[\"stun:stun.example.test:3478\"]}],\"relays\":[\"wss://relay.example.test/wsh\"],\"signaling\":[\"wss://sig.example.test/ws\"]},\"revoked\":[],\"roles\":{\"guest\":[\"protocol:mcp:open\"],\"member\":[\"mcp:search:call\",\"objects:window:get\",\"protocol:mcp:open\"]},\"root\":{\"chain\":[],\"key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\"},\"serial\":1,\"sig\":\"q_q1bcqZkyfQ-OVezsowYcvbZll7EYuEd-1T8_kVVYJHXnFe-wI0gDbmgHhstwqpOu2ds9XS-4cn_mdIfTa3Ag\",\"ttl\":604800,\"v\":1}",
+      "options": {
+        "pinnedId": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+        "now": 1800000000
+      },
+      "expect": {
+        "ok": false,
+        "reason": "bad-signature"
+      }
+    },
+    {
+      "name": "pinned to another realm id",
+      "op": "verifyDescriptor",
+      "input": "{\"admitters\":[],\"epoch\":0,\"extensions\":{},\"id\":\"Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw\",\"issuers\":[{\"key\":\"zRSzf5VulTGU_3-3Oz2B3MVh1hp1OAlLfD4aZD7l86o\",\"notAfter\":1807776000},{\"key\":\"T9CZzNR9eJPf6ewkQU7LDZtUICMqrTDZHEZb4zy-ZcQ\",\"notAfter\":1807776000}],\"labels\":{},\"mode\":\"invite\",\"name\":\"test realm\",\"rendezvous\":{\"bootstrap\":[\"https://boot.example.test/\"],\"ice\":[{\"urls\":[\"stun:stun.example.test:3478\"]}],\"relays\":[\"wss://relay.example.test/wsh\"],\"signaling\":[\"wss://sig.example.test/ws\"]},\"revoked\":[],\"roles\":{\"guest\":[\"protocol:mcp:open\"],\"member\":[\"mcp:search:call\",\"objects:window:get\",\"protocol:mcp:open\"]},\"root\":{\"chain\":[],\"key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\"},\"serial\":1,\"sig\":\"ZeboHL9RLA8-kLLJLTky2i5Rn6Vv-qTjMKfIbKz5sg9eOdLJL26YQqpiExU1iPGlfIuIibeCmfEYW6ZR_dlGBA\",\"ttl\":604800,\"v\":1}",
+      "options": {
+        "pinnedId": "aIlNWPGPLDTUnrL0sRDgQs0PMVCk3DkkPX9jvVmMB4M",
+        "now": 1800000000
+      },
+      "expect": {
+        "ok": false,
+        "reason": "wrong-realm"
+      }
+    },
+    {
+      "name": "expired snapshot: validUntil reached",
+      "op": "verifyDescriptor",
+      "input": "{\"admitters\":[],\"epoch\":0,\"extensions\":{},\"id\":\"Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw\",\"issuers\":[{\"key\":\"zRSzf5VulTGU_3-3Oz2B3MVh1hp1OAlLfD4aZD7l86o\",\"notAfter\":1807776000},{\"key\":\"T9CZzNR9eJPf6ewkQU7LDZtUICMqrTDZHEZb4zy-ZcQ\",\"notAfter\":1807776000}],\"labels\":{},\"mode\":\"invite\",\"name\":\"test realm\",\"rendezvous\":{\"bootstrap\":[\"https://boot.example.test/\"],\"ice\":[{\"urls\":[\"stun:stun.example.test:3478\"]}],\"relays\":[\"wss://relay.example.test/wsh\"],\"signaling\":[\"wss://sig.example.test/ws\"]},\"revoked\":[],\"roles\":{\"guest\":[\"protocol:mcp:open\"],\"member\":[\"mcp:search:call\",\"objects:window:get\",\"protocol:mcp:open\"]},\"root\":{\"chain\":[],\"key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\"},\"serial\":1,\"sig\":\"-68gcIasOhj423HcDhxFicO1F4fuSOGcBGur4kP_exi4C35MtFSQ3ARa2YJzdo2vyCGU-xYks-Alc81mZ-nCDw\",\"ttl\":604800,\"v\":1,\"validUntil\":1800086400}",
+      "options": {
+        "pinnedId": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+        "now": 1800086401
+      },
+      "expect": {
+        "ok": false,
+        "reason": "expired"
+      }
+    },
+    {
+      "name": "snapshot valid at validUntil",
+      "op": "verifyDescriptor",
+      "input": "{\"admitters\":[],\"epoch\":0,\"extensions\":{},\"id\":\"Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw\",\"issuers\":[{\"key\":\"zRSzf5VulTGU_3-3Oz2B3MVh1hp1OAlLfD4aZD7l86o\",\"notAfter\":1807776000},{\"key\":\"T9CZzNR9eJPf6ewkQU7LDZtUICMqrTDZHEZb4zy-ZcQ\",\"notAfter\":1807776000}],\"labels\":{},\"mode\":\"invite\",\"name\":\"test realm\",\"rendezvous\":{\"bootstrap\":[\"https://boot.example.test/\"],\"ice\":[{\"urls\":[\"stun:stun.example.test:3478\"]}],\"relays\":[\"wss://relay.example.test/wsh\"],\"signaling\":[\"wss://sig.example.test/ws\"]},\"revoked\":[],\"roles\":{\"guest\":[\"protocol:mcp:open\"],\"member\":[\"mcp:search:call\",\"objects:window:get\",\"protocol:mcp:open\"]},\"root\":{\"chain\":[],\"key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\"},\"serial\":1,\"sig\":\"-68gcIasOhj423HcDhxFicO1F4fuSOGcBGur4kP_exi4C35MtFSQ3ARa2YJzdo2vyCGU-xYks-Alc81mZ-nCDw\",\"ttl\":604800,\"v\":1,\"validUntil\":1800086400}",
+      "options": {
+        "pinnedId": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+        "now": 1800086400
+      },
+      "expect": {
+        "ok": true
+      }
+    },
+    {
+      "name": "wildcard role scope, correctly signed",
+      "op": "verifyDescriptor",
+      "input": "{\"admitters\":[],\"epoch\":0,\"extensions\":{},\"id\":\"Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw\",\"issuers\":[{\"key\":\"zRSzf5VulTGU_3-3Oz2B3MVh1hp1OAlLfD4aZD7l86o\",\"notAfter\":1807776000},{\"key\":\"T9CZzNR9eJPf6ewkQU7LDZtUICMqrTDZHEZb4zy-ZcQ\",\"notAfter\":1807776000}],\"labels\":{},\"mode\":\"invite\",\"name\":\"test realm\",\"rendezvous\":{\"bootstrap\":[\"https://boot.example.test/\"],\"ice\":[{\"urls\":[\"stun:stun.example.test:3478\"]}],\"relays\":[\"wss://relay.example.test/wsh\"],\"signaling\":[\"wss://sig.example.test/ws\"]},\"revoked\":[],\"roles\":{\"guest\":[\"protocol:mcp:open\"],\"member\":[\"mcp:*:call\"]},\"root\":{\"chain\":[],\"key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\"},\"serial\":1,\"sig\":\"AoSZSy1NRQyc2K_yaR1xzSgplVatgUAx0IoEIfx5yZk5rihRcuz3FbAWRMKT8fv-8ydRJ8oYWE7VV1SuZ0cFAg\",\"ttl\":604800,\"v\":1}",
+      "options": {
+        "pinnedId": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+        "now": 1800000000
+      },
+      "expect": {
+        "ok": false,
+        "reason": "bad-scope"
+      }
+    },
+    {
+      "name": "two-segment role scope, correctly signed",
+      "op": "verifyDescriptor",
+      "input": "{\"admitters\":[],\"epoch\":0,\"extensions\":{},\"id\":\"Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw\",\"issuers\":[{\"key\":\"zRSzf5VulTGU_3-3Oz2B3MVh1hp1OAlLfD4aZD7l86o\",\"notAfter\":1807776000},{\"key\":\"T9CZzNR9eJPf6ewkQU7LDZtUICMqrTDZHEZb4zy-ZcQ\",\"notAfter\":1807776000}],\"labels\":{},\"mode\":\"invite\",\"name\":\"test realm\",\"rendezvous\":{\"bootstrap\":[\"https://boot.example.test/\"],\"ice\":[{\"urls\":[\"stun:stun.example.test:3478\"]}],\"relays\":[\"wss://relay.example.test/wsh\"],\"signaling\":[\"wss://sig.example.test/ws\"]},\"revoked\":[],\"roles\":{\"guest\":[\"protocol:mcp:open\"],\"member\":[\"mcp:tool\"]},\"root\":{\"chain\":[],\"key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\"},\"serial\":1,\"sig\":\"XCSDfMQJjyq9ppxq0pBTWQLDbmJlLM76FPi0lDuqHppahzQ55xy6ssOQKxEnqhgWw_tJE8pWJqkdYmyyK8XPDw\",\"ttl\":604800,\"v\":1}",
+      "options": {
+        "pinnedId": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+        "now": 1800000000
+      },
+      "expect": {
+        "ok": false,
+        "reason": "bad-scope"
+      }
+    },
+    {
+      "name": "empty-segment role scope, correctly signed",
+      "op": "verifyDescriptor",
+      "input": "{\"admitters\":[],\"epoch\":0,\"extensions\":{},\"id\":\"Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw\",\"issuers\":[{\"key\":\"zRSzf5VulTGU_3-3Oz2B3MVh1hp1OAlLfD4aZD7l86o\",\"notAfter\":1807776000},{\"key\":\"T9CZzNR9eJPf6ewkQU7LDZtUICMqrTDZHEZb4zy-ZcQ\",\"notAfter\":1807776000}],\"labels\":{},\"mode\":\"invite\",\"name\":\"test realm\",\"rendezvous\":{\"bootstrap\":[\"https://boot.example.test/\"],\"ice\":[{\"urls\":[\"stun:stun.example.test:3478\"]}],\"relays\":[\"wss://relay.example.test/wsh\"],\"signaling\":[\"wss://sig.example.test/ws\"]},\"revoked\":[],\"roles\":{\"guest\":[\"protocol:mcp:open\"],\"member\":[\"mcp::call\"]},\"root\":{\"chain\":[],\"key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\"},\"serial\":1,\"sig\":\"i_zlwot0FcUqH7LEYVQM34CkUHeolxKhaSswkRCcvmjQEEbnUQIf7e0o-_YBVuDfcup2YaeTBapKGRH33hsOBQ\",\"ttl\":604800,\"v\":1}",
+      "options": {
+        "pinnedId": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+        "now": 1800000000
+      },
+      "expect": {
+        "ok": false,
+        "reason": "bad-scope"
+      }
+    },
+    {
+      "name": "too large",
+      "op": "verifyDescriptor",
+      "input": "{\"admitters\":[],\"epoch\":0,\"extensions\":{},\"id\":\"Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw\",\"issuers\":[{\"key\":\"zRSzf5VulTGU_3-3Oz2B3MVh1hp1OAlLfD4aZD7l86o\",\"notAfter\":1807776000},{\"key\":\"T9CZzNR9eJPf6ewkQU7LDZtUICMqrTDZHEZb4zy-ZcQ\",\"notAfter\":1807776000}],\"labels\":{},\"mode\":\"invite\",\"name\":\"test realm\",\"rendezvous\":{\"bootstrap\":[\"https://boot.example.test/\"],\"ice\":[{\"urls\":[\"stun:stun.example.test:3478\"]}],\"relays\":[\"wss://relay.example.test/wsh\"],\"signaling\":[\"wss://sig.example.test/ws\"]},\"revoked\":[],\"roles\":{\"guest\":[\"protocol:mcp:open\"],\"member\":[\"mcp:search:call\",\"objects:window:get\",\"protocol:mcp:open\"]},\"root\":{\"chain\":[],\"key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\"},\"serial\":1,\"sig\":\"ZeboHL9RLA8-kLLJLTky2i5Rn6Vv-qTjMKfIbKz5sg9eOdLJL26YQqpiExU1iPGlfIuIibeCmfEYW6ZR_dlGBA\",\"ttl\":604800,\"v\":1}",
+      "options": {
+        "pinnedId": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+        "now": 1800000000,
+        "maxBytes": 100
+      },
+      "expect": {
+        "ok": false,
+        "reason": "too-large"
+      }
+    },
+    {
+      "name": "adopt: higher serial",
+      "op": "adoptDescriptor",
+      "held": "{\"admitters\":[],\"epoch\":0,\"extensions\":{},\"id\":\"Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw\",\"issuers\":[{\"key\":\"zRSzf5VulTGU_3-3Oz2B3MVh1hp1OAlLfD4aZD7l86o\",\"notAfter\":1807776000},{\"key\":\"T9CZzNR9eJPf6ewkQU7LDZtUICMqrTDZHEZb4zy-ZcQ\",\"notAfter\":1807776000}],\"labels\":{},\"mode\":\"invite\",\"name\":\"test realm\",\"rendezvous\":{\"bootstrap\":[\"https://boot.example.test/\"],\"ice\":[{\"urls\":[\"stun:stun.example.test:3478\"]}],\"relays\":[\"wss://relay.example.test/wsh\"],\"signaling\":[\"wss://sig.example.test/ws\"]},\"revoked\":[],\"roles\":{\"guest\":[\"protocol:mcp:open\"],\"member\":[\"mcp:search:call\",\"objects:window:get\",\"protocol:mcp:open\"]},\"root\":{\"chain\":[],\"key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\"},\"serial\":1,\"sig\":\"ZeboHL9RLA8-kLLJLTky2i5Rn6Vv-qTjMKfIbKz5sg9eOdLJL26YQqpiExU1iPGlfIuIibeCmfEYW6ZR_dlGBA\",\"ttl\":604800,\"v\":1}",
+      "offered": "{\"admitters\":[],\"epoch\":0,\"extensions\":{},\"id\":\"Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw\",\"issuers\":[{\"key\":\"zRSzf5VulTGU_3-3Oz2B3MVh1hp1OAlLfD4aZD7l86o\",\"notAfter\":1807776000},{\"key\":\"T9CZzNR9eJPf6ewkQU7LDZtUICMqrTDZHEZb4zy-ZcQ\",\"notAfter\":1807776000}],\"labels\":{},\"mode\":\"invite\",\"name\":\"test realm\",\"rendezvous\":{\"bootstrap\":[\"https://boot.example.test/\"],\"ice\":[{\"urls\":[\"stun:stun.example.test:3478\"]}],\"relays\":[\"wss://relay.example.test/wsh\"],\"signaling\":[\"wss://sig.example.test/ws\"]},\"revoked\":[],\"roles\":{\"guest\":[\"protocol:mcp:open\"],\"member\":[\"mcp:search:call\",\"objects:window:get\",\"protocol:mcp:open\"]},\"root\":{\"chain\":[],\"key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\"},\"serial\":5,\"sig\":\"S_IlNXrdJcFkiwCHqYIWt9dUdlGebCXWml9YsYSipsF2D2SkUkJfrhp3eQjC0RQZXtJBGyBb9TS7Vn2uhn77Bw\",\"ttl\":604800,\"v\":1}",
+      "options": {
+        "pinnedId": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+        "now": 1800000000
+      },
+      "expect": {
+        "ok": true
+      }
+    },
+    {
+      "name": "adopt refused: stale serial (equal)",
+      "op": "adoptDescriptor",
+      "held": "{\"admitters\":[],\"epoch\":0,\"extensions\":{},\"id\":\"Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw\",\"issuers\":[{\"key\":\"zRSzf5VulTGU_3-3Oz2B3MVh1hp1OAlLfD4aZD7l86o\",\"notAfter\":1807776000},{\"key\":\"T9CZzNR9eJPf6ewkQU7LDZtUICMqrTDZHEZb4zy-ZcQ\",\"notAfter\":1807776000}],\"labels\":{},\"mode\":\"invite\",\"name\":\"test realm\",\"rendezvous\":{\"bootstrap\":[\"https://boot.example.test/\"],\"ice\":[{\"urls\":[\"stun:stun.example.test:3478\"]}],\"relays\":[\"wss://relay.example.test/wsh\"],\"signaling\":[\"wss://sig.example.test/ws\"]},\"revoked\":[],\"roles\":{\"guest\":[\"protocol:mcp:open\"],\"member\":[\"mcp:search:call\",\"objects:window:get\",\"protocol:mcp:open\"]},\"root\":{\"chain\":[],\"key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\"},\"serial\":5,\"sig\":\"S_IlNXrdJcFkiwCHqYIWt9dUdlGebCXWml9YsYSipsF2D2SkUkJfrhp3eQjC0RQZXtJBGyBb9TS7Vn2uhn77Bw\",\"ttl\":604800,\"v\":1}",
+      "offered": "{\"admitters\":[],\"epoch\":0,\"extensions\":{},\"id\":\"Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw\",\"issuers\":[{\"key\":\"zRSzf5VulTGU_3-3Oz2B3MVh1hp1OAlLfD4aZD7l86o\",\"notAfter\":1807776000},{\"key\":\"T9CZzNR9eJPf6ewkQU7LDZtUICMqrTDZHEZb4zy-ZcQ\",\"notAfter\":1807776000}],\"labels\":{},\"mode\":\"invite\",\"name\":\"test realm\",\"rendezvous\":{\"bootstrap\":[\"https://boot.example.test/\"],\"ice\":[{\"urls\":[\"stun:stun.example.test:3478\"]}],\"relays\":[\"wss://relay.example.test/wsh\"],\"signaling\":[\"wss://sig.example.test/ws\"]},\"revoked\":[],\"roles\":{\"guest\":[\"protocol:mcp:open\"],\"member\":[\"mcp:search:call\",\"objects:window:get\",\"protocol:mcp:open\"]},\"root\":{\"chain\":[],\"key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\"},\"serial\":5,\"sig\":\"S_IlNXrdJcFkiwCHqYIWt9dUdlGebCXWml9YsYSipsF2D2SkUkJfrhp3eQjC0RQZXtJBGyBb9TS7Vn2uhn77Bw\",\"ttl\":604800,\"v\":1}",
+      "options": {
+        "pinnedId": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+        "now": 1800000000
+      },
+      "expect": {
+        "ok": false,
+        "reason": "stale-serial"
+      }
+    },
+    {
+      "name": "adopt refused: stale serial (lower, replayed old descriptor)",
+      "op": "adoptDescriptor",
+      "held": "{\"admitters\":[],\"epoch\":0,\"extensions\":{},\"id\":\"Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw\",\"issuers\":[{\"key\":\"zRSzf5VulTGU_3-3Oz2B3MVh1hp1OAlLfD4aZD7l86o\",\"notAfter\":1807776000},{\"key\":\"T9CZzNR9eJPf6ewkQU7LDZtUICMqrTDZHEZb4zy-ZcQ\",\"notAfter\":1807776000}],\"labels\":{},\"mode\":\"invite\",\"name\":\"test realm\",\"rendezvous\":{\"bootstrap\":[\"https://boot.example.test/\"],\"ice\":[{\"urls\":[\"stun:stun.example.test:3478\"]}],\"relays\":[\"wss://relay.example.test/wsh\"],\"signaling\":[\"wss://sig.example.test/ws\"]},\"revoked\":[],\"roles\":{\"guest\":[\"protocol:mcp:open\"],\"member\":[\"mcp:search:call\",\"objects:window:get\",\"protocol:mcp:open\"]},\"root\":{\"chain\":[],\"key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\"},\"serial\":5,\"sig\":\"S_IlNXrdJcFkiwCHqYIWt9dUdlGebCXWml9YsYSipsF2D2SkUkJfrhp3eQjC0RQZXtJBGyBb9TS7Vn2uhn77Bw\",\"ttl\":604800,\"v\":1}",
+      "offered": "{\"admitters\":[],\"epoch\":0,\"extensions\":{},\"id\":\"Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw\",\"issuers\":[{\"key\":\"zRSzf5VulTGU_3-3Oz2B3MVh1hp1OAlLfD4aZD7l86o\",\"notAfter\":1807776000},{\"key\":\"T9CZzNR9eJPf6ewkQU7LDZtUICMqrTDZHEZb4zy-ZcQ\",\"notAfter\":1807776000}],\"labels\":{},\"mode\":\"invite\",\"name\":\"test realm\",\"rendezvous\":{\"bootstrap\":[\"https://boot.example.test/\"],\"ice\":[{\"urls\":[\"stun:stun.example.test:3478\"]}],\"relays\":[\"wss://relay.example.test/wsh\"],\"signaling\":[\"wss://sig.example.test/ws\"]},\"revoked\":[],\"roles\":{\"guest\":[\"protocol:mcp:open\"],\"member\":[\"mcp:search:call\",\"objects:window:get\",\"protocol:mcp:open\"]},\"root\":{\"chain\":[],\"key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\"},\"serial\":1,\"sig\":\"ZeboHL9RLA8-kLLJLTky2i5Rn6Vv-qTjMKfIbKz5sg9eOdLJL26YQqpiExU1iPGlfIuIibeCmfEYW6ZR_dlGBA\",\"ttl\":604800,\"v\":1}",
+      "options": {
+        "pinnedId": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+        "now": 1800000000
+      },
+      "expect": {
+        "ok": false,
+        "reason": "stale-serial"
+      }
+    },
+    {
+      "name": "adopt refused: older epoch with a higher serial",
+      "op": "adoptDescriptor",
+      "held": "{\"admitters\":[],\"epoch\":3,\"extensions\":{},\"id\":\"Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw\",\"issuers\":[{\"key\":\"zRSzf5VulTGU_3-3Oz2B3MVh1hp1OAlLfD4aZD7l86o\",\"notAfter\":1807776000},{\"key\":\"T9CZzNR9eJPf6ewkQU7LDZtUICMqrTDZHEZb4zy-ZcQ\",\"notAfter\":1807776000}],\"labels\":{},\"mode\":\"invite\",\"name\":\"test realm\",\"rendezvous\":{\"bootstrap\":[\"https://boot.example.test/\"],\"ice\":[{\"urls\":[\"stun:stun.example.test:3478\"]}],\"relays\":[\"wss://relay.example.test/wsh\"],\"signaling\":[\"wss://sig.example.test/ws\"]},\"revoked\":[],\"roles\":{\"guest\":[\"protocol:mcp:open\"],\"member\":[\"mcp:search:call\",\"objects:window:get\",\"protocol:mcp:open\"]},\"root\":{\"chain\":[],\"key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\"},\"serial\":5,\"sig\":\"lgu8nrv4f-ICA_GiVlw0Qu0QRkWhaU-YTFsKOjDQ2MmgSYZ8rFRx4qBIoNuuVf91h870yQDyF3W_cdcBY7jRBA\",\"ttl\":604800,\"v\":1}",
+      "offered": "{\"admitters\":[],\"epoch\":2,\"extensions\":{},\"id\":\"Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw\",\"issuers\":[{\"key\":\"zRSzf5VulTGU_3-3Oz2B3MVh1hp1OAlLfD4aZD7l86o\",\"notAfter\":1807776000},{\"key\":\"T9CZzNR9eJPf6ewkQU7LDZtUICMqrTDZHEZb4zy-ZcQ\",\"notAfter\":1807776000}],\"labels\":{},\"mode\":\"invite\",\"name\":\"test realm\",\"rendezvous\":{\"bootstrap\":[\"https://boot.example.test/\"],\"ice\":[{\"urls\":[\"stun:stun.example.test:3478\"]}],\"relays\":[\"wss://relay.example.test/wsh\"],\"signaling\":[\"wss://sig.example.test/ws\"]},\"revoked\":[],\"roles\":{\"guest\":[\"protocol:mcp:open\"],\"member\":[\"mcp:search:call\",\"objects:window:get\",\"protocol:mcp:open\"]},\"root\":{\"chain\":[],\"key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\"},\"serial\":6,\"sig\":\"klBjEWDdwGT1TE4-udz_9p2LB1_lHKvB3k1gZfY7YbucyjXxI3KArBBvZKOlh0cnJCVJcG9otw7DyNrugDrFDQ\",\"ttl\":604800,\"v\":1}",
+      "options": {
+        "pinnedId": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+        "now": 1800000000
+      },
+      "expect": {
+        "ok": false,
+        "reason": "epoch-regressed"
+      }
+    },
+    {
+      "name": "authority-less: valid",
+      "op": "verifyAuthorityless",
+      "input": "{\"form\":\"authorityless\",\"hints\":{\"bootstrap\":[\"https://boot.example.test/\"],\"ice\":[{\"urls\":[\"stun:stun.example.test:3478\"]}],\"relays\":[\"wss://relay.example.test/wsh\"],\"signaling\":[\"wss://sig.example.test/ws\"]},\"id\":\"6STgGlepcc1u8dOLqzn5YfLMFu4mEoEu1j3Y4Cp0U3c\",\"mode\":\"open\",\"name\":\"commons\",\"roles\":{\"guest\":[\"protocol:mcp:open\"]},\"salt\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"v\":1}",
+      "options": {
+        "pinnedId": "6STgGlepcc1u8dOLqzn5YfLMFu4mEoEu1j3Y4Cp0U3c"
+      },
+      "expect": {
+        "ok": true
+      }
+    },
+    {
+      "name": "authority-less: replaced hints keep the id",
+      "op": "verifyAuthorityless",
+      "input": "{\"form\":\"authorityless\",\"hints\":{\"bootstrap\":[\"https://boot.example.test/\"],\"ice\":[{\"urls\":[\"stun:stun.example.test:3478\"]}],\"relays\":[\"wss://other.example.test/wsh\"],\"signaling\":[\"wss://sig.example.test/ws\"]},\"id\":\"6STgGlepcc1u8dOLqzn5YfLMFu4mEoEu1j3Y4Cp0U3c\",\"mode\":\"open\",\"name\":\"commons\",\"roles\":{\"guest\":[\"protocol:mcp:open\"]},\"salt\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"v\":1}",
+      "options": {
+        "pinnedId": "6STgGlepcc1u8dOLqzn5YfLMFu4mEoEu1j3Y4Cp0U3c"
+      },
+      "expect": {
+        "ok": true
+      }
+    },
+    {
+      "name": "authority-less tampered name",
+      "op": "verifyAuthorityless",
+      "input": "{\"form\":\"authorityless\",\"hints\":{\"bootstrap\":[\"https://boot.example.test/\"],\"ice\":[{\"urls\":[\"stun:stun.example.test:3478\"]}],\"relays\":[\"wss://relay.example.test/wsh\"],\"signaling\":[\"wss://sig.example.test/ws\"]},\"id\":\"6STgGlepcc1u8dOLqzn5YfLMFu4mEoEu1j3Y4Cp0U3c\",\"mode\":\"open\",\"name\":\"commons2\",\"roles\":{\"guest\":[\"protocol:mcp:open\"]},\"salt\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"v\":1}",
+      "options": {
+        "pinnedId": "6STgGlepcc1u8dOLqzn5YfLMFu4mEoEu1j3Y4Cp0U3c"
+      },
+      "expect": {
+        "ok": false,
+        "reason": "bad-id"
+      }
+    },
+    {
+      "name": "authority-less non-canonical",
+      "op": "verifyAuthorityless",
+      "input": " {\"form\":\"authorityless\",\"hints\":{\"bootstrap\":[\"https://boot.example.test/\"],\"ice\":[{\"urls\":[\"stun:stun.example.test:3478\"]}],\"relays\":[\"wss://relay.example.test/wsh\"],\"signaling\":[\"wss://sig.example.test/ws\"]},\"id\":\"6STgGlepcc1u8dOLqzn5YfLMFu4mEoEu1j3Y4Cp0U3c\",\"mode\":\"open\",\"name\":\"commons\",\"roles\":{\"guest\":[\"protocol:mcp:open\"]},\"salt\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"v\":1}",
+      "options": {
+        "pinnedId": "6STgGlepcc1u8dOLqzn5YfLMFu4mEoEu1j3Y4Cp0U3c"
+      },
+      "expect": {
+        "ok": false,
+        "reason": "not-canonical"
+      }
+    },
+    {
+      "name": "authority-less with a privileged role and a matching id",
+      "op": "verifyAuthorityless",
+      "input": "{\"form\":\"authorityless\",\"hints\":{\"bootstrap\":[\"https://boot.example.test/\"],\"ice\":[{\"urls\":[\"stun:stun.example.test:3478\"]}],\"relays\":[\"wss://relay.example.test/wsh\"],\"signaling\":[\"wss://sig.example.test/ws\"]},\"id\":\"jzw5rTEAUsmH95YPt72Joo537dD2iALAyZLPaXB9vcM\",\"mode\":\"open\",\"name\":\"commons\",\"roles\":{\"admin\":[\"mcp:search:call\"],\"guest\":[\"protocol:mcp:open\"]},\"salt\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"v\":1}",
+      "options": {
+        "pinnedId": "jzw5rTEAUsmH95YPt72Joo537dD2iALAyZLPaXB9vcM"
+      },
+      "expect": {
+        "ok": false,
+        "reason": "bad-role"
+      }
+    }
+  ]
+}

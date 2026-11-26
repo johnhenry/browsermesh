@@ -68,7 +68,7 @@ describe("adoptDescriptor", () => {
       assert.equal(a.ok, false);
       assert.equal(typeof a.reason, "string");
     }
-    for (const bad of [null, "x", 5, {}, { id: 1 }]) {
+    for (const bad of ["x", 5, {}, { id: 1 }, []]) {
       assert.equal((await adoptDescriptor(bad, held.text, { pinnedId: held.id, now: T0 })).ok, false);
     }
     assert.equal((await adoptDescriptor(held.descriptor, held.text, undefined)).ok, false);

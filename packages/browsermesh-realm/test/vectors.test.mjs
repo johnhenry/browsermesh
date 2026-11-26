@@ -98,6 +98,12 @@ describe("vectors", () => {
           assert.equal(sig, doc.signature, doc.name);
           assert.equal(canonicalJson({ ...body, sig }), doc.signed, doc.name);
           assert.equal(Buffer.from(domainSigningBytes(doc.domain, doc.unsigned)).toString("hex"), doc.signingBytesHex, doc.name);
+          if (doc.countersigner) {
+            const counter = await identityFromSeed(v.keys[doc.countersigner].seed);
+            const text = canonicalJson({ ...body, sig });
+            const cs = Buffer.from(await counter.sign(domainSigningBytes(doc.countersignDomain, text))).toString("base64url");
+            assert.equal(cs, doc.countersignature, doc.name);
+          }
         }
       });
 

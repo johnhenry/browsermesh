@@ -137,7 +137,7 @@ describe("verifyCredential", () => {
   it("accepts now as a function and defaults to the real clock", async () => {
     const { r, issue } = await setup();
     assert.equal((await verifyCredential(await issue(), r.descriptor, { now: () => T0 })).ok, true);
-    assert.equal(reason(await verifyCredential(await issue(), r.descriptor)), "expired");
+    assert.equal((await verifyCredential(await issue(), r.descriptor)).ok, false, "the real clock is not T0");
   });
 
   it("refuses against a stale descriptor snapshot", async () => {
