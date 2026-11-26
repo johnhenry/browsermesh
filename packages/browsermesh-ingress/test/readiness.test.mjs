@@ -188,7 +188,7 @@ describe('a name in its hold', () => {
     assert.equal((await t.get()).text, 'up')
     // The pod's link drops: the name is held, the pod stops serving for a moment.
     first.stop()
-    client.close()
+    client.channel.close() // the link drops without a goodbye
     await until(() => t.table.lookup(`app.${t.zone}`)?.held === true, 'the name to be held')
     const waiting = t.get()
     // A stranger cannot take it meanwhile; the pod comes back, serves again and claims again.
@@ -209,7 +209,7 @@ describe('a name in its hold', () => {
     const client = await openNameClient(t.p, t.ingress.podId)
     await client.claim('app')
     first.stop()
-    client.close()
+    client.channel.close() // the link drops without a goodbye
     await until(() => t.table.lookup(`app.${t.zone}`)?.held === true, 'the name to be held')
     const r = await t.get()
     assert.equal(r.status, 502)

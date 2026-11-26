@@ -79,6 +79,39 @@ describe('a route that names a service', () => {
   })
 })
 
+describe('the record of a request names the service', () => {
+  it('the audit record carries the service next to the host, and none for a route without one', async () => {
+    const records = []
+    const t = await rig({ ingress: { onAudit: (r) => records.push(r) } })
+    await t.get('web.example.test', '/a')
+    await t.get('api.example.test', '/b')
+    await t.get('plain.example.test', '/c')
+    assert.deepEqual(records.map((r) => [r.host, r.service]), [['web.example.test', 'web'], ['api.example.test', 'api'], ['plain.example.test', undefined]])
+    assert.ok(!('service' in records[2]), 'a route with no service has no such field: records of the earlier shape are unchanged')
+  })
+
+  it('a refused request still says which service it was for', async () => {
+    const records = []
+    const t = await rig({ ingress: { onAudit: (r) => records.push(r) } })
+    await t.get('db.example.test')
+    assert.equal(records[0].reason, 'provider-no-service')
+    assert.equal(records[0].service, 'db')
+  })
+
+  it('what the pod\'s handler is told: the service in its context, and the site-handler form gets it as a field', async () => {
+    const t = await rig()
+    await t.get('web.example.test')
+    assert.deepEqual(t.seen.map((s) => s[1]), ['web'])
+    const { fromSiteHandler } = await import('../src/index.mjs')
+    const calls = []
+    const handler = fromSiteHandler(async (req) => { calls.push(req); return { status: 200, headers: {}, body: 'x' } })
+    await handler(new Request('http://x.test/p'), { peer: 'pp', service: 'web' })
+    await handler(new Request('http://x.test/q'), { peer: 'pp' })
+    assert.equal(calls[0].service, 'web')
+    assert.ok(!('service' in calls[1]))
+  })
+})
+
 describe('a pod that predates services', () => {
   it('is asked nothing for a route with no service, and a route with one is refused, not sent to its only handler', async () => {
     const t = await rig({ services: false })

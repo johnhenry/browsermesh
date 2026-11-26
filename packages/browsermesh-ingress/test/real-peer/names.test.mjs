@@ -102,12 +102,19 @@ describeIfReal('a pod claims a name over a real data channel', () => {
     assert.equal((await request({ port: listener.port, host: `blog.${ZONE}` })).status, 404)
   })
 
-  it('when the channel closes the name is held for the pod, and claiming again on a new channel gets it back', async () => {
-    client.close()
+  it('when the channel goes without a goodbye the name is held for the pod, and claiming again on a new channel gets it back', async () => {
+    client.channel.close()
     await waitFor(() => table.lookup(`app.${ZONE}`)?.held === true, WEBRTC_TIMEOUT_MS, 'the name to be held')
     client = await pkg.openNameClient(services.provider, nodes.ingress.podId, { timeoutMs: WEBRTC_TIMEOUT_MS })
     await client.claim('app', { service: 'web' })
     assert.equal(table.lookup(`app.${ZONE}`).held, false)
     assert.equal((await request({ port: listener.port, host: `app.${ZONE}` })).body, 'the web service')
+  })
+
+  it('closing the client says goodbye over the real channel: the names are given up at once, and nothing is held', async () => {
+    await client.close()
+    await waitFor(() => table.lookup(`app.${ZONE}`) === null, WEBRTC_TIMEOUT_MS, 'the name to be given up')
+    assert.equal(table.lookup(`docs.${ZONE}`)?.held, true, 'only what this channel claimed: docs was claimed over the first channel, which went without a goodbye')
+    assert.equal((await request({ port: listener.port, host: `app.${ZONE}` })).status, 404)
   })
 })

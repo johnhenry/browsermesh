@@ -361,10 +361,10 @@ async function pump(writer, body, { limits, counters, ac, done }) {
  */
 export function fromSiteHandler(onRequest) {
   if (typeof onRequest !== 'function') throw new TypeError('fromSiteHandler: a site request handler is required')
-  return async (request, { peer } = {}) => {
+  return async (request, { peer, service } = {}) => {
     const url = new URL(request.url)
     const body = request.body ? new Uint8Array(await request.arrayBuffer()) : undefined
-    const result = await onRequest({ fromPubKey: peer, method: request.method, path: url.pathname + url.search, headers: Object.fromEntries(request.headers), body })
+    const result = await onRequest({ fromPubKey: peer, method: request.method, path: url.pathname + url.search, headers: Object.fromEntries(request.headers), body, ...(service === undefined ? {} : { service }) })
     const { decodeWireResponse } = await import('@johnhenry/browsermesh-apps')
     const wire = decodeWireResponse(result)
     const bytes = wire.body instanceof Uint8Array ? wire.body : wire.body === undefined || wire.body === null ? null

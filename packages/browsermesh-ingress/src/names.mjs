@@ -16,6 +16,8 @@ import { createRateLimiter } from './limits.mjs'
 
 export const NAMES_PROTOCOL = 'ingress-names'
 export const NAMES_VERSIONS = Object.freeze([1])
+/** The reason `openNameClient().close()` gives when it closes the channel: a goodbye, as opposed to a channel that simply went away. */
+const GOODBYE_REASON = 'done'
 
 /** Labels that are never claimable: they read as something an operator or a service owns. The operator maps these by hand. */
 export const NAME_DENY_DEFAULTS = Object.freeze([
@@ -139,23 +141,27 @@ export function createNameTable({
       return { name: label, host, service }
     },
 
-    /** The holder gives a name up. @returns {boolean} whether it held it */
-    release(pod, label) {
+    /** The holder gives a name up. `{ link }`: only if it was claimed over that link. @returns {boolean} whether it held it */
+    release(pod, label, { link } = {}) {
       sweep()
       const have = names.get(label)
       if (!have || have.pod !== pod) return false
+      if (link !== undefined && have.link !== link) return false
       names.delete(label)
       audit('release', pod, label)
       changed({ type: 'released', pod, name: label })
       return true
     },
 
-    /** The link `link` of `pod` is gone: its names are held for `holdMs` for this pod only. A link that is not the one that made the claim changes nothing. */
-    linkLost(pod, link) {
+    /**
+     * The link `link` of `pod` is gone: its names are held for `holdMs` for this pod only. A link that is not the one that made the claim changes nothing.
+     * `{ hold: false }`: the link was closed on purpose (the pod said goodbye), so its names are given up at once instead of held, and nobody is told to wait for the pod.
+     */
+    linkLost(pod, link, { hold = true } = {}) {
       sweep()
       for (const [label, e] of [...names]) {
         if (e.pod !== pod || e.link !== link || e.heldUntil !== null) continue
-        if (holdMs === 0) { names.delete(label); audit('release', pod, label); changed({ type: 'released', pod, name: label }); continue }
+        if (holdMs === 0 || !hold) { names.delete(label); audit('release', pod, label); changed({ type: 'released', pod, name: label }); continue }
         e.heldUntil = now() + holdMs
         audit('hold', pod, label)
         changed({ type: 'held', pod, name: label, holdMs })
@@ -228,7 +234,14 @@ export function serveIngressNames(service, table) {
       return { released: table.release(peer, params.name) }
     })
     channel.onRequest('names', () => table.namesOf(peer))
-    channel.onClose(() => { channels.delete(channel); table.linkLost(peer, channel) })
+    // A pod's goodbye: what this channel claimed is given up, the channel stays usable. (Only names of this pod, claimed over this channel.)
+    channel.onRequest('bye', () => {
+      const released = []
+      for (const n of table.namesOf(peer)) if (!n.held && table.release(peer, n.name, { link: channel })) released.push(n.name)
+      return { released }
+    })
+    // A channel that closed because the pod said `done` is a goodbye (names given up); any other close is a link that dropped (names held).
+    channel.onClose(() => { channels.delete(channel); table.linkLost(peer, channel, { hold: channel.remoteReason !== GOODBYE_REASON }) })
   }
   const unserve = api.serveProtocol(NAMES_PROTOCOL, accept, { versions: [...NAMES_VERSIONS] })
   return {
@@ -244,9 +257,10 @@ export function serveIngressNames(service, table) {
  * @param {string} ingressPodId
  * @returns {Promise<{ channel: object, claim(name: string, opts?: { service?: string }): Promise<{ name: string, host: string }>, release(name: string): Promise<{ released: boolean }>, names(): Promise<object[]>, close(): void }>}
  */
-export async function openNameClient(service, ingressPodId, { timeoutMs = 10_000 } = {}) {
+export async function openNameClient(service, ingressPodId, { timeoutMs = 10_000, closeTimeoutMs = 2_000 } = {}) {
   const api = service && typeof service === 'object' ? (service.api ?? service) : null
   if (typeof api?.openProtocol !== 'function') throw new TypeError('openNameClient: the first argument is a mesh service with openProtocol (createMeshProtocolService)')
+  if (!Number.isSafeInteger(closeTimeoutMs) || closeTimeoutMs <= 0) throw new TypeError('openNameClient: closeTimeoutMs must be a positive integer')
   const channel = await api.openProtocol(ingressPodId, NAMES_PROTOCOL, { versions: [...NAMES_VERSIONS], timeoutMs })
   return {
     channel,
@@ -254,6 +268,18 @@ export async function openNameClient(service, ingressPodId, { timeoutMs = 10_000
     release: (name) => channel.request('release', { name }, { timeoutMs }),
     names: () => channel.request('names', {}, { timeoutMs }),
     onClose: (cb) => channel.onClose(cb),
-    close: () => channel.close('done'),
+    /**
+     * Say goodbye and close: the names this channel claimed are given up at once (not held for the pod to come back), and
+     * this resolves once the ingress has answered, so the goodbye is on its way before whatever the caller closes next (the
+     * node) can cut it off. An ingress that does not know the request, or one that does not answer within `closeTimeoutMs`,
+     * does not hold the close up: the channel is closed all the same, with the reason `done` that an ingress reads as a goodbye
+     * too. Call it before closing the node, and `await` it.
+     * @returns {Promise<void>}
+     */
+    async close() {
+      if (channel.closed) return
+      try { await channel.request('bye', {}, { timeoutMs: closeTimeoutMs }) } catch { /* an older ingress, or none: the close below says it */ }
+      channel.close(GOODBYE_REASON)
+    },
   }
 }

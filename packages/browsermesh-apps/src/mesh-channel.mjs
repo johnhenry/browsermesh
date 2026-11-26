@@ -199,7 +199,9 @@ export function createChannelCore({
   const closeListeners = new Set()
 
   const effectiveMax = () => remote ? Math.min(local.maxMessageBytes, remote.maxMessageBytes) : local.maxMessageBytes
-  const frame = (k, rest) => ({ k, ...rest })
+  // Every frame says which link it belongs to (`sid`), so a frame that outlives its link (a close, above all) cannot
+  // be taken for one of the link that replaced it. A peer that predates the field ignores it.
+  const frame = (k, rest) => ({ k, sid, ...rest })
   function transmit(f) {
     return Promise.resolve().then(() => sendFrame(f))
   }
@@ -477,6 +479,8 @@ export function createChannelCore({
 
   function receive(fr) {
     if (closed || !fr || typeof fr !== 'object') return
+    // A frame of another link than the one this end holds is dropped. One with no id (an older peer's) is taken as before.
+    if (remoteSid !== null && typeof fr.sid === 'string' && fr.sid !== remoteSid) return log('mesh-channel:stale-frame', { peer, k: fr.k })
     switch (fr.k) {
       case 'hello': return onHello(fr)
       case 'hello-ack': return onHelloAck(fr)
@@ -679,6 +683,19 @@ export function createMeshChannelService({
         core?.receive(msg)
       })
 
+      // A link lives as long as the transport under it. When the node says the transport to a peer closed and that peer
+      // has no other active session, the link is closed now (and with it every protocol channel on it), so what runs on
+      // it hears of the loss at once instead of when a request or a timeout finds out. A node without these events (a
+      // test double) is left as it was.
+      const onTransportClose = (event) => {
+        const peer = event?.pubKey
+        if (closed || typeof peer !== 'string') return
+        if (typeof peerNode.hasActiveSession === 'function' && peerNode.hasActiveSession(peer)) return
+        cores.get(peer)?.close(err(ChannelErrorCode.CANCELLED, 'transport-closed', 'the transport to the peer closed'), { notifyRemote: false })
+      }
+      const canWatch = typeof peerNode.on === 'function' && typeof peerNode.hasActiveSession === 'function'
+      if (canWatch) peerNode.on('peer:transport-close', onTransportClose)
+
       async function open(peer, { timeoutMs } = {}) {
         if (closed) throw new Error('mesh-channel: service torn down')
         if (typeof peer !== 'string' || !peer || peer.length > 512) throw new TypeError('mesh-channel: peer must identify one peer')
@@ -707,6 +724,7 @@ export function createMeshChannelService({
           if (closed) return
           closed = true
           unsubscribe()
+          if (canWatch && typeof peerNode.off === 'function') peerNode.off('peer:transport-close', onTransportClose)
           for (const core of [...cores.values()]) core.close(err(ChannelErrorCode.CANCELLED, 'channel-closed', 'service torn down'))
           cores.clear()
         },

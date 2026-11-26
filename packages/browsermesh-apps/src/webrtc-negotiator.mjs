@@ -66,6 +66,19 @@
 // plain literal has no such timing hazard.
 const DEFAULT_CONNECTION_ID = 'default'
 
+/**
+ * What an offer says about glare: present (a number of 1 or more) when the sender follows the rule "the lower pod id's
+ * offer wins". An offer without it comes from a release that does not, and is assumed to yield (see the offer handler).
+ */
+export const GLARE_VERSION = 1
+
+/**
+ * When this side's offer wins a glare (the other side's offer is dropped) and no answer has come this long after, the
+ * offer is sent again: it may never have reached a peer that was not there yet when it was first sent. Longer than a
+ * signalling round trip, so in a true glare the answer is in before this runs out and nothing is sent twice.
+ */
+export const GLARE_RESEND_MS = 1500
+
 /** Default time to wait for an SDP answer before giving up. */
 const DEFAULT_ANSWER_TIMEOUT_MS = 15_000
 
@@ -256,12 +269,56 @@ export function createWebRTCTransportFactory({
     })
   }
 
+  /**
+   * One transport adapter per connection. A connection is handed out by the caller side (the dial returns it) and by
+   * the callee side (`onIncomingConnection`), and a peer that starts over on a connection this side still holds
+   * hands it out again: each time it is the same adapter, so the node wires the connection in once and every inbound
+   * message is delivered once, however often the connection is handed out. A closed adapter is never reused.
+   * @type {WeakMap<object, object>}
+   */
+  const adapters = new WeakMap()
+  async function adapterFor(conn) {
+    const have = adapters.get(conn)
+    if (have && have.state !== 'closed') return have
+    const { WebRTCTransportAdapter } = await import('@johnhenry/browsermesh-transport')
+    const raced = adapters.get(conn) // another path made one while the import was settling
+    if (raced && raced.state !== 'closed') return raced
+    const adapter = new WebRTCTransportAdapter(conn)
+    adapters.set(conn, adapter)
+    await adapter.connect()
+    return adapter
+  }
+
+  /**
+   * Dials this side has an offer out for, whose answer has not been applied: `key` -> `{ yield() }`. Two peers that
+   * dial each other at the same moment (glare) each hold one of these when the other's offer arrives.
+   * @type {Map<string, { yield: () => void, resend: () => void }>}
+   */
+  const dialing = new Map()
+
   // Callee side: answer any inbound offer automatically. Registered once,
   // for the lifetime of this factory, so a peer that only ever receives
   // connections (never calls negotiate() itself) still gets connected.
   signaling.onOffer(async (fromPodId, offer, connectionId = DEFAULT_CONNECTION_ID) => {
     const key = iceKey(fromPodId, connectionId)
     let entry = null
+    // Glare: this side's own offer to the same peer is out. One of the two offers must give way, and both sides must
+    // agree which: the lower pod id's offer wins. A peer that does not say it follows the rule (an older release,
+    // whose offer has no `glare` marker) is assumed to yield, as every older release does, so then ours wins.
+    const mine = dialing.get(key)
+    if (mine) {
+      const theirsFollowsRule = Number(offer?.glare) >= 1
+      if (!theirsFollowsRule || localPodId < fromPodId) {
+        log('webrtc-negotiator:glare-won', { from: fromPodId, connectionId })
+        // The peer answers our offer; its own offer is dropped. Our offer may never have reached it (it was not there
+        // when we sent it): if no answer has come by then, it is sent again, and the peer gives way to it (or an older
+        // peer answers it).
+        mine.resendIfUnanswered()
+        return
+      }
+      log('webrtc-negotiator:glare-yielded', { from: fromPodId, connectionId })
+      mine.yield() // our dial stops waiting for an answer and takes the connection the peer's offer opens
+    }
     try {
       // An offer for a connection that is already open (a renegotiation) or already counted takes no slot.
       const existing = meshManager.getConnection?.(fromPodId, connectionId)
@@ -279,10 +336,7 @@ export function createWebRTCTransportFactory({
       // side gets from connectToPeer() -- see PeerNode.adoptIncomingSession().
       if (typeof onIncomingConnection === 'function') {
         await waitForOpen(conn, defaultOpenTimeoutMs ?? DEFAULT_OPEN_TIMEOUT_MS)
-        const { WebRTCTransportAdapter } = await import('@johnhenry/browsermesh-transport')
-        const adapter = new WebRTCTransportAdapter(conn)
-        await adapter.connect()
-        onIncomingConnection(fromPodId, adapter, connectionId)
+        onIncomingConnection(fromPodId, await adapterFor(conn), connectionId)
       }
     } catch (err) {
       if (entry) {
@@ -342,17 +396,50 @@ export function createWebRTCTransportFactory({
     })
     answerPromise.catch(() => {}) // read below; a failure before that must not be an unhandled rejection
 
+    // From here until the answer is applied this dial is "out": an offer from the same peer that arrives meanwhile is
+    // glare (see the standing offer handler), and may make this dial give way.
+    const key = iceKey(remotePodId, connectionId)
+    let gaveWay = false
+    let giveWay = () => {}
+    const gaveWayPromise = new Promise((resolve) => { giveWay = () => { gaveWay = true; resolve() } })
+    let sentOffer = null
+    let answered = false
+    let resendTimer = null
+    const sendOffer = () => signaling.send('webrtc-offer', remotePodId, { ...sentOffer, glare: GLARE_VERSION }, connectionId)
+    const dial = {
+      yield: giveWay,
+      resendIfUnanswered() {
+        if (resendTimer) return
+        resendTimer = setTimeout(() => {
+          resendTimer = null
+          if (!sentOffer || answered || gaveWay || dialing.get(key) !== dial) return
+          try { sendOffer() } catch { /* the signalling transport is down: the answer timeout says so */ }
+        }, GLARE_RESEND_MS)
+        resendTimer.unref?.()
+      },
+    }
+    dialing.set(key, dial)
     try {
-      const offer = await conn.createOffer()
-      signaling.send('webrtc-offer', remotePodId, offer, connectionId)
+      let offer
+      try {
+        offer = await conn.createOffer()
+      } catch (err) {
+        if (gaveWay) offer = null // the peer's offer replaced the connection this one was being made on
+        else throw err
+      }
+      if (offer && !gaveWay) { sentOffer = offer; sendOffer() }
+      // The answer to our offer, or the peer's offer taking over: then the connection opens through the answering path.
+      const outcome = gaveWay ? 'gave-way' : await Promise.race([answerPromise.then((answer) => ({ answer })), gaveWayPromise.then(() => 'gave-way')])
+      if (outcome === 'gave-way') stopWaiting()
+      else { answered = true; await conn.handleAnswer(outcome.answer) }
     } catch (err) {
       // The offer never left (the signalling transport is down, or the connection could not make one): stop waiting for an answer to it.
       stopWaiting()
       throw err
+    } finally {
+      clearTimeout(resendTimer)
+      if (dialing.get(key) === dial) dialing.delete(key)
     }
-
-    const answer = await answerPromise
-    await conn.handleAnswer(answer)
 
     try {
       await waitForOpen(conn, openTimeoutMs)
@@ -361,10 +448,7 @@ export function createWebRTCTransportFactory({
       throw new Error(`WebRTC DataChannel with ${remotePodId} did not open in time`)
     }
 
-    const { WebRTCTransportAdapter } = await import('@johnhenry/browsermesh-transport')
-    const adapter = new WebRTCTransportAdapter(conn)
-    await adapter.connect()
-    return adapter
+    return adapterFor(conn)
   }
 
   Object.defineProperty(webrtcTransportFactory, 'halfOpenInbound', {

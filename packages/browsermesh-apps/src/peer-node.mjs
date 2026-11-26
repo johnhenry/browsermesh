@@ -494,6 +494,17 @@ export class PeerNode {
    *   callers strip it before returning to their own caller)
    */
   #createSession(pubKey, transportType, transportInstance, connectionId = DEFAULT_CONNECTION_ID) {
+    // One transport object is one session. A peer that starts over on the connection it already had (a fresh offer
+    // swaps the connection underneath, the transport object stays) is handed to this method again: a second session
+    // would register a second inbound listener on the same transport and deliver every message to the node twice.
+    if (transportInstance) {
+      for (const s of this.#sessions.values()) {
+        if (s.transportInstance === transportInstance && s.pubKey === pubKey && s.state === 'active') {
+          s.connectedAt = Date.now()
+          return s
+        }
+      }
+    }
     const sessionId = crypto.randomUUID()
     const session = {
       sessionId,
@@ -529,6 +540,14 @@ export class PeerNode {
     // immediate complement to its own ping/pong liveness probing.
     if (transportInstance && typeof transportInstance.onClose === 'function') {
       transportInstance.onClose(() => {
+        // A session lives as long as its transport: once a transport that is finished (`state` is `'closed'`: a WebRTC
+        // connection that closed does not come back) says it closed, the session is no longer active (`hasActiveSession`
+        // and `sendTo` stop counting it). A transport that reports a drop and then redials itself (a wsh link) is not
+        // finished, and neither is one that does not say: its session stays, as before.
+        if (session.state === 'active' && transportInstance.state === 'closed') {
+          session.state = 'closed'
+          this.#sessions.delete(sessionId)
+        }
         this.#emit('peer:transport-close', { pubKey, sessionId, transport: transportType })
       })
     }

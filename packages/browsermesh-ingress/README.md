@@ -277,7 +277,11 @@ createMeshIngress({ service, resolve: (request) => ({ peer: podId, service: 'api
 // CLI: --map site.example.test/web=<podId>#web --map site.example.test/api=<podId>#api --map db.example.test=<podId>#db
 ```
 
-A handler that serves several services finds the name in `ctx.service`. A route with no service reaches the pod's default
+A handler that serves several services finds the name in `ctx.service` (the second argument, next to `peer`, `signal` and
+`client`; it is absent for a route with no service). A site handler wrapped with `fromSiteHandler` is given it as the `service`
+field of the request object it receives. The ingress's own record of each request (`onAudit`, and the line the CLI prints) names
+the service as well as the host: `service` on the record when the route has one, and `GET site.example.test -> <podId>#web 200 ...`
+on the CLI line (a route with no service prints, and records, exactly what it always did). A route with no service reaches the pod's default
 handler; a pod declared with `handler: null` and no default refuses it. A service name is `[a-z0-9][a-z0-9._-]{0,63}`; a pod
 declares at most 32. One pod behind several hostnames or paths is the same trust domain, so it does not need
 `--allow-shared-origin` (two different pods under one hostname still do).
@@ -318,10 +322,14 @@ The rules, each with a test:
   a field of the message. A grant revoked stops the next claim.
 - **Never a name another live pod holds**, and two claims racing for one name give it to one. A pod that holds a name and claims it
   again is changing its service, not taking a second slot.
-- **Held while the link is up, released a short while after it drops.** When the claiming channel closes the name is held for
-  `holdMs` (default 30 s; 0 frees it at once) for that pod only: a stranger cannot take it in between, the same pod gets it back at
-  once by claiming on its new channel, and a channel that closes late (after the pod came back) takes nothing from the new claim.
-  After the hold the name is free for anyone with a grant. A request for a held name waits for its pod (see below).
+- **Held while the link is up, released a short while after it drops.** When the claiming channel is lost (the link drops, or the
+  channel closes with no goodbye) the name is held for `holdMs` (default 30 s; 0 frees it at once) for that pod only: a
+  stranger cannot take it in between, the same pod gets it back at once by claiming on its new channel, and a channel that closes
+  late (after the pod came back) takes nothing from the new claim. After the hold the name is free for anyone with a grant. A
+  request for a held name waits for its pod (see below).
+- **A goodbye gives the names up at once.** `await client.close()` says goodbye (a `bye` request, then the channel closes with
+  the reason `done`): what that channel claimed is released, not held, so nobody waits for a pod that is not coming back and a
+  request for the name is a 404 straight away. Only a close with a goodbye does this; a lost link is still held.
 - **Bounded**: `maxPerPod` (4), `maxNames` for the zone (64; held names count), and `claimRate` (30 attempts per pod per
   minute, refused ones included). A pod flapping its link re-claims within the same allowance.
 - **Names are plain DNS labels**: lowercase letters, digits and hyphens, 1 to 63 characters, no hyphen at either end, no case
@@ -352,9 +360,31 @@ CLI: `--names-zone pods.example.test --names-allow <podId>=app,blog [--names-all
 
 - **Wire (additive).** A new protocol, `ingress-names` v1, on the protocol channel, served only when the operator serves it:
   `claim { name, service? } -> { name, host, service? }`, `release { name } -> { released }`, `names {} -> [{ name, host,
-  service?, held }]`; a refusal is a channel error whose `reason` is one of the table above.
+  service?, held }]`, and (0.6) `bye {} -> { released: string[] }`; a refusal is a channel error whose `reason` is one of the
+  table above.
 - **An older ingress** does not serve the protocol: the pod's `openNameClient` fails (unknown protocol) and nothing else changes.
-  **An older pod** never opens it. The `http` protocol is unchanged, so a claimed name is served over `http` v1 as any mapping is.
+  An older ingress that serves it does not know `bye`: the client's close ignores that answer and closes the channel with the
+  reason `done` all the same, which that ingress treats as any lost channel, so the names are held for `holdMs` as they always were.
+  **An older pod** never opens it, or closes its channel with no `bye`: a new ingress reads the reason `done` of an older client's
+  `close()` as the goodbye it was meant as (names released); any other close is a lost link (names held). The `http` protocol
+  is unchanged, so a claimed name is served over `http` v1 as any mapping is.
+
+### Closing a pod: the order
+
+Say goodbye first, take the services down, close the node last, and wait for each step:
+
+```js
+await client.close()      // the names are given up and the ingress has heard it (it answers `bye`); at most `closeTimeoutMs`, 2 s
+served.stop()             // the `http` channels close
+await node.shutdown()     // then the node
+node.meshManager.closeAll()   // and its connections, if the page is going to keep running
+```
+
+Closing the node first (or not waiting for `client.close()`) can cut the goodbye off before it leaves, and the ingress then
+learns the pod is gone only from the link ending, so the names are held for `holdMs` and a request for one waits for a pod that
+is not coming back. Closing a names client does not touch the `http` channels or the link: only the names it claimed go.
+If the link ends without any of this (a tab closed, a network lost), the ingress still sees it end: a node whose connection
+closes ends its link at once (apps 0.28), where it used to be noticed only by the next request or timeout.
 - **Not built, on purpose**: names for a pod that has no link to the ingress (a claim needs the channel, so the pod has dialled
   or been dialled), per-name TLS certificates (TLS is in front of the listener, as always), and DNS (the operator points a
   wildcard record at the listener; the ingress does not publish names).
@@ -376,6 +406,33 @@ answered before any request reaches a pod, and it shadows that one path for ever
 pod that dials it, so either side can start the link; a pod that cannot accept inbound connections dials the ingress's pod id
 (printed at start) and the ingress uses that link. Nothing about this is new; what is new is that the dialling now starts when the
 ingress starts rather than at the first request.
+
+**Both sides dialling at once.** With a hand mapping and the CLI's default dialling the ingress is dialling the pod while the pod
+dials the ingress. The two connection attempts used to cross and cancel each other (each side answered the other's offer and
+dropped its own, so neither dial was answered), and the first requests failed until the dials timed out. Now one of them wins:
+**the lower pod id's offer wins**, the other side drops its own offer, answers it and takes the connection, and both dials come
+back with that one connection in a second or two. A request that arrives meanwhile waits for the link (up to `--link-wait`) as for
+any link still being made. This is decided in `@johnhenry/browsermesh-apps` (the WebRTC negotiator), so it holds for every pair of
+peers that dial each other, not only for the ingress. `--link-wait 0` still turns the ingress's dialling off, if you would rather
+the pod alone dials.
+
+**A pod that stops and starts again** (the same identity, a new page or a new process) against an ingress that keeps running is
+served at once: its first answer is whole and the second link is not touched by the end of the first. What was wrong: a
+connection the pod's node had closed without closing the WebRTC connection under it stayed on the ingress, and the new start
+reused it, so the node wired the one connection in twice and delivered every message twice; the second copy of the end of a
+response read as a stream error, and the ingress cut the visitor off after the whole body (`provider-failed`) and then dropped the
+link. Now one connection is one session, a link ends when its connection ends, and a frame left over from a link that has ended
+cannot touch the one that replaced it.
+
+**What an older peer does.** Both fixes are in `@johnhenry/browsermesh-apps` (0.28), which the ingress and the pod each run.
+- *A pod older than the fix, an ingress with it*: restarts are served (the duplicate connection was the ingress's), and a crossing
+  dial is won by the ingress (an older pod's offers carry no marker, so it is assumed to give way, as every older pod does): the
+  pod's own `connectToPeer` may report an answer timeout after the link is already up, and the link is. The pod needs nothing.
+- *An ingress older than the fix, a pod with it*: nothing is fixed. The ingress still wires a restarted pod in twice, and a dial
+  that crosses the pod's still fails until it times out; upgrade the ingress (`--link-wait 0` is the workaround for crossing dials).
+- Two peers with the fix agree on the lower pod id; a peer that sends the marker is never answered with an older behaviour.
+  The wire additions are a `glare` field on a WebRTC offer and the link's id (`sid`) on every channel frame; a peer that predates
+  them ignores both, and a frame without an id is accepted exactly as before.
 
 ## Headers, by default and on purpose
 
@@ -507,7 +564,7 @@ A provider's own answer, including its own 4xx and 5xx and a plain 421, passes t
 | Response headers | allow-list; `Set-Cookie`, `Content-Encoding`, HSTS, `Refresh`, CORS and unknown headers dropped |
 | Forced | `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'; sandbox` (a response is never framed; `contentSecurityPolicy` in the mapping replaces or removes it), `X-Content-Type-Options: nosniff`, `Cache-Control: no-store`, `Vary` |
 | Redirects | never followed; a `Location` that is not a path on this origin is a 502 |
-| Audit | pod, host, method, status, reason, bytes, duration; never query strings, paths or bodies |
+| Audit | pod, service (when the route names one), host, method, status, reason, bytes, duration; never query strings, paths or bodies |
 
 ## CLI
 
