@@ -107,7 +107,7 @@ export async function main(argv, { stdout, stderr, startNode = startMeshNode, pr
     methods: options.methods,
     limits,
     deny: token ? bearerDeny(token) : undefined,
-    onAudit: (r) => say(`${r.method} ${r.host} -> ${r.peer ?? '-'} ${r.status}${r.reason ? ` (${r.reason})` : ''} in ${r.requestBytes}B out ${r.responseBytes}B ${r.durationMs}ms`),
+    onAudit: (r) => say(`${r.method} ${r.host} -> ${r.peer ?? '-'}${r.service ? `#${r.service}` : ''} ${r.status}${r.reason ? ` (${r.reason})` : ''} in ${r.requestBytes}B out ${r.responseBytes}B ${r.durationMs}ms`),
   })
   // The mapped pods are dialled now and kept dialled; a request that arrives before a link is up waits for it (bounded)
   // instead of being answered 502.

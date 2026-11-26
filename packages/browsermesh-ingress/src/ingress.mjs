@@ -447,6 +447,8 @@ export function createMeshIngress({
         const peer = mapping.peer
         if (tried.includes(peer)) throw lastFailure // a pod already tried is not asked twice
         record.peer = peer
+        if (mapping.service === undefined) delete record.service
+        else record.service = mapping.service // the record names the service as well as the host
         record.attempt = attempt
         const path = mapping.path === undefined ? undefined : checkMappedPath(mapping.path)
         const outTarget = path === undefined ? target : checkTarget(path + url.search, limits.maxTargetLength)

@@ -101,9 +101,11 @@ describeIfReal('a peer that is killed outright is noticed', () => {
     const info = await Promise.race([link.whenClosed, new Promise((_, reject) => setTimeout(() => reject(new Error('the link was not closed')), NOTICE_LIMIT_MS))])
     const took = Date.now() - killedAt
     t.diagnostic(`provider killed with SIGKILL: the consumer's link ended '${info.reason}' after ${(took / 1000).toFixed(1)} s (keep-alive defaults: every 5 s, 3 misses)`)
-    assert.equal(info.reason, 'provider-gone')
+    // The keep-alive ends it as `provider-gone`; where the transport reports the connection closed first (the operating system
+    // told it the peer's socket is gone) the link ends with it, as `provider-closed`. Either way it ends, with what was open.
+    assert.ok(['provider-gone', 'provider-closed'].includes(info.reason), info.reason)
     const failure = await waiting
-    assert.ok(failure && failure.code === 'provider-gone', String(failure?.code ?? failure))
+    assert.ok(failure && ['provider-gone', 'provider-closed'].includes(failure.code), String(failure?.code ?? failure))
     assert.equal(link.stats().open, 0)
     await assert.rejects(link.connect('origin.test', originPort), (e) => e.code === 'link-closed')
   })
@@ -151,10 +153,11 @@ describeIfReal('a peer that is killed outright is noticed', () => {
 
     const killedAt = Date.now()
     consumer.child.kill('SIGKILL')
-    await waitFor(() => provider.stats().gone === 1 && provider.connections.length === 0, NOTICE_LIMIT_MS, 'the provider to give up on the killed consumer')
+    await waitFor(() => provider.connections.length === 0 && provider.stats().channels === 0, NOTICE_LIMIT_MS, 'the provider to give up on the killed consumer')
     t.diagnostic(`consumer killed with SIGKILL: the provider ended its connection and channel after ${((Date.now() - killedAt) / 1000).toFixed(1)} s (keep-alive defaults: every 5 s, 3 misses)`)
-    assert.equal(provider.stats().channels, 0)
     assert.equal(provider.stats().ends['consumer-left'], 1)
-    assert.ok(audit.some((a) => a.event === 'egress-consumer-gone' && a.peer === consumerPodId))
+    // The keep-alive counts the consumer `gone` (and audits it); where the transport reported the closed connection first the
+    // channel simply closed, and the consumer's end is the same `consumer-left`.
+    if (provider.stats().gone === 1) assert.ok(audit.some((a) => a.event === 'egress-consumer-gone' && a.peer === consumerPodId))
   })
 })

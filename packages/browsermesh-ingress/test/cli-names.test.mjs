@@ -176,6 +176,18 @@ describe('main(): names and routes end to end', () => {
     assert.deepEqual([gone.status, gone.reason], [502, 'provider-no-service'])
   })
 
+  it('the line printed for each request names the service after the pod; a route without one prints as it always did', async () => {
+    const t = await start((p) => ['--map', `site.example.test/web=${p.provider.podId}#web`, '--map', `plain.example.test=${p.provider.podId}`, '--link-wait', '0'])
+    const served = serveHttpOnMesh(t.p, () => new Response('the default'), { allowFrom: [t.ingress.podId], services: { web: () => new Response('the web') } })
+    cleanups.push(() => served.stop())
+    grantHttp(t)
+    await hostGet(t.port, 'site.example.test', '/web/x')
+    await hostGet(t.port, 'plain.example.test', '/')
+    const lines = t.t.out.join('').split('\n')
+    assert.ok(lines.some((l) => l.startsWith(`GET site.example.test -> ${t.provider.podId}#web 200 `)), lines.join('\n'))
+    assert.ok(lines.some((l) => l.startsWith(`GET plain.example.test -> ${t.provider.podId} 200 `)), lines.join('\n'))
+  })
+
   it('dials the mapped pods at start and answers the first request even when the pod comes a moment later; --ready-path says when', async () => {
     const t = await start((p) => ['--map', `site.example.test=${p.provider.podId}`, '--ready-path', '/_ready', '--link-wait', '20s'])
     assert.equal((await fetch(`http://127.0.0.1:${t.port}/_ready`)).status, 503)

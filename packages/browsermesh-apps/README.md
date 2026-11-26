@@ -218,6 +218,32 @@ halfOpenTimeoutMs: 30_000 })`. Leave them out and the defaults above apply;
 a value the factory refuses (not a positive integer, or not a positive number)
 throws a `TypeError` from `createMeshNode()`.
 
+**Two peers dialling each other at once (glare) converge on one connection.**
+When `connectToPeer()` has an offer out to a peer and an offer from that peer
+arrives, one must give way, and both sides must agree which. The rule is *the
+lower pod id's offer wins*: the other side drops its own offer, answers the
+winner's, and its `connectToPeer()` resolves with the connection that opens
+(about a second, not the answer timeout). Offers carry `glare: 1` so each side
+knows the other follows the rule; an offer without it comes from a release that
+always gives way, so against one this side's offer wins whatever the ids. A
+winner whose offer may never have reached a peer that was not there yet sends
+it again once, `GLARE_RESEND_MS` (1.5 s) after it ignored the peer's offer, if
+no answer has come. Before this, each side answered the other's offer and
+dropped its own, nothing was answered, and both dials ended in their timeouts.
+An older peer that dials a newer one at the same moment is answered and linked
+whatever the ids (its own `connectToPeer()` may report an answer timeout after
+the link is up) and needs no change; two older peers behave as they did.
+
+**One connection, one session; a session ends with its connection.** A peer that
+starts over on a connection this side still holds is wired in once: the
+negotiator keeps one transport adapter per connection and `PeerNode` one session
+per transport object (before, each start added a session and every inbound
+message was delivered once per session). When a transport that is finished
+(`state === 'closed'`) reports its close, its session is no longer active
+(`hasActiveSession`, `sendTo`), and `createMeshChannelService()` closes the link
+to that peer (`transport-closed`) unless the peer has another active session. A
+transport that drops and redials itself (a wsh link) keeps its session.
+
 By default, `createMeshNode()` gathers **no ICE servers at all** (no STUN,
 no TURN) -- host candidates only, which is enough for peers on the same LAN
 and discloses nothing to a third party. That's fine for typical NAT, but
@@ -894,7 +920,12 @@ Like `mesh-rpc`, it does not authorise anything itself. Compatibility: the
 first thing sent to a peer is one `hello`; a peer that does not run the
 service ignores it and `open()` rejects with `MeshChannelError`
 (`code -32000`, `reason 'unsupported'`) after `handshakeTimeoutMs`; pass
-`peerSupports(peer)` to refuse without sending even that. See
+`peerSupports(peer)` to refuse without sending even that. Every frame now also
+carries the link's session id (`sid`): a frame for another link than the one a
+peer holds (the late close of a link that was replaced) is dropped, a frame with
+no `sid` (an older peer's) is accepted as before, and a peer that predates the
+field ignores it. When the node reports that the transport to a peer closed and
+the peer has no other active session, the link to it closes at once. See
 `examples/17-mesh-channel.mjs` and the module comment in `mesh-channel.mjs`
 for the wire frames, the memory model and the error codes.
 

@@ -234,6 +234,32 @@ was the first dial, and a pod that was a moment late was a 502. `expect(podId)` 
 and keeps dialling, and a request for such a pod waits for the link for a bounded time that never outlasts its own deadline.
 Readiness is a count, never a pod id, and the Node listener answers it only on a path the operator names.
 
+**A link lives as long as its connection, and a pod that restarts is one link, not two.** Three things were found together
+when one pod identity stopped and started again against an ingress that kept running (the second start's first answer arrived
+whole and then the ingress cut the visitor off), and when the ingress and the pod dialled each other at the same moment. They
+are decided in `browsermesh-apps`, below the ingress, so they hold for every pair of peers:
+- *One connection, one session.* A peer that starts over sends an offer on the connection the other side still holds; the
+  transport swaps the connection underneath and keeps its own object. Each such offer used to add another transport adapter and
+  another session over that object, so every inbound message was delivered once per session and the second copy of a stream's end
+  was a violation that closed the link. The negotiator now keeps one adapter per connection and the node one session per
+  transport object. A session whose transport has closed for good (a WebRTC connection that closed does not come back) is no
+  longer active, and the channel link to that peer ends with it (`transport-closed`) unless another session of the peer is
+  still up; a transport that drops and redials itself (a wsh link) keeps its session.
+- *A frame carries its link.* Every channel frame has the id (`sid`) of the link it belongs to; a frame for another link than
+  the one held is dropped, so the close of an old link that arrives after the new link's hello cannot end the new link. An older
+  peer sends no id and is accepted as before.
+- *Glare.* Two peers that dial each other at once each answered the other's offer and dropped their own, so neither dial was
+  answered and both waited out their timeouts (30 s each in the CLI: about 90 s of failed requests). The rule is the lower pod
+  id's offer wins: the other side drops its offer, answers, and its dial returns the connection that opens. Offers carry
+  `glare: 1`; an offer without it is from a release that always gives way, so against one the newer side's offer wins whatever the
+  ids. A winner whose offer was never received (the peer was not there yet when it was sent) sends it again once, 1.5 s after
+  ignoring the peer's offer, if no answer has come. What an older peer does: an older pod against a fixed ingress is answered
+  and linked (its own dial may report a timeout after the link is up); an older ingress is not helped.
+- *The names channel says goodbye.* `openNameClient(...).close()` asks the ingress to give up what the channel claimed (`bye`) and
+  closes the channel with the reason `done`; the ingress reads that as a goodbye and releases, where a channel that is lost is
+  still held. The close is awaited, so a pod that closes it before its node does not lose it; closing it never touches the `http`
+  link.
+
 **What it does not do.** There is still no end-to-end confidentiality from the ingress operator: TLS ends in front of the
 listener and the operator reads and can change both directions (the README says so plainly). TLS passthrough, where the ingress
 routes by SNI and relays bytes a pod decrypts itself, would remove the operator from the content. It needs a byte-stream
@@ -257,5 +283,6 @@ a change to this one.
 
 `browsermesh-ingress --listen 127.0.0.1:8080 --signaling wss://... --map host=podId [--map ...]`, with
 `--allow-methods`, `--max-body`, `--timeout`, `--auth bearer:<file>`, `--identity <file>`, `--config file.json`,
-`--public --tls-terminated-in-front`, `--help`. The mesh node uses `node-datachannel` when it is installed (an
+`--public --tls-terminated-in-front`, `--help`. Each request is printed as one line naming the host and the pod, and the
+service after the pod (`-> <podId>#web`) when the route has one. The mesh node uses `node-datachannel` when it is installed (an
 optional dependency); without it nothing can connect to a pod, and the CLI says so.

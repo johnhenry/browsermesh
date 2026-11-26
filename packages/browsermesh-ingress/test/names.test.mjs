@@ -227,6 +227,20 @@ describe('a link going down: the hold', () => {
     await t.claim(POD_A, 'other', { link: LINK_A2 })
   })
 
+  it('a link closed on purpose gives its names up at once: nothing is held, and nobody is told to wait for the pod', async () => {
+    const events = []
+    const { t, audits } = table({ holdMs: 30_000, onChange: (e) => events.push(e) })
+    await t.claim(POD_A, 'app', { link: LINK_A1 })
+    await t.claim(POD_A, 'docs', { link: LINK_A2 }) // another link of the same pod
+    t.linkLost(POD_A, LINK_A1, { hold: false })
+    assert.equal(t.lookup(`app.${ZONE}`), null)
+    assert.equal(t.lookup(`docs.${ZONE}`).held, false, 'only the names of the link that closed')
+    assert.deepEqual(events.map((e) => [e.type, e.name]), [['claimed', 'app'], ['claimed', 'docs'], ['released', 'app']])
+    assert.ok(audits.some((r) => r.action === 'release' && r.name === 'app'))
+    assert.ok(!audits.some((r) => r.action === 'hold'))
+    await t.claim(POD_B, 'app', { link: LINK_B }) // free for anybody at once
+  })
+
   it('holdMs 0 frees a name the moment its link goes', async () => {
     const { t } = table({ holdMs: 0 })
     await t.claim(POD_A, 'app', { link: LINK_A1 })
@@ -371,7 +385,7 @@ describe('claiming over the protocol channel', () => {
     t.ingress.registry.grantCapabilities(t.stranger.podId, [`protocol:${NAMES_PROTOCOL}:open`, 'ingress:name:*:claim'])
     const first = await t.open()
     await first.claim('app')
-    first.close()
+    first.channel.close() // the channel is gone without a goodbye: the same as a link that dropped
     await until(() => t.names.lookup(`app.${ZONE}`)?.held === true, 'the name to be held')
     const other = await t.open(t.s)
     await assert.rejects(other.claim('app'), (e) => e.reason === 'name-taken')
@@ -390,6 +404,80 @@ describe('claiming over the protocol channel', () => {
     assert.deepEqual(await client.release('app'), { released: false })
     assert.equal(t.names.lookup(`app.${ZONE}`), null)
     await client.claim('app')
+  })
+
+  it('closing the client says goodbye: its names are given up at once, not held, and nobody is made to wait for the pod', async () => {
+    const t = await rig({ grants: ['ingress:name:*:claim'] })
+    const changes = []
+    t.names.subscribe((e) => changes.push(e.type))
+    const client = await t.open()
+    await client.claim('app')
+    await client.claim('docs')
+    await client.close()
+    assert.equal(t.names.lookup(`app.${ZONE}`), null)
+    assert.equal(t.names.lookup(`docs.${ZONE}`), null)
+    assert.equal(client.channel.closed, true)
+    await until(() => !changes.includes('held'), 'no hold')
+    assert.deepEqual(changes, ['claimed', 'claimed', 'released', 'released'])
+    assert.equal(t.names.stats().names, 0)
+  })
+
+  it('a goodbye over a channel that other names were claimed on by another pod touches only this pod\'s names', async () => {
+    const t = await rig({ grants: ['ingress:name:*:claim'] })
+    t.ingress.registry.grantCapabilities(t.stranger.podId, [`protocol:${NAMES_PROTOCOL}:open`, 'ingress:name:*:claim'])
+    const mine = await t.open()
+    const theirs = await t.open(t.s)
+    await mine.claim('app')
+    await theirs.claim('docs')
+    await mine.close()
+    assert.equal(t.names.lookup(`app.${ZONE}`), null)
+    assert.equal(t.names.lookup(`docs.${ZONE}`).peer, t.stranger.podId)
+  })
+
+  it('an older client\'s close (no bye, the reason `done`) is read as a goodbye too; any other reason is a lost channel', async () => {
+    const t = await rig({ grants: ['ingress:name:*:claim'] })
+    const old = await t.open()
+    await old.claim('app')
+    old.channel.close('done')
+    await until(() => t.names.lookup(`app.${ZONE}`) === null, 'the name to be given up')
+    const other = await t.open()
+    await other.claim('docs')
+    other.channel.close('network lost')
+    await until(() => t.names.lookup(`docs.${ZONE}`)?.held === true, 'the name to be held')
+  })
+
+  it('bye is a request of its own: it gives up what this channel claimed and the channel stays usable', async () => {
+    const t = await rig()
+    const client = await t.open()
+    await client.claim('app')
+    assert.deepEqual(await client.channel.request('bye', {}), { released: ['app'] })
+    assert.equal(t.names.lookup(`app.${ZONE}`), null)
+    assert.deepEqual(await client.channel.request('bye', {}), { released: [] })
+    await client.claim('app')
+  })
+
+  it('an ingress that does not know bye: closing the client still closes the channel, with the reason the older ingress reads as a goodbye', async () => {
+    const pods = await threePods()
+    cleanups.push(() => pods.teardown())
+    pods.ingress.registry.grantCapabilities(pods.provider.podId, [`protocol:${NAMES_PROTOCOL}:open`])
+    const seen = {}
+    pods.i.api.serveProtocol(NAMES_PROTOCOL, (channel) => { channel.onClose(() => { seen.reason = channel.remoteReason }) }, { versions: [1] })
+    const client = await openNameClient(pods.p, pods.ingress.podId)
+    await client.close()
+    assert.equal(client.channel.closed, true)
+    await until(() => seen.reason !== undefined, 'the other end to see the close')
+    assert.equal(seen.reason, 'done')
+  })
+
+  it('an ingress that never answers bye cannot hold the pod up: the close gives up after closeTimeoutMs', async () => {
+    const pods = await threePods()
+    cleanups.push(() => pods.teardown())
+    pods.ingress.registry.grantCapabilities(pods.provider.podId, [`protocol:${NAMES_PROTOCOL}:open`])
+    pods.i.api.serveProtocol(NAMES_PROTOCOL, (channel) => { channel.onRequest('bye', () => new Promise(() => {})) }, { versions: [1] })
+    const client = await openNameClient(pods.p, pods.ingress.podId, { closeTimeoutMs: 25 })
+    await client.close()
+    assert.equal(client.channel.closed, true)
+    await client.close() // closing twice is fine
   })
 
   it('an ingress that predates names: the pod learns it, and nothing else changes', async () => {
