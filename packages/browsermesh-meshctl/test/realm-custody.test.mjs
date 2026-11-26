@@ -1,6 +1,7 @@
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmod } from 'node:fs/promises'
+import { chmod, chown, mkdir, symlink } from 'node:fs/promises'
+import { join } from 'node:path'
 import { realmFixture, PP, PASSPHRASE, freshPodId } from './realm-helpers.mjs'
 
 describe('realm key custody', () => {
@@ -70,6 +71,29 @@ describe('realm key custody', () => {
       assert.equal(r.error.code, 'EREALM_PASSPHRASE_FILE_MODE')
       assert.doesNotMatch(r.stderr, new RegExp(PASSPHRASE))
     }
+  })
+
+  it('--passphrase-file refuses a symlink (it is opened with O_NOFOLLOW), even to a 0600 file', async () => {
+    const target = await fx.passphraseFile(0o600)
+    const link = join(fx.dir, `pp-link-${fx.seen.length}`)
+    await symlink(target, link)
+    const r = await fx.run(issue('--passphrase-file', link))
+    assert.equal(r.code, 3)
+    assert.equal(r.error.code, 'EREALM_PASSPHRASE_FILE_MODE')
+    assert.match(r.error.message, /symlink/)
+  })
+
+  it('--passphrase-file: a directory is a usage error; a file owned by someone else is refused where it can be arranged', async (t) => {
+    const dir = join(fx.dir, 'a-directory')
+    await mkdir(dir)
+    const d = await fx.run(issue('--passphrase-file', dir))
+    assert.equal(d.code, 2)
+    if (process.getuid?.() !== 0) return t.skip('chown to another user needs root')
+    const file = await fx.passphraseFile(0o600)
+    await chown(file, 12345, 12345)
+    const r = await fx.run(issue('--passphrase-file', file))
+    assert.equal(r.code, 3)
+    assert.equal(r.error.code, 'EREALM_PASSPHRASE_FILE_MODE')
   })
 
   it('a missing or empty --passphrase-file is refused', async () => {
