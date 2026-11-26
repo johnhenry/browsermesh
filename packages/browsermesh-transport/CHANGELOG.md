@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.13.1
+
+### Patch Changes
+
+- 21ef78b: `WshPeerLinks` calls `authorize(peer, { restricted: true })`: the second argument says the transport understands the `{ restricted: true }` verdict, so an authorizer can refuse instead of returning it to a transport that would grant a full link. New `WshPeerLinks.supportsRestrictedAdmission = true`. Existing authorizers ignore the extra argument.
+
 ## 0.13.0
 
 ### Minor Changes
