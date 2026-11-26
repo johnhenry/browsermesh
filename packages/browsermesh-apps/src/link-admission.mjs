@@ -48,8 +48,11 @@ const isThenable = (v) => v && typeof v.then === 'function'
  * @param {number} [opts.maxFrameBytes=16384] - Larger frames, either way, are dropped (inbound) or refused (outbound) and counted.
  * @param {(info: { peerKey: string, transport: string, proven: boolean }) => 'allow'|'deny'|'restrict'|Promise<'allow'|'deny'|'restrict'>} opts.decide
  *   A throw, a rejection or any other value is a deny.
- * @param {(link: { peerKey: string, transport: string, proven: boolean, send: (frame: object) => any, onFrame: (cb: (frame: any) => any) => void, onClose: (cb: (reason: string) => void) => void, promote: () => boolean, close: (reason?: string) => boolean }) => any} opts.handler
- *   Called once per restricted link, synchronously inside `admit()`, and owns the exchange. A throw or a rejection closes the link
+ * @param {(link: { peerKey: string, transport: string, proven: boolean, send: (frame: object) => Promise<boolean>, onFrame: (cb: (frame: any) => any) => void, onClose: (cb: (reason: string) => void) => void, promote: () => boolean, close: (reason?: string) => boolean }) => any} opts.handler
+ *   Called once per restricted link, synchronously inside `admit()`, and owns the exchange. `link.send(frame)` throws synchronously for a
+ *   programmer error (the link is no longer restricted, or the frame is over `maxFrameBytes`: `RangeError`); otherwise it returns a promise
+ *   that NEVER rejects: `true` once the transport accepted the frame, `false` if the transport failed or the link closed under it. A handler
+ *   may fire and forget a send; it checks the result only if it needs delivery. A throw or a rejection closes the link
  *   with `handler-error`. Inbound text frames that are JSON objects arrive as objects.
  * @param {(event: { type: string, peerKey?: string, transport?: string, reason?: string }) => void} [opts.onEvent]
  *   `denied`, `refused`, `restricted`, `promoted`, `closed` (with `reason`), `frame-dropped`.
@@ -114,7 +117,11 @@ export function createLinkAdmission({
           throw new RangeError(`frame is over the restricted-link limit of ${maxFrameBytes} bytes`)
         }
         stats.framesOut++
-        return channel.send(frame)
+        // The promise never rejects: a transport that fails, or a link that closes under the send, resolves `false`.
+        try {
+          const out = channel.send(frame)
+          return isThenable(out) ? Promise.resolve(out).then(() => true, () => false) : Promise.resolve(true)
+        } catch { return Promise.resolve(false) }
       },
       onFrame(cb) { rec.frameCb = typeof cb === 'function' ? cb : null },
       onClose(cb) { rec.closeCb = typeof cb === 'function' ? cb : null },
