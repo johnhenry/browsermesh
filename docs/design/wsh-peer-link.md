@@ -359,7 +359,7 @@ repository does not otherwise measure or budget sizes.
 
 `@johnhenry/wsh` is an **optional peer dependency** of
 `@johnhenry/browsermesh-transport` (and a dev dependency for tests), at the
-version range that was tested: `>=0.45.0 <1.0.0`. The transport's wsh tests (116: link, lazy loading,
+version range that was tested when the link was added, `>=0.45.0 <1.0.0`; the manifest now declares `*` (see [the version table](../wsh-and-browsermesh.md#versions) for every package's range and why). The transport's wsh tests (116: link, lazy loading,
 identity; the real handshake over the in-process pipe relay) and example 18 were
 run against 0.45.0, 0.46.0, 0.46.1, 0.47.0 and 0.48.0 and pass on each; nothing
 newer has been tried (wsh is 0.x and breaks between minors, so a release past

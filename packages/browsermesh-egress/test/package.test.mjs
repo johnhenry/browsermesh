@@ -98,7 +98,8 @@ describe('the package', () => {
     assert.equal(pkg.peerDependenciesMeta['@johnhenry/wsh'].optional, true)
     assert.ok(pkg.peerDependencies['@johnhenry/browsermesh-apps'])
     assert.ok(pkg.peerDependencies['@johnhenry/browsermesh-netway'])
-    assert.ok(pkg.devDependencies['@johnhenry/wsh'].startsWith('^0.57'))
+    // the dev range must admit wsh's half-close rule (0.57 and later)
+    assert.match(pkg.devDependencies['@johnhenry/wsh'], /^\^0\.(5[7-9]|[6-9]\d)\./)
   })
 
   it('the entries export what the README says', async () => {
