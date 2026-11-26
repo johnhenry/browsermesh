@@ -373,6 +373,66 @@ uses, exported for a hand-built node. `wsh.require` governs outbound
 `connectToPeer()`; inbound WebRTC offers are still answered while a WebRTC
 signaling bus is wired.
 
+## Link admission: holding an unknown peer on a restricted link
+
+Opt in (off by default; without the option nothing changes). A link whose peer is not yet known can be held in a
+**restricted state**: it counts against a cap, has a deadline, talks to ONE handler you supply and to nothing else, and is
+then promoted into a normal session or closed. The seam carries no policy and no realm logic: what the frames mean, and who
+is let in, is `decide` and `handler`. Design, states and the known gaps:
+[`docs/design/link-admission.md`](../../docs/design/link-admission.md); what is and is not protected:
+[`docs/security.md`](../../docs/security.md#link-admission).
+
+```js
+import { createLinkAdmission, createMeshNode } from '@johnhenry/browsermesh-apps'
+
+const node = await createMeshNode({
+  signalingTransport,
+  wsh: { relays: ['wss://relay.example/'] },
+  admission: {                                  // or an existing `createLinkAdmission()` seam
+    decide: ({ peerKey, transport, proven }) => 'restrict',   // 'allow' | 'deny' | 'restrict'
+    handler: (link) => {                        // once per restricted link
+      link.onFrame((frame) => { /* a JSON text frame arrives as an object */ link.send({ type: 'x:ack' }) })
+      // later: link.promote() makes it a normal session; link.close(reason) drops it
+    },
+    onEvent: (event) => {},                     // restricted, promoted, closed, refused, denied, frame-dropped, ...
+    maxRestricted: 8, deadlineMs: 10_000, maxFrameBytes: 16 * 1024,   // the defaults
+  },
+});
+node.admission.stats();                         // restricted now, opened, promoted, closed, refusedFull, deadlines, ...
+```
+
+- **`decide({ peerKey, transport, proven })`** returns `'allow' | 'deny' | 'restrict'`, sync or async. A throw, a rejection or
+  any other value is `'deny'`. `proven` is true when the link authenticated `peerKey`: always over wsh; over WebRTC only when
+  the identity binding verified it (false under `webrtcAllowUnboundPeers` with a peer that sent no proof).
+- **`handler({ peerKey, transport, proven, send, onFrame, onClose, promote, close })`** owns the exchange. `promote()` and
+  `close()` are one-shot together (the first wins). Frames over `maxFrameBytes` are dropped before the handler sees them, and
+  an outbound frame over it throws. The deadline closes a link that was neither promoted nor closed (`deadline`); a link
+  past the cap is refused (`restricted-full`) and never reaches the handler.
+- **Over wsh** an unknown peer (one the registry or `wsh.authorize` refuses) is put to `decide` with `transport: 'wsh'`. A
+  `restrict` decision logs it in with `endpoint:mesh-admission` instead of `endpoint:mesh`: wsh's own capability check keeps
+  it off the mesh endpoint. A restricted link is not a peer (no `peer-up`, nothing in `onIncomingData`, no session) until
+  `promote()`. `createWshAdmissionAuthorize(admission, inner, { onEvent })` builds the `authorize` that does this and
+  `createMeshNode` uses it.
+- **Over WebRTC** an inbound data channel is held until `decide` says so: `allow` adopts it as today, `deny` closes it,
+  `restrict` holds it restricted until `promote()`.
+- **Fails closed against an older transport.** `{ restricted: true }` is a verdict only a transport that says so understands:
+  `WshPeerLinks` calls `authorize(peer, { restricted: true })` and sets `WshPeerLinks.supportsRestrictedAdmission`. A transport
+  from before that grants a full `endpoint:mesh` on any truthy verdict, so `createWshAdmissionAuthorize` returns the
+  restricted verdict only when the call carries `{ restricted: true }`; otherwise a `restrict` decision is a refusal
+  (`onEvent` type `restricted-unsupported`), and `createMeshNode({ admission, wsh })` logs
+  `mesh-bootstrap:admission-restricted-unsupported` when the loaded `WshPeerLinks` lacks the flag. With such a transport
+  every peer the seam would restrict is refused: upgrade `@johnhenry/browsermesh-transport`. `allow` and `deny` behave the
+  same with any transport.
+
+Built and tested: the seam (cap, deadline, one-shot promote/close, frame cap, counters), the wsh path over an in-process pipe
+relay with real sealed sessions, the WebRTC gate over mock transports, and the fail-closed negotiation. Known gaps (from the
+design note): the seam's frame cap applies after decoding, so memory held per restricted wsh link is bounded by the hub's
+`maxFrameBytes` (1 MiB), not the seam's 16 KiB; a burst of strangers larger than the waiting halves can leave an honest
+dialler unpaired for one relay round trip (the cap does not cover strangers not yet restricted); a local `connectToPeer()`
+to a peer whose inbound WebRTC link is held adopts that connection as a caller session; links you dial are never
+restricted; registry access re-checks do not cover a restricted link; no realm messages, credentials or grants ship with
+the seam (the handler is yours).
+
 ## Sharing a `VirtualNetwork` with specific peers: mesh relay
 
 Real-world scenario: your peer already reaches a real local service (e.g. an

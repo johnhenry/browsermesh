@@ -352,6 +352,23 @@ register the adapter yourself:
 negotiator.registerAdapter('wsh', createWshTransportFactory(links))   // endpoint = the peer's pod id
 ```
 
+### Admitting an unknown peer: `admission` and `{ restricted: true }`
+
+`authorize` normally answers `true`, `false` or `{ expires }`. It may also answer **`{ restricted: true }`**, and the hub
+then takes an `admission` option, a seam with `admit({ peerKey, transport, proven, channel })` (`createLinkAdmission()` in
+`@johnhenry/browsermesh-apps` is one). A restricted peer is logged in with `endpoint:mesh-admission` instead of
+`endpoint:mesh` (the host serves a second endpoint of that name, so wsh's capability check keeps it off the mesh endpoint).
+Its link is not a peer: no `peer-up`, no `message`, nothing in `peers()`. Its frames go to the seam, and `channel.adopt()`
+promotes it into a normal link. A restricted verdict with no `admission` configured is a refusal (`no-admission`), and a
+dialler whose `mesh` endpoint is refused by policy opens `mesh-admission`. Design:
+[`docs/design/link-admission.md`](../../docs/design/link-admission.md).
+
+`authorize` is called as `authorize(peer, { restricted: true })`. The second argument is a capability flag meaning "this
+transport understands the restricted verdict", and `WshPeerLinks.supportsRestrictedAdmission` is `true`. An authorizer that
+can return a restricted verdict should do so only when it was told so: a transport from before this granted a full
+`endpoint:mesh` on any truthy verdict, and `createWshAdmissionAuthorize` in `@johnhenry/browsermesh-apps` refuses instead
+when the flag is missing. Existing authorizers ignore the extra argument.
+
 ### Selection
 
 `'wsh'` is a `TRANSPORT_TYPES` member but is in no default preference order.

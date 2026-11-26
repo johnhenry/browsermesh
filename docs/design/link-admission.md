@@ -43,8 +43,8 @@ the handler never sees them. An outbound frame over the cap throws and is counte
 handler's frames. It holds because a restricted link is not yet a session of the node: nothing subscribed to it.
 
 **wsh** (`browsermesh-transport`). `WshPeerLinks({ authorize, admission })`. `authorize` may now return `{ restricted: true }`
-(additive: `true`, `false`, `{ expires }` are unchanged; default is still "nobody"). A restricted verdict logs the peer in with
-the same `endpoint:mesh` grant, but when the endpoint opens the link is NOT registered: no `peer-up`, no `message` events, no
+(additive: `true`, `false`, `{ expires }` are unchanged; default is still "nobody"). A restricted verdict logs the peer in (with
+`endpoint:mesh-admission`, below) and the link is NOT registered: no `peer-up`, no `message` events, no
 entry in `peers()`. Its frames go to `admission.admit(...)`, its sends come from the handler. `promote` registers it exactly
 as a normal inbound link (tie-break, `peer-up`, reading continues on the same decoder). A restricted verdict with no
 `admission` configured is a refusal. The restricted peer is granted `endpoint:mesh-admission` instead of `endpoint:mesh`, and
@@ -59,6 +59,16 @@ does this when given `admission`.
 has opened; with `admission` it first asks `decide({ peerKey, transport: 'webrtc', proven: connection.bound })`: `allow` adopts
 as today, `deny` closes, `restrict` calls `admit` with a channel over the adapter and adopts only on `promote`. Without the
 option the code path is today's, unchanged.
+
+## Older transports fail closed
+
+`{ restricted: true }` is a verdict only a transport that understands it may receive: `WshPeerLinks` before it granted a full
+`endpoint:mesh` on ANY truthy verdict. So `WshPeerLinks` calls `authorize(peer, { restricted: true })` (and sets the static
+`WshPeerLinks.supportsRestrictedAdmission = true`), and `createWshAdmissionAuthorize` returns the restricted verdict only when
+called with `{ restricted: true }`. Called with one argument (an older transport) a `restrict` decision is a refusal and
+`onEvent` gets `restricted-unsupported`; `createMeshNode({ admission, wsh })` logs
+`mesh-bootstrap:admission-restricted-unsupported` when the loaded class lacks the flag. `allow` and `deny` are the same either
+way. The apps peer range on transport is not raised for this.
 
 ## Slots and the cap
 
