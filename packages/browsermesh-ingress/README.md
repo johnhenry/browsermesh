@@ -97,6 +97,14 @@ forwardClientAddress?, verifyResponse?, signRequest?, linkIdentity?, retry?, rpc
 `{ handle(request, { clientAddress }), expect(podId), readiness(), whenReady(), stats(), close() }`. `resolve` may be left out
 when `names` is given.
 
+`listenNode(ingress, { halfClosedClients: true })` serves a client that has sent its whole request and then finished sending
+(`nc -N`, `shutdown(SHUT_WR)`): the connection stays open for the answer, however long the provider takes within
+`limits.timeoutMs`, and ends after the response. Off by default: Node's HTTP server ends such a connection at the client's end
+of file, which loses the answer, but a client's end of file is also all that Firefox and WebKit send when a fetch is aborted, and
+with the option on that no longer aborts the page's handler until `limits.timeoutMs`. A request that is not complete
+when the client finishes is not served and is ended, as before; a client that finishes sending and never reads is bounded by
+`limits.timeoutMs`, not held.
+
 - `resolve(request, { attempt, tried }) -> Promise<{ peer, service?, path?, headers?, response? } | null>`: `peer` is the pod id the
   answer is pinned to; `service` names the service on that pod (see "Several services on one pod"); `path` replaces the request's path (the query is kept); `headers` are added to what the provider
   is sent; `response` is `{ contentSecurityPolicy, cacheControl, allowSetCookie, addHeaders }` to opt this mapping out of

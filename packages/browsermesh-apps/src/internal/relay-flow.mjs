@@ -32,6 +32,12 @@ export const RELAY_FLOW_DEFAULTS = Object.freeze({
   maxFrameBytes: 64 * 1024,
   /** How often the host re-checks access of open connections, ms. 0 disables. */
   recheckIntervalMs: 30_000,
+  /**
+   * A connection that is half-closed (one side has said it will send no more, the other has not) stays open while
+   * anything moves in either direction, and is closed (reason `idle timeout`) after this many ms with nothing moving.
+   * 0 = never. Only connections where both peers negotiated half-close are ever half-closed.
+   */
+  halfCloseIdleMs: 300_000,
 })
 
 /**
@@ -44,8 +50,9 @@ export function resolveFlowOptions(opts = {}) {
   for (const key of Object.keys(out)) {
     if (opts[key] === undefined) continue
     const v = opts[key]
-    const min = key === 'recheckIntervalMs' ? 0 : 1
+    const min = key === 'recheckIntervalMs' || key === 'halfCloseIdleMs' ? 0 : 1
     if (!Number.isInteger(v) || v < min) throw new Error(`${key} must be an integer >= ${min}`)
+    if (key === 'halfCloseIdleMs' && v > 0x7fffffff) throw new Error(`${key} must be at most 2147483647 (a timer cannot wait longer)`)
     out[key] = v
   }
   if (out.lowWaterBytes >= out.highWaterBytes) throw new Error('lowWaterBytes must be below highWaterBytes')

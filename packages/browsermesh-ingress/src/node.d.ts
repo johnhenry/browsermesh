@@ -18,6 +18,12 @@ export interface ListenOptions {
    * to expect are linked, 503 before. Off unless given; it needs an ingress with `readiness()`. It shadows that path for every host.
    */
   readyPath?: string
+  /**
+   * Treat a client's end of file after its whole request (`nc -N`, `shutdown(SHUT_WR)`) as a half-close: the answer is still sent and the
+   * connection ends after it. Off by default: with it, a hang-up that is only a FIN (an aborted browser fetch) no longer aborts the
+   * handler until `limits.timeoutMs`.
+   */
+  halfClosedClients?: boolean
 }
 
 export function listenNode(ingress: Pick<MeshIngress, 'handle'>, options?: ListenOptions): Promise<{ port: number; host: string; close(): Promise<void> }>

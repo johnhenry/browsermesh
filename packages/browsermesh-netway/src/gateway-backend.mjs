@@ -44,6 +44,25 @@ const GATEWAY_CREDIT = 0x7f;
 const GATEWAY_CREDIT_WINDOW = 262_144;
 /** Largest GatewayData payload sent while credit is on (wsh's own client sends the same). */
 const GATEWAY_MAX_FRAME = 65_536;
+
+// Half-close (wsh 0.57, wsh issue 271). A GatewayClose (0x75) means "I will send no more"; the sender goes on
+// receiving. A connection is over when both sides have sent one, on an error, when a side DISCARDED it (a
+// GatewayClose with the reason "discarded": that side reads nothing more), or when it is half-closed and nothing has
+// moved in either direction for `halfCloseIdleMs`. A host that predates the rule ended the connection itself about a
+// second after the client's close; nothing here depends on which kind of host it is.
+/** Reason on a GatewayClose from a side that discards the connection (wsh's own constant). */
+const GATEWAY_DISCARDED = 'discarded';
+/** Default idle bound for a half-closed connection, in milliseconds (wsh's own default; 0 = never). */
+export const DEFAULT_HALF_CLOSE_IDLE_MS = 300_000;
+
+/** `halfCloseIdleMs` as an option: an integer number of milliseconds from 0 (never) to 2^31 - 1 (a timer cannot wait longer). */
+function assertHalfCloseIdleMs(v) {
+  if (v === undefined) return DEFAULT_HALF_CLOSE_IDLE_MS;
+  if (!Number.isInteger(v) || v < 0 || v > 0x7fffffff) {
+    throw new TypeError('halfCloseIdleMs must be an integer number of milliseconds from 0 (never) to 2147483647');
+  }
+  return v;
+}
 import { DatagramSocket } from './datagram-socket.mjs';
 import { Listener } from './listener.mjs';
 import { OperationQueue } from './queue.mjs';
@@ -112,6 +131,7 @@ export class GatewayBackend extends Backend {
   #gatewayIdCounter = 0;
   #listenerIdCounter = 0;
   #operationTimeoutMs;
+  #halfCloseIdleMs;
 
   /**
    * Create a GatewayBackend.
@@ -125,9 +145,15 @@ export class GatewayBackend extends Backend {
    * @param {number} [opts.operationTimeoutMs=30000] - Timeout in milliseconds
    *   for gateway operations (connect, listen, resolve, sendDatagram). Set to
    *   `0` to disable timeouts.
+   * @param {number} [opts.halfCloseIdleMs=300000] - A connection that is half-closed (one side has sent its
+   *   GatewayClose and the other has not) stays open while anything moves in either direction, and is ended after
+   *   this many milliseconds with nothing moving: the backend then closes its socket (writes fail with the reason
+   *   `idle timeout`) and tells the host. `0` = never. It is the same rule and default as the wsh host's
+   *   `gateway.halfCloseIdleMs`; a connection that is not half-closed is never ended by it.
    */
-  constructor({ wshClient, queueConfig, operationTimeoutMs = DEFAULT_OPERATION_TIMEOUT_MS } = {}) {
+  constructor({ wshClient, queueConfig, operationTimeoutMs = DEFAULT_OPERATION_TIMEOUT_MS, halfCloseIdleMs } = {}) {
     super();
+    this.#halfCloseIdleMs = assertHalfCloseIdleMs(halfCloseIdleMs);
     this.#wshClient = wshClient;
     this.#queue = new OperationQueue(queueConfig);
     this.#operationTimeoutMs = operationTimeoutMs;
@@ -163,18 +189,81 @@ export class GatewayBackend extends Backend {
     const toUser = new AsyncBuffer({ highWaterMark: 1024, windowBytes: credit ? DEFAULT_WINDOW_BYTES : 0 }); // wire -> user
     const userSocket = new StreamSocket({ inbound: toUser, outbound: toRelay });
     const relaySocket = new StreamSocket({ inbound: toRelay, outbound: toUser });
-    const flow = { socket: relaySocket, gate: credit ? new CreditGate(GATEWAY_CREDIT_WINDOW) : null, unacked: 0 };
+    const flow = {
+      id: gatewayId,
+      socket: relaySocket,
+      gate: credit ? new CreditGate(GATEWAY_CREDIT_WINDOW) : null,
+      unacked: 0,
+      localEnded: false,   // our GatewayClose has been sent (or the host's discard made one unnecessary)
+      remoteEnded: false,  // the host's GatewayClose arrived
+      userDiscarded: false, // the application closed or destroyed its socket: it reads nothing more
+      discard: false,      // the connection is being torn down by us (the backend closed, the transport went)
+      noReply: false,      // the host discarded the connection: no GatewayClose goes back
+      finished: false,     // over: out of the table, no timer, nothing more is sent for it
+      lastActive: 0,
+      timer: null,
+    };
     this.#flows.set(gatewayId, flow);
     // The user destroyed their socket, or the relay side was closed: a pump waiting for credit stops waiting.
     toRelay.whenAborted().then(() => flow.gate?.fail());
+    // The application closed or destroyed its socket (not merely ended it): nothing it is sent will be read.
+    toUser.whenAborted().then(() => {
+      flow.userDiscarded = true;
+      // Already half-closed towards the host: there is no pump step left to say so, and nothing to wait for.
+      if (flow.localEnded && !flow.finished) this.#finishFlow(flow);
+    });
     return { userSocket, flow };
   }
+
+  /**
+   * The connection is over: out of the table, its timer stopped. `close` also closes the relay side (the
+   * application's reads end, its writes fail with `reason`); without it the relay side is left as it is, which
+   * is right when both sides finished by themselves and everything received has been handed over.
+   * @private
+   */
+  #finishFlow(flow, { close = false, reason } = {}) {
+    if (flow.finished) return;
+    flow.finished = true;
+    if (flow.timer) { clearTimeout(flow.timer); flow.timer = null; }
+    if (this.#flows.get(flow.id) === flow) this.#flows.delete(flow.id);
+    flow.gate?.fail();
+    if (close) flow.socket.close(reason).catch(() => {});
+  }
+
+  /**
+   * The connection is half-closed: end it when nothing has moved in either direction for `halfCloseIdleMs`. One
+   * timer; traffic only stamps `lastActive` and the timer re-arms for what is left of the bound when it fires.
+   * @private
+   */
+  #watchIdle(flow) {
+    flow.lastActive = Date.now();
+    const ms = this.#halfCloseIdleMs;
+    if (!(ms > 0) || flow.timer || flow.finished) return;
+    const check = () => {
+      flow.timer = null;
+      if (flow.finished) return;
+      const left = flow.lastActive + ms - Date.now();
+      if (left > 0) { flow.timer = setTimeout(check, left); flow.timer.unref?.(); return; }
+      if (!flow.localEnded) {
+        flow.localEnded = true;
+        this.#wshClient.sendControl({ type: 0x75, gateway_id: flow.id, reason: 'idle timeout' }).catch(() => {});
+      }
+      this.#finishFlow(flow, { close: true, reason: 'idle timeout' });
+    };
+    flow.timer = setTimeout(check, ms);
+    flow.timer.unref?.();
+  }
+
+  /** Something moved on the connection: it is not idle. @private */
+  #touch(flow) { flow.lastActive = Date.now(); }
 
   /** Close every connection and end every wait for credit (the transport is gone, or the backend closed). @private */
   #failFlows() {
     const flows = [...this.#flows.values()];
     this.#flows.clear();
     for (const flow of flows) {
+      flow.discard = true;
+      if (flow.timer) { clearTimeout(flow.timer); flow.timer = null; }
       flow.gate?.fail();
       flow.socket.close().catch(() => {});
     }
@@ -364,25 +453,36 @@ export class GatewayBackend extends Backend {
     const flow = this.#flows.get(gatewayId);
     (async () => {
       let transportError = false;
+      let errored = false;
       try {
         while (true) {
           const chunk = await relaySocket.read();
-          if (chunk === null) break; // socket closed
+          if (chunk === null) break; // the application is done sending (end), or the socket was closed
           await this.#sendData(gatewayId, flow, chunk, () => { transportError = true; });
+          this.#touch(flow);
         }
       } catch (_) {
         // Transport closed or errored, the user destroyed the socket, or the connection was closed while
         // waiting for credit. Close the relay socket so user-side reads return null (EOF) instead of
         // hanging indefinitely.
+        errored = true;
         await relaySocket.close();
-        this.#flows.delete(gatewayId);
+        this.#finishFlow(flow);
       }
-      // Tell server the channel is done (best-effort); a dead transport cannot be told.
-      if (!transportError) {
-        await this.#wshClient.sendControl({
-          type: 0x75, gateway_id: gatewayId,
-        }).catch(() => {});
-      }
+      // The connection ended some other way (the host discarded it, or the idle bound ended it): nothing to say.
+      if (flow.finished && !errored) return;
+      // A dead transport cannot be told, and a host that discarded the connection reads nothing more.
+      if (transportError || flow.noReply) return;
+      // Tell the host we are done sending (best-effort). Reaching here without an error is a half-close: the
+      // host's answer, if any, is still delivered, and the connection stays until the host has closed too. An
+      // application that closed or destroyed its socket (or an error) discards it, and the host is told so.
+      flow.localEnded = true;
+      const discarded = errored || flow.userDiscarded || flow.discard;
+      await this.#wshClient.sendControl({
+        type: 0x75, gateway_id: gatewayId, ...(discarded ? { reason: GATEWAY_DISCARDED } : {}),
+      }).catch(() => {});
+      if (discarded || flow.remoteEnded) this.#finishFlow(flow);
+      else this.#watchIdle(flow);
     })();
   }
 
@@ -415,12 +515,15 @@ export class GatewayBackend extends Backend {
    * @private
    */
   #deliver(gatewayId, flow, data) {
+    if (flow.finished || flow.remoteEnded) return; // the host will send nothing more; a stray frame is dropped
+    this.#touch(flow);
     flow.socket.write(data).then(() => {
       if (!flow.gate || this.#flows.get(gatewayId) !== flow) return;
       flow.unacked += data.length;
       if (flow.unacked >= GATEWAY_CREDIT_WINDOW / 2) {
         const bytes = flow.unacked;
         flow.unacked = 0;
+        this.#touch(flow);
         this.#wshClient.sendControl({ type: GATEWAY_CREDIT, gateway_id: gatewayId, bytes }).catch(() => {});
       }
     }, () => {});
@@ -496,11 +599,20 @@ export class GatewayBackend extends Backend {
 
       case 0x75: { // GATEWAY_CLOSE
         const flow = this.#flows.get(msg.gateway_id);
-        if (flow) {
-          flow.gate?.fail(); // a write waiting for the host's credit ends: the host will grant none now
-          flow.socket.close();
-          this.#flows.delete(msg.gateway_id);
+        if (!flow || flow.remoteEnded) break;
+        flow.remoteEnded = true;
+        if (msg.reason === GATEWAY_DISCARDED) {
+          // The host discarded the connection (its origin is gone): it reads nothing more, so our direction is over
+          // too and no GatewayClose goes back. What it sent before stays readable; a write waiting for credit ends.
+          flow.noReply = true;
+          this.#finishFlow(flow, { close: true });
+          break;
         }
+        // A half-close: the host will send no more, and goes on reading. The application sees end of stream (after
+        // what is already queued for it) and may keep writing; the connection is over when it has finished too.
+        flow.socket.end().catch(() => {});
+        if (flow.localEnded) this.#finishFlow(flow);
+        else this.#watchIdle(flow);
         break;
       }
 
@@ -531,7 +643,8 @@ export class GatewayBackend extends Backend {
       }
 
       case GATEWAY_CREDIT: { // the host lets us send `bytes` more on gateway_id
-        this.#flows.get(msg.gateway_id)?.gate?.grant(msg.bytes);
+        const flow = this.#flows.get(msg.gateway_id);
+        if (flow) { this.#touch(flow); flow.gate?.grant(msg.bytes); }
         break;
       }
 
@@ -607,7 +720,12 @@ export class GatewayBackend extends Backend {
   async close() {
     this.#closed = true;
     this.#queue.clear();
-    for (const flow of this.#flows.values()) { flow.gate?.fail(); await flow.socket.close(); }
+    for (const flow of this.#flows.values()) {
+      flow.discard = true;
+      if (flow.timer) { clearTimeout(flow.timer); flow.timer = null; }
+      flow.gate?.fail();
+      await flow.socket.close();
+    }
     for (const listener of this.#activeListeners.values()) listener.close();
     this.#flows.clear();
     this.#activeListeners.clear();

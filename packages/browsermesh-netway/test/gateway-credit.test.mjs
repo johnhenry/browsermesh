@@ -163,12 +163,23 @@ describe('GatewayBackend with gateway-credit: a wait for credit ends', () => {
     return { ...ctx, outcome };
   }
 
-  it('when the host closes the connection', async () => {
+  it('when the host discards the connection (a GatewayClose with the reason "discarded")', async () => {
     const { client, gatewayId, outcome, socket, backend } = await parked();
-    client.inject({ type: 0x75, gateway_id: gatewayId });
+    client.inject({ type: 0x75, gateway_id: gatewayId, reason: 'discarded' });
     const result = await outcome;
     assert.equal(result.name, 'SocketClosedError');
     assert.equal(await socket.read(), null);
+    await backend.close();
+  });
+
+  it('not when the host merely half-closes: the host still reads, and grants credit as its origin takes the bytes', async () => {
+    const { client, gatewayId, outcome, socket, backend } = await parked();
+    client.inject({ type: 0x75, gateway_id: gatewayId });
+    assert.equal(await socket.read(), null, 'the application sees the host\'s end');
+    client.inject({ type: 0x7f, gateway_id: gatewayId, bytes: 1_000_000 });
+    assert.equal(await outcome, 'resolved');
+    await tick();
+    assert.equal(sentBytes(client), 900_000);
     await backend.close();
   });
 

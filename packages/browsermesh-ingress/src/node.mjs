@@ -39,9 +39,10 @@ export function clientAddressOf(socketAddress, xForwardedFor, trustProxy) {
  * @param {boolean} [opts.public=false] - required to bind anything but loopback: the caller states it has put TLS in front
  * @param {boolean|number} [opts.trustProxy=false]
  * @param {number} [opts.maxConnections=256]
+ * @param {boolean} [opts.halfClosedClients=false] - a client's end of file after its whole request is a half-close, not a hang-up: the answer is still sent (see the comment in the code for the cost)
  * @returns {Promise<{ port: number, host: string, close(): Promise<void>, server: http.Server }>}
  */
-export async function listenNode(ingress, { port = 0, host = '127.0.0.1', public: isPublic = false, trustProxy = false, maxConnections = 256, maxHeaderBytes = 16 * 1024, headersTimeoutMs = 10_000, requestTimeoutMs = 60_000, readyPath } = {}) {
+export async function listenNode(ingress, { port = 0, host = '127.0.0.1', public: isPublic = false, trustProxy = false, maxConnections = 256, maxHeaderBytes = 16 * 1024, headersTimeoutMs = 10_000, requestTimeoutMs = 60_000, readyPath, halfClosedClients = false } = {}) {
   if (!ingress || typeof ingress.handle !== 'function') throw new TypeError('listenNode: an ingress with handle() is required')
   if (!isLoopbackHost(host) && isPublic !== true) throw new Error(`listenNode: ${host} is not a loopback address; pass public: true once TLS is terminated in front of this listener`)
   if (readyPath !== undefined) {
@@ -61,6 +62,12 @@ export async function listenNode(ingress, { port = 0, host = '127.0.0.1', public
     serve(ingress, req, res, trustProxy).catch(() => { if (!res.headersSent) fail(res, new IngressError(500, 'internal-error', 'The ingress failed.')); else res.destroy() })
   })
   server.maxConnections = maxConnections
+  // A client's end of file is ambiguous: `nc -N` / `shutdown(SHUT_WR)` mean "I have sent my request and am waiting", and a browser's
+  // aborted fetch (Firefox, WebKit) is also only a FIN. Node's default treats it as a hang-up: the page's handler is aborted and an
+  // answer that is not ready is lost. `halfClosedClients: true` treats it as a half-close: the connection stays open for the answer and
+  // ends after the response, bounded by the ingress's request timeout. Off by default, because it also means a hang-up that is only a
+  // FIN no longer aborts the handler until that timeout.
+  server.httpAllowHalfOpen = halfClosedClients === true
   server.on('clientError', (err, socket) => {
     const line = err?.code === 'HPE_HEADER_OVERFLOW' ? '431 Request Header Fields Too Large' : err?.code === 'ERR_HTTP_REQUEST_TIMEOUT' ? '408 Request Timeout' : '400 Bad Request'
     if (socket.writable) socket.end(`HTTP/1.1 ${line}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`)

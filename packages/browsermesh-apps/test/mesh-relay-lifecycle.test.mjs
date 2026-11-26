@@ -384,6 +384,7 @@ describe('relayed connections hold a bounded amount of memory', () => {
       maxConnectionsPerPeer: 16,
       maxFrameBytes: 65536,
       recheckIntervalMs: 30000,
+      halfCloseIdleMs: 300000,
     })
     assert.throws(() => new MeshRelayHost({ node: bus?.node?.('x') ?? { onIncomingData() { return () => {} }, sendTo() {} }, network: {}, registry: {}, lowWaterBytes: 10, highWaterBytes: 10 }), /lowWaterBytes/)
   })

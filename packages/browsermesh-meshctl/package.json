@@ -60,7 +60,7 @@
     "@johnhenry/browsermesh-core": ">=0.1.0 <1.0.0",
     "@johnhenry/browsermesh-apps": ">=0.24.0",
     "@johnhenry/browsermesh-transport": ">=0.11.0 <1.0.0",
-    "@johnhenry/wsh": "^0.56.1"
+    "@johnhenry/wsh": "^0.57.0"
   },
   "engines": {
     "node": ">=26.0.0"
