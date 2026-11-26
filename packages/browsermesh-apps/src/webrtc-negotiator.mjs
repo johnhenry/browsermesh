@@ -99,6 +99,9 @@ export const DEFAULT_MAX_HALF_OPEN_INBOUND = 64
  */
 export const DEFAULT_HALF_OPEN_TIMEOUT_MS = 60_000
 
+/** Frames an adapter holds for the node while nothing listens to it yet (the oldest are kept, the rest dropped). */
+const MAX_EARLY_FRAMES = 64
+
 /**
  * Build a `'webrtc'` adapter factory for `MeshTransportNegotiator`, backed by
  * a real `WebRTCMeshManager` and a `MeshSignalingChannel`.
@@ -279,13 +282,35 @@ export function createWebRTCTransportFactory({
    * @type {WeakMap<object, object>}
    */
   const adapters = new WeakMap()
+  let adapterClass = null
   async function adapterFor(conn) {
     const have = adapters.get(conn)
     if (have && have.state !== 'closed') return have
     const { WebRTCTransportAdapter } = await import('@johnhenry/browsermesh-transport')
     const raced = adapters.get(conn) // another path made one while the import was settling
     if (raced && raced.state !== 'closed') return raced
-    const adapter = new WebRTCTransportAdapter(conn)
+    // The adapter exists from the moment the connection can carry a frame, but the node listens to it only when it has built
+    // the session around it, a little later (an inbound connection is handed out, then adopted; a dial returns, then the node
+    // goes on to record the session). A peer that speaks first (the opening frame of a channel it opens the moment the
+    // connection is up) would be heard by nobody. The adapter holds what comes in until its first listener, and hands it over.
+    adapterClass ??= class HoldingAdapter extends WebRTCTransportAdapter {
+      #early = []
+      #heard = false
+      _fire(event, data) {
+        if (event !== 'message' || this.#heard) return super._fire(event, data)
+        if (this.#early.length < MAX_EARLY_FRAMES) this.#early.push(data)
+        return undefined
+      }
+      onMessage(cb) {
+        super.onMessage(cb)
+        if (this.#heard) return
+        this.#heard = true
+        const early = this.#early
+        this.#early = []
+        for (const data of early) { try { cb(data) } catch { /* a listener's own error does not reach the connection */ } }
+      }
+    }
+    const adapter = new adapterClass(conn)
     adapters.set(conn, adapter)
     await adapter.connect()
     return adapter

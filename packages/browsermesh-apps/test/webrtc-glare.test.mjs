@@ -27,6 +27,7 @@ const guard = (promise, what, ms = 4000) => {
 function fakeConn(world, local, remote) {
   const stateCbs = []
   const closeCbs = []
+  const messageCbs = []
   let seq = 0
   const conn = {
     remotePodId: remote,
@@ -37,7 +38,8 @@ function fakeConn(world, local, remote) {
     onIceCandidate() {},
     onClose(cb) { closeCbs.push(cb) },
     onError() {},
-    onMessage() {},
+    onMessage(cb) { messageCbs.push(cb) },
+    deliver(data) { for (const cb of messageCbs) cb(data) },
     onStateChange(cb) { stateCbs.push(cb) },
     send() {},
     close() { conn.isOpen = false; conn.state = 'closed'; for (const cb of stateCbs) cb('closed'); for (const cb of closeCbs) cb() },
@@ -322,6 +324,43 @@ describe('a peer that starts over on a connection this side still holds', () => 
     conn.setOpen()
     await guard(answering, 'the answer')
     assert.deepEqual(b.incoming.at(-1).info, { restarted: false })
+  })
+
+  it('what the peer sends before the node has wired the connection in is held for the node, in order, not lost', async () => {
+    const w = world()
+    const a = w.add('aaa')
+    const b = w.add('bbb')
+    await guard(a.factory('bbb'), 'first dial')
+    await settle()
+    const conn = b.conns.get('aaa')
+    const adapter = b.incoming[0].adapter // handed out, nobody has listened to it yet
+    conn.deliver('one')
+    conn.deliver('two')
+    const first = []
+    adapter.onMessage((d) => first.push(d))
+    assert.deepEqual(first, ['one', 'two'], 'the first listener gets what came before it, in order')
+    conn.deliver('three')
+    assert.deepEqual(first, ['one', 'two', 'three'])
+    const second = []
+    adapter.onMessage((d) => second.push(d))
+    assert.deepEqual(second, [], 'a later listener is not given what was already delivered')
+    conn.deliver('four')
+    assert.deepEqual([first.at(-1), second], ['four', ['four']])
+  })
+
+  it('what is held for the node is bounded: the oldest are kept, in order', async () => {
+    const w = world()
+    const a = w.add('aaa')
+    const b = w.add('bbb')
+    await guard(a.factory('bbb'), 'first dial')
+    await settle()
+    const conn = b.conns.get('aaa')
+    const adapter = b.incoming[0].adapter
+    for (let i = 0; i < 1000; i++) conn.deliver(i)
+    const got = []
+    adapter.onMessage((d) => got.push(d))
+    assert.equal(got.length > 0 && got.length < 1000, true, `a bounded number is held (${got.length})`)
+    assert.deepEqual(got, got.map((_, i) => i), 'the oldest are kept, in order')
   })
 
   it('a renegotiation of an open connection (an ICE restart) is not a restart: the channel and what runs over it carry on', async () => {
