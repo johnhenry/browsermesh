@@ -767,6 +767,73 @@ const bm = {
   /** Stop serving and let go of the data channel, once the far end has closed its channel. */
   ingressStop() { bm.ingress.served.stop(); bm.ingress.svc.teardown(); bm.rtcUnregister() },
 
+  // -- a page as the consumer of an egress provider (browsermesh-egress), over the live data channel -----
+
+  egress: null,
+  /** Open the link to the provider at the data channel's other end. Resolves with the error code instead of throwing, so a test can name it. */
+  async egressConnect() {
+    const apps = await import('@johnhenry/browsermesh-apps')
+    const { connectEgress } = await import('@johnhenry/browsermesh-egress')
+    // A second attempt (after a refusal) replaces the first service: two on one data channel would both answer its messages.
+    bm.egress?.svc.teardown()
+    const node = meshNode(bm.rtc)
+    node.registry = new apps.PeerRegistry({ localPodId: node.podId })
+    const svc = apps.attachService(node, undefined, apps.createMeshProtocolService())
+    try {
+      const link = await connectEgress(svc, bm.rtc.remote)
+      bm.egress = { node, svc, link }
+      return { ok: true }
+    } catch (e) {
+      bm.egress = { node, svc, link: null }
+      return { ok: false, code: e.code ?? String(e) }
+    }
+  },
+  /** TCP: write `text`, half-close, read what the destination sends until it ends. */
+  async egressTcp(host, port, text) {
+    try {
+      const socket = await bm.egress.link.connect(host, port)
+      await socket.write(new TextEncoder().encode(text))
+      await socket.end()
+      const parts = []
+      for (;;) { const chunk = await socket.read(); if (chunk === null) break; parts.push(new TextDecoder().decode(chunk)) }
+      return { ok: true, text: parts.join('') }
+    } catch (e) { return { ok: false, code: e.code ?? String(e), addressClass: e.addressClass, reason: e.reason, detail: e.detail } }
+  },
+  /** The fetch form: the status, the body's text and bytes, the final URL and the headers that arrived. */
+  async egressFetch(url, init) {
+    try {
+      const res = await bm.egress.link.fetch(url, init)
+      const bytes = new Uint8Array(await res.arrayBuffer())
+      return { ok: true, status: res.status, text: new TextDecoder().decode(bytes), length: bytes.byteLength, url: res.url, redirected: res.redirected, headers: [...res.headers].sort() }
+    } catch (e) { return { ok: false, code: e.code ?? String(e), addressClass: e.addressClass, reason: e.reason, detail: e.detail } }
+  },
+  /** UDP: send `text` as one datagram and read one datagram back. */
+  async egressUdp(host, port, text) {
+    try {
+      const flow = await bm.egress.link.udp(host, port)
+      await flow.send(new TextEncoder().encode(text))
+      const reply = await flow.read()
+      await flow.close()
+      return { ok: true, text: reply === null ? null : new TextDecoder().decode(reply) }
+    } catch (e) { return { ok: false, code: e.code ?? String(e), addressClass: e.addressClass, reason: e.reason } }
+  },
+  async egressLookup(name) {
+    try { return { ok: true, addresses: await bm.egress.link.lookup(name) } } catch (e) { return { ok: false, code: e.code ?? String(e) } }
+  },
+  /** A fetch whose body the page reads slowly, to see the provider stop the destination; resolves once `bytes` have been read. */
+  async egressFetchPartial(url, bytes) {
+    try {
+      const res = await bm.egress.link.fetch(url)
+      const reader = res.body.getReader()
+      let got = 0
+      while (got < bytes) { const { done, value } = await reader.read(); if (done) break; got += value.byteLength }
+      await reader.cancel()
+      return { ok: true, got }
+    } catch (e) { return { ok: false, code: e.code ?? String(e) } }
+  },
+  egressStats() { return bm.egress.link.stats() },
+  async egressStop() { try { await bm.egress.link?.close() } catch { /* gone */ } bm.egress.svc.teardown(); bm.rtcUnregister() },
+
   // -- examples, unmodified, in the page ------------------------------------
 
   async runExample(file) {

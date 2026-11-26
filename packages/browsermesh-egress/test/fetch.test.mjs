@@ -200,6 +200,18 @@ describe('methods', () => {
     for (let i = 0; i < total; i += 997) assert.equal(o.seen[0].body[i], patternByte(i), `byte ${i}`)
   })
 
+  it('a platform whose Request has no `body` stream (an older Firefox) still gets GET without a body and POST with its bytes', async () => {
+    const { o, link } = await plain((req, res) => { req.resume(); req.on('end', () => res.end('ok')) }, { egress: { fetchMethods: ['GET', 'POST'] } })
+    const real = Object.getOwnPropertyDescriptor(Request.prototype, 'body')
+    Object.defineProperty(Request.prototype, 'body', { configurable: true, get() { return undefined } })
+    try {
+      assert.equal(await (await link.fetch('http://plain.test/get')).text(), 'ok')
+      assert.equal(await (await link.fetch('http://plain.test/post', { method: 'POST', body: 'posted bytes' })).text(), 'ok')
+      assert.equal(await (await link.fetch('http://plain.test/empty', { method: 'POST' })).text(), 'ok')
+    } finally { Object.defineProperty(Request.prototype, 'body', real) }
+    assert.deepEqual(o.seen.map((r) => [r.method, r.url, String(r.body)]), [['GET', '/get', ''], ['POST', '/post', 'posted bytes'], ['POST', '/empty', '']])
+  })
+
   it('a body on a GET is not sent', async () => {
     const { link } = await plain()
     await assert.rejects(link.fetch('http://plain.test/', { method: 'GET', body: 'x' }), TypeError)

@@ -346,8 +346,14 @@ export async function connectEgress(service, provider, { signal, limits: limitOp
     const done = () => callSignal.removeEventListener('abort', onAbort)
     entry.fail = (e) => ac.abort(e)
     const wasAborted = () => (callSignal.aborted ? callSignal.reason : ac.signal.aborted && ac.signal.reason instanceof EgressError ? ac.signal.reason : null)
-    const hasBody = request.body !== null
-    const bodyReader = hasBody ? request.body.getReader() : null
+    // A platform whose Request has no `body` stream (an older Firefox answers undefined, not null): take the bytes whole, as one chunk.
+    let bodyStream = request.body ?? null
+    if (request.body === undefined && request.method !== 'GET' && request.method !== 'HEAD') {
+      const whole = new Uint8Array(await request.arrayBuffer())
+      if (whole.byteLength) bodyStream = new ReadableStream({ start(c) { c.enqueue(whole); c.close() } })
+    }
+    const hasBody = bodyStream !== null
+    const bodyReader = hasBody ? bodyStream.getReader() : null
     const dropBody = () => { try { bodyReader?.cancel().catch(() => {}) } catch { /* gone */ } }
     let up = null
     let answer
