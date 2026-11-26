@@ -125,8 +125,10 @@ describeIfReal('a peer that is killed outright is noticed', () => {
     const link = await egressNode.connect(providerPodId, { keepAlive: false })
     const killedAt = Date.now()
     provider.child.kill('SIGKILL')
-    await waitFor(() => link.closed, 12 * 60_000, 'the transport to notice')
-    t.diagnostic(`keep-alive off, provider killed with SIGKILL: the transport's own timers ended the link after ${((Date.now() - killedAt) / 1000).toFixed(1)} s`)
+    const noticed = await waitFor(() => link.closed, 12 * 60_000, 'the transport to notice').then(() => true, () => false)
+    t.diagnostic(noticed
+      ? `keep-alive off, provider killed with SIGKILL: the transport's own timers ended the link after ${((Date.now() - killedAt) / 1000).toFixed(1)} s`
+      : 'keep-alive off, provider killed with SIGKILL: the transport had not noticed after 12 minutes')
   })
 
   it('a provider notices its consumer was killed: the connection ends, the channel is gone, the budget is free', async (t) => {
