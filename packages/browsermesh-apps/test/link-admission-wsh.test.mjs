@@ -187,3 +187,31 @@ describe('createMeshNode({ admission }) over wsh', () => {
     await waitFor(() => bob.hasActiveSession(alice.podId))
   })
 })
+
+describe('createMeshNode({ admission, wsh }) against a transport without the restricted capability', () => {
+  it('warns through onLog when the loaded WshPeerLinks does not advertise supportsRestrictedAdmission', async () => {
+    const env = await createInProcessPipeRelay()
+    cleanups.push(() => env.close())
+    const logs = []
+    class OldLinks {
+      constructor() {}
+      on() { return () => {} }
+      async listen() {}
+      async close() {}
+    }
+    const { admission } = bobAdmission()
+    try {
+      await makeNode(env, 'old', { admission, onLog: (tag, data) => logs.push({ tag, data }), wsh: { relays: [RELAY], WebSocket: env.WebSocket, WshPeerLinks: OldLinks, listen: false } })
+    } catch { /* the stub is not a full transport: the warning is logged before it is used */ }
+    assert.ok(logs.some((l) => l.tag === 'mesh-bootstrap:admission-restricted-unsupported'), `no warning in ${JSON.stringify(logs)}`)
+  })
+
+  it('does not warn with the real WshPeerLinks', async () => {
+    const env = await createInProcessPipeRelay()
+    cleanups.push(() => env.close())
+    const logs = []
+    const { admission } = bobAdmission()
+    await makeNode(env, 'new', { admission, onLog: (tag) => logs.push(tag) })
+    assert.ok(!logs.includes('mesh-bootstrap:admission-restricted-unsupported'))
+  })
+})

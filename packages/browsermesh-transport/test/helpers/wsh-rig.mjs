@@ -32,7 +32,7 @@ export function makeHub(env, identity, { allow = [], ...rest } = {}) {
     identity,
     relays: [RELAY],
     WebSocket: env.WebSocket,
-    authorize: (peer) => { calls.push(peer.podId); return authorize(peer); },
+    authorize: (peer, ctx) => { calls.push(peer.podId); return authorize(peer, ctx); },
     connectTimeoutMs: 4000,
     reconnect: { baseMs: 5, maxMs: 25 },
     ...rest,
