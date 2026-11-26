@@ -14,8 +14,10 @@
  */
 import { StreamSocket } from '@johnhenry/browsermesh-netway'
 import { createStreamLayer } from '@johnhenry/browsermesh-apps/protocol-stream'
-import { checkHost, checkPort, looksLikePodId } from './destination.mjs'
+import { createAddressMemory } from './address-memory.mjs'
+import { checkHost, checkPort, isCanonicalIPv4, looksLikePodId } from './destination.mjs'
 import { END_REASONS, EgressError, errorFromAnswer } from './errors.mjs'
+import { answerPings, resolveKeepAlive, startLiveness } from './liveness.mjs'
 import { NO_BODY_STATUSES, parseTarget } from './http-policy.mjs'
 import {
   CONNECT_METHOD, EGRESS_CONSUMER, EGRESS_PROTOCOL, EGRESS_VERSIONS, END_METHOD, FETCH_METHOD, KIND_DOWN, KIND_UP, RESOLVE_METHOD, UDP_METHOD, randomHex,
@@ -61,17 +63,37 @@ function resolveLimits(given = {}) {
   return out
 }
 
-/** What a failed channel open means, as an error. */
+/**
+ * What a failed channel open means, as an error. Each failure the open can have gets its own code, so a page can tell the person
+ * what to do: the provider refused this pod (`provider-not-authorized`: no grant for the protocol; `provider-refused`: the channel
+ * service itself would not take the link), the provider does not offer `egress` (`provider-no-egress`), speaks no common version
+ * (`provider-version`), did not answer in time (`provider-timeout`), or this pod has no link to it at all (`provider-not-found`).
+ * `provider-unreachable` stays the catch-all for what none of these names.
+ */
 function openFailure(e) {
   if (e instanceof EgressError) return e
   const reason = e?.reason
   if (reason === 'not-authorized' || e?.code === -32003) return new EgressError('provider-not-authorized')
+  // `unsupported`: the pod answered no channel hello (it runs no channel service), so it offers no protocol at all.
   if (reason === 'unknown-protocol' || reason === 'unsupported' || e?.code === -32601) return new EgressError('provider-no-egress')
   if (reason === 'unsupported-version') return new EgressError('provider-version')
+  if (reason === 'refused' || reason === 'too-many-peers' || reason === 'bad-handshake') return new EgressError('provider-refused')
   if (reason === 'timeout') return new EgressError('provider-timeout')
   if (e?.name === 'AbortError' || reason === 'cancelled') return new EgressError('aborted')
+  // The mesh has no session to the provider (never connected, or the connection is gone): nothing was sent.
+  if (typeof e?.message === 'string' && /no active session|has no transport|unreachable peer/.test(e.message)) return new EgressError('provider-not-found')
   return new EgressError('provider-unreachable')
 }
+
+/** The reasons a provider gives when it closes a channel (`channel.remoteReason`), as this package names them. Anything else is `provider-closed`. */
+const REMOTE_REASONS = Object.freeze({
+  stopped: 'provider-stopped',
+  'not serving': 'provider-stopped',
+  'authorization revoked': 'revoked',
+  'not an egress consumer this pod serves': 'provider-refused',
+  'too many malformed requests': 'protocol-violation',
+  'stream rules broken': 'protocol-violation',
+})
 
 /** What a failed request means, as an error. */
 function requestFailure(e) {
@@ -94,14 +116,22 @@ function requestFailure(e) {
  * @param {(bytes: Uint8Array, info: { peer: string }) => (string|Promise<string>)} [opts.signRequest]
  *   Sign each connect and lookup for the provider's `verifyRequest`. The package picks no cryptography.
  * @param {string} [opts.protocol='egress']
- * @returns {Promise<{ peer: string, closed: boolean, connect: Function, lookup: Function, asBackend: Function, stats: Function, close: Function }>}
+ * @param {false|true|{ intervalMs?: number, misses?: number }} [opts.keepAlive] - the link's keep-alive (default: a ping every 5 s, gone after 3 silent
+ *   intervals, so a provider that vanished is noticed in about 15 s); `false` turns it off (the transport's own timers then decide, in minutes)
+ * @param {boolean|{ ttlMs?: number, maxEntries?: number }} [opts.mapAddresses=false] - remember what this link's lookups answered, and when a provider refuses an
+ *   ADDRESS (`no-grant`), ask for the name that address was answered for instead (a guest OS connects by the address it was given)
+ * @returns {Promise<{ peer: string, closed: boolean, closeReason: string|undefined, whenClosed: Promise<{ reason: string }>, onClose: Function, connect: Function, lookup: Function, fetch: Function, udp: Function, namesFor: Function, asBackend: Function, stats: Function, close: Function }>}
  */
-export async function connectEgress(service, provider, { signal, limits: limitOptions, signRequest, protocol = EGRESS_PROTOCOL, onLog } = {}) {
+export async function connectEgress(service, provider, { signal, limits: limitOptions, signRequest, protocol = EGRESS_PROTOCOL, onLog, keepAlive: keepAliveOption, mapAddresses = false } = {}) {
   const api = service && typeof service === 'object' ? (service.api ?? service) : null
   if (typeof api?.openProtocol !== 'function') throw new TypeError('connectEgress: the first argument is a mesh service with openProtocol (createMeshProtocolService)')
   if (typeof provider !== 'string' || !provider) throw new TypeError('connectEgress: the provider\'s pod id is required: the link is pinned to it')
   if (signRequest !== undefined && typeof signRequest !== 'function') throw new TypeError('connectEgress: signRequest must be a function')
   const limits = resolveLimits(limitOptions)
+  const keepAlive = resolveKeepAlive(keepAliveOption, 'connectEgress: keepAlive')
+  if (mapAddresses !== false && mapAddresses !== true && (!mapAddresses || typeof mapAddresses !== 'object' || Array.isArray(mapAddresses))) throw new TypeError('connectEgress: mapAddresses is true, false or { ttlMs, maxEntries }')
+  const memory = mapAddresses ? createAddressMemory({ ttlMs: 10 * 60_000, maxEntries: 256, ...(mapAddresses === true ? {} : mapAddresses) }) : null
+  let byNameOnly = false // a provider that refused an address and took its name wants names: later connects go straight there
 
   const pending = new Map() // cid -> entry, from the request until the socket exists
   const active = new Map() // cid -> entry, while the socket lives
@@ -109,8 +139,13 @@ export async function connectEgress(service, provider, { signal, limits: limitOp
   let streams
   let channel
   let closed = false
+  let closeReason
+  let liveness = null
+  const closeListeners = new Set()
+  const closedSignal = deferred()
+  const linkAbort = new AbortController() // aborted with the link's failure: ends the lookups, which have no entry of their own
   let nextCid = 1
-  const counters = { connections: 0, refused: 0, lookups: 0, bytesUp: 0, bytesDown: 0 }
+  const counters = { connections: 0, refused: 0, lookups: 0, bytesUp: 0, bytesDown: 0, pings: 0, pongs: 0 }
 
   try {
     channel = await api.openProtocol(provider, protocol, {
@@ -118,13 +153,15 @@ export async function connectEgress(service, provider, { signal, limits: limitOp
       timeoutMs: limits.openTimeoutMs,
       signal,
       setup(ch) {
+        // Answered whether or not this end pings: a provider that pings is answered, and what it hears is proof this end is there.
+        answerPings(ch, () => liveness?.heard())
         streams = createStreamLayer(ch, {
           maxStreams: limits.maxConnections * 2,
           window: limits.streamWindowBytes,
           // The provider's own accounting ends a connection that has moved too much, and says why; this layer's cap must not get there first.
           maxStreamBytes: Number.MAX_SAFE_INTEGER,
           maxViolations: limits.maxViolations,
-          onAbuse: () => { try { ch.close('the provider broke stream rules') } catch { /* gone */ } },
+          onAbuse: () => { closeLink('protocol-violation'); try { ch.close('the provider broke stream rules') } catch { /* gone */ } },
           onLog,
         })
         // The only streams a provider may open are the answer streams of a connection this side asked for, once each.
@@ -139,7 +176,7 @@ export async function connectEgress(service, provider, { signal, limits: limitOp
           } catch (e) {
             // A provider that keeps opening streams nobody asked for is cut off, as one that breaks the stream rules is.
             strikes += 1
-            if (strikes > limits.maxViolations) { try { ch.close('the provider opened streams nobody asked for') } catch { /* gone */ } }
+            if (strikes > limits.maxViolations) { closeLink('protocol-violation'); try { ch.close('the provider opened streams nobody asked for') } catch { /* gone */ } }
             throw e
           }
         })
@@ -163,11 +200,44 @@ export async function connectEgress(service, provider, { signal, limits: limitOp
     streams.close()
     throw new EgressError('provider-version')
   }
-  channel.onClose(() => {
+  /** The error an entry (or a lookup) fails with once the link has ended, by why it ended. */
+  const closedError = (entry) => {
+    if (closeReason === 'local-close') return new EgressError('link-closed')
+    if (closeReason === 'provider-gone') return new EgressError('provider-gone')
+    return new EgressError(entry?.endReason ? 'connection-ended' : 'provider-closed', undefined, { reason: entry?.endReason })
+  }
+  /** The code of what was open when the link failed, for the places that find out only afterwards. */
+  const closedCode = () => (closeReason === 'local-close' ? 'link-closed' : closeReason === 'provider-gone' ? 'provider-gone' : closeReason !== undefined || channel.closed ? 'provider-closed' : 'connection-ended')
+
+  /** The one place a link ends: records why (the first reason stands), fails what is open, tells the listeners. */
+  function closeLink(reason) {
+    if (closeReason !== undefined) return
+    closeReason = reason
     closed = true
-    for (const e of entries()) e.fail?.(new EgressError(e.endReason ? 'connection-ended' : 'provider-closed', undefined, { reason: e.endReason }))
-    streams.close()
-  })
+    liveness?.stop()
+    linkAbort.abort(closedError())
+    for (const e of entries()) e.fail?.(closedError(e))
+    try { streams.close() } catch { /* gone */ }
+    const info = { reason }
+    for (const cb of [...closeListeners]) { try { cb(info) } catch { /* the owner's callback */ } }
+    closeListeners.clear()
+    closedSignal.resolve(info)
+  }
+
+  channel.onClose(() => closeLink(REMOTE_REASONS[channel.remoteReason] ?? 'provider-closed'))
+  if (keepAlive && !channel.closed) {
+    liveness = startLiveness(channel, {
+      ...keepAlive,
+      onPing: () => { counters.pings += 1 },
+      onPong: () => { counters.pongs += 1 },
+      onDead: () => {
+        closeLink('provider-gone')
+        // The provider is not answering on the mesh link either: end this side of it, so a provider that comes back opens a fresh one.
+        try { channel.close('provider gone') } catch { /* gone */ }
+        try { api.channel?.link?.(provider)?.close?.('provider gone') } catch { /* gone */ }
+      },
+    })
+  }
 
   const destinationOf = (host, port) => {
     if (typeof host !== 'string') throw new EgressError('bad-destination', 'The host is not a string.')
@@ -191,7 +261,30 @@ export async function connectEgress(service, provider, { signal, limits: limitOp
   /** Cancel what a failed connect left behind. */
   const abandon = (entry, why) => { pending.delete(entry.cid); entry.reader?.cancel(why).catch(() => {}); entry.ready.promise.then((r) => r.cancel(why).catch(() => {}), () => {}) }
 
-  async function connect(host, port, { signal: callSignal } = {}) {
+  /**
+   * `connect(host, port)`. With `mapAddresses`, a connect to an ADDRESS this link's own lookups answered for a name is tried as asked
+   * (a provider with `connectByResolvedAddress` takes it, and dials that address); if the provider refuses it `no-grant`, the names
+   * the address was answered for are asked for instead, newest first, at most three, and a provider that took a name is asked for names
+   * from then on. Only `no-grant` leads to a name, and only a name this link looked up itself: nothing is invented.
+   */
+  async function connect(host, port, options) {
+    const names = memory && typeof host === 'string' && isCanonicalIPv4(host) ? memory.namesFor(host).slice(0, 3) : []
+    if (!names.length) return connectOnce(host, port, options)
+    let refusal = null
+    if (!byNameOnly) {
+      try { return await connectOnce(host, port, options) } catch (e) { if (!(e instanceof EgressError && e.code === 'no-grant')) throw e; refusal = e }
+    }
+    for (const name of names) {
+      try {
+        const socket = await connectOnce(name, port, options)
+        byNameOnly = true
+        return socket
+      } catch (e) { if (!(e instanceof EgressError && e.code === 'no-grant')) throw e; refusal = e }
+    }
+    throw refusal
+  }
+
+  async function connectOnce(host, port, { signal: callSignal } = {}) {
     live()
     const dest = destinationOf(host, port)
     if (pending.size + active.size >= limits.maxConnections) throw new EgressError('too-many-connections')
@@ -245,7 +338,7 @@ export async function connectEgress(service, provider, { signal, limits: limitOp
     const fail = (e) => {
       if (over) return
       over = true
-      const err = e instanceof EgressError ? e : new EgressError(closed ? 'link-closed' : channel.closed ? 'provider-closed' : 'connection-ended', undefined, { reason: entry.endReason })
+      const err = e instanceof EgressError ? e : new EgressError(closedCode(), undefined, { reason: entry.endReason })
       relay.destroy(err)
       down.cancel('failed').catch(() => {})
       up.abort('failed')
@@ -300,11 +393,18 @@ export async function connectEgress(service, provider, { signal, limits: limitOp
     counters.lookups += 1
     let answer
     try {
-      answer = await channel.request(RESOLVE_METHOD, { name: host, type: 'A', hops: 0, ...(await sign('resolve', { host })) }, { signal: callSignal, timeoutMs: limits.requestTimeoutMs })
-    } catch (e) { throw requestFailure(e) }
+      const asked = callSignal ? AbortSignal.any([callSignal, linkAbort.signal]) : linkAbort.signal
+      answer = await channel.request(RESOLVE_METHOD, { name: host, type: 'A', hops: 0, ...(await sign('resolve', { host })) }, { signal: asked, timeoutMs: limits.requestTimeoutMs })
+    } catch (e) {
+      // The link ended while the lookup waited: it fails with why, not with the transport's own words.
+      if (linkAbort.signal.aborted && !callSignal?.aborted) throw linkAbort.signal.reason
+      throw requestFailure(e)
+    }
     if (!answer || typeof answer !== 'object' || typeof answer.ok !== 'boolean') throw new EgressError('bad-answer')
     if (!answer.ok) { counters.refused += 1; throw errorFromAnswer(answer) }
-    return validateAddresses(answer)
+    const addresses = validateAddresses(answer)
+    memory?.remember(host, addresses)
+    return addresses
   }
 
   /**
@@ -427,7 +527,7 @@ export async function connectEgress(service, provider, { signal, limits: limitOp
       settle()
       try { controller?.error(error) } catch { /* closed */ }
     }
-    const failure = () => wasAborted() ?? new EgressError(closed ? 'link-closed' : channel.closed ? 'provider-closed' : 'connection-ended', undefined, { reason: entry.endReason })
+    const failure = () => wasAborted() ?? new EgressError(closedCode(), undefined, { reason: entry.endReason })
     entry.fail = (e) => teardown(e instanceof EgressError ? e : failure())
     ac.signal.addEventListener('abort', () => { if (!over) teardown(wasAborted() ?? failure()) }, { once: true })
 
@@ -535,7 +635,7 @@ export async function connectEgress(service, provider, { signal, limits: limitOp
     let failure = null // what reads and sends fail with after the flow failed; null for a flow closed on this side or ended cleanly
     let sending = Promise.resolve()
     let reading = Promise.resolve()
-    const failureNow = () => (callSignal?.aborted ? new EgressError('aborted') : new EgressError(closed ? 'link-closed' : channel.closed ? 'provider-closed' : 'connection-ended', undefined, { reason: entry.endReason }))
+    const failureNow = () => (callSignal?.aborted ? new EgressError('aborted') : new EgressError(closedCode(), undefined, { reason: entry.endReason }))
     const finish = (error) => {
       if (over) return
       over = true
@@ -608,19 +708,31 @@ export async function connectEgress(service, provider, { signal, limits: limitOp
     /** The provider's pod id (the channel's verified peer). */
     peer: provider,
     get closed() { return closed || channel.closed },
+    /** Why the link ended (`CLOSE_REASONS`: `local-close`, `provider-gone`, `revoked`, ...), or `undefined` while it is up. */
+    get closeReason() { return closeReason },
+    /** Resolves `{ reason }` when the link ends, for whatever reason. (`closed` stays a boolean.) */
+    whenClosed: closedSignal.promise,
+    /** `cb({ reason })` once, when the link ends (at once, asynchronously, if it already has). Returns a function that removes it. */
+    onClose(cb) {
+      if (typeof cb !== 'function') throw new TypeError('onClose needs a function')
+      if (closeReason !== undefined) { const info = { reason: closeReason }; queueMicrotask(() => { try { cb(info) } catch { /* the owner's callback */ } }); return () => {} }
+      closeListeners.add(cb)
+      return () => closeListeners.delete(cb)
+    },
     connect,
     lookup,
     fetch: fetchUrl,
     udp,
+    /** The names this link's own lookups answered `address` for, newest first (empty without `mapAddresses`). */
+    namesFor: (address) => memory?.namesFor(address) ?? [],
     /** A netway `Backend` (connect and resolve) to register on a `VirtualNetwork`: `net.addBackend('tcp', link.asBackend())`. */
     asBackend() { return new EgressBackend(link) },
     stats: () => ({ ...counters, open: active.size + pending.size }),
     /** End every connection and close the channel. */
     async close() {
-      if (closed) return
-      closed = true
-      for (const e of entries()) e.fail?.(new EgressError('link-closed'))
-      try { streams.close(); channel.close('link closed') } catch { /* gone */ }
+      if (closeReason !== undefined) return
+      closeLink('local-close')
+      try { channel.close('link closed') } catch { /* gone */ }
     },
   }
   link[EGRESS_CONSUMER] = true

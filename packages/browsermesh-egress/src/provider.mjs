@@ -12,6 +12,8 @@
  */
 import { createStreamLayer } from '@johnhenry/browsermesh-apps/protocol-stream'
 import { ChannelErrorCode, MeshChannelError } from '@johnhenry/browsermesh-apps/mesh-channel'
+import { createAddressMemory } from './address-memory.mjs'
+import { answerPings, resolveKeepAlive, startLiveness } from './liveness.mjs'
 import { setsCovering, compileSets, EGRESS_SCOPES } from './destination.mjs'
 import { BUDGET_NAMES, EgressError, REFUSAL_CODES, refusalAnswer } from './errors.mjs'
 import { CONSUMER_HEADER, DEFAULT_FETCH_METHODS, FETCH_USER_AGENT, KNOWN_METHODS, MAX_HEADERS, NO_BODY_STATUSES, REDIRECT_STATUSES, headerBytes, originOf, parseTarget, requestHeaders, responseHeaders } from './http-policy.mjs'
@@ -87,6 +89,12 @@ const endedAnswer = (conn) => (conn.endReason === 'shutdown' ? refusalAnswer('sh
  *   the fetch form `not-offered`. It must not follow redirects, decompress, keep connections or add headers: the provider does the rest.
  * @param {string[]} [opts.fetchMethods=['GET','HEAD']] - methods a consumer may use for the fetch form (GET HEAD POST PUT PATCH DELETE OPTIONS; never CONNECT or TRACE)
  * @param {boolean} [opts.identifyConsumers=false] - add `x-browsermesh-consumer: <pod id>` to each fetch request (off: the destination never learns who asked)
+ * @param {false|true|{ intervalMs?: number, misses?: number }} [opts.keepAlive] - ping each consumer every `intervalMs` (default 5 s); a consumer heard from in no way
+ *   for `misses` intervals (default 3) is gone: its channel is closed, its connections end `consumer-left`, its budgets are free. `false` turns the pinging off
+ *   (a consumer's own pings are still answered).
+ * @param {boolean} [opts.connectByResolvedAddress=false] - take a `connect` to an address THIS provider's own lookup returned for a consumer (under
+ *   its `dns` grant, for a bounded time and count) as a connect to that name under the name's TCP grant. For a guest OS that connects by the address it was given.
+ *   The address is dialled as it is (no second lookup), through the same checked `dial`; an address of a name the consumer has no TCP grant for gives nothing.
  * @param {Record<string, string[]>} [opts.sets] - operator-named destination sets: `host:ports`, `*.suffix:ports`, `a.b.c.d/n:ports`
  * @param {{ acknowledge: string }} [opts.wide] - `{ acknowledge: 'any-public-address' }`: a holder of a wildcard grant may reach any public destination
  * @param {number[]} [opts.blockedPorts=[25,465,587]] - ports no one reaches (with wide mode the defaults cannot be removed)
@@ -104,7 +112,7 @@ const endedAnswer = (conn) => (conn.endReason === 'shutdown' ? refusalAnswer('sh
  */
 export function createMeshEgress({
   service, registry, dial, resolve, exchange, dialUdp, fetchMethods = DEFAULT_FETCH_METHODS, identifyConsumers = false, auditUrls = 'none', sets, wide, blockedPorts = DEFAULT_BLOCKED_PORTS,
-  blockedUdpPorts = DEFAULT_BLOCKED_UDP_PORTS, limits: limitOptions, allowFrom, deny, verifyRequest, indicator, unattended, onAudit, onMeter, clock, recheckIntervalMs = 30_000, protocol = EGRESS_PROTOCOL, onLog,
+  blockedUdpPorts = DEFAULT_BLOCKED_UDP_PORTS, connectByResolvedAddress = false, keepAlive: keepAliveOption, limits: limitOptions, allowFrom, deny, verifyRequest, indicator, unattended, onAudit, onMeter, clock, recheckIntervalMs = 30_000, protocol = EGRESS_PROTOCOL, onLog,
 } = {}) {
   const api = service && typeof service === 'object' ? (service.api ?? service) : null
   if (typeof api?.serveProtocol !== 'function') throw new TypeError('createMeshEgress: service is a mesh service with serveProtocol (createMeshProtocolService)')
@@ -122,6 +130,8 @@ export function createMeshEgress({
   if (!Array.isArray(fetchMethods) || !fetchMethods.length || !fetchMethods.every((m) => KNOWN_METHODS.includes(m))) throw new TypeError(`createMeshEgress: fetchMethods is a non-empty list of ${KNOWN_METHODS.join(', ')} (CONNECT and TRACE are never served)`)
   const methods = new Set(fetchMethods)
   if (typeof identifyConsumers !== 'boolean') throw new TypeError('createMeshEgress: identifyConsumers is true or false')
+  if (typeof connectByResolvedAddress !== 'boolean') throw new TypeError('createMeshEgress: connectByResolvedAddress is true or false')
+  const keepAlive = resolveKeepAlive(keepAliveOption, 'createMeshEgress: keepAlive')
   if (indicator !== undefined && (typeof indicator?.connected !== 'function' || typeof indicator?.disconnected !== 'function')) throw new TypeError('createMeshEgress: indicator needs connected() and disconnected()')
   if (protocol !== EGRESS_PROTOCOL && (typeof protocol !== 'string' || !protocol)) throw new TypeError('createMeshEgress: protocol must be a name')
   if (!Number.isSafeInteger(recheckIntervalMs) || recheckIntervalMs <= 0) throw new TypeError('createMeshEgress: recheckIntervalMs must be a positive integer')
@@ -162,7 +172,7 @@ export function createMeshEgress({
   const channels = new Set()
   const conns = new Set()
   const perPeer = new Map() // peer -> { connections, open, bytesUp, bytesDown, refused, lookups }
-  const counters = { channels: 0, requests: 0, opened: 0, refused: 0, closed: 0, lookups: 0, fetches: 0, bytesUp: 0, bytesDown: 0, reasons: {}, ends: {} }
+  const counters = { channels: 0, requests: 0, opened: 0, refused: 0, closed: 0, lookups: 0, fetches: 0, bytesUp: 0, bytesDown: 0, pings: 0, pongs: 0, gone: 0, reasons: {}, ends: {} }
   const udpCounters = { flows: 0, datagramsUp: 0, datagramsDown: 0, dropped: { rate: 0, credit: 0, size: 0, outbox: 0 } }
   let started = false
   let stopped = false
@@ -424,7 +434,22 @@ export function createMeshEgress({
     if (stopped || !started) { channel.close('not serving'); return }
     const first = decide ? decide(peer, context) : true
     let open = typeof first === 'boolean' ? first : null
-    const chan = { channel, peer, conns: new Map(), bad: 0, streams: null }
+    const chan = { channel, peer, conns: new Map(), bad: 0, streams: null, memory: connectByResolvedAddress ? createAddressMemory({ ttlMs: limits.addressMemoryMs, maxEntries: limits.maxRememberedAddresses, now }) : null }
+    /**
+     * A `connect` to an ADDRESS that this provider's own lookup returned, for this consumer, for a name it holds a `dns` grant for,
+     * is a connect to that name under the name's TCP grant (exact, any-port or set; never a wildcard: those decide on their own).
+     * Returns the grant, or null. The address is the one that is dialled; nothing is looked up again.
+     */
+    function authoriseByAddress(self, host, port) {
+      for (const name of self.memory.namesFor(host)) {
+        const dnsScope = `egress:dns:${name}`
+        if (!can(peer, dnsScope, 'resolve')) continue
+        const g = authorise(peer, name, 'name', port)
+        if (!g.ok || g.via === 'wide') continue
+        return { ok: true, via: 'resolved-name', name, still: () => can(peer, dnsScope, 'resolve') && g.still() }
+      }
+      return null
+    }
     const refuseChannel = () => { open = false; channels.delete(chan); channel.close('not an egress consumer this pod serves') }
     if (open === false) { channel.close('not an egress consumer this pod serves'); return }
     counters.channels += 1
@@ -506,13 +531,19 @@ export function createMeshEgress({
       if (early) return refuse(req, 'tcp', early)
       if (!connectRate.take(peer).ok) return refuse(req, 'tcp', refusalAnswer('budget-exceeded', { budget: 'connect-rate' }))
       if (!globalRate.take('*').ok) return refuse(req, 'tcp', refusalAnswer('budget-exceeded', { budget: 'connect-rate-global' }))
-      const grant = authorise(peer, req.host, req.kind, req.port)
+      let grant = authorise(peer, req.host, req.kind, req.port)
+      // An address this provider's own lookup returned for a name the consumer holds a `dns` grant and a TCP grant for is that name.
+      if (!grant.ok && grant.code === 'no-grant' && chan.memory && req.kind === 'ipv4') grant = authoriseByAddress(chan, req.host, req.port) ?? grant
       if (!grant.ok) return refuse(req, 'tcp', refusalAnswer(grant.code))
       if (!(await verified(req, 'connect'))) return refuse(req, 'tcp', refusalAnswer('bad-request'), { detail: 'request-unverified' })
       if (blocked.has(req.port)) return refuse(req, 'tcp', refusalAnswer('port-blocked'))
       if (deny) {
         let vetoed
-        try { vetoed = (await deny({ peer, host: req.host, port: req.port })) === true } catch { vetoed = true }
+        // The veto is the operator's for the address and, when the address was taken for a name, for the name too.
+        for (const host of grant.via === 'resolved-name' ? [req.host, grant.name] : [req.host]) {
+          if (vetoed) break
+          try { vetoed = (await deny({ peer, host, port: req.port })) === true } catch { vetoed = true }
+        }
         if (vetoed) return refuse(req, 'tcp', refusalAnswer('destination-refused'))
       }
       if (chan.conns.has(req.cid)) { badRequest('cid'); return refuse(req, 'tcp', refusalAnswer('bad-request')) }
@@ -526,7 +557,7 @@ export function createMeshEgress({
       releases.push(all)
 
       const conn = {
-        cid: req.cid, form: 'tcp', peer, chan, host: req.host, port: req.port, via: grant.via, still: grant.still, ac: new AbortController(), releases, state: 'dialing',
+        cid: req.cid, form: 'tcp', peer, chan, host: req.host, port: req.port, via: grant.via, name: grant.name, still: grant.still, ac: new AbortController(), releases, state: 'dialing',
         socket: null, up: null, down: null, address: undefined, addressClass: undefined, startedAt: now(), opened: false, ended: false,
         bytesUp: 0, bytesDown: 0, meteredUp: 0, meteredDown: 0, originEnded: false, upDone: false,
       }
@@ -537,6 +568,7 @@ export function createMeshEgress({
         const guard = deferred()
         const timer = unref(setTimeout(() => { conn.ac.abort(new Error('connect timeout')); guard.reject(Object.assign(new Error('connect timed out'), { code: 'TIMEOUT' })) }, timeoutMs))
         let dialed
+        // `conn.host` is what the dial is given: for an address taken for a name it is the address this provider resolved, so nothing is looked up again.
         try { dialed = await Promise.race([dial({ host: conn.host, port: conn.port, wide: grant.via === 'wide', signal: conn.ac.signal, timeoutMs }), guard.promise]) } finally { clearTimeout(timer) }
         if (!dialed || typeof dialed !== 'object' || !dialed.socket || typeof dialed.socket.on !== 'function') throw Object.assign(new Error('dial returned no socket'), { code: 'FAILED' })
         conn.socket = dialed.socket
@@ -569,7 +601,7 @@ export function createMeshEgress({
       conn.meterTimer = unref(setInterval(() => emitMeter(conn, false), limits.meterIntervalMs))
       touch(conn)
       pumpDown(conn)
-      audit('egress-open', { outcome: 'opened', peer, form: 'tcp', host: conn.host, port: conn.port, address: conn.address, addressClass: conn.addressClass, via: conn.via })
+      audit('egress-open', { outcome: 'opened', peer, form: 'tcp', host: conn.host, port: conn.port, address: conn.address, addressClass: conn.addressClass, via: conn.via, ...(conn.name ? { name: conn.name } : {}) })
       try {
         indicator?.connected({ peer, host: conn.host, port: conn.port }, { stop: async () => { endConnection(conn, 'shutdown'); return true } })
       } catch { /* the embedder's callback */ }
@@ -873,16 +905,37 @@ export function createMeshEgress({
         meter({ peer, form: 'dns', connections: 1, bytesUp: 0, bytesDown: 0, durationMs: Math.max(0, now() - startedAt), reason: 'name-not-found', final: true })
         return refuse(req, 'dns', refusalAnswer('name-not-found'))
       }
+      // What this provider's own resolver answered, for this consumer only: the one source of an address taken for a name.
+      chan.memory?.remember(req.name, addresses)
       audit('egress-resolve', { outcome: 'answered', peer, form: 'dns', host: req.name, addresses: addresses.length, durationMs: Math.max(0, now() - startedAt) })
       meter({ peer, form: 'dns', connections: 1, bytesUp: 0, bytesDown: 0, durationMs: Math.max(0, now() - startedAt), reason: 'closed', final: true })
       return { ok: true, addresses }
     })
 
     channel.onClose(() => {
+      chan.liveness?.stop()
       channels.delete(chan)
       for (const conn of [...chan.conns.values()]) endConnection(conn, 'consumer-left', { notify: false })
       chan.streams.close()
     })
+
+    // The keep-alive: this end answers a consumer's ping always, and pings the consumer itself unless switched off. A consumer that
+    // is heard from in no way for the whole window is gone: its channel is closed, and with it its connections and budgets.
+    answerPings(channel, () => chan.liveness?.heard())
+    if (keepAlive && !channel.closed) {
+      chan.liveness = startLiveness(channel, {
+        ...keepAlive,
+        onPing: () => { counters.pings += 1 },
+        onPong: () => { counters.pongs += 1 },
+        onDead: () => {
+          counters.gone += 1
+          audit('egress-consumer-gone', { outcome: 'closed', peer, reason: 'consumer-gone' })
+          try { channel.close('consumer gone') } catch { /* gone */ }
+          // The mesh link under it is as dead; ending it frees the slot it holds (a link is one of a bounded number) and lets the consumer come back fresh.
+          try { api.channel?.link?.(peer)?.close?.('consumer gone') } catch { /* gone */ }
+        },
+      })
+    }
   }
 
   // ----------------------------------------------------------- recheck, start, stop

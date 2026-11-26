@@ -68,6 +68,8 @@ export async function main(argv, { stdout, stderr, startNode = startMeshNode, di
     fetchMethods: options.fetchMethods,
     auditUrls: options.auditUrls,
     identifyConsumers: options.identifyConsumers,
+    connectByResolvedAddress: options.connectByResolvedAddress,
+    ...(options.keepAlive !== undefined ? { keepAlive: options.keepAlive } : {}),
     ...(options.blockedPorts ? { blockedPorts: options.blockedPorts } : {}),
     ...(options.blockedUdpPorts ? { blockedUdpPorts: options.blockedUdpPorts } : {}),
     ...(options.limits ? { limits: options.limits } : {}),
@@ -85,6 +87,7 @@ export async function main(argv, { stdout, stderr, startNode = startMeshNode, di
     say('browsermesh-egress dry run: nothing is started, no key is read or written.')
     for (const line of describeGrants(options)) say(line)
     say(`fetch methods: ${options.fetchMethods.join(', ')}; audit of URLs: ${options.auditUrls}; consumers identified to destinations: ${options.identifyConsumers ? 'yes' : 'no'}`)
+    say(`a connect to an address this provider's own lookup returned is taken for its name: ${options.connectByResolvedAddress ? 'yes (for a consumer that holds the name\'s dns and TCP grants)' : 'no'}; keep-alive: ${options.keepAlive === false ? 'off' : `every ${options.keepAlive?.intervalMs ?? 5000} ms`}`)
     say(`private space a named destination may resolve to: ${options.allowPrivate.length ? options.allowPrivate.join(', ') : 'none'}; always refused: ${options.deny.length ? options.deny.join(', ') : '(only the built-in classes)'}`)
     say(`wide mode: ${options.wide ? 'ON (any public address for a wildcard grant)' : 'off'}`)
     say('always refused: loopback, private, link-local, carrier-NAT, metadata and reserved addresses (unless the operator listed them above, for a named destination); ports 25, 465, 587 (TCP) and 53 (UDP)')

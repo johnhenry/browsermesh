@@ -9,14 +9,17 @@ to send UDP datagrams to one, to look a name up, or to fetch an `http(s)` URL, a
 [`browsermesh-ingress`](../browsermesh-ingress): ingress brings HTTP in to a pod, egress takes the network out from one.
 
 It is a library: `createMeshEgress` (the provider), `connectEgress` (the consumer, browser-safe, with a netway backend),
-on its own Node entry `nodeDialer` (the provider's network, on wsh's address guard), and a command line,
-`browsermesh-egress`, that runs a provider from a grants file.
+on its own Node entry `nodeDialer` (the provider's network, on wsh's address guard), a small browser entry
+(`./browser`, `createEgressNode`: everything a page needs to reach a provider, about 270 kB minified instead of about
+1.4 MB), and a command line, `browsermesh-egress`, that runs a provider from a grants file.
 
-Peer dependencies: `@johnhenry/browsermesh-apps` `>=0.21.0` (the protocol channel and its streams) and
+Peer dependencies: `@johnhenry/browsermesh-apps` `>=0.21.0` (the protocol channel and its streams; the `./browser` entry
+needs `>=0.25.0`, which has `@johnhenry/browsermesh-apps/lean-node`) and
 `@johnhenry/browsermesh-netway` `>=0.3.0` (the socket a consumer gets, and the backend). The provider's Node entry
 (`./node`) also needs `@johnhenry/wsh` `>=0.55.0` (an optional peer dependency: its address guard,
 `@johnhenry/wsh/address-guard`). The consumer entry imports no `node:` module and no wsh. Real WebRTC from Node needs
-`node-datachannel` (an optional dependency).
+`node-datachannel` (an optional dependency). [Installing for a page](#installing-for-a-page-that-only-consumes) says what
+a consumer-only install brings, and how to leave the provider's parts out.
 
 ## What it is, and what it is not
 
@@ -59,6 +62,57 @@ Read this before you turn it on.
   grant one you would not grant the whole network.
 - **Destinations and timing are personal data in many places.** The audit has them; set your own retention.
 - **Stopping the provider drops every connection.** There is no resume.
+
+## Installing for a page that only consumes
+
+A page needs the consumer half and the wiring to reach a provider; it never runs the provider, the command line or WebRTC from
+Node. What `npm install @johnhenry/browsermesh-egress` brings, and what to do about it:
+
+- **Node `>=26` in `engines`.** Every package of this family declares it (the provider and the command line need it), so the
+  install prints an `EBADENGINE` warning on an older Node and, with `engine-strict`, stops. Nothing of it runs in the page:
+  the bundle is plain ESM for a browser. Install on Node 26, or leave `engine-strict` off.
+- **`node-datachannel`**: a native WebRTC binding, an `optionalDependency` (an install that cannot get it still succeeds). Only
+  the command line and a provider in Node use it. A page never loads it.
+- **`isolated-vm`**, through `@johnhenry/browsermesh-pod` (the page takes the signalling transport from it): an optional
+  dependency of that package, which needs a native build when there is no prebuilt binary (with `--ignore-scripts` it is
+  present and unbuilt, and nothing in a page imports it).
+- **`@johnhenry/wsh`**: an optional peer, needed only by `./node`. It is not installed for you.
+
+To leave the native parts out, omit optional dependencies and name what the page does need:
+
+```
+npm install --omit=optional @johnhenry/browsermesh-egress @johnhenry/browsermesh-apps @johnhenry/browsermesh-netway \
+  @johnhenry/browsermesh-core @johnhenry/browsermesh-discovery @johnhenry/browsermesh-transport \
+  @johnhenry/browsermesh-pod @johnhenry/browsermesh-primitives
+```
+
+(`--omit=optional` also leaves out the five `@johnhenry/browsermesh-*` packages the package lists as optional, which is why
+they are named. `isolated-vm` is then not fetched at all.) A provider started without what it needs says so: `./node` throws
+"needs @johnhenry/wsh 0.55.0 or later", and the command line exits with "WebRTC is not available: the optional dependency
+node-datachannel is not installed" or names the BrowserMesh package it could not load, each with the command to run. The engines
+field and the optional dependencies are left as they are: moving `node-datachannel` out of `optionalDependencies` would stop
+`npx @johnhenry/browsermesh-egress` from having WebRTC, and the engines floor is the family's.
+
+```js
+import { createEgressNode } from '@johnhenry/browsermesh-egress/browser'
+
+const egress = await createEgressNode({ signaling: 'wss://signal.example/signaling' })   // an identity, the signalling connection, a node
+console.log(egress.podId)                                  // what the provider's operator grants `protocol:egress:open` and the destinations to
+const link = await egress.connect(providerPodId)           // connects to that pod, opens protocol `egress`, pins the link to it
+const res = await link.fetch('https://registry.example/v2/')
+link.onClose(({ reason }) => console.log('the link ended:', reason))
+await egress.close()
+```
+
+`createEgressNode({ signaling, identity?, label?, iceServers?, answerTimeoutMs?, openTimeoutMs?, onLog? })` takes the signalling
+server's WebSocket URL (or a ready transport with `send(message)` and `onMessage(cb)`), an identity to restore
+(`{ privateKeyJwk }`, from `egress.identityManager.export(egress.podId)`; keep it where the page keeps secrets, or the pod id
+changes each load and so do the grants), and TURN servers for a provider behind a strict NAT. `connect(providerPodId, options)`
+takes `connectEgress`'s options and rejects with an `EgressError` that says what to tell the person: `signalling-unreachable`,
+`provider-not-found`, `provider-timeout`, `provider-not-authorized`, `provider-no-egress`, `provider-version`,
+`provider-refused` ([the codes](#refusals-in-one-place)). The entry is the consumer half only: no provider, no `node:` module,
+no wsh (a test bundles it with esbuild and pins its size; the old recipe, `createMeshNode` from the apps package root, was
+1,463,032 bytes in the same measurement and this is 267,127).
 
 ## Library
 
@@ -108,9 +162,9 @@ await net.connect('tcp://registry.npmjs.org:443')
 ### The provider: `createMeshEgress`
 
 `createMeshEgress({ service, registry, dial, resolve, exchange?, dialUdp?, fetchMethods?, identifyConsumers?, auditUrls?,
-sets?, wide?, blockedPorts?, blockedUdpPorts?, limits?, allowFrom?, deny?, verifyRequest?, indicator?, unattended?,
-onAudit?, onMeter?, clock?, recheckIntervalMs?, protocol? })` returns `{ start(), stop(), recheck(peer?), stats(),
-connections, started }`.
+connectByResolvedAddress?, keepAlive?, sets?, wide?, blockedPorts?, blockedUdpPorts?, limits?, allowFrom?, deny?, verifyRequest?,
+indicator?, unattended?, onAudit?, onMeter?, clock?, recheckIntervalMs?, protocol? })` returns `{ start(), stop(), recheck(peer?),
+stats(), connections, started }`.
 
 | Option | Default | What it is |
 | --- | --- | --- |
@@ -123,6 +177,8 @@ connections, started }`.
 | `fetchMethods` | `['GET', 'HEAD']` | methods the fetch form serves: any of GET HEAD POST PUT PATCH DELETE OPTIONS (never CONNECT or TRACE) |
 | `identifyConsumers` | `false` | add `x-browsermesh-consumer: <pod id>` to each fetch request; off, the destination never learns who asked |
 | `auditUrls` | `'none'` | what the audit says of a fetched URL: `'none'` (the length of path and query only), `'path'` (and the path), `'full'` (and the query) |
+| `connectByResolvedAddress` | `false` | take a `connect` to an address **this provider's own lookup returned** for the consumer as a connect to that name, under the name's grants: [Names and addresses](#names-and-addresses) |
+| `keepAlive` | `{ intervalMs: 5000, misses: 3 }` | ping each consumer; one heard from in no way for `misses` intervals is gone, its channel closed and its connections and budgets freed. `false` stops this end pinging (a consumer's pings are still answered): [Liveness](#liveness) |
 | `sets` | none | operator-named destination sets (below) |
 | `wide` | off | `{ acknowledge: 'any-public-address' }`: see [Wide mode](#wide-mode) |
 | `blockedPorts` | `[25, 465, 587]` | TCP and fetch ports no one reaches. With wide mode the defaults cannot be removed |
@@ -143,20 +199,47 @@ connections, started }`.
 `shutdown` and stops serving; a stopped provider cannot be started again. `recheck(peer?)` asks the registry again about
 the live connections (of one peer, or all) and ends the ones whose grant is gone, `revoked`; it runs on every
 registry access change and on the interval. `stats()` is `{ channels, requests, opened, refused, closed, lookups, fetches, bytesUp,
-bytesDown, open, reasons, ends, udp: { flows, datagramsUp, datagramsDown, dropped: { rate, credit, size, outbox } },
+bytesDown, pings, pongs, gone, open, reasons, ends, udp: { flows, datagramsUp, datagramsDown, dropped: { rate, credit, size, outbox } },
 peers: { [podId]: { connections, open, bytesUp, bytesDown, refused, lookups } } }`,
 keyed by the channel's verified peer and never by a field of a message.
 
 ### The consumer: `connectEgress`
 
-`connectEgress(service, providerPodId, { signal?, limits?, signRequest?, protocol? })` opens protocol `egress` to that
-pod and returns a link: `{ peer, closed, connect(host, port, { signal }), lookup(name, { signal }), fetch(input, init),
-udp(host, port, { signal }), asBackend(), stats(), close() }`.
+`connectEgress(service, providerPodId, { signal?, limits?, signRequest?, protocol?, keepAlive?, mapAddresses? })` opens
+protocol `egress` to that pod and returns a link: `{ peer, closed, closeReason, whenClosed, onClose(cb), connect(host, port,
+{ signal }), lookup(name, { signal }), fetch(input, init), udp(host, port, { signal }), namesFor(address), asBackend(), stats(),
+close() }`. (A page that does not already have a mesh node uses `createEgressNode` from `./browser`, above.)
 
 - The link is **pinned**: a channel bound to any pod other than the one named is closed and refused
-  (`provider-pin-mismatch`). A provider that does not serve the protocol (`provider-no-egress`), has not granted it
-  (`provider-not-authorized`) or has no direct link (`provider-unreachable`) is named; routed delivery is not part of this
-  version.
+  (`provider-pin-mismatch`). **Opening fails with a code that says why** (a page can tell the person what to do): the provider
+  has not granted the protocol (`provider-not-authorized`), does not serve it (`provider-no-egress`), speaks no common version
+  (`provider-version`), refused the link itself (`provider-refused`: its channel service takes no more peers, or none),
+  did not answer in time (`provider-timeout`), or this pod has no link to it (`provider-not-found`: connect to the pod first;
+  `createEgressNode().connect` does, and says `signalling-unreachable` when the signalling server is the problem).
+  `provider-unreachable` stays the catch-all for what none of these names. Routed delivery is not part of this version.
+- **The link says when and why it ended.** `closed` stays a boolean (it always was one). `closeReason` is `undefined` while the
+  link is up and then one of the reasons below; `whenClosed` resolves `{ reason }`; `onClose(cb)` calls `cb({ reason })` once
+  and returns a function that removes it. Everything that was open ends promptly with a typed error: a connect, a lookup or a
+  fetch that was waiting, an open socket's `read()`, a flow's.
+
+<!-- close-reasons-table:begin -->
+| Reason | Meaning |
+| --- | --- |
+| `local-close` | This side closed the link (`link.close()`). |
+| `provider-gone` | Nothing was heard from the provider for the keep-alive window: it was killed or cannot be reached. |
+| `provider-closed` | The provider or the transport closed the channel, and said nothing this package knows the meaning of (an older provider says nothing). |
+| `provider-stopped` | The provider stopped, or is not serving. |
+| `revoked` | The provider closed the channel because this pod's access to the protocol was revoked. |
+| `provider-refused` | The provider closed the channel because it does not serve this pod (its `allowFrom`). |
+| `protocol-violation` | One end broke the stream rules, or sent too many malformed requests, and the channel was cut. |
+<!-- close-reasons-table:end -->
+
+What was open fails with `provider-gone` after a keep-alive loss, `link-closed` after `close()`, and `provider-closed` (or
+`connection-ended` with the provider's `reason`) for every other end. The reasons other than `local-close`, `provider-gone`
+and `protocol-violation` come from what the provider said as it closed the channel, so they need a provider running
+`@johnhenry/browsermesh-apps` `>=0.25.0`; from an older one the reason is `provider-closed`.
+
+Also on the consumer:
 - `connect(host, port)` resolves with a netway `StreamSocket`: `write()` resolves when the bytes have been taken, `read()`
   resolves a chunk or `null` at the end of what the destination sends, `end()` is the half-close (the destination can
   still send), `close()` and `destroy(err)` end both directions. **Pause and resume are `read()`**: a socket nobody reads
@@ -179,6 +262,10 @@ udp(host, port, { signal }), asBackend(), stats(), close() }`.
 - `limits`: `{ openTimeoutMs: 10000, requestTimeoutMs: 30000, maxConnections: 32, streamWindowBytes: 262144,
   socketWindowBytes: 262144, maxViolations: 8 }`. `signRequest(bytes, { peer })` signs each connect and lookup for the
   provider's `verifyRequest`.
+- `keepAlive: { intervalMs: 5000, misses: 3 }` (or `false`): the link pings the provider and ends `provider-gone` when nothing
+  is heard for `misses` intervals ([Liveness](#liveness)). `mapAddresses: true` (or `{ ttlMs: 600000, maxEntries: 256 }`;
+  off by default): when the provider refuses an **address** (`no-grant`) that this link's own lookup answered for a name, `connect`
+  asks for the name instead; `link.namesFor(address)` is what it remembers ([Names and addresses](#names-and-addresses)).
 - Every failure is an `EgressError` with a stable `code` (below), and `budget`, `addressClass`, `detail` or `reason` where
   the code defines one, and `posix` (`ENOTFOUND`, `ECONNREFUSED`, `ETIMEDOUT`, ...) where there is a nearest name. Types
   are in `src/index.d.ts` and `src/node.d.ts`.
@@ -231,7 +318,8 @@ one segment and a block or a suffix cannot be written in a grant: those live in 
   lookup grant: each says a different thing about what the provider sees. A fetch grant names an origin (host and port); the
   default port of the scheme is used when the URL has none.
 - `<host>` and `<name>` are lowercase DNS names or four plain decimal numbers (no `:`, no `*`). A grant for a name does not
-  cover that name's address, and the reverse. Every other spelling of an address (`127.1`, `0x7f.1`, `2130706433`, a
+  cover that name's address, and the reverse (a guest that connects by the address its lookup returned needs
+  [Names and addresses](#names-and-addresses)). Every other spelling of an address (`127.1`, `0x7f.1`, `2130706433`, a
   trailing dot) and every IPv6 literal is `bad-destination` before any rule is asked, so no rule sees two spellings of
   one address. A port is 1 to 65535.
 - Each can carry `expiresAt` (`grantCapabilities(peer, scopes, { expiresAt })`). The provider notices an expiry on its
@@ -252,6 +340,51 @@ one segment and a block or a suffix cannot be written in a grant: those live in 
 
 Ports are `*`, or numbers and ranges (`80,443,8000-8100`). A bare `*` host, `*:443`, `*.com` and IPv6 are refused at
 construction: wide access is a mode, never a set. A set name is a scope segment (lowercase letters, digits, `.`, `_`, `-`).
+
+## Names and addresses
+
+A grant is for a name (`egress:tcp:registry.example:443:connect`), and a guest operating system connects by the **address** its
+own lookup returned. The provider's `connect` for `93.184.216.34` is a request for an address, which no grant for the name
+covers (`no-grant`): the reverse of the rule above, and the right default. A container engine in a page, whose guest looks a
+name up through `link.lookup` and then connects to what it was given, needs one of two things.
+
+**At the provider: `connectByResolvedAddress: true` (off by default).** For each consumer link the provider remembers which
+addresses *its own lookup* returned, under the consumer's `dns` grant, for which names: at most `limits.maxRememberedAddresses`
+(256) pairs, each for `limits.addressMemoryMs` (ten minutes) from the lookup, the oldest forgotten first. A `connect` to an
+address that is in that memory, from that consumer, on a link it looked the name up on, is taken as a connect to the name:
+
+- **the name's own grants decide**, the consumer's TCP grant for that name and port (exact, any port, or an operator's set), and
+  the consumer must still hold the name's `dns` grant. An address returned for a name the consumer holds no TCP grant for, or
+  a port the grant does not name, gives nothing: `no-grant`, as without the option;
+- **the address is what is dialled**: the provider hands its `dial` the address it resolved, so there is no second lookup, nothing
+  the consumer supplies decides where the connection goes, and the address guard checks it as it checks every other address
+  (an address that is private, loopback, link-local or metadata is refused whatever the memory says);
+- **the operator's `deny` is asked about the address and about the name**, the blocked ports, the budgets and the audit apply as
+  to any connect (`egress-open` carries `via: 'resolved-name'` and the `name`), and revoking either grant ends the path at once and
+  a live connection `revoked`;
+- **nothing is taken from the consumer**: the request has no field that names a mapping (extra fields are ignored), and the memory
+  is per link, never shared;
+- what a holder of the two grants gains is a connection to an address the name resolved to a moment ago: the same machines it
+  could already connect to by name. A shared host that serves other names is reached as the granted name's address, as it is
+  by name. No wildcard grant is involved (those are wide mode's, and decide on their own). It applies to the TCP connect form;
+  the fetch form and UDP take their destination from a URL or a name the consumer writes.
+
+**At the consumer: `mapAddresses: true` (off by default)**, which works against any provider, 0.1.1 and 0.2.0 included. The link
+remembers what its own lookups answered. When the provider refuses an address with `no-grant` and the address was answered for
+a name, the link asks for the name instead (newest first, at most three names), and from then on goes straight to names for this
+provider. Only `no-grant` leads to a name, and only a name this link looked up itself. It costs a second lookup at the
+provider, which may pick another address of the same name; where that matters, the provider's option is the exact one.
+`createAddressMemory({ ttlMs, maxEntries })` is exported for a consumer that routes by itself.
+
+```js
+// provider: the operator
+createMeshEgress({ ..., connectByResolvedAddress: true })
+node.registry.grantCapabilities(consumerPodId, ['protocol:egress:open', 'egress:dns:registry.example:resolve', 'egress:tcp:registry.example:443:connect'])
+
+// consumer: a guest looks up, then connects to the address it was given
+const [address] = await link.lookup('registry.example')
+const socket = await link.connect(address, 443)       // taken as registry.example:443
+```
 
 ## Wide mode
 
@@ -298,9 +431,17 @@ What the provider does, per request, in this order:
    `cache-control`, `content-length`, `content-type`, the conditional headers, `pragma` and `range` are sent on, each once.
    `Host` is built from the parsed URL, never taken from the consumer. The provider adds `user-agent: browsermesh-egress`,
    `accept-encoding: identity` and `connection: close`; it adds no `Authorization`, no cookie and no `Origin` or `Referer`, and
-   the consumer's pod id only if the operator set `identifyConsumers`. On the way back only a short list describing the body
-   passes (`content-type`, `content-length`, `content-range`, `content-encoding`, `etag`, `last-modified`, `cache-control`,
-   `location`, ...): no `Set-Cookie`, no hop-by-hop or proxy header.
+   the consumer's pod id only if the operator set `identifyConsumers`. On the way back only a fixed list passes, each header at
+   most 8192 characters, at most 100 in all and the whole block within `maxHeaderBytes`: what describes the body and its
+   caching (`content-type`, `content-length`, `content-range`, `accept-ranges`, `content-encoding`, `content-language`,
+   `content-disposition`, `etag`, `last-modified`, `cache-control`, `expires`, `age`, `date`, `vary`), what a client needs to be
+   told next (`location`, `retry-after`, `link`, `www-authenticate`), and what registries and ordinary APIs say about
+   themselves (`docker-distribution-api-version`, `docker-content-digest`, the `ratelimit-*` and `x-ratelimit-*` limit,
+   remaining and reset): never `Set-Cookie`, a hop-by-hop or a proxy header, and nothing that is not on the list.
+   **A header that carries a URL the consumer will act on (the realm in `www-authenticate`, `link`, `location`) is the
+   provider's word, as `response.url` is.** A provider (or a destination the provider fetched from) can point the consumer
+   anywhere; the consumer's request to that URL is its own `fetch` and still needs its own grant (`no-grant` otherwise), so the
+   header gives a hostile provider no reach it did not already have. Check the host of a realm before sending a credential to it.
 3. **The destination is checked, then dialled at the address that was checked.** The name is resolved once by wsh's address
    guard, every answer is classified, and the connection (and, for `https:`, the TLS handshake, whose SNI and certificate
    check use the name) goes to an address that passed: a second DNS answer cannot change where the connection goes.
@@ -326,6 +467,50 @@ itself. The consumer pins the provider's pod id and the response is bounded and 
 that are not pairs, a header outside the allow-list or with a control character, a URL that is not `http(s)`: `bad-answer` or
 dropped), but nothing authenticates the content. Treat the body as untrusted bytes, as for any fetch, and check what you can
 check yourself (a registry client checks the digest of what it downloaded).
+
+### Pulling from a public registry through the fetch form
+
+A registry pull is several fetches to several hosts, and the provider follows redirects only to hosts the consumer holds a fetch
+grant for, so a pull needs the redirect hosts written down. The usual shape (the hosts are what the registries named below
+answered with at the time of writing, and they change: not checked against the live registries here, so read your own provider's
+audit, `egress-hop` and `egress-refused` lines, on a first pull and amend the sets):
+
+1. `GET https://registry.example/v2/` answers `401` with `www-authenticate: Bearer realm="https://auth.example/token",service="..."`.
+   The realm is the **token service**, another host: fetch it with the scope the challenge named, then retry with
+   `authorization: Bearer <token>`. (`www-authenticate` reaches the consumer; before it was dropped.)
+2. The manifest comes from the registry; `docker-content-digest` is the digest to check what you download against.
+3. A blob answers `307` with a `location` on the registry's **blob storage or CDN host**: a third host. The provider follows it
+   only if the consumer holds a fetch grant for it; `Authorization` is dropped on the way (the origin changed), which is what a
+   storage host wants.
+
+So the operator names each registry's hosts as a set, and grants the sets to the consumer:
+
+```js
+createMeshEgress({
+  ...nodeDialer(),
+  sets: {
+    'docker-hub': ['registry-1.docker.io:443', 'auth.docker.io:443', 'production.cloudflare.docker.com:443'],
+    'ghcr': ['ghcr.io:443', 'pkg-containers.githubusercontent.com:443'],
+    'quay': ['quay.io:443', 'cdn01.quay.io:443', 'cdn02.quay.io:443', 'cdn03.quay.io:443'],
+  },
+  // layers are tens to hundreds of MiB: the fetch's own bound and the connection's must both be raised, and the time
+  limits: { maxFetchResponseBytes: 512 * 1024 * 1024, maxBytesPerConnection: 512 * 1024 * 1024, maxFetchDurationMs: 10 * 60_000 },
+  unattended: true,
+})
+node.registry.grantCapabilities(consumerPodId, ['protocol:egress:open', 'egress:set:docker-hub:fetch', 'egress:set:ghcr:fetch'])
+```
+
+Three limits bound one fetch, and a layer passes only when all three allow it: `maxFetchResponseBytes` (8 MiB by default) for
+the body, `maxBytesPerConnection` (64 MiB) for the connection both ways, and `maxFetchDurationMs` (30 s) for its whole life;
+the consumer's own `maxBytesPerConsumer` (1 GiB a day) still counts every byte. A pull that needs more than you want the provider
+to buffer-and-forward for one request should not go through the fetch form at all:
+
+**For large bodies, `connect` and the consumer's own TLS.** Grant the TCP form for the storage host
+(`egress:tcp:production.cloudflare.docker.com:443:connect` and its `egress:dns:...:resolve`) and run TLS in the page over the
+`StreamSocket`: the provider then carries bytes it cannot read, and its limit is `maxBytesPerConnection`, not the fetch's. The
+small requests (the challenge, the token, the manifest) can still go through `fetch`. Which of the two to use is the question
+of who may read the layer: through `fetch` the provider reads every byte; through `connect` it reads none. (A page that does the
+TLS itself also checks the certificate itself, which the fetch form cannot offer it.)
 
 ## UDP
 
@@ -401,6 +586,40 @@ not ask for them is never sent anything new.
 - **This consumer against this provider with a form off** (no `exchange`, no `dialUdp`): `not-offered`, said only after the grant
   check, so a consumer learns nothing about the provider's configuration without a grant.
 
+## Compatibility with 0.2.0
+
+Protocol `egress` is still version 1 and nothing 0.2.0 sent or understood changed. What was added is additive or negotiated,
+and each end can run either version:
+
+| Change | A 0.2.0 or 0.1.1 peer |
+| --- | --- |
+| More response headers pass the fetch form (`www-authenticate`, `link`, `docker-*`, `ratelimit-*`) | **Provider:** it sends the new headers only from a new provider. **Consumer:** a 0.2.0 consumer drops what its own list lacks and reads the rest of the answer as before; a new consumer simply sees none of them from an old provider. |
+| `connectByResolvedAddress` (provider) | No wire change: the same `connect { host: <address> }` is refused `no-grant` by a 0.2.0 or 0.1.1 provider, as before. A consumer with `mapAddresses` then asks for the name. |
+| `mapAddresses` (consumer) | No wire change: it sends `connect` for a name, which every provider serves. |
+| The keep-alive: a `ping` request on the channel, answered `{ ok: true }` | An older peer has no `ping` and answers `method-not-found`, which is an answer: the pinging end counts it as proof the peer is there and goes on, and never declares an older peer gone for lacking the method. An older peer pings nothing, so a new end simply waits on its own pings. A peer that answers nothing at all is the one declared gone. A 0.2.0 consumer on a new provider is pinged, answers `method-not-found`, and is served as before; a dead one is noticed all the same. |
+| Why the other end closed (`closeReason`), from a field `reason` on the protocol host's close notification | An older provider sends no reason and the link's `closeReason` is `provider-closed`; an older peer that receives the field ignores it. |
+| New link codes (`provider-not-found`, `provider-refused`, `signalling-unreachable`, `provider-gone`) | Client-side only: nothing new on the wire. A 0.2.0 consumer reports what used to be the catch-all `provider-unreachable` for the two open failures that now have their own codes. |
+| `./browser` and `createEgressNode` | Client-side only. It needs `@johnhenry/browsermesh-apps` `>=0.25.0` for the lean node it is built on. |
+
+## Liveness
+
+Nothing in a data channel says when the other end was killed outright: with a real WebRTC link on both ends the transport's own
+timers took about 237 s to (in a consumer's measurement). So each end of an egress channel runs a keep-alive on the protocol
+channel: a `ping` request every `intervalMs` (5 s), answered `{ ok: true }` at once, and the other end is **gone** when nothing at
+all has been heard from it, no answer to a ping, no ping of its own and no message of the protocol, for `misses` intervals
+(3, so about 15 s). Anything heard counts: a link busy with a large download is not declared gone because a ping waited behind it.
+
+- **The consumer** ends the link `provider-gone`: what was waiting (`connect`, `lookup`, `fetch`) fails with `provider-gone`, so does
+  every open socket's `read()` and every flow, and the mesh link under it is closed too, so a provider that comes back is
+  opened fresh. `link.whenClosed` and `link.onClose` say so.
+- **The provider** closes the dead consumer's channel and its mesh link: its connections end `consumer-left`, its slots and
+  budgets are free (`egress-consumer-gone` in the audit, `gone` in `stats()`).
+- Measured with real WebRTC (node-datachannel on both ends, the other end a child process killed with SIGKILL): the survivor
+  noticed after 15.0 s in both directions with the defaults.
+- `keepAlive: false` turns an end's pinging off (it still answers); `{ intervalMs, misses }` changes it. A fast interval costs one
+  small request per interval per link. An end that is not pinged by the other still notices a vanished peer only as fast as the
+  transport does, so set both ends.
+
 ## Budgets
 
 <!-- defaults-table:begin -->
@@ -433,6 +652,8 @@ not ask for them is never sent anything new.
 | `udpReplyRatio` | 8 | reply credit earned per byte the consumer sends | a reply over the credit is dropped |
 | `udpReplyFloorBytes` | 4096 | reply credit earned per datagram sent, at least | a reply over the credit is dropped |
 | `udpReplyCreditMaxBytes` | 262144 | reply credit held at once | a reply over the credit is dropped |
+| `addressMemoryMs` | 600000 | how long an address this provider's lookup returned is taken for its name (`connectByResolvedAddress`) | the address is `no-grant` again |
+| `maxRememberedAddresses` | 256 | (address, name) pairs remembered per consumer link (`connectByResolvedAddress`) | the oldest lookup is forgotten first |
 <!-- defaults-table:end -->
 
 Also `meterIntervalMs` (60000), `maxBadRequests` (8: malformed requests and refused streams of one channel before the
@@ -452,8 +673,8 @@ accepts what the consumer sends, and the reverse.
 ## Refusals, in one place
 
 Every refusal a provider makes is `{ ok: false, code, ... }` on the wire and an `EgressError` with that `code` on the
-consumer. The codes are exported (`REFUSAL_CODES`, `BUDGET_NAMES`, `END_REASONS`, `LINK_CODES`) and a test pins each table
-below to its export.
+consumer. The codes are exported (`REFUSAL_CODES`, `BUDGET_NAMES`, `END_REASONS`, `LINK_CODES`, and `CLOSE_REASONS` above) and a
+test pins each table to its export.
 
 <!-- refusals-table:begin -->
 | Code | Meaning |
@@ -528,9 +749,13 @@ there: it is denied before any dial, so the provider's own network cannot be pro
 | `provider-no-egress` | The provider does not serve the `egress` protocol. |
 | `provider-version` | The provider speaks no version of `egress` this package does. |
 | `provider-timeout` | The provider did not answer in time. |
-| `provider-unreachable` | The provider is not reachable over a direct link; routed delivery is not supported. |
+| `provider-unreachable` | The provider is not reachable over a direct link; routed delivery is not supported. Also what a failure to open the channel is called when none of the more exact codes below names it. |
+| `provider-not-found` | This pod has no link to the provider and nothing was found at that pod id: the id is wrong, the provider is offline, or no connection was made first. |
+| `provider-refused` | The provider's channel service refused the link before any question about this protocol (it takes no more peers, or its operator accepts none). |
+| `signalling-unreachable` | The signalling server could not be reached, so the provider could not be looked for (said by the browser entry's `connect`). |
 | `provider-pin-mismatch` | The channel is bound to a different pod than the one named; refused. |
 | `provider-closed` | The channel to the provider closed. |
+| `provider-gone` | Nothing was heard from the provider for the keep-alive window (`keepAlive.misses` intervals): it was killed or cannot be reached. What was open ended with this code. |
 | `provider-no-form` | The provider does not know this form of request (it is older than the form). |
 | `datagram-too-large` | The datagram is larger than the provider's bound for one (`limits.maxDatagramBytes`, or the flow's answered bound). |
 | `bad-answer` | The provider answered with something this package cannot read. |
@@ -560,12 +785,13 @@ a consumer on purpose: the operator is trusted with `dial`.
 
 | `event` | When | Fields |
 | --- | --- | --- |
-| `egress-open` | a connection, flow or fetch was made | `peer`, `form` (`tcp`, `udp` or `fetch`), `host`, `port`, `address`, `addressClass`, `via` (`exact`, `host`, `set` or `wide`), `outcome: 'opened'`; a fetch also `method`, `status`, `redirects`, `pathLength` |
+| `egress-open` | a connection, flow or fetch was made | `peer`, `form` (`tcp`, `udp` or `fetch`), `host`, `port`, `address`, `addressClass`, `via` (`exact`, `host`, `set`, `wide` or `resolved-name`), `outcome: 'opened'`; `resolved-name` (an address taken for a name) also `name`; a fetch also `method`, `status`, `redirects`, `pathLength` |
 | `egress-hop` | a fetch's hop was answered | `peer`, `form: 'fetch'`, `hop`, `method`, `host`, `port`, `address`, `addressClass`, `pathLength`, `status`, `outcome: 'hop'` |
 | `egress-close` | it ended | the same, plus `bytesUp`, `bytesDown`, `durationMs`, `reason` (an end reason), `outcome: 'closed'`; a UDP flow also `datagramsUp`, `datagramsDown`, `droppedUp`, `droppedDown` |
 | `egress-refused` | a request was refused | `peer`, `form`, `host`, `port`, `code`, and `budget`, `addressClass` or `detail` where the code defines one, `outcome: 'refused'` |
 | `egress-resolve` | a lookup was answered | `peer`, `form: 'dns'`, `host` (the name), `addresses` (a count), `durationMs`, `outcome: 'answered'` |
 | `egress-abuse` | a consumer was cut off | `peer`, `reason`, `outcome: 'closed'` |
+| `egress-consumer-gone` | a consumer was heard from in no way for the keep-alive window; its channel and connections were closed | `peer`, `reason: 'consumer-gone'`, `outcome: 'closed'` |
 
 `address` is the checked address that was dialled, so an operator can answer "which of your consumers connected to X at
 time T". There is never a header, payload byte or lookup answer; the path and query of a fetch are there only as lengths,
@@ -626,6 +852,8 @@ stream   meta { cid, kind: 'down' }   provider -> consumer, opened BEFORE the an
 stream   meta { cid, kind: 'up' }     consumer -> provider, opened after the answer
 request  resolve  { name, type: 'A', hops: 0, nonce?, sig? }  -> { ok: true, addresses: [string] } | { ok: false, code, ... }
 notify   end      { cid, reason }     provider -> consumer, before it aborts the streams of a connection it ended
+request  ping     {}                  either way, every keepAlive.intervalMs -> { ok: true }; an older peer answers method-not-found, which is
+                                      an answer (added after 0.2.0; protocol version still 1)
 
 request  fetch    { cid, url, method, headers: [[name, value]], body: boolean, redirect: 'follow' | 'manual', hops: 0, nonce?, sig? }
                   -> { ok: true, status, statusText, headers: [[name, value]], url, redirected } | { ok: false, code, ... }
@@ -635,6 +863,9 @@ request  udp      { cid, host, port, hops: 0, nonce?, sig? }  -> { ok: true, max
                   `down` opened BEFORE the answer, `up` after it; a datagram is a frame: a 2-byte big-endian length, then the payload
 ```
 
+The protocol host's own close notification (`mesh.protocol.close`, in the apps package) gained one optional field after 0.2.0: `{ name,
+reason? }`, short plain text, which is what `link.closeReason` is read from. A peer without the field ignores it.
+
 Ending a stream is the half-close; cancelling it is a destroy; closing the channel or revoking a grant ends every
 connection. A peer without the protocol answers the open with `unknown-protocol` (or not-authorized) and is sent nothing
 else, so an older peer is never sent something it would mis-handle.
@@ -643,6 +874,9 @@ else, so an older peer is never sent something it would mis-handle.
 
 The forms and the command line of the first version are all here. What is left:
 
+- **UDP in a guest's network backend.** A container engine's guest kernel talks to its host through a network backend interface
+  that has no datagram method, so a guest's UDP cannot be routed through `link.udp` yet. That is upstream of this repository
+  (the engine and its kernel); this package's UDP form works for a page's own code and for anything that can call it.
 - **An adapter example** from `link` to a callback-style TCP backend with pause and resume, for a container engine.
 - **Connection reuse and HTTP/2 in the fetch form**: each fetch is one connection, HTTP/1.1, closed after the response.
 - **Changing the grants of a running command-line provider**: edit the file and restart (an embedder has the registry, which

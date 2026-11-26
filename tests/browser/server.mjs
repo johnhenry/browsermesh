@@ -68,9 +68,11 @@ export async function buildImportMap() {
     if (!pkg.name || !entry) continue
     imports[pkg.name] = `/pkg/${dir}/${entry.replace(/^\.\//, '')}`
     // Subpath exports that are plain files (`@johnhenry/browsermesh-apps/protocol-channel`).
+    // A subpath may also be `{ types, default }` (the egress package's `./browser`): the file is its `default`.
     for (const [key, target] of Object.entries(pkg.exports ?? {})) {
-      if (key === '.' || typeof target !== 'string' || !target.startsWith('./')) continue
-      imports[`${pkg.name}${key.slice(1)}`] = `/pkg/${dir}/${target.replace(/^\.\//, '')}`
+      const file = typeof target === 'string' ? target : typeof target?.default === 'string' ? target.default : null
+      if (key === '.' || !file?.startsWith('./')) continue
+      imports[`${pkg.name}${key.slice(1)}`] = `/pkg/${dir}/${file.replace(/^\.\//, '')}`
     }
   }
   // wsh's object layer, for packages that peer-depend on it. Its transport-neutral core (`objects-core.mjs`) is what
@@ -83,6 +85,8 @@ export async function buildImportMap() {
   imports['@johnhenry/wsh/page'] = '/vendor/wsh/page-host.mjs'
   // wsh's identity entry (a key's names: pod id, fingerprint, OpenSSH line): browser-safe, no imports outside its own directory.
   imports['@johnhenry/wsh/identity'] = '/vendor/wsh/identity.mjs'
+  // The key vault the core package's identity manager seals keys with: zero dependencies, served read only from node_modules.
+  imports['@johnhenry/keyvault'] = '/vendor/keyvault/index.mjs'
   return { imports }
 }
 
@@ -378,6 +382,9 @@ export async function startServer({ port = 0, hub = new Hub() } = {}) {
     }
     if (pathname.startsWith('/vendor/wsh/')) {
       return sendFile(res, nonce, path.join(REPO, 'node_modules', '@johnhenry', 'wsh', 'src'), pathname.slice('/vendor/wsh/'.length))
+    }
+    if (pathname.startsWith('/vendor/keyvault/')) {
+      return sendFile(res, nonce, path.join(REPO, 'node_modules', '@johnhenry', 'keyvault', 'src'), pathname.slice('/vendor/keyvault/'.length))
     }
     if (pathname.startsWith('/harness/')) {
       return sendFile(res, nonce, HARNESS, pathname.slice('/harness/'.length))

@@ -834,6 +834,28 @@ const bm = {
   egressStats() { return bm.egress.link.stats() },
   async egressStop() { try { await bm.egress.link?.close() } catch { /* gone */ } bm.egress.svc.teardown(); bm.rtcUnregister() },
 
+  // -- a page that builds its own node with the browser entry (`@johnhenry/browsermesh-egress/browser`), through the signalling server --
+
+  egressNode: null,
+  /** Create the node (an identity, the signalling connection, a lean mesh node) and say its pod id. */
+  async egressNodeCreate() {
+    const { createEgressNode } = await import('@johnhenry/browsermesh-egress/browser')
+    bm.egressNode = await createEgressNode({ signaling: `${wsBase()}/signaling`, iceServers: [], answerTimeoutMs: 3000 })
+    return bm.egressNode.podId
+  },
+  /** Connect to the provider's pod and open the link; the other `egress*` functions then work on it. Resolves with the error code instead of throwing. */
+  async egressNodeConnect(providerPodId) {
+    try {
+      const link = await bm.egressNode.connect(providerPodId, { mapAddresses: true })
+      bm.egress = { svc: bm.egressNode.service, link }
+      bm.egressClosed = null
+      link.whenClosed.then((info) => { bm.egressClosed = info })
+      return { ok: true }
+    } catch (e) { return { ok: false, code: e.code ?? String(e) } }
+  },
+  egressClosed: null,
+  async egressNodeStop() { try { await bm.egressNode?.close() } catch { /* gone */ } },
+
   // -- examples, unmodified, in the page ------------------------------------
 
   async runExample(file) {

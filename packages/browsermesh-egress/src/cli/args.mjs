@@ -30,6 +30,8 @@ Options:
   --fetch-methods LIST        methods the fetch form serves, comma separated (default GET,HEAD)
   --audit-urls MODE           what the audit says of a URL: none (path length only, the default), path, full (path and query)
   --identify-consumers        tell destinations which pod asked (an x-browsermesh-consumer header on fetches)
+  --connect-by-resolved-address  take a connect to an address THIS provider's own lookup returned for a consumer as a connect to that name
+  --keep-alive-ms N|off       ping each consumer every N ms (default 5000; gone after 3 silent intervals); off: do not ping
   --wide                      let a holder of a wildcard grant reach ANY public address; needs the next flag
   --acknowledge-wide VALUE    must be exactly "${WIDE_ACKNOWLEDGEMENT}"
   --json                      print each audit record as one JSON line
@@ -52,7 +54,7 @@ Exit status: 0 after --help or --dry-run, 2 on bad input, 1 if the node cannot s
 
 const FLAGS = new Map([
   ['config', 'value'], ['allow', 'list'], ['set', 'list'], ['signaling', 'value'], ['identity', 'value'], ['allow-private', 'list'], ['deny', 'list'],
-  ['fetch-methods', 'value'], ['audit-urls', 'value'], ['identify-consumers', 'bool'], ['wide', 'bool'], ['acknowledge-wide', 'value'],
+  ['fetch-methods', 'value'], ['audit-urls', 'value'], ['identify-consumers', 'bool'], ['connect-by-resolved-address', 'bool'], ['keep-alive-ms', 'value'], ['wide', 'bool'], ['acknowledge-wide', 'value'],
   ['json', 'bool'], ['dry-run', 'bool'], ['help', 'bool'],
 ])
 /** Keys only the config file has (structured values). */
@@ -213,6 +215,14 @@ export function resolveOptions(raw, { now = Date.now() } = {}) {
   const auditUrls = raw['audit-urls'] ?? 'none'
   if (!['none', 'path', 'full'].includes(auditUrls)) throw new UsageError('--audit-urls is none, path or full.')
 
+  // `--keep-alive-ms N` sets the interval of the keep-alive (misses stay at the default); `off` turns this provider's pinging off.
+  let keepAlive
+  if (raw['keep-alive-ms'] !== undefined) {
+    if (raw['keep-alive-ms'] === 'off') keepAlive = false
+    else if (/^\d+$/.test(String(raw['keep-alive-ms'])) && Number(raw['keep-alive-ms']) > 0) keepAlive = { intervalMs: Number(raw['keep-alive-ms']) }
+    else throw new UsageError('--keep-alive-ms is a whole number of milliseconds, or off.')
+  }
+
   const wildcards = grants.flatMap((g) => g.parsed.filter((p) => p.wide).map((p) => p.scope))
   const wide = raw.wide === true
   if (raw['acknowledge-wide'] !== undefined && !wide) throw new UsageError('--acknowledge-wide has no effect without --wide.')
@@ -236,7 +246,7 @@ export function resolveOptions(raw, { now = Date.now() } = {}) {
   }
   return {
     signaling, identity: raw.identity, grants, sets, allowPrivate: raw['allow-private'], deny: raw.deny, fetchMethods, auditUrls,
-    identifyConsumers: raw['identify-consumers'] === true, wide, blockedPorts: portList(raw.blockedPorts, 'blockedPorts'), blockedUdpPorts: portList(raw.blockedUdpPorts, 'blockedUdpPorts'),
+    identifyConsumers: raw['identify-consumers'] === true, connectByResolvedAddress: raw['connect-by-resolved-address'] === true, keepAlive, wide, blockedPorts: portList(raw.blockedPorts, 'blockedPorts'), blockedUdpPorts: portList(raw.blockedUdpPorts, 'blockedUdpPorts'),
     limits, json: raw.json === true, dryRun: raw['dry-run'] === true, warnings,
   }
 }

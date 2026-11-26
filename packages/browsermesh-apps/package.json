@@ -18,6 +18,7 @@
     "./channel-advertisement": "./src/channel-advertisement.mjs",
     "./mesh-fetch": "./src/mesh-fetch.mjs",
     "./mesh-service": "./src/mesh-service.mjs",
+    "./lean-node": "./src/lean-node.mjs",
     "./peer-registry": "./src/peer-registry.mjs"
   },
   "files": [

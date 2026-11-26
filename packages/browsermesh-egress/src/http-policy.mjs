@@ -22,9 +22,16 @@ export const CONSUMER_HEADER = 'x-browsermesh-consumer'
 /** Request headers a consumer may send on: content, conditions, ranges and the credential it chose to put there. */
 export const REQUEST_HEADERS = Object.freeze(['accept', 'accept-language', 'authorization', 'cache-control', 'content-length', 'content-type',
   'if-match', 'if-modified-since', 'if-none-match', 'if-range', 'if-unmodified-since', 'pragma', 'range'])
-/** Response headers passed to the consumer: what describes the body and its caching; never a cookie, a hop-by-hop or a proxy header. */
+/**
+ * Response headers passed to the consumer: what describes the body and its caching, what a registry or an ordinary API needs to
+ * be used (the challenge to authenticate, the digest, the next page, the rate limit); never a cookie, a hop-by-hop or a proxy
+ * header. A header that carries a URL the consumer may act on (`location`, `link`, the realm in `www-authenticate`) is the
+ * provider's word about where to go next: the consumer's request to that URL still needs its own grant.
+ */
 export const RESPONSE_HEADERS = Object.freeze(['accept-ranges', 'age', 'cache-control', 'content-disposition', 'content-encoding', 'content-language',
-  'content-length', 'content-range', 'content-type', 'date', 'etag', 'expires', 'last-modified', 'location', 'retry-after', 'vary'])
+  'content-length', 'content-range', 'content-type', 'date', 'etag', 'expires', 'last-modified', 'location', 'retry-after', 'vary',
+  'www-authenticate', 'link', 'docker-distribution-api-version', 'docker-content-digest',
+  'ratelimit-limit', 'ratelimit-remaining', 'ratelimit-reset', 'x-ratelimit-limit', 'x-ratelimit-remaining', 'x-ratelimit-reset'])
 const REQUEST_ALLOWED = new Set(REQUEST_HEADERS)
 const RESPONSE_ALLOWED = new Set(RESPONSE_HEADERS)
 

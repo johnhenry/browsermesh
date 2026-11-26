@@ -5,7 +5,8 @@ import assert from 'node:assert/strict'
 import { readFile, readdir } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
-import { REFUSAL_CODES, BUDGET_NAMES, END_REASONS, LINK_CODES, EGRESS_LIMIT_DEFAULTS, EGRESS_SCOPES, DEFAULT_BLOCKED_PORTS, DEFAULT_BLOCKED_UDP_PORTS } from '../src/index.mjs'
+import { REFUSAL_CODES, BUDGET_NAMES, END_REASONS, LINK_CODES, CLOSE_REASONS, EGRESS_LIMIT_DEFAULTS, EGRESS_SCOPES, DEFAULT_BLOCKED_PORTS, DEFAULT_BLOCKED_UDP_PORTS, KEEPALIVE_DEFAULTS } from '../src/index.mjs'
+import { RESPONSE_HEADERS } from '../src/http-policy.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const readme = await readFile(path.join(root, 'README.md'), 'utf8')
@@ -18,7 +19,7 @@ const rows = (table) => table.split('\n').filter((l) => l.startsWith('|')).slice
 const unticked = (s) => s.replaceAll('`', '')
 
 describe('the README tables are the code\'s lists', () => {
-  for (const [name, source] of [['refusals-table', REFUSAL_CODES], ['budgets-table', BUDGET_NAMES], ['ends-table', END_REASONS], ['link-codes-table', LINK_CODES]]) {
+  for (const [name, source] of [['refusals-table', REFUSAL_CODES], ['budgets-table', BUDGET_NAMES], ['ends-table', END_REASONS], ['link-codes-table', LINK_CODES], ['close-reasons-table', CLOSE_REASONS]]) {
     it(`${name}: the same names, in the same words`, () => {
       const table = rows(block(name))
       assert.deepEqual(table.map(([n]) => unticked(n)).sort(), Object.keys(source).sort())
@@ -80,6 +81,24 @@ describe('the scopes and the defaults', () => {
     assert.match(readme, /The fetch form is a different promise: the provider is the HTTP client, so it sees the request and the\s+response in\s+plaintext/)
     assert.match(readme, /With the fetch form on, your machine reads what the consumer fetches/)
     assert.match(readme, /\*\*The provider is the HTTP client, so it sees everything\.\*\*/)
+  })
+
+  it('the README says what the 0.3 changes are and what an older peer does for each', () => {
+    for (const heading of ['## Installing for a page that only consumes', '## Names and addresses', '## Liveness', '## Compatibility with 0.2.0', '### Pulling from a public registry through the fetch form']) assert.ok(readme.includes(heading), heading)
+    const compat = readme.slice(readme.indexOf('## Compatibility with 0.2.0'), readme.indexOf('## Liveness'))
+    for (const change of ['More response headers', 'connectByResolvedAddress', 'mapAddresses', 'keep-alive', 'closeReason', 'New link codes', '`./browser`']) assert.ok(compat.includes(change), `the compatibility table does not name: ${change}`)
+    assert.ok(readme.includes(`\`{ intervalMs: ${KEEPALIVE_DEFAULTS.intervalMs}, misses: ${KEEPALIVE_DEFAULTS.misses} }\``), 'the keep-alive defaults in the options table are the code\'s')
+    assert.match(readme, /UDP in a guest's network backend/)
+  })
+
+  it('the README names the response headers that pass, and says a cookie never does and a header\'s URL is the provider\'s word', () => {
+    for (const name of ['www-authenticate', 'link', 'docker-content-digest', 'docker-distribution-api-version', 'retry-after', 'content-range', 'accept-ranges', 'etag', 'last-modified', 'location']) {
+      assert.ok(RESPONSE_HEADERS.includes(name), `${name} is not on the list`)
+      assert.ok(readme.includes(`\`${name}\``), `the README does not name ${name}`)
+    }
+    assert.match(readme, /never `Set-Cookie`/)
+    assert.match(readme, /provider's word, as `response\.url` is/)
+    assert.match(readme, /still needs its own grant/)
   })
 
   it('the README no longer lists the fetch form, UDP, the command line or the browser spec as not built', () => {

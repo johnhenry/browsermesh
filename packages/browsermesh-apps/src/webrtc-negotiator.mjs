@@ -326,6 +326,7 @@ export function createWebRTCTransportFactory({
 
     const conn = await getWiredConnection(remotePodId, connectionId)
 
+    let stopWaiting = () => {}
     const answerPromise = new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         unsubscribe()
@@ -337,10 +338,18 @@ export function createWebRTCTransportFactory({
         unsubscribe()
         resolve(answer)
       })
+      stopWaiting = () => { clearTimeout(timer); unsubscribe() }
     })
+    answerPromise.catch(() => {}) // read below; a failure before that must not be an unhandled rejection
 
-    const offer = await conn.createOffer()
-    signaling.send('webrtc-offer', remotePodId, offer, connectionId)
+    try {
+      const offer = await conn.createOffer()
+      signaling.send('webrtc-offer', remotePodId, offer, connectionId)
+    } catch (err) {
+      // The offer never left (the signalling transport is down, or the connection could not make one): stop waiting for an answer to it.
+      stopWaiting()
+      throw err
+    }
 
     const answer = await answerPromise
     await conn.handleAnswer(answer)

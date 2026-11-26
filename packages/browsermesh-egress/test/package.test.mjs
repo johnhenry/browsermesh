@@ -84,9 +84,10 @@ describe('the browser-safe entry', () => {
 })
 
 describe('the package', () => {
-  it('exports the core entry and ./node, each typed, and ships src', () => {
-    assert.deepEqual(Object.keys(pkg.exports).sort(), ['.', './node'])
+  it('exports the core entry, ./browser and ./node, each typed, and ships src', () => {
+    assert.deepEqual(Object.keys(pkg.exports).sort(), ['.', './browser', './node'])
     assert.equal(pkg.exports['.'].types, './src/index.d.ts')
+    assert.equal(pkg.exports['./browser'].types, './src/browser.d.ts')
     assert.equal(pkg.exports['./node'].types, './src/node.d.ts')
     for (const f of ['src', 'LICENSE', 'README.md']) assert.ok(pkg.files.includes(f), f)
     assert.equal(pkg.engines.node, '>=26.0.0')
@@ -115,5 +116,8 @@ describe('the package', () => {
     const node = await import('../src/node.mjs')
     const ndts = await readFile(path.join(root, 'src/node.d.ts'), 'utf8')
     for (const name of Object.keys(node)) assert.match(ndts, new RegExp(`\\b${name}\\b`), `${name} is not in node.d.ts`)
+    const browser = await import('../src/browser.mjs')
+    const bdts = await readFile(path.join(root, 'src/browser.d.ts'), 'utf8')
+    for (const name of Object.keys(browser)) assert.match(bdts, new RegExp(`\\b${name}\\b`), `${name} is not in browser.d.ts`)
   })
 })

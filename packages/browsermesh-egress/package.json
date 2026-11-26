@@ -10,11 +10,16 @@
       "types": "./src/index.d.ts",
       "default": "./src/index.mjs"
     },
+    "./browser": {
+      "types": "./src/browser.d.ts",
+      "default": "./src/browser.mjs"
+    },
     "./node": {
       "types": "./src/node.d.ts",
       "default": "./src/node.mjs"
     }
   },
+  "sideEffects": false,
   "bin": {
     "browsermesh-egress": "./bin/browsermesh-egress.mjs"
   },

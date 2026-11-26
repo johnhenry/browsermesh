@@ -258,6 +258,25 @@ This reaches the `WebRTCMeshManager` that `createMeshNode()` attaches to the
 returned node as `node.meshManager`, and from there every
 `WebRTCPeerConnection` it creates.
 
+### A node for a page that reaches one pod: `createLeanMeshNode()`
+
+`createMeshNode` imports every optional service the package has, so a bundler that follows the package root pulls in about a
+megabyte for a page that needs none of them. `@johnhenry/browsermesh-apps/lean-node` is the same composition for the part
+every node needs (identity, a default-deny `PeerRegistry`, WebRTC over your signalling transport) and nothing else:
+
+```js
+import { createLeanMeshNode, attachService, createMeshProtocolService } from '@johnhenry/browsermesh-apps/lean-node';
+
+const node = await createLeanMeshNode({ signalingTransport, iceServers: [] });   // the options createMeshNode takes that mean the same here
+const protocols = attachService(node, undefined, createMeshProtocolService());
+await node.connectToPeer(providerPodId, { webrtc: providerPodId });             // rejects with the reason; no half-made session
+```
+
+It has no wsh links, discovery strategies (a peer is reached by its pod id) or opt-in services, and it requires WebRTC to
+succeed: `connectToPeer` rejects with the negotiation's own error where `createMeshNode`'s default negotiator would fall through to a
+session with no transport. Its imports of `-core`, `-discovery` and `-transport` are static and named (they are optional peers of
+this package that this entry needs). [`browsermesh-egress`](../browsermesh-egress)'s `/browser` entry is built on it.
+
 ## Sealed, key-authenticated links: `createMeshNode({ wsh })`
 
 Opt in (off by default) to carry mesh links on [wsh](https://github.com/johnhenry/wsh)

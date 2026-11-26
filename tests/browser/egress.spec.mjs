@@ -213,6 +213,45 @@ test('the guard still refuses what the operator did not list, grant or no grant;
   }
 })
 
+test('a page builds its own node with the browser entry, through the signalling server: refused, then served, then told why the link ended', async ({ servers, open }) => {
+  const page = await open(servers.a, { isolated: true })
+  await exposeHostCandidates(page)
+  const destinations = await startDestinations()
+  // The Node end is the command's own mesh node: a persisted-style identity, the signalling connection, real WebRTC.
+  const ndc = await import('node-datachannel')
+  const { startMeshNode } = await import('../../packages/browsermesh-egress/src/cli/mesh-node.mjs')
+  const { createMeshEgress } = await import('@johnhenry/browsermesh-egress')
+  const { nodeDialer } = await import('@johnhenry/browsermesh-egress/node')
+  const meshNode = await startMeshNode({ signaling: `ws://127.0.0.1:${servers.a.port}/signaling`, iceServers: [] })
+  const audit = []
+  const egress = createMeshEgress({
+    service: meshNode.service, registry: meshNode.registry, unattended: true, onAudit: (r) => audit.push(r),
+    ...nodeDialer({ allowPrivate: ['127.0.0.1'], denyOwnAddresses: false }),
+  })
+  egress.start()
+  try {
+    const pagePodId = await page.evaluate(() => window.bm.egressNodeCreate())
+    expect(pagePodId).toMatch(/^[A-Za-z0-9_-]{43}$/)
+    // Nobody at that pod id: the page is told so, by a code of its own.
+    expect(await page.evaluate(() => window.bm.egressNodeConnect('P'.repeat(43)))).toEqual({ ok: false, code: 'provider-not-found' })
+    // The provider's operator has not granted this page the protocol: refused, by name.
+    expect(await page.evaluate((id) => window.bm.egressNodeConnect(id), meshNode.podId)).toEqual({ ok: false, code: 'provider-not-authorized' })
+    meshNode.registry.grantCapabilities(pagePodId, [OPEN, `egress:tcp:127.0.0.1:${destinations.tcp}:connect`])
+    expect(await page.evaluate((id) => window.bm.egressNodeConnect(id), meshNode.podId)).toEqual({ ok: true })
+    expect(await page.evaluate((p) => window.bm.egressTcp('127.0.0.1', p, 'hello from a lean node'), destinations.tcp)).toEqual({ ok: true, text: 'echo:hello from a lean node' })
+    expect(await page.evaluate((p) => window.bm.egressTcp('127.0.0.1', p + 1, 'x'), destinations.tcp)).toMatchObject({ ok: false, code: 'no-grant' })
+    // The provider stops: the page's link ends, and says why (a reason the provider gave, not a guess).
+    await egress.stop()
+    await expect.poll(() => page.evaluate(() => window.bm.egressClosed), { message: 'the link to say it ended' }).toEqual({ reason: 'provider-stopped' })
+  } finally {
+    await page.evaluate(() => window.bm.egressNodeStop()).catch(() => {})
+    await egress.stop()
+    await meshNode.close()
+    await destinations.close()
+    try { ndc.cleanup() } catch { /* nothing to clean up */ }
+  }
+})
+
 test('a revocation takes effect on the next request, and a page that cancels a big body stops the destination', async ({ servers, open }) => {
   const rig = await setup(open, servers)
   const { page, provider, destinations: d } = rig
