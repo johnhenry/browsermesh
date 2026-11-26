@@ -51,6 +51,17 @@ describe('the README header table', () => {
   })
 })
 
+describe('the README names table', () => {
+  const table = rows(block('names-table')).map(([reason, mode]) => ({ reason: reason.replaceAll('`', ''), mode }))
+
+  it('has exactly the reasons a name can be refused for', async () => {
+    const text = await readFile(path.join(root, 'src/names.mjs'), 'utf8')
+    const found = new Set([...text.matchAll(/(?:refuse\([^,]+, [^,]+, |new NameRefusal\()'([a-z-]+)'/g)].map((m) => m[1]))
+    assert.deepEqual([...found].sort(), table.map((r) => r.reason).sort())
+    for (const r of table) assert.ok(r.mode.length > 8, r.reason)
+  })
+})
+
 describe('the README failure table', () => {
   const table = rows(block('failures-table')).map(([status, reason, mode]) => ({ status: Number(status), reason: reason.replaceAll('`', ''), mode }))
   const pairs = (list) => new Set(list.map((r) => `${r.status} ${r.reason}`))

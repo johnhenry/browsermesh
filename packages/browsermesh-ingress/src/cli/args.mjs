@@ -3,9 +3,14 @@
  *
  * Every refusal is a `UsageError` whose message is one sentence the person who typed the command can act on.
  */
-import { checkHost, isPodId } from '../headers.mjs'
+import { checkHost, hostName, isPodId } from '../headers.mjs'
 import { isLoopbackHost } from '../node.mjs'
 import { parseBytes, parseDuration } from '../limits.mjs'
+import { NAME_DENY_DEFAULTS, NameRefusal, checkLabel } from '../names.mjs'
+import { SERVICE_NAME_RE } from '../wire.mjs'
+
+const ZONE_RE = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/
+const PATH_RE = /^\/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*$/
 
 export class UsageError extends Error {
   constructor(message) { super(message); this.name = 'UsageError' }
@@ -19,7 +24,19 @@ Usage:
 Options:
   --listen HOST:PORT          where to listen (default 127.0.0.1:8080)
   --signaling URL             the signaling server the mesh node joins (wss://, or ws:// to loopback)
-  --map HOST[/PREFIX]=PODID   serve this pod for this Host (repeatable); one pod per hostname
+  --map HOST[/PREFIX]=PODID[#SERVICE]
+                              serve this pod for this Host (repeatable); one pod per hostname. #SERVICE names
+                              the service on that pod (the pod declares which it serves), so one pod can serve
+                              several ports or sites under different hostnames or paths
+  --link-wait DURATION        how long a request waits for a mapped pod's link that is still being made
+                              (default 5s; 0 turns the wait and the dialling at start off)
+  --ready-path PATH           answer GET PATH with 200 once every mapped pod is linked, 503 before (off by default)
+  --names-zone ZONE           let pods claim names under ZONE (a claim for app is app.ZONE) ... (off by default)
+  --names-allow PODID=LABELS  ... this pod may claim these names (comma separated; * is any); repeatable and required
+  --names-deny LABELS         names refused on top of the built-in deny-list (www, api, admin ...); a trailing * is a prefix
+  --names-max N               names held at once in the zone (default 64)
+  --names-max-per-pod N       names one pod may hold (default 4)
+  --names-hold DURATION       how long a name stays its pod's after its link drops (default 30s; 0 frees it at once)
   --allow-methods LIST        methods served, comma separated (default GET,HEAD)
   --max-body SIZE             request body cap, e.g. 64k (default 64k)
   --timeout DURATION          whole-request deadline, e.g. 30s (default 30s)
@@ -44,6 +61,8 @@ const FLAGS = new Map([
   ['listen', 'value'], ['signaling', 'value'], ['map', 'list'], ['allow-methods', 'value'], ['max-body', 'value'], ['timeout', 'value'],
   ['auth', 'value'], ['identity', 'value'], ['config', 'value'], ['public', 'bool'], ['tls-terminated-in-front', 'bool'],
   ['allow-shared-origin', 'bool'], ['help', 'bool'],
+  ['link-wait', 'value'], ['ready-path', 'value'],
+  ['names-zone', 'value'], ['names-allow', 'list'], ['names-deny', 'value'], ['names-max', 'value'], ['names-max-per-pod', 'value'], ['names-hold', 'value'],
 ])
 
 /** @param {string[]} argv @returns {object} raw flags: `{ listen, map: [...], public: true, ... }` */
@@ -64,7 +83,7 @@ export function parseArgv(argv) {
     }
     const value = eq !== -1 ? arg.slice(eq + 1) : argv[++i]
     if (value === undefined || (eq === -1 && value.startsWith('--'))) throw new UsageError(`--${name} needs a value.`)
-    if (kind === 'list') out[name].push(value)
+    if (kind === 'list') (out[name] ??= []).push(value)
     else {
       if (name in out) throw new UsageError(`--${name} was given twice.`)
       out[name] = value
@@ -87,24 +106,38 @@ export function fromConfig(json) {
       if (Array.isArray(value)) out.map.push(...value.map(String))
       else if (value && typeof value === 'object') for (const [host, pod] of Object.entries(value)) out.map.push(`${host}=${pod}`)
       else throw new UsageError('"map" in the config file must be an object of host: podId, or a list of host=podId.')
+    } else if (name === 'names-allow') {
+      const list = (out['names-allow'] ??= [])
+      if (Array.isArray(value)) list.push(...value.map(String))
+      else if (value && typeof value === 'object') for (const [pod, labels] of Object.entries(value)) list.push(`${pod}=${Array.isArray(labels) ? labels.join(',') : labels}`)
+      else throw new UsageError('"namesAllow" in the config file must be an object of podId: labels, or a list of podId=labels.')
     } else if (kind === 'bool') out[name] = value === true
     else out[name] = Array.isArray(value) ? value.join(',') : String(value)
   }
   return out
 }
 
-/** Flags win over the config file; `map` entries of both are kept. */
+/** Flags win over the config file; `map` and `names-allow` entries of both are kept. */
 export function merge(config, flags) {
   const out = { ...config, ...flags, map: [...(config.map ?? []), ...(flags.map ?? [])] }
+  const allow = [...(config['names-allow'] ?? []), ...(flags['names-allow'] ?? [])]
+  if (allow.length) out['names-allow'] = allow
   return out
 }
 
-/** @returns {{ host: string, prefix: string, peer: string }} */
+/** @returns {{ host: string, prefix: string, peer: string, service?: string }} */
 export function parseMapping(text) {
   const eq = text.lastIndexOf('=')
-  if (eq <= 0 || eq === text.length - 1) throw new UsageError(`--map "${text}" is not HOST=PODID (or HOST/PREFIX=PODID).`)
+  if (eq <= 0 || eq === text.length - 1) throw new UsageError(`--map "${text}" is not HOST=PODID (or HOST/PREFIX=PODID[#SERVICE]).`)
   const left = text.slice(0, eq)
-  const peer = text.slice(eq + 1)
+  let peer = text.slice(eq + 1)
+  let service
+  const hash = peer.indexOf('#')
+  if (hash !== -1) {
+    service = peer.slice(hash + 1)
+    peer = peer.slice(0, hash)
+    if (!SERVICE_NAME_RE.test(service)) throw new UsageError(`--map "${text}": "${service}" is not a service name (lowercase letters, digits, . _ -, up to 64).`)
+  }
   if (!isPodId(peer)) throw new UsageError(`--map "${text}": "${peer}" is not a pod id.`)
   const slash = left.indexOf('/')
   const hostPart = slash === -1 ? left : left.slice(0, slash)
@@ -117,7 +150,47 @@ export function parseMapping(text) {
       throw new UsageError(`--map "${text}": "${left.slice(slash)}" is not a plain path prefix.`)
     }
   }
-  return { host, prefix, peer }
+  return { host, prefix, peer, ...(service === undefined ? {} : { service }) }
+}
+
+const ALLOW_HELP = 'is not PODID=LABELS (comma separated labels, or *)'
+
+/** The names options, or null when `--names-zone` is not given. Every flag of the family without it is refused. */
+function resolveNames(raw) {
+  const given = ['names-allow', 'names-deny', 'names-max', 'names-max-per-pod', 'names-hold'].filter((k) => (Array.isArray(raw[k]) ? raw[k].length : raw[k] !== undefined))
+  if (raw['names-zone'] === undefined) {
+    if (given.length) throw new UsageError(`--${given[0]} needs --names-zone: names are off unless a zone is given.`)
+    return null
+  }
+  const zone = String(raw['names-zone'])
+  if (!ZONE_RE.test(zone)) throw new UsageError(`--names-zone "${zone}" is not a lowercase hostname without a port.`)
+  if (!raw['names-allow']?.length) throw new UsageError('--names-zone needs at least one --names-allow PODID=LABELS: nothing is claimable without a grant.')
+  const denied = new Set(NAME_DENY_DEFAULTS)
+  const allow = raw['names-allow'].map((text) => {
+    const eq = text.indexOf('=')
+    const pod = eq === -1 ? '' : text.slice(0, eq)
+    const labels = eq === -1 ? [] : text.slice(eq + 1).split(',').map((s) => s.trim()).filter(Boolean)
+    if (!isPodId(pod) || !labels.length) throw new UsageError(`--names-allow "${text}" ${ALLOW_HELP}.`)
+    for (const l of labels) {
+      if (l === '*') continue
+      try { checkLabel(l) } catch (e) { if (e instanceof NameRefusal) throw new UsageError(`--names-allow "${text}": "${l}" is not a name (a lowercase DNS label).`); throw e }
+      if (denied.has(l)) throw new UsageError(`--names-allow "${text}": "${l}" is on the deny-list and is never claimable; map it with --map instead.`)
+    }
+    return { pod, labels }
+  })
+  const deny = raw['names-deny'] === undefined ? [] : String(raw['names-deny']).split(',').map((s) => s.trim()).filter(Boolean)
+  for (const d of deny) if (!/^[a-z0-9][a-z0-9-]*\*?$/.test(d)) throw new UsageError(`--names-deny "${d}" is not a label (a trailing * is a prefix).`)
+  const count = (flag) => {
+    if (raw[flag] === undefined) return undefined
+    if (!/^\d{1,6}$/.test(String(raw[flag])) || Number(raw[flag]) < 1) throw new UsageError(`--${flag} "${raw[flag]}" is not a positive number.`)
+    return Number(raw[flag])
+  }
+  let holdMs
+  if (raw['names-hold'] !== undefined) {
+    if (/^0(?:ms|s|m)?$/.test(String(raw['names-hold']).trim())) holdMs = 0
+    else try { holdMs = parseDuration(raw['names-hold']) } catch { throw new UsageError(`--names-hold "${raw['names-hold']}" is not a duration (for example 30s, or 0).`) }
+  }
+  return { zone, allow, deny, maxNames: count('names-max'), maxPerPod: count('names-max-per-pod'), holdMs }
 }
 
 /**
@@ -143,7 +216,8 @@ export function resolveOptions(raw) {
   try { sig = new URL(raw.signaling) } catch { throw new UsageError(`--signaling "${raw.signaling}" is not a URL.`) }
   if (sig.protocol !== 'wss:' && !(sig.protocol === 'ws:' && isLoopbackHost(sig.hostname))) throw new UsageError('--signaling must be wss:// (ws:// is accepted only for a loopback server).')
 
-  if (!raw.map.length) throw new UsageError('At least one --map HOST=PODID is required: nothing is served without a mapping.')
+  const names = resolveNames(raw)
+  if (!raw.map.length && !names) throw new UsageError('At least one --map HOST=PODID is required: nothing is served without a mapping (or --names-zone, to let pods claim names).')
   const mappings = raw.map.map(parseMapping)
   const seen = new Map() // host -> mappings
   for (const mp of mappings) {
@@ -174,7 +248,20 @@ export function resolveOptions(raw) {
     if (!am) throw new UsageError('--auth must be bearer:FILE, where FILE holds the token.')
     auth = { file: am[1] }
   }
-  return { host, port, signaling: raw.signaling, mappings, methods, maxBody, timeoutMs, auth, identity: raw.identity, public: isPublic, warnings }
+  let linkWaitMs
+  if (raw['link-wait'] !== undefined) {
+    if (/^0(?:ms|s|m)?$/.test(String(raw['link-wait']).trim())) linkWaitMs = 0
+    else try { linkWaitMs = parseDuration(raw['link-wait']) } catch { throw new UsageError(`--link-wait "${raw['link-wait']}" is not a duration (for example 5s, or 0).`) }
+  }
+  let readyPath
+  if (raw['ready-path'] !== undefined) {
+    readyPath = String(raw['ready-path'])
+    if (!PATH_RE.test(readyPath) || readyPath.startsWith('//')) throw new UsageError(`--ready-path "${readyPath}" is not a plain absolute path (for example /_ready).`)
+  }
+  if (names && mappings.some((mp) => hostName(mp.host).endsWith(`.${names.zone}`))) {
+    warnings.push(`warning: a --map host is under the names zone ${names.zone}; pods cannot claim that name (the mapping wins).`)
+  }
+  return { host, port, signaling: raw.signaling, mappings, methods, maxBody, timeoutMs, auth, identity: raw.identity, public: isPublic, warnings, names, linkWaitMs, readyPath }
 }
 
 /**
@@ -189,9 +276,10 @@ export function createResolver(mappings) {
     const url = new URL(request.url)
     const list = byHost.get(url.host)
     if (!list) return null
+    const svc = (mp) => (mp.service === undefined ? {} : { service: mp.service })
     for (const mp of list) {
-      if (!mp.prefix) return { peer: mp.peer }
-      if (url.pathname === mp.prefix || url.pathname.startsWith(`${mp.prefix}/`)) return { peer: mp.peer, path: url.pathname.slice(mp.prefix.length) || '/' }
+      if (!mp.prefix) return { peer: mp.peer, ...svc(mp) }
+      if (url.pathname === mp.prefix || url.pathname.startsWith(`${mp.prefix}/`)) return { peer: mp.peer, path: url.pathname.slice(mp.prefix.length) || '/', ...svc(mp) }
     }
     return null
   }
