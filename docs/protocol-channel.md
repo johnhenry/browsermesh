@@ -64,7 +64,8 @@ const available = await clientHost.api.listProtocols(serverKey)   // only what t
 - It is re-checked on every request, notification and message of a served channel; revoking the scope closes the channel on its next use (`closeProtocols(peer, name)` closes eagerly).
 - Per-protocol finer scopes (per method, per root) are the protocol's business, done in its handlers with `ctx.peer` and the same registry, for example `objects:<root>:get`.
 - Versions: the opener offers a list, the server picks the highest common one, else -32000.
-- Wire: requests `mesh.protocol.open` / `mesh.protocol.list`, notification `mesh.protocol.close`, protocol methods as `<name>/<method>`, raw messages as `{ $p: name, b }`. A peer without protocol support answers -32601; a peer without the channel refuses at the handshake.
+- Wire: requests `mesh.protocol.open` / `mesh.protocol.list`, notification `mesh.protocol.close` (`{ name, reason? }`), protocol methods as `<name>/<method>`, raw messages as `{ $p: name, b }`. A peer without protocol support answers -32601; a peer without the channel refuses at the handshake.
+- Why the other end closed: `channel.close('some text')` tells the other end the text when it is one to 64 printable ASCII characters (an `Error`, a longer string or anything else is not sent), and that end reads it as `channel.remoteReason` (`undefined` when none was given, or an older peer closed it). The field is optional on the wire; a peer that predates it ignores it. A layered protocol uses it to tell a revocation (`'authorization revoked'`) from a stop.
 
 ## Mounting a remote-object layer (`wsh-objects`)
 

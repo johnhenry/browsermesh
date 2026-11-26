@@ -13,6 +13,7 @@ export type RefusalCode =
 /** What a consumer reports when the link, not the provider's answer, failed. */
 export type LinkCode =
   | 'provider-not-authorized' | 'provider-no-egress' | 'provider-version' | 'provider-timeout' | 'provider-unreachable'
+  | 'provider-not-found' | 'provider-refused' | 'signalling-unreachable' | 'provider-gone'
   | 'provider-pin-mismatch' | 'provider-closed' | 'provider-no-form' | 'datagram-too-large' | 'bad-answer' | 'connection-ended' | 'link-closed'
   | 'too-many-connections' | 'aborted'
 
@@ -161,6 +162,10 @@ export interface EgressLimits {
   udpReplyRatio: number
   udpReplyFloorBytes: number
   udpReplyCreditMaxBytes: number
+  /** `connectByResolvedAddress`: how long an address this provider's own lookup returned is taken for its name, from the lookup, ms. */
+  addressMemoryMs: number
+  /** `connectByResolvedAddress`: (address, name) pairs remembered per consumer link; the oldest lookup is forgotten first. */
+  maxRememberedAddresses: number
 }
 export const EGRESS_LIMIT_DEFAULTS: Readonly<EgressLimits>
 
@@ -234,6 +239,15 @@ export interface MeshEgressOptions {
   fetchMethods?: Array<'GET' | 'HEAD' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'OPTIONS'>
   /** Add `x-browsermesh-consumer: <pod id>` to each fetch request (default false: the destination never learns who asked). */
   identifyConsumers?: boolean
+  /**
+   * Default false. Take a `connect` to an ADDRESS that this provider's own lookup returned for the consumer (under its `dns` grant, for
+   * `limits.addressMemoryMs`, at most `limits.maxRememberedAddresses` per link) as a connect to that name under the name's TCP grant. The
+   * address is dialled as it is (no second lookup), through the same checked `dial`; an address of a name the consumer has no TCP grant
+   * for gives nothing. For a guest operating system that connects by the address its lookup returned.
+   */
+  connectByResolvedAddress?: boolean
+  /** The keep-alive: ping each consumer every `intervalMs` (default 5000); a consumer heard from in no way for `misses` intervals (default 3) is gone. `false`: do not ping (pings of a consumer are still answered). */
+  keepAlive?: boolean | KeepAliveOptions
   /** What the audit says of a URL: `'none'` (default: the length only), `'path'` or `'full'` (path and query). */
   auditUrls?: 'none' | 'path' | 'full'
   /** UDP ports no one reaches (default `[53]`: names are looked up through the lookup form). With wide mode 53 cannot be removed. */
@@ -267,6 +281,10 @@ export interface EgressStats {
   lookups: number
   bytesUp: number
   bytesDown: number
+  /** Keep-alive pings this provider sent, answers it heard to them, and consumers it declared gone. */
+  pings: number
+  pongs: number
+  gone: number
   open: number
   reasons: Record<string, number>
   ends: Record<string, number>
@@ -304,18 +322,55 @@ export interface ConsumerLimits {
 }
 export const CONSUMER_LIMIT_DEFAULTS: Readonly<ConsumerLimits>
 
+export interface KeepAliveOptions {
+  /** A ping every this many ms (default 5000). */
+  intervalMs?: number
+  /** The other end is gone after this many intervals in which nothing at all was heard from it (default 3: noticed within about 15 s). */
+  misses?: number
+}
+export const KEEPALIVE_DEFAULTS: Readonly<Required<KeepAliveOptions>>
+
 export interface ConnectEgressOptions {
   signal?: AbortSignal
   limits?: Partial<ConsumerLimits>
   signRequest?: (bytes: Uint8Array, info: { peer: string }) => string | Promise<string>
   protocol?: string
   onLog?: (...args: unknown[]) => void
+  /** The link's keep-alive (default on: a ping every 5 s, gone after 3 silent intervals). `false` leaves it to the transport's own timers (minutes). */
+  keepAlive?: boolean | KeepAliveOptions
+  /**
+   * Default false. Remember what this link's lookups answered; when the provider refuses an ADDRESS (`no-grant`) that was answered for a name,
+   * ask for the name instead (a guest OS connects by the address it was given). Only a name this link looked up itself, only on `no-grant`.
+   */
+  mapAddresses?: boolean | { ttlMs?: number; maxEntries?: number }
+}
+
+/** Why a link ended: `link.closeReason`, `link.whenClosed`, `link.onClose`. */
+export type CloseReason = 'local-close' | 'provider-gone' | 'provider-closed' | 'provider-stopped' | 'revoked' | 'provider-refused' | 'protocol-violation'
+export const CLOSE_REASONS: Readonly<Record<CloseReason, string>>
+
+/** Which names an address was answered for, bounded in time and in count (what `connectByResolvedAddress` and `mapAddresses` use). */
+export function createAddressMemory(options: { ttlMs: number; maxEntries: number; now?: () => number }): {
+  remember(name: string, addresses: unknown[]): void
+  /** The names this address was answered for, most recent first. */
+  namesFor(address: string): string[]
+  readonly size: number
+  clear(): void
 }
 
 export interface EgressLink {
   /** The provider's pod id (the channel's verified peer). */
   readonly peer: string
+  /** True once the link has ended, for any reason. (A boolean, as it has always been: see `whenClosed` and `onClose` for the reason.) */
   readonly closed: boolean
+  /** Why the link ended, or `undefined` while it is up. */
+  readonly closeReason: CloseReason | undefined
+  /** Resolves `{ reason }` when the link ends. */
+  readonly whenClosed: Promise<{ reason: CloseReason }>
+  /** `cb({ reason })` once, when the link ends (asynchronously, at once, if it already has). Returns a function that removes the listener. */
+  onClose(cb: (info: { reason: CloseReason }) => void): () => void
+  /** The names this link's own lookups answered `address` for, newest first (empty unless `mapAddresses` is on). */
+  namesFor(address: string): string[]
   /** Open TCP to `host:port`. Resolves with a netway `StreamSocket`: `read()`, `write()`, `end()` (half-close), `close()`, `destroy()`. */
   connect(host: string, port: number, options?: { signal?: AbortSignal }): Promise<StreamSocket>
   /** The IPv4 addresses of a name. Rejects `name-not-found` (`posix: 'ENOTFOUND'`) for a name that does not exist. */
@@ -330,7 +385,7 @@ export interface EgressLink {
   udp(host: string, port: number, options?: { signal?: AbortSignal }): Promise<EgressUdpFlow>
   /** A netway `Backend` for `VirtualNetwork.addBackend('tcp', ...)`. */
   asBackend(): EgressBackend
-  stats(): { connections: number; refused: number; lookups: number; bytesUp: number; bytesDown: number; open: number }
+  stats(): { connections: number; refused: number; lookups: number; bytesUp: number; bytesDown: number; pings: number; pongs: number; open: number }
   close(): Promise<void>
 }
 

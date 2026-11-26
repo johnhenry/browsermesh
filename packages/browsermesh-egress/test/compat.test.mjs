@@ -90,6 +90,68 @@ describe('a 0.1.1 consumer against this provider: the same answers, whether or n
   })
 })
 
+describe('what was added after 0.2.0, against the pinned 0.1.1 and 0.2.0 messages', () => {
+  it('a 0.1.1 consumer\'s requests get the same answers from a provider with the new options on (keep-alive pinging, addresses taken for names)', async () => {
+    const pods = await threePods()
+    cleanups.push(() => pods.teardown())
+    const tcp = await echoOrigin()
+    cleanups.push(() => tcp.close())
+    const net = simNetwork({ names: { 'pkg.test': [PUBLIC] }, origins: { [`${PUBLIC}:443`]: tcp.port } })
+    const provider = createMeshEgress({ service: pods.p, registry: pods.provider.registry, dial: net.dial, resolve: net.resolve, unattended: true, connectByResolvedAddress: true, keepAlive: { intervalMs: 20, misses: 3 } })
+    provider.start()
+    cleanups.push(() => provider.stop())
+    grant(pods, [EGRESS_SCOPES.tcp('pkg.test', 443), EGRESS_SCOPES.dns('pkg.test')])
+    const channel = await rawChannel(pods) // a consumer of 0.1.1: no ping handler, no keep-alive
+    const streams = createStreamLayer(channel, {})
+    const downs = new Map()
+    streams.onStream((reader, { meta }) => downs.set(meta.cid, reader))
+    // the pinned requests and answers, exactly as 0.1.1 had them
+    assert.deepEqual(await channel.request('connect', OLD_CONNECT), OLD_OK)
+    const up = await streams.open(OLD_UP_META)
+    await up.write(bytes('ping'))
+    assert.equal(text((await downs.get(1).read()).value), 'ping')
+    await up.end()
+    assert.deepEqual(await channel.request('resolve', OLD_RESOLVE), { ok: true, addresses: [PUBLIC] })
+    assert.deepEqual(await channel.request('connect', { ...OLD_CONNECT, cid: 2, host: 'other.test' }), OLD_NO_GRANT)
+    assert.deepEqual(await channel.request('connect', { ...OLD_CONNECT, cid: 3, hops: 1 }), OLD_CHAINING)
+    assert.deepEqual(await channel.request('connect', { ...OLD_CONNECT, cid: 4, host: 'Pkg Test' }), OLD_BAD_DESTINATION)
+    // what it can now get that it could not: the address its own lookup returned is taken for the name (the option is the operator's)
+    assert.deepEqual(await channel.request('connect', { ...OLD_CONNECT, cid: 5, host: PUBLIC }), OLD_OK)
+    // the provider pings it, hears method-not-found, and keeps serving it
+    await until(() => provider.stats().pings >= 4, 'four pings to a consumer that has no ping')
+    assert.equal(provider.stats().gone, 0)
+    assert.equal(channel.closed, false)
+  })
+
+  it('without the options the same address is refused as it always was, and the ping is the one new request: { ok: true }', async () => {
+    const { pods, provider } = await bootProvider({ newForms: false })
+    grant(pods, [EGRESS_SCOPES.tcp('pkg.test', 443), EGRESS_SCOPES.dns('pkg.test')])
+    const channel = await rawChannel(pods)
+    await channel.request('resolve', OLD_RESOLVE)
+    assert.deepEqual(await channel.request('connect', { ...OLD_CONNECT, cid: 1, host: PUBLIC }), OLD_NO_GRANT)
+    assert.deepEqual(await channel.request('ping', {}), { ok: true })
+    assert.deepEqual(await channel.request('ping', { anything: 'is ignored' }), { ok: true })
+    assert.equal(provider.stats().requests, 2, 'a ping is not a request of the forms: it is not counted or rate limited as one')
+  })
+
+  it('the response header list keeps every name 0.2.0 passed (a header a 0.2.0 consumer used is never taken away)', async () => {
+    const { RESPONSE_HEADERS } = await import('../src/http-policy.mjs')
+    for (const name of ['accept-ranges', 'age', 'cache-control', 'content-disposition', 'content-encoding', 'content-language', 'content-length', 'content-range', 'content-type', 'date', 'etag', 'expires', 'last-modified', 'location', 'retry-after', 'vary']) assert.ok(RESPONSE_HEADERS.includes(name), name)
+  })
+
+  it('a 0.2.0 provider answers this consumer\'s ping as method-not-found, and the new consumer keeps the link up on it', async () => {
+    const pods = await threePods()
+    cleanups.push(() => pods.teardown())
+    const stop = pods.p.api.serveProtocol('egress', () => {}, { versions: [1] })
+    cleanups.push(() => stop())
+    grant(pods, [])
+    const channel = await rawChannel(pods)
+    const e = await channel.request('ping', {}).catch((x) => x)
+    assert.equal(e.code, -32601)
+    assert.equal(e.reason, 'method-not-found')
+  })
+})
+
 describe('this consumer against a 0.1.1 provider (connect and resolve only)', () => {
   /** What 0.1.1 registers on a channel: `connect`, `resolve`; any other method is answered method-not-found by the channel. */
   async function oldProvider() {

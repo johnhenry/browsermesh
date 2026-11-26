@@ -6,6 +6,7 @@
  *   BUDGET_NAMES   which budget a `budget-exceeded` refusal names
  *   END_REASONS    why a connection that was open ended (audit, meter, and the error a consumer's socket fails with)
  *   LINK_CODES     what a consumer reports when there is no answer to read (the link itself failed)
+ *   CLOSE_REASONS  why a consumer's link ended (`link.closeReason`)
  */
 
 /** A provider's refusal codes. `message` is one plain sentence. */
@@ -65,9 +66,13 @@ export const LINK_CODES = Object.freeze({
   'provider-no-egress': 'The provider does not serve the `egress` protocol.',
   'provider-version': 'The provider speaks no version of `egress` this package does.',
   'provider-timeout': 'The provider did not answer in time.',
-  'provider-unreachable': 'The provider is not reachable over a direct link; routed delivery is not supported.',
+  'provider-unreachable': 'The provider is not reachable over a direct link; routed delivery is not supported. Also what a failure to open the channel is called when none of the more exact codes below names it.',
+  'provider-not-found': 'This pod has no link to the provider and nothing was found at that pod id: the id is wrong, the provider is offline, or no connection was made first.',
+  'provider-refused': 'The provider\'s channel service refused the link before any question about this protocol (it takes no more peers, or its operator accepts none).',
+  'signalling-unreachable': 'The signalling server could not be reached, so the provider could not be looked for (said by the browser entry\'s `connect`).',
   'provider-pin-mismatch': 'The channel is bound to a different pod than the one named; refused.',
   'provider-closed': 'The channel to the provider closed.',
+  'provider-gone': 'Nothing was heard from the provider for the keep-alive window (`keepAlive.misses` intervals): it was killed or cannot be reached. What was open ended with this code.',
   'provider-no-form': 'The provider does not know this form of request (it is older than the form).',
   'datagram-too-large': 'The datagram is larger than the provider\'s bound for one (`limits.maxDatagramBytes`, or the flow\'s answered bound).',
   'bad-answer': 'The provider answered with something this package cannot read.',
@@ -75,6 +80,17 @@ export const LINK_CODES = Object.freeze({
   'link-closed': 'This link was closed locally.',
   'too-many-connections': 'This link already has `limits.maxConnections` connections open.',
   aborted: 'The caller\'s signal aborted the call.',
+})
+
+/** Why a consumer's link ended (`link.closeReason`, `link.whenClosed`, `link.onClose`). */
+export const CLOSE_REASONS = Object.freeze({
+  'local-close': 'This side closed the link (`link.close()`).',
+  'provider-gone': 'Nothing was heard from the provider for the keep-alive window: it was killed or cannot be reached.',
+  'provider-closed': 'The provider or the transport closed the channel, and said nothing this package knows the meaning of (an older provider says nothing).',
+  'provider-stopped': 'The provider stopped, or is not serving.',
+  revoked: 'The provider closed the channel because this pod\'s access to the protocol was revoked.',
+  'provider-refused': 'The provider closed the channel because it does not serve this pod (its `allowFrom`).',
+  'protocol-violation': 'One end broke the stream rules, or sent too many malformed requests, and the channel was cut.',
 })
 
 /** POSIX-style names a netway user or a container engine expects, for the codes that have one. */

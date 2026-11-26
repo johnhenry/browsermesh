@@ -44,6 +44,10 @@ except where the owner's decisions and the building replaced it:
   refused whole (`refuseMixed`); the blocked ports (25, 465, 587) are absolute for every grant and wide mode keeps them
   (the note let an exact-port grant override them); a `*.suffix` in a set needs at least two labels after the star; sets
   cannot hold a bare wildcard; IPv6 literals are not accepted in this version; no `admit` hook.
+- **After 0.2.0, the first real consumer's findings (section 8):** the registry headers pass the fetch form, an address a
+  provider's own lookup returned can be taken for its name (opt-in), a keep-alive notices a killed peer in about 15 s and the link
+  says why it ended, a small browser entry replaces the apps package root for a page, `openProtocol` failures have their own codes,
+  and the README has the registry example. Protocol version 1, additive.
 - Section 6.4's item 6 is done: `docs/capability-notation.md` and `docs/wsh-and-browsermesh.md` say that gateway rights are
   never granted from mesh trust and that the `egress:*` scopes are the narrow, operator-written exception.
 
@@ -845,3 +849,80 @@ wants the existing `MeshRelayHost` path fixed.
 - **The consumer's real concurrency profile** beyond its own limits (how many parallel connections an image pull plus a
   package install opens); the proposed 16 per consumer comes from its overlay limit, not a measurement.
 - **Legal and operational exposure of providers** in any jurisdiction: 4.10 lists what the code can show; it is not advice.
+
+## 8. After 0.2.0: what the first real consumer found, and what was done (issue #379)
+
+A container engine in a browser tab was the first consumer. It reported eight problems; items 1 to 7 are fixed in the next minor
+(still protocol `egress` version 1, everything additive or negotiated), item 8 is upstream. For each: the decision, why, and what
+an older peer does. The package README has the interface; this is the reasoning.
+
+**8.1 Response headers (item 1).** The allow-list dropped `www-authenticate`, so a registry's 401 could not say where its token
+service is. Decided one name at a time, against "what a registry or an ordinary API needs that is safe to pass": added
+`www-authenticate`, `link` (pagination), `docker-distribution-api-version`, `docker-content-digest` and the IETF and `x-` rate-limit
+headers (informational numbers); already there and kept: `range` (a request header; `content-range` and `accept-ranges` answer
+it), `retry-after`, `etag`, `last-modified`; never `set-cookie`, `proxy-authenticate`, hop-by-hop headers or anything unlisted.
+Bounded as before (at most 100, 8192 characters each, the block within `maxHeaderBytes`). **A header with a URL in it
+(`location`, `link`, the realm of `www-authenticate`) is the provider's word**, the same as `response.url`: it can name any host,
+and the consumer's next request there is its own `fetch`, which needs its own grant, so a hostile provider gains nothing it did
+not have by speaking. An older consumer drops a header its list lacks and reads the rest as before.
+
+**8.2 Names and addresses (item 2).** A guest OS connects by the address its lookup returned, and a grant is for a name. Two
+designs were weighed.
+
+- *Consumer maps and connects by name.* No wire change, no new provider state, works against every provider, and gains nothing
+  for the consumer (it asks only for names it holds grants for). The cost: the provider resolves the name again, so the guest's
+  connection may go to another address of the name than the one the guest was given; it is a second lookup the operator pays
+  for and a failure mode (the second lookup can fail or differ).
+- *Provider remembers what its own lookups returned, per consumer link.* The connection goes to exactly the address the guest
+  was given, the address guard checks it as ever, and no second lookup happens. The cost: provider state (bounded) and a rule
+  that widens what an existing grant admits, so it is **off by default** (`connectByResolvedAddress`).
+
+Both are built: the provider's option is the exact one, and the consumer's `mapAddresses` is what makes the same code work
+against a 0.1.1 or 0.2.0 provider (it asks for the name when an address is refused `no-grant`, once, and remembers that this
+provider wants names). What a consumer could gain that it should not, and why it cannot: the memory is filled only by the
+provider's own resolver, for that consumer's own lookups, under its `dns` grant; a request carries no mapping and extra fields
+mean nothing; the TCP decision is the NAME's (exact, any-port or set grant, for that port), so an address returned for a name the
+consumer has no TCP grant for, or another port, or another consumer's lookup, gives nothing; the consumer must still hold the
+name's `dns` grant at connect time; wildcard grants never enter (wide mode decides on its own); `deny` is asked about the address
+and the name; revoking either grant ends the path and a live connection `revoked`; the guard refuses a private or loopback
+address whatever was remembered. What remains is intended: the consumer reaches the addresses its granted name resolved to, for
+ten minutes, up to 256 per link, which is what a grant for the name meant. A host that serves other names is reached as it is
+by name. The memory is TCP's only: the fetch form and UDP take their destination from a name or URL the consumer writes. An older
+provider never sees a different message (a connect to an address was always a connect to an address); an older consumer is
+served the address path only if the operator turned it on.
+
+**8.3 Liveness (item 3).** Nothing in the data channel says a peer was killed: a consumer measured about 237 s with
+node-datachannel on both ends. A `ping` request on the egress channel, from each end, answered `{ ok: true }`: every 5 s, and a
+peer is gone after 3 intervals in which **nothing at all** was heard (an answer, a ping, any protocol message: a link busy with a
+download is not declared dead because a ping queued behind it). 15 s was measured with real WebRTC and a SIGKILLed child in both
+directions. An older peer has no `ping` and answers method-not-found: an answer is proof of life, so it is neither declared gone
+for lacking the method nor left unwatched, and an older peer's own silence is the only thing that ends it. (The alternative of
+negotiating the feature first was not needed: the unknown-method answer is the negotiation, and it costs nothing.) On a loss the
+consumer ends the link `provider-gone`, fails what was waiting with that code (lookups too, which had no entry of their own),
+and closes the mesh link under it so that a provider that comes back is opened fresh; the provider closes the dead consumer's
+channel and mesh link (a link holds a slot out of a bounded few), which frees its connections and budgets. The link's end is an
+event with a reason (`closeReason`, `whenClosed`, `onClose`; `closed` stays a boolean because a promise there would be truthy
+and break every `if (link.closed)`). A reason the PROVIDER gives (`revoked`, `provider-stopped`, `provider-refused`) travels in one
+optional field of the protocol host's close notification, which an older peer ignores; without it the reason is `provider-closed`.
+
+**8.4 The browser entry (item 4).** What a consumer truly needs is an identity (`-core`), a signalling transport (`-pod`), a node
+that can open a data channel (`-apps`, `-transport`) and `connectEgress`. The apps package root costs 1.4 MB because it imports
+every service, so the node's composition without the services is `createLeanMeshNode` in the package that owns it
+(`@johnhenry/browsermesh-apps/lean-node`), and `createEgressNode` in `@johnhenry/browsermesh-egress/browser` joins the pieces
+(identity, signalling URL, lean node, protocol service, the connect step with its error codes). Measured (esbuild, minified, ESM):
+1,463,032 bytes for the old recipe and 267,127 for the entry; a test bundles both and asserts a bound so it cannot regress. A second
+node-composition function exists beside `createMeshNode` (about a hundred lines) rather than a refactor of that long function; the
+price is a copy that could drift, which a shared test in the real-peer suite catches (the lean node connects to a full one).
+
+**8.5 Open failures (item 5).** The open folded most failures into `provider-unreachable`. Each now has a code: `provider-not-found`
+(no link to that pod), `provider-refused` (the channel service itself refused), `signalling-unreachable` (the browser entry's
+connect), next to the existing `provider-not-authorized`, `provider-no-egress`, `provider-version` and `provider-timeout`;
+`provider-unreachable` stays the catch-all. Client-side only; nothing on the wire.
+
+**8.6 Install (item 7).** A consumer-only install brings `node-datachannel` (an optional dependency), `isolated-vm` (through `-pod`,
+optional there) and a Node >= 26 `engines`. None can be made optional without breaking the command line (`npx` would lose
+WebRTC) or the family's policy, so the README says what each is and gives the `--omit=optional` recipe; the provider's missing
+pieces already say so when started (a clear error from `./node` and from the command).
+
+**8.7 Not here (item 8).** The guest kernel's network backend interface has no datagram method, so a guest's UDP cannot reach
+`link.udp`; that is upstream of this repository. The README lists it among the limits.

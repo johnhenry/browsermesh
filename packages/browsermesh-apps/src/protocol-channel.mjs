@@ -36,7 +36,7 @@
  * Wire (all on top of a mesh-channel link; nothing new on the envelope):
  *   request  mesh.protocol.open   { name, versions? } -> { name, version }
  *   request  mesh.protocol.list   {} -> [{ name, versions }]
- *   notify   mesh.protocol.close  { name }
+ *   notify   mesh.protocol.close  { name, reason? }   (`reason`: short plain text, why the sender closed; an older peer ignores it)
  *   protocol methods travel as `<name>/<method>`; raw messages as { $p: name, b }.
  * A peer without protocol support answers `mesh.protocol.*` with -32601 (or
  * does not run the channel at all); nothing here changes the link.
@@ -52,6 +52,8 @@ export const PROTOCOL_LIST_METHOD = 'mesh.protocol.list'
 export const PROTOCOL_CLOSE_METHOD = 'mesh.protocol.close'
 export const PROTOCOL_FRAMING_RESERVE_BYTES = 512
 const NAME_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/
+/** A close reason that crosses the wire: one to 64 characters of printable ASCII. Anything else is not sent, and not believed. */
+const REASON_RE = /^[\x20-\x7e]{1,64}$/
 
 /** The scope a peer needs to open protocol `name`: `protocol:<name>:open`. */
 export function protocolScope(name, action = 'open') {
@@ -124,6 +126,8 @@ export function createProtocolHost({ authorize, onLog } = {}) {
       version,
       serving,
       peer: link.peer,
+      /** Why the OTHER end closed this channel, as it said so (short plain text), once it has; `undefined` when it gave none or an older peer closed it. */
+      remoteReason: undefined,
       get maxMessageBytes() { return Math.max(1, link.maxMessageBytes - PROTOCOL_FRAMING_RESERVE_BYTES) },
       get closed() { return closed },
       send(obj, opts) { try { gate() } catch (e) { return Promise.reject(e) } return link.send({ $p: name, b: obj }, opts) },
@@ -168,13 +172,16 @@ export function createProtocolHost({ authorize, onLog } = {}) {
         closeListeners.add(cb)
         return () => closeListeners.delete(cb)
       },
-      close(reason, { notifyRemote = true } = {}) {
+      close(reason, { notifyRemote = true, remoteReason } = {}) {
         if (closed) return
         closed = true
+        if (typeof remoteReason === 'string' && REASON_RE.test(remoteReason)) channel.remoteReason = remoteReason
         for (const off of unsubs.splice(0)) { try { off() } catch { /* already gone */ } }
         st.channels.delete(name)
         st.messageListeners.delete(name)
-        if (notifyRemote && !link.closed) link.notify(PROTOCOL_CLOSE_METHOD, { name }).catch(() => {})
+        // The other end is told why, when the reason is short plain text: `{ name, reason }`. A peer that predates the field ignores it.
+        const said = typeof reason === 'string' && REASON_RE.test(reason) ? { reason } : {}
+        if (notifyRemote && !link.closed) link.notify(PROTOCOL_CLOSE_METHOD, { name, ...said }).catch(() => {})
         const why = reason instanceof Error ? reason : null
         for (const cb of [...closeListeners]) { try { cb(why) } catch (e) { log('protocol:close-listener-threw', { name, error: e?.message }) } }
         closeListeners.clear()
@@ -216,7 +223,7 @@ export function createProtocolHost({ authorize, onLog } = {}) {
     }))
     st.offs.push(link.onNotification(PROTOCOL_CLOSE_METHOD, params => {
       const ch = typeof params?.name === 'string' ? st.channels.get(params.name) : undefined
-      ch?.close(null, { notifyRemote: false })
+      ch?.close(null, { notifyRemote: false, remoteReason: params?.reason })
     }))
     st.offs.push(link.onMessage(async (msg, ctx) => {
       if (!msg || typeof msg.$p !== 'string') return

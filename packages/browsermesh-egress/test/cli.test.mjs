@@ -43,6 +43,17 @@ describe('argument parsing', () => {
     assert.deepEqual(o.grants.map((g) => [g.peer, g.scopes]), [[POD_A, ['egress:tcp:registry.test:443:connect']]])
   })
 
+  it('--connect-by-resolved-address is off unless given, and --keep-alive-ms (or "off") sets the keep-alive; both are checked', () => {
+    const o = resolve(base)
+    assert.equal(o.connectByResolvedAddress, false)
+    assert.equal(o.keepAlive, undefined)
+    const on = resolve([...base, '--connect-by-resolved-address', '--keep-alive-ms', '2000'])
+    assert.equal(on.connectByResolvedAddress, true)
+    assert.deepEqual(on.keepAlive, { intervalMs: 2000 })
+    assert.equal(resolve([...base, '--keep-alive-ms', 'off']).keepAlive, false)
+    for (const bad of ['0', 'x', '-5', '1.5']) assert.throws(() => resolve([...base, '--keep-alive-ms', bad]), /--keep-alive-ms/)
+  })
+
   it('--flag value, --flag=value, repeated --allow, --set with ports that hold commas, --allow-private and --deny', () => {
     const o = resolve([...base, `--allow=${POD_B}=egress:set:pkgs:connect,egress:dns:registry.test:resolve`, '--set', 'pkgs=registry.test:443,*.cdn.example.test:80,443', '--allow-private', '10.0.0.0/8', '--deny=10.9.0.0/16', '--fetch-methods', 'get, post', '--audit-urls=path', '--identify-consumers'])
     assert.equal(o.grants.length, 2)

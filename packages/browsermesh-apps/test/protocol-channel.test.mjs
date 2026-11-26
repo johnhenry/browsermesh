@@ -314,3 +314,78 @@ test('a peer that does not support protocols answers the open with an error, and
 test('the open method name is part of the documented wire', () => {
   assert.equal(PROTOCOL_OPEN_METHOD, 'mesh.protocol.open')
 })
+
+// ---------------------------------------------------------------- why the other end closed
+
+test('a channel the other end closed says why: remoteReason is the short text it gave, and absent when it gave none', async () => {
+  const { alice, bob, regB, a, b, teardown } = await meshPair()
+  try {
+    const servers = []
+    b.api.serveProtocol('counter', ch => { servers.push(ch) })
+    regB.grantCapabilities(alice.podId, [protocolScope('counter')])
+    const client = await a.api.openProtocol(bob.podId, 'counter')
+    await flush()
+    assert.equal(client.remoteReason, undefined)
+    const closed = deferred()
+    client.onClose(() => closed.resolve())
+    servers[0].close('stopped')
+    await closed.promise
+    assert.equal(client.remoteReason, 'stopped')
+
+    // no reason given (a plain close, or an Error): the other end is told nothing it can read
+    const second = await a.api.openProtocol(bob.podId, 'counter')
+    await flush()
+    const again = deferred()
+    second.onClose(() => again.resolve())
+    servers[1].close()
+    await again.promise
+    assert.equal(second.remoteReason, undefined)
+  } finally { teardown() }
+})
+
+test('a revoked authorisation closes the served channel with the reason the other end can read, and the close text is bounded and plain', async () => {
+  const { alice, bob, regB, a, b, teardown } = await meshPair()
+  try {
+    b.api.serveProtocol('counter', () => {})
+    regB.grantCapabilities(alice.podId, [protocolScope('counter')])
+    const client = await a.api.openProtocol(bob.podId, 'counter')
+    await flush()
+    const closed = deferred()
+    client.onClose(() => closed.resolve())
+    regB.revokeCapabilities(alice.podId, [protocolScope('counter')])
+    await closed.promise
+    assert.equal(client.remoteReason, 'authorization revoked')
+
+    // a reason that is long or not plain text is not passed on as it is
+    const servers = []
+    b.api.serveProtocol('two', ch => { servers.push(ch) })
+    regB.grantCapabilities(alice.podId, [protocolScope('two')])
+    const two = await a.api.openProtocol(bob.podId, 'two')
+    await flush()
+    const done = deferred()
+    two.onClose(() => done.resolve())
+    servers[0].close('x'.repeat(500))
+    await done.promise
+    assert.equal(two.remoteReason, undefined)
+  } finally { teardown() }
+})
+
+test('an older peer ignores the reason field on the close notification: the notification is still { name } to it', async () => {
+  const [alice, bob] = await network()
+  registryFor(alice); const regB = registryFor(bob)
+  const a = attachService(alice, undefined, createMeshProtocolService())
+  const b = attachService(bob, undefined, createMeshProtocolService())
+  try {
+    const servers = []
+    b.api.serveProtocol('counter', ch => { servers.push(ch) })
+    regB.grantCapabilities(alice.podId, [protocolScope('counter')])
+    await a.api.openProtocol(bob.podId, 'counter')
+    await flush()
+    const seen = []
+    const link = a.api.channel.link(bob.podId)
+    link.onNotification('mesh.protocol.close', params => seen.push(params))
+    servers[0].close('stopped')
+    await flush()
+    assert.deepEqual(seen, [{ name: 'counter', reason: 'stopped' }], 'the old fields are the same; one field is added')
+  } finally { a.teardown(); b.teardown() }
+})

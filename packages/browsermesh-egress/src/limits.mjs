@@ -71,11 +71,15 @@ export const EGRESS_LIMIT_DEFAULTS = Object.freeze({
   udpReplyRatio: 8,
   udpReplyFloorBytes: 4096,
   udpReplyCreditMaxBytes: 256 * 1024,
+  /** `connectByResolvedAddress`: how long an address this provider's own lookup returned for a consumer is taken for that name, from the lookup, ms. */
+  addressMemoryMs: 10 * 60_000,
+  /** `connectByResolvedAddress`: (address, name) pairs remembered per consumer link; the oldest lookup is forgotten first. */
+  maxRememberedAddresses: 256,
 })
 
 const POSITIVE = ['maxConnectionsPerConsumer', 'maxConnections', 'maxBytesPerConnection', 'connectTimeoutMs', 'idleMs', 'maxDurationMs', 'upWaitMs',
   'meterIntervalMs', 'maxBadRequests', 'maxViolations', 'streamWindowBytes', 'maxTracked', 'maxRedirects', 'maxHeaderBytes', 'headersTimeoutMs', 'maxFetchRequestBytes', 'maxFetchResponseBytes', 'maxFetchDurationMs',
-  'maxDatagramBytes', 'maxUdpFlowsPerConsumer', 'udpIdleMs', 'udpOutboxBytes', 'maxUdpDatagramsPerFlow', 'maxUdpBytesPerFlow', 'udpReplyRatio', 'udpReplyFloorBytes', 'udpReplyCreditMaxBytes']
+  'maxDatagramBytes', 'maxUdpFlowsPerConsumer', 'udpIdleMs', 'udpOutboxBytes', 'maxUdpDatagramsPerFlow', 'maxUdpBytesPerFlow', 'udpReplyRatio', 'udpReplyFloorBytes', 'udpReplyCreditMaxBytes', 'addressMemoryMs', 'maxRememberedAddresses']
 const RATES = ['connectRate', 'globalConnectRate', 'dnsRate', 'udpDatagramRate']
 
 /** @returns {typeof EGRESS_LIMIT_DEFAULTS} defaults overlaid with `given`, each value checked */
