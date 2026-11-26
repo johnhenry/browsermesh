@@ -35,7 +35,11 @@ collide with the operator's own grants** (sections 5.5 and 7).
 - **Eventual revocation is acceptable**, especially where there is no always-on peer.
 - The name is **realm**. ("Network" is taken: `VirtualNetwork` in `browsermesh-netway` is something else.)
 - **One identity per realm**, so realms cannot correlate a user across each other. Per-realm keys are **derived from one
-  seed**, so a single backup recovers every realm identity (see 5.10 for what that needs).
+  seed**, so a single backup recovers every realm identity (see 5.10 for what that needs). The seed is **extractable and
+  exported only under a passphrase**; if derivation fails in any of Chromium, Firefox or WebKit, v1 **falls back to
+  independent random keys per realm**, with one backup per realm and the limitation documented.
+- A peer adopts a **higher-serial descriptor offered by another peer only after verifying it** end to end against the
+  pinned realm id and chain (5.2); it never adopts an unverified one.
 - The **authority-less open realm** exists as its own form, with its rendezvous information kept outside the hash (5.9).
 - **Root rotation is in v1** (5.1), with a fork rule.
 - The **keyless "any holder" credential is not in v1.** Open mode covers a baked-in app that needs only the guest role; a
@@ -110,7 +114,9 @@ forbids each.)
 
 A reader accepts a descriptor only if it is signed by a root reachable from the pinned id and its `serial` is higher than the
 one it holds. A descriptor travels with proofs (5.5), because a credential from an issuer added in serial N fails at a
-verifier still on N-1.
+verifier still on N-1. **Adoption rule (decided):** a descriptor offered by any peer is adopted only after it verifies end
+to end against the pinned id and chain and its serial is higher than the held one; size and chain length are capped and the
+work is rate-limited per link.
 
 ### 5.3 Roles
 
@@ -130,6 +136,13 @@ past it or backdate `notBefore`. Credentials always name a subject key; there is
 This is the part the review found missing. Today the wsh listener decides inside the wsh login, from the peer's key alone
 and before any mesh frame (default: nobody), so a stranger holding a perfectly valid credential is refused before it can
 present it. WebRTC links have no admission check at all.
+
+**Checked against `@johnhenry/wsh` 0.55.0 and `browsermesh-transport`:** the `authorize` callback receives only
+`{ podId, fingerprint, publicKey }`, asked after the key's signature verified; wsh's `extensions` (application-defined
+control messages) arrive only from connections that have already been authenticated, so they are after `authorize` too; and
+`Hello.features` is a pre-authentication, negotiable string list (the host-key nonce already rides there), a possible carrier
+for a short realm hint that would let a host refuse a stranger claiming an unknown realm before it takes a slot. That needs
+a change in wsh to pass the features to `authorize`, so it is an optional later optimisation, not a v1 requirement.
 
 The design: a realm-enabled node admits an unknown key to a **restricted link** that carries only the realm exchange,
 under a short deadline and a cap on how many such links are open (wsh's `listenSlots` default is small, so held strangers
@@ -203,8 +216,11 @@ Ed25519 key. The review checked this in Node 26: it works, the public key must b
 - `IdentityWallet` has no seed today, and `MeshIdentityManager` generates random keys and saves by exporting a private JWK,
   so it needs extractable keys. The wallet gains a seed and a derivation step.
 - Existing random identities and external-signer identities cannot be derived.
-- The seed is the only secret to back up, which means it must be extractable for export. A non-extractable seed key cannot
-  be recovered; an extractable one is exposed to anything that can run in the page. Section 10 asks which.
+- The seed is the only secret to back up, so it is **extractable**, and exported only under a passphrase (the identity
+  manager's passphrase export is the base). The cost, accepted by the owner: anything that can run in the page can read the
+  seed while it is loaded.
+- **Fallback.** If derivation fails in any of Chromium, Firefox or WebKit, v1 ships with independent random keys per
+  realm: one backup per realm and the limitation documented. Seed derivation then waits for browser support.
 - Derived bytes pass through page memory when imported.
 - Derived keys do not hide an IP address or a relay's view of who connects; per-realm identity unlinks keys, not network
   metadata.
@@ -238,6 +254,9 @@ Ed25519 key. The review checked this in Node 26: it works, the public key must b
   which has none. This is a change to existing packages, not only a new one.
 - **`createMeshNode`** gains a `realm` option (descriptor, credential) and an `identity` option (5.10). Note it currently
   requires an already-built signalling transport, not a URL.
+- **Signalling server.** Checked in `browsermesh-servers/signaling`: its authenticated mode proves only that a pod id is the
+  hash of the key that signed a per-connection nonce bound to the server's own origin. It has no rooms, realms or
+  membership, so it cannot carry or enforce realm membership; the design never assumes it can.
 - **Open links** already re-check on access changes (wsh, protocol channels, egress, the relay host), so expiry and epoch
   changes close them. With renewal (5.7) members are not hard-closed at `notAfter`.
 - **`browsermesh-realm` depends on `browsermesh-primitives` only.** The canonical encoder moves there (it is internal to
@@ -282,18 +301,20 @@ TUI, server-side membership enforcement, and a keyless credential.
 
 ## 10. Open questions
 
-1. **The seed's extractability.** An extractable seed can be backed up but is exposed to page scripts; a non-extractable one
-   is safer but cannot be recovered. The owner has chosen derivation from one seed; which seed storage is open.
-2. **Browser support for derivation.** Ed25519 import from derived bytes works in Node 26 and is untested in Chromium,
-   Firefox and WebKit. A real-browser check is the first stage-2 task.
-3. **Adopting a descriptor from gossip.** Proposed: always verify a higher-serial descriptor against the pinned id and chain
-   before adopting; never adopt an unverified one; cap size and rate. Not yet confirmed.
-4. **The derivation scheme details.** The KDF context string per realm id, and how the seed is stored and exported in the
-   wallet.
-5. **Wsh login extension.** Whether the wsh login can carry realm data (which would avoid the restricted-link step for wsh)
-   lives in `@johnhenry/wsh` and was not checked from this repository.
-6. **Signalling server.** Whether its authenticated mode can carry realm membership is in `browsermesh-servers`; this
-   design assumes it does not.
+Settled by the owner on 2026-11-26 (now in section 2): seed extractable with a passphrase export; independent per-realm keys
+as the fallback if browser derivation fails; adoption of a descriptor only after verification.
+
+Settled by reading the code (5.5 and 7): the wsh login cannot carry realm data to `authorize` today, and the signalling
+server has no membership concept.
+
+Still open:
+
+1. **Browser support for derivation.** Ed25519 import from derived bytes works in Node 26 and is untested in Chromium,
+   Firefox and WebKit. A real-browser check is the first stage-2 task, and its result decides whether v1 derives from a seed
+   or takes the fallback.
+2. **Derivation scheme details.** The KDF context string per realm id, and how the seed is stored in the wallet.
+3. **A wsh change for a pre-authentication realm hint** (5.5): worth doing only if stranger slots prove to be a real
+   problem. Deferred.
 
 ## 11. Staged order
 
