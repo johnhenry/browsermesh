@@ -99,6 +99,9 @@ export const DEFAULT_MAX_HALF_OPEN_INBOUND = 64
  */
 export const DEFAULT_HALF_OPEN_TIMEOUT_MS = 60_000
 
+/** Frames an adapter holds for the node while nothing listens to it yet (the oldest are kept, the rest dropped). */
+const MAX_EARLY_FRAMES = 64
+
 /**
  * Build a `'webrtc'` adapter factory for `MeshTransportNegotiator`, backed by
  * a real `WebRTCMeshManager` and a `MeshSignalingChannel`.
@@ -109,7 +112,8 @@ export const DEFAULT_HALF_OPEN_TIMEOUT_MS = 60_000
  * @param {import('./signaling.mjs').MeshSignalingChannel} opts.signaling
  * @param {Function} [opts.onLog]
  * @param {(remotePodId: string, adapter: import('@johnhenry/browsermesh-transport').WebRTCTransportAdapter, connectionId: string, info: { restarted: boolean }) => void} [opts.onIncomingConnection]
- *   `info.restarted` is true when the offer arrived for a connection this side held open: the peer started over on it.
+ *   `info.restarted` is true when a fresh offer (not a renegotiation) arrived for a connection this side still held, open or
+ *   handed to the node and not closed since: the peer started over on it.
  *   Called once the DataChannel for a *callee-side* (auto-answered) inbound
  *   offer actually opens, with a ready `WebRTCTransportAdapter` wrapping it.
  *   Optional: without it, inbound-only connections still come up at the
@@ -278,13 +282,35 @@ export function createWebRTCTransportFactory({
    * @type {WeakMap<object, object>}
    */
   const adapters = new WeakMap()
+  let adapterClass = null
   async function adapterFor(conn) {
     const have = adapters.get(conn)
     if (have && have.state !== 'closed') return have
     const { WebRTCTransportAdapter } = await import('@johnhenry/browsermesh-transport')
     const raced = adapters.get(conn) // another path made one while the import was settling
     if (raced && raced.state !== 'closed') return raced
-    const adapter = new WebRTCTransportAdapter(conn)
+    // The adapter exists from the moment the connection can carry a frame, but the node listens to it only when it has built
+    // the session around it, a little later (an inbound connection is handed out, then adopted; a dial returns, then the node
+    // goes on to record the session). A peer that speaks first (the opening frame of a channel it opens the moment the
+    // connection is up) would be heard by nobody. The adapter holds what comes in until its first listener, and hands it over.
+    adapterClass ??= class HoldingAdapter extends WebRTCTransportAdapter {
+      #early = []
+      #heard = false
+      _fire(event, data) {
+        if (event !== 'message' || this.#heard) return super._fire(event, data)
+        if (this.#early.length < MAX_EARLY_FRAMES) this.#early.push(data)
+        return undefined
+      }
+      onMessage(cb) {
+        super.onMessage(cb)
+        if (this.#heard) return
+        this.#heard = true
+        const early = this.#early
+        this.#early = []
+        for (const data of early) { try { cb(data) } catch { /* a listener's own error does not reach the connection */ } }
+      }
+    }
+    const adapter = new adapterClass(conn)
     adapters.set(conn, adapter)
     await adapter.connect()
     return adapter
@@ -303,8 +329,9 @@ export function createWebRTCTransportFactory({
   signaling.onOffer(async (fromPodId, offer, connectionId = DEFAULT_CONNECTION_ID) => {
     const key = iceKey(fromPodId, connectionId)
     let entry = null
-    // An offer for a connection this side holds OPEN is a peer that started over (a page loaded again, a node made anew): the
-    // connection is swapped underneath and whatever link ran over the old one is over. The node is told when it is handed out.
+    // A fresh offer for a connection this side still holds is a peer that started over (a page loaded again, a node made
+    // anew): the connection is swapped underneath and whatever link ran over the old one is over. The node is told when it is
+    // handed out.
     let restarted = false
     // Glare: this side's own offer to the same peer is out. One of the two offers must give way, and both sides must
     // agree which: the lower pod id's offer wins. A peer that does not say it follows the rule (an older release,
@@ -326,12 +353,18 @@ export function createWebRTCTransportFactory({
     try {
       // An offer for a connection that is already open (a renegotiation) or already counted takes no slot.
       const existing = meshManager.getConnection?.(fromPodId, connectionId)
-      restarted = existing?.isOpen === true
+      // Held: open, or handed to the node and not closed since. A connection whose peer went away without this side having seen
+      // it yet is no longer open (its channel is closing, or its state failed) but the node still runs a link over it, and
+      // answering the peer's fresh offer swaps the connection underneath without the close ever being reported.
+      const handedOut = existing ? adapters.get(existing) : undefined
+      const held = existing?.isOpen === true || (handedOut !== undefined && handedOut.state !== 'closed')
       if (!halfOpen.has(key) && !existing?.isOpen) entry = admitHalfOpen(key, fromPodId, connectionId)
       const conn = await getWiredConnection(fromPodId, connectionId)
       if (entry?.evicted) { closeQuietly(conn); return }
       if (entry) watchHalfOpen(key, entry, conn, fromPodId, connectionId)
       const answer = await conn.handleOffer(offer)
+      // A renegotiation (an ICE restart) keeps the channel and everything over it: the peer did not start over.
+      restarted = held && answer?.renegotiation !== true
       signaling.send('webrtc-answer', fromPodId, answer, connectionId)
       log('webrtc-negotiator:answered', { from: fromPodId, connectionId })
 

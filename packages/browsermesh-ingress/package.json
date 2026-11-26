@@ -26,7 +26,7 @@
   ],
   "scripts": {
     "test": "node --test test/*.test.mjs",
-    "test:real-peer": "node --test --test-concurrency=1 test/real-peer/*.test.mjs"
+    "test:real-peer": "node --test --test-force-exit --test-concurrency=1 test/real-peer/*.test.mjs"
   },
   "keywords": [
     "http",
