@@ -230,6 +230,34 @@ Ed25519 key. The review checked this in Node 26: it works, the public key must b
 - Derived keys do not hide an IP address or a relay's view of who connects; per-realm identity unlinks keys, not network
   metadata.
 
+**Proposed strings and format** (to be fixed with test vectors, section 10):
+
+- **Derivation.** `info = "browsermesh/realm/v1 identity " + realmId` (UTF-8), HKDF-SHA-256, empty salt (the seed is
+  uniformly random, which RFC 5869 permits), 32 bytes out, used as the Ed25519 private-key seed in a fixed 16-byte PKCS#8
+  header. This follows the repo's existing convention of a `browsermesh/<thing>/v<n>` domain string, as in
+  `SEAL_DOMAIN = 'browsermesh/sealed/v1'` and its HKDF `info`. A different realm id gives an unrelated key.
+- **Seed backup.** No new format: `@johnhenry/keyvault`'s `seal(seed, passphrase, { type: 'browsermesh-realm-seed', header })`,
+  a self-describing JSON record whose KDF and parameters are authenticated, so they can be raised later
+  (`needsUpgrade()`). Today's default is PBKDF2-SHA256 at 600,000 iterations; Argon2id and a WebAuthn PRF secret are
+  options keyvault already has, which could later replace the typed passphrase. `browsermesh-core`'s identity export
+  already uses keyvault, so the wallet gains no new dependency.
+- **First test vector** (seed `00 01 .. 1f`, realm id `realm-test-vector-0000000000000000000000000`): derived seed
+  `0da1010425a78f9783e802c9109d3899cdb281f4a1cd5079cec7878a0a8d1235`, public key
+  `iAZS2VHtgLy47Huzd17k93TsC8HDwmHZCJNJhX7Ejng` (base64url). Produced by Node 26's WebCrypto, and by Chromium 156 and 159.
+
+**Prior art.**
+
+- *In these repositories:* `@johnhenry/keyvault` (typed, self-describing sealed records; the format above), core's
+  passphrase-encrypted identity export (built on it), wsh's `WshKeyStore` (non-extractable keys in IndexedDB for daily use
+  and an extractable passphrase-encrypted backup in OPFS, the same split as here, PBKDF2 at 310,000), and the repo's
+  HKDF-with-a-domain-string habit (`key-agreement.mjs`, the stealth lookup records, the signalling registration prefix).
+- *In general* (from general knowledge; not re-checked for this note): libsodium's `crypto_kdf_derive_from_key`, which is a
+  master key plus a context plus a subkey id, the same shape as seed plus realm id; SLIP-0010, the standard for deriving
+  Ed25519 keys from a seed, which is hardened-derivation only and heavier than a flat HKDF needs; and WebAuthn, where an
+  authenticator derives a separate credential per relying party from one internal secret, which is exactly "one identity
+  per realm" with the realm id in the role of the RP id. An Ed25519 private key is itself a 32-byte seed (RFC 8032), so
+  using HKDF output directly as that seed is ordinary practice.
+
 ## 6. Threat model
 
 | Who or what | What they can do | What stops them |
@@ -315,12 +343,15 @@ server has no membership concept.
 
 Still open:
 
-1. **The browser check itself.** Ed25519 import from derived bytes works in Node 26 and is untested in the three browsers.
-   It is the first stage-2 task, and its result decides whether v1 derives from a seed or takes the fallback.
-2. **The exact context string and file format.** To be fixed with the wallet code and covered by test vectors; the choices
-   above (HKDF-SHA-256, realm id in the context, encrypted file) are not in question.
-3. **A wsh change for a pre-authentication realm hint** (5.5): worth doing only if stranger slots prove to be a real
-   problem. Deferred.
+1. **The browser check.** Run as a spike on 2026-11-26. **Chromium 156 and 159 pass** and match Node 26 exactly (derived
+   bytes, public key and signature; the key is non-extractable and refuses export). **Firefox and WebKit could not be
+   launched on the author's machine** (a NixOS box with only Chromium's libraries), so nothing is known about them yet. The
+   same check is now a browser spec in a separate pull request (#407) that the repository's CI runs in all three browsers;
+   its result closes this item, and a failure in either decides the fallback.
+2. **The exact strings and record shape.** Proposed in 5.10 from the prior art above, with the first vector. Closed when the
+   wallet code lands and the vector is pinned in its tests.
+3. **A wsh change for a pre-authentication realm hint** (5.5). Deferred, and tracked as johnhenry/wsh#274 with a trigger
+   (slot exhaustion by strangers seen in tests or real use), not part of this plan.
 
 ## 11. Staged order
 
