@@ -36,12 +36,13 @@ function makeSink({ isTTY = false } = {}) {
  * @param {AbortSignal} [opts.signal]
  * @param {Function} [opts.WebSocketCtor]
  * @param {boolean} [opts.isTTY] - Simulate stdout being/not being a TTY.
+ * @param {Record<string, string>} [opts.env] - The environment the realm commands read `--passphrase-env` from.
  * @returns {Promise<{code: number, stdout: string, stderr: string, stdoutLines: string[]}>}
  */
-export async function runCli(argv, { session, signal, WebSocketCtor, isTTY = false } = {}) {
+export async function runCli(argv, { session, signal, WebSocketCtor, isTTY = false, env } = {}) {
   const stdout = makeSink({ isTTY })
   const stderr = makeSink({ isTTY })
-  const code = await main(argv, { stdout, stderr, session, signal, WebSocketCtor })
+  const code = await main(argv, { stdout, stderr, session, signal, WebSocketCtor, env })
   return {
     code,
     stdout: stdout.text(),

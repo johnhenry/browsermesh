@@ -48,6 +48,14 @@ describe('the manifest', () => {
     assert.equal(pkg.peerDependenciesMeta['@johnhenry/wsh'].optional, true)
   })
 
+  it('keeps the realm package an optional peer (it is unpublished) and depends on keyvault for key custody', () => {
+    assert.ok(pkg.peerDependencies['@johnhenry/browsermesh-realm'])
+    assert.equal(pkg.peerDependenciesMeta['@johnhenry/browsermesh-realm'].optional, true)
+    assert.ok(pkg.devDependencies['@johnhenry/browsermesh-realm'], 'a workspace devDependency so the tests run')
+    assert.ok(pkg.dependencies['@johnhenry/keyvault'])
+    assert.ok(!('@johnhenry/browsermesh-realm' in (pkg.dependencies ?? {})))
+  })
+
   it('asks for an apps release that has the placement planner it calls', () => {
     const [, low] = /^>=(\d+\.\d+\.\d+)/.exec(pkg.peerDependencies['@johnhenry/browsermesh-apps'])
     assert.ok(Number(low.split('.')[1]) >= 18, `apps peer ${low}`)
@@ -75,6 +83,17 @@ describe('the README', () => {
     assert.match(readme, /--wsh-relay/)
     assert.match(readme, /--signaling/)
     assert.match(readme, /--loopback/)
+  })
+
+  it('documents the realm commands, key custody, and the limits it states plainly', () => {
+    assert.ok(readme.includes('\n## Realms\n'))
+    const flat = readme.replace(/\s*\n>?\s*/g, ' ')
+    assert.match(flat, /--passphrase-env/)
+    assert.match(flat, /--passphrase-file/)
+    assert.match(flat, /cannot list (the )?live peers/i)
+    assert.match(flat, /There is no `realm leave`/)
+    assert.match(flat, /local key custody and offline signing/)
+    assert.match(flat, /seed/i)
   })
 
   it('says `vm` needs a repository checkout, and does not call the package private or unpublished', () => {
