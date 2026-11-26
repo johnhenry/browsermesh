@@ -13,8 +13,12 @@ identity may do.
 
 > **Status.** The commands are tested in full against in-process hosts
 > (`--loopback`), and the sealed relay path (`--wsh-relay`) against the
-> in-process pipe relay and a real pod-host service. `meshctl` has not been run
-> against a deployed host, and the WebRTC path (`--signaling`) is wired but has
+> in-process pipe relay and a real pod-host service, and it has been run once
+> against a deployed pod host over `--wsh-relay` (2026-11-25: `hosts`, `host
+> describe`, `pods spawn`, `status`, `send`, `list` and `drain` answered, and an
+> identity the host had not allowed was refused with `WSH_REFUSED`, exit 3). The
+> host was a minimal one (the in-memory driver, not a real VMM), so the lanes'
+> real runtimes are not covered by that run. The WebRTC path (`--signaling`) is wired but has
 > not been exercised end to end. Read [What is not supported](#what-is-not-supported)
 > before relying on it.
 
@@ -325,10 +329,13 @@ and the spike's own test suite (`spikes/vm-pod-host/test/`) stays green.
 
 - **`vm` needs a repository checkout** (above): it is absent from the
   installed package.
-- **Nothing here has been run against a deployed host.** The commands are
+- **One real run, against a minimal deployed host.** The commands are
   tested against in-process hosts and the sealed relay path against an
-  in-process pipe relay and a real pod-host service; the real-mesh path has
-  not been run against a deployed host or relay.
+  in-process pipe relay and a real pod-host service. The sealed relay path has
+  also been run once against a deployed relay and pod host (the in-memory
+  driver, behind an HTTPS reverse proxy): every verb above answered, and an
+  identity the host had not allowed was refused. It has not been run against a
+  host backed by a real VMM or isolate runtime, nor over `--signaling`.
 - **No host discovery.** Real-mode `<host>` arguments are pod ids, and
   `--host <podId>` lists the hosts a command considers. There is no
   directory to ask.
