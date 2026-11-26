@@ -184,6 +184,15 @@ describe('the address guard', () => {
     assert.equal(text(next[0]), 'hi')
   })
 
+  it('wide mode checks the class the dial reports, so a dialUdp that ignored `wide` still cannot reach private space', async () => {
+    const closed = []
+    const stray = async () => ({ socket: { on() {}, send() {}, close() { closed.push(true) } }, address: '10.0.0.7', class: 'private', family: 4 })
+    const { link } = await rig({ grants: ['egress:udp:*:*:send'], egress: { wide: { acknowledge: WIDE_ACKNOWLEDGEMENT }, dialUdp: stray } })
+    const e = await link.udp('game.test', 4000).catch((x) => x)
+    assert.ok(e.code === 'destination-refused' && e.addressClass === 'private', String(e.code))
+    assert.equal(closed.length, 1, 'the socket was closed')
+  })
+
   it('a destination that cannot be reached is connect-failed, not a hang', async () => {
     const { link } = await rig({ grants: [EGRESS_SCOPES.udp('game.test', 4999)] })
     const e = await link.udp('game.test', 4999).catch((x) => x)
@@ -219,7 +228,7 @@ describe('budgets', () => {
     const { link, provider, udpOrigin: origin, audit } = await rig({ egress: { clock: { now: () => t.now }, limits: { udpDatagramRate: { limit: 5, windowMs: 1000 } } }, onDatagram: () => {} })
     const flow = await link.udp('game.test', 4000)
     for (let i = 0; i < 20; i++) await flow.send(bytes(`d${i}`))
-    await until(() => provider.stats().udp.dropped.rate >= 15, 'the flood to be counted')
+    await until(() => provider.stats().udp.dropped.rate >= 15 && origin.received.length >= 5, 'the flood to be counted and the five to arrive')
     assert.equal(origin.received.length, 5)
     assert.deepEqual(origin.received.map(text), ['d0', 'd1', 'd2', 'd3', 'd4'])
     t.now += 2000

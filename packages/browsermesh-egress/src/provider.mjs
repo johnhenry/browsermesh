@@ -65,7 +65,9 @@ function refusalOf(e, phase) {
 /** The answer for a connection that was ended while it was still being made: the provider stopped, the grant went, or the destination reset it. */
 const endedAnswer = (conn) => (conn.endReason === 'shutdown' ? refusalAnswer('shutting-down')
   : conn.endReason === 'revoked' ? refusalAnswer('no-grant')
-    : refusalAnswer('connect-failed', { detail: 'failed' }))
+    : conn.form === 'fetch' && conn.endReason === 'byte-budget' ? refusalAnswer('budget-exceeded', { budget: 'fetch-request-bytes' })
+      : conn.endReason === 'consumer-budget' ? refusalAnswer('budget-exceeded', { budget: 'bytes-per-consumer' })
+        : refusalAnswer('connect-failed', { detail: 'failed' }))
 
 /**
  * @param {object} opts
@@ -270,6 +272,8 @@ export function createMeshEgress({
     if (conn.ended) return false
     if (direction === 'up') { conn.bytesUp += n; counters.bytesUp += n; peerStats(conn.peer).bytesUp += n } else { conn.bytesDown += n; counters.bytesDown += n; peerStats(conn.peer).bytesDown += n }
     if (conn.bytesUp + conn.bytesDown > limits.maxBytesPerConnection) { endConnection(conn, 'byte-budget'); return false }
+    // The fetch form has its own, smaller bounds on each body.
+    if (conn.form === 'fetch' && (direction === 'up' ? conn.bytesUp > limits.maxFetchRequestBytes : conn.bytesDown > limits.maxFetchResponseBytes)) { endConnection(conn, 'byte-budget'); return false }
     if (!byteBudget.add(conn.peer, n)) { endConnection(conn, 'consumer-budget'); return false }
     touch(conn)
     return true
@@ -635,7 +639,7 @@ export function createMeshEgress({
       conn.via = grant.via
       conn.stills.push(grant.still)
       counters.fetches += 1
-      conn.durationTimer = unref(setTimeout(() => endConnection(conn, 'time-budget'), limits.maxDurationMs))
+      conn.durationTimer = unref(setTimeout(() => endConnection(conn, 'time-budget'), limits.maxFetchDurationMs))
       touch(conn)
       headersTimer = unref(setTimeout(() => { conn.headersTimedOut = true; try { conn.ac.abort(new Error('headers timeout')) } catch { /* aborted */ } }, limits.headersTimeoutMs))
 

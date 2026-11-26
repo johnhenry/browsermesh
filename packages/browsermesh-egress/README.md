@@ -4,12 +4,13 @@
 [![license](https://img.shields.io/npm/l/%40johnhenry%2Fbrowsermesh-egress.svg)](LICENSE)
 
 A pod lends its network access to peers that hold a grant. A peer that cannot reach the open network (a browser tab: no
-raw sockets, bound by CORS) asks a pod that can (Node, or anywhere with sockets) to open a TCP connection to `host:port`
-or to look a name up, and gets the bytes back. The mirror of [`browsermesh-ingress`](../browsermesh-ingress): ingress
-brings HTTP in to a pod, egress takes TCP out from one.
+raw sockets, bound by CORS) asks a pod that can (Node, or anywhere with sockets) to open a TCP connection to `host:port`,
+to send UDP datagrams to one, to look a name up, or to fetch an `http(s)` URL, and gets the answer back. The mirror of
+[`browsermesh-ingress`](../browsermesh-ingress): ingress brings HTTP in to a pod, egress takes the network out from one.
 
-It is a library: `createMeshEgress` (the provider), `connectEgress` (the consumer, browser-safe, with a netway backend)
-and, on its own Node entry, `nodeDialer` (the provider's network, on wsh's address guard).
+It is a library: `createMeshEgress` (the provider), `connectEgress` (the consumer, browser-safe, with a netway backend),
+on its own Node entry `nodeDialer` (the provider's network, on wsh's address guard), and a command line,
+`browsermesh-egress`, that runs a provider from a grants file.
 
 Peer dependencies: `@johnhenry/browsermesh-apps` `>=0.21.0` (the protocol channel and its streams) and
 `@johnhenry/browsermesh-netway` `>=0.3.0` (the socket a consumer gets, and the backend). The provider's Node entry
@@ -21,10 +22,17 @@ Peer dependencies: `@johnhenry/browsermesh-apps` `>=0.21.0` (the protocol channe
 
 - **It is** a bounded way to lend a network: protocol `egress` v1 on the existing protocol channel
   (`openProtocol(peer, 'egress', { versions: [1] })`), TCP connections as two protocol streams each (credit-based
-  backpressure, half-close, cancellation), and name lookups as one request.
+  backpressure, half-close, cancellation), UDP flows (datagrams as frames of two streams), name lookups as one request,
+  and a fetch-shaped call.
 - **It is not an open proxy.** Nothing is lent unless the operator created and started a provider, and then only to peers
   that hold a grant for the destination they ask for.
-- **It carries bytes, it does not read them.** There is no TLS code in the path, no interception mode and no sniffing.
+- **The TCP and UDP forms carry bytes, they do not read them.** There is no TLS code in those paths, no interception mode
+  and no sniffing.
+- **The fetch form is a different promise: the provider is the HTTP client, so it sees the request and the response in
+  plaintext.** A page cannot terminate TLS on a raw stream, so for `fetch` the provider does it. A grant for it
+  (`egress:http:...:fetch`) says "I trust this provider with this request and its answer", and the provider's operator should
+  know that their machine reads it. Where a page can run its own TLS over `connect()`, that form is private from the provider;
+  use it. See [The fetch form](#the-fetch-form).
 - **It is not a VPN, a Wisp server or a SOCKS server**, and it does not run a wsh gateway for the peer.
 - **Not in this version yet:** see [Not in this version yet](#not-in-this-version-yet).
 
@@ -40,6 +48,13 @@ Read this before you turn it on.
 - **You carry plaintext for plain protocols.** For TLS you see the destination, the sizes and the timing and nothing
   more; for a protocol with no TLS you carry everything a consumer sends. The audit never records contents, and the
   package logs none.
+- **With the fetch form on, your machine reads what the consumer fetches.** The provider makes the HTTP(S) request itself,
+  so it sees the URL, the headers (an `Authorization` the consumer sends, included), the request body and the response, in
+  plaintext, and it could alter the response. The audit does not record them, but your process holds them. Give a fetch
+  grant only to a peer you would trust with that, and tell the people whose requests you carry. The form is off unless you
+  pass an `exchange` (`nodeDialer().exchange` does).
+- **UDP carries whatever a consumer sends, to the one address it names**, from your address. The provider drops what it
+  will not pass on, and bounds the replies a flow may receive by what it sent (below).
 - **A granted destination that is itself a proxy, a VPN or a relay passes the consumer on** to whatever it forwards. Do not
   grant one you would not grant the whole network.
 - **Destinations and timing are personal data in many places.** The audit has them; set your own retention.
@@ -57,7 +72,7 @@ const service = attachService(node, undefined, createMeshProtocolService())
 const egress = createMeshEgress({
   service,
   registry: node.registry,                                  // the grants are the registry's
-  ...nodeDialer({ allowPrivate: [] }),                      // { dial, resolve } on wsh's address guard
+  ...nodeDialer({ allowPrivate: [] }),                      // { dial, dialUdp, resolve, exchange } on wsh's address guard
   sets: { 'package-hosts': ['registry.npmjs.org:443', '*.alpinelinux.org:80,443'] },
   unattended: true,                                         // or an `indicator`: start() needs one of the two
   onAudit: (record) => console.log(record),
@@ -68,6 +83,8 @@ node.registry.grantCapabilities(consumerPodId, [
   'egress:tcp:registry.npmjs.org:443:connect',              // one host, one port
   'egress:set:package-hosts:connect',                       // anything the operator's set lists
   'egress:dns:registry.npmjs.org:resolve',                  // a lookup is its own grant
+  'egress:http:registry.npmjs.org:443:fetch',               // the fetch form: the provider makes the request and sees it
+  'egress:udp:time.example.org:123:send',                   // UDP datagrams to one host and port
 ])
 
 // the consumer: any pod, a browser tab included
@@ -78,6 +95,10 @@ await socket.write(bytes)                                          // resolves w
 const chunk = await socket.read()                                  // null at the end of what the destination sends
 await socket.end()                                                 // half-close: the destination can still send
 const addresses = await link.lookup('registry.npmjs.org')          // ['104.16.0.35', ...]; rejects `name-not-found`
+const res = await link.fetch('https://registry.npmjs.org/left-pad') // a Response, streamed; what CORS blocks. THE PROVIDER sees it
+const flow = await link.udp('time.example.org', 123)               // one UDP flow
+await flow.send(datagram)                                          // a Uint8Array up to flow.maxDatagramBytes
+const reply = await flow.read()                                    // a datagram, or null at a clean end
 
 // route a netway VirtualNetwork through it
 net.addBackend('tcp', link.asBackend())
@@ -86,9 +107,10 @@ await net.connect('tcp://registry.npmjs.org:443')
 
 ### The provider: `createMeshEgress`
 
-`createMeshEgress({ service, registry, dial, resolve, sets?, wide?, blockedPorts?, limits?, allowFrom?, deny?,
-verifyRequest?, indicator?, unattended?, onAudit?, onMeter?, clock?, recheckIntervalMs?, protocol? })` returns
-`{ start(), stop(), recheck(peer?), stats(), connections, started }`.
+`createMeshEgress({ service, registry, dial, resolve, exchange?, dialUdp?, fetchMethods?, identifyConsumers?, auditUrls?,
+sets?, wide?, blockedPorts?, blockedUdpPorts?, limits?, allowFrom?, deny?, verifyRequest?, indicator?, unattended?,
+onAudit?, onMeter?, clock?, recheckIntervalMs?, protocol? })` returns `{ start(), stop(), recheck(peer?), stats(),
+connections, started }`.
 
 | Option | Default | What it is |
 | --- | --- | --- |
@@ -96,17 +118,23 @@ verifyRequest?, indicator?, unattended?, onAudit?, onMeter?, clock?, recheckInte
 | `registry` | required | `checkAccess` and `onAccessChange`: the grants are the registry's |
 | `dial` | required | `({ host, port, wide, signal, timeoutMs }) => Promise<{ socket, address, class }>`: resolve once, check, connect to the address that was checked. `nodeDialer()` builds it |
 | `resolve` | required | `({ name, wide, signal, timeoutMs }) => Promise<[{ address, class }]>`: the A records, checked by the same policy |
+| `exchange` | none | the fetch form's HTTP client, `({ url, method, headers, body, dial, signal, ... }) => Promise<{ status, headers, body }>`; `nodeDialer().exchange` builds it. **Without one the fetch form is answered `not-offered`.** The provider then sees what it fetches |
+| `dialUdp` | none | `({ host, port, wide, signal, timeoutMs }) => Promise<{ socket, address, class }>`: a datagram socket connected to the address that was checked (`nodeDialer().dialUdp`). Without one UDP is answered `not-offered` |
+| `fetchMethods` | `['GET', 'HEAD']` | methods the fetch form serves: any of GET HEAD POST PUT PATCH DELETE OPTIONS (never CONNECT or TRACE) |
+| `identifyConsumers` | `false` | add `x-browsermesh-consumer: <pod id>` to each fetch request; off, the destination never learns who asked |
+| `auditUrls` | `'none'` | what the audit says of a fetched URL: `'none'` (the length of path and query only), `'path'` (and the path), `'full'` (and the query) |
 | `sets` | none | operator-named destination sets (below) |
 | `wide` | off | `{ acknowledge: 'any-public-address' }`: see [Wide mode](#wide-mode) |
-| `blockedPorts` | `[25, 465, 587]` | ports no one reaches. With wide mode the defaults cannot be removed |
+| `blockedPorts` | `[25, 465, 587]` | TCP and fetch ports no one reaches. With wide mode the defaults cannot be removed |
+| `blockedUdpPorts` | `[53]` | UDP ports no one reaches: DNS is its own form (`lookup`, its own grant and rate). With wide mode 53 cannot be removed |
 | `limits` | below | the budgets |
 | `allowFrom` | any peer the registry admits | a list of pod ids, or `(podId, context) => boolean`, asked on open and for every request; only `true` serves. Narrows the registry, never widens it |
 | `deny` | none | `({ peer, host, port }) => boolean`: the operator's veto, asked after the grant |
 | `verifyRequest` | none | `({ peer, bytes, sig, request }) => boolean`: refuses a request whose signature it does not accept (the consumer's `signRequest` makes it). The package picks no cryptography |
 | `indicator` | none | `{ connected(who, { stop }), disconnected(who) }`: the person at this pod sees each connection and can stop it |
 | `unattended` | `false` | nobody is in front of this pod. `start()` refuses unless this is `true` or an `indicator` is given |
-| `onAudit` | none | one record per open, refusal, close, lookup (below). A sink that throws never breaks a connection |
-| `onMeter` | none | one record per connection or lookup, and a delta every `meterIntervalMs` for a long connection (below) |
+| `onAudit` | none | one record per open, refusal, close, lookup, and per fetch hop (below). A sink that throws never breaks a connection |
+| `onMeter` | none | one record per connection, flow, fetch or lookup, and a delta every `meterIntervalMs` for a long one (below) |
 | `clock` | `{ now: Date.now }` | the rate limiters' and byte budgets' clock (a test advances one) |
 | `recheckIntervalMs` | `30000` | how often live connections are checked against the registry again, so an expiry is noticed |
 | `protocol` | `'egress'` | the protocol name |
@@ -114,15 +142,16 @@ verifyRequest?, indicator?, unattended?, onAudit?, onMeter?, clock?, recheckInte
 `start()` begins serving (and throws without an `indicator` or `unattended: true`). `stop()` ends every connection with
 `shutdown` and stops serving; a stopped provider cannot be started again. `recheck(peer?)` asks the registry again about
 the live connections (of one peer, or all) and ends the ones whose grant is gone, `revoked`; it runs on every
-registry access change and on the interval. `stats()` is `{ channels, requests, opened, refused, closed, lookups, bytesUp,
-bytesDown, open, reasons, ends, peers: { [podId]: { connections, open, bytesUp, bytesDown, refused, lookups } } }`,
+registry access change and on the interval. `stats()` is `{ channels, requests, opened, refused, closed, lookups, fetches, bytesUp,
+bytesDown, open, reasons, ends, udp: { flows, datagramsUp, datagramsDown, dropped: { rate, credit, size, outbox } },
+peers: { [podId]: { connections, open, bytesUp, bytesDown, refused, lookups } } }`,
 keyed by the channel's verified peer and never by a field of a message.
 
 ### The consumer: `connectEgress`
 
 `connectEgress(service, providerPodId, { signal?, limits?, signRequest?, protocol? })` opens protocol `egress` to that
-pod and returns a link: `{ peer, closed, connect(host, port, { signal }), lookup(name, { signal }), asBackend(), stats(),
-close() }`.
+pod and returns a link: `{ peer, closed, connect(host, port, { signal }), lookup(name, { signal }), fetch(input, init),
+udp(host, port, { signal }), asBackend(), stats(), close() }`.
 
 - The link is **pinned**: a channel bound to any pod other than the one named is closed and refused
   (`provider-pin-mismatch`). A provider that does not serve the protocol (`provider-no-egress`), has not granted it
@@ -137,6 +166,13 @@ close() }`.
 - `lookup(name)` resolves the IPv4 addresses of a name (at most 16). It rejects `name-not-found` (`error.posix` is
   `ENOTFOUND`) for a name that does not exist, and `lookup-failed` for a resolver failure: the two are never the same
   error. A provider's answer is not an identity; use TLS.
+- `fetch(input, init)` is `fetch` through the provider: a `Response` back, `init.signal` honoured, the body a stream that
+  only moves as it is read. **The provider makes the request and sees all of it** ([The fetch form](#the-fetch-form)).
+  `response.url` and `response.redirected` are the provider's word.
+- `udp(host, port)` resolves with a flow `{ maxDatagramBytes, closed, send(datagram), read(), close() }`, async iterable:
+  `send` rejects `datagram-too-large` above `maxDatagramBytes` and resolves when the provider has the datagram; `read()`
+  resolves a datagram, or `null` once the flow ended cleanly, and rejects with an `EgressError` (`connection-ended` with a
+  `reason`, ...) when it ended otherwise ([UDP](#udp)).
 - `asBackend()` is a netway `Backend` (`connect`, `resolve` for `A`; `listen` and datagrams are not offered):
   `net.addBackend('tcp', link.asBackend())`. A refused connection (`connect-failed` with `detail: 'refused'`) is netway's
   `ConnectionRefusedError`; every other failure stays an `EgressError`. Closing the backend leaves the link open.
@@ -149,10 +185,11 @@ close() }`.
 
 ### The Node dialer: `nodeDialer`
 
-`import { nodeDialer } from '@johnhenry/browsermesh-egress/node'` returns `{ dial, resolve }`, the two options the provider
-takes, on wsh's address guard (`@johnhenry/wsh/address-guard`). **This package classifies no address**: every decision goes
-through `resolveChecked` and `dialChecked`. A name is resolved once, every answer is classified, and the connection is made
-to an address that passed, never to the name again.
+`import { nodeDialer } from '@johnhenry/browsermesh-egress/node'` returns `{ dial, dialUdp, resolve, exchange }`, the options
+the provider takes, on wsh's address guard (`@johnhenry/wsh/address-guard`). **This package classifies no address**: every
+decision goes through `resolveChecked`, `dialChecked` and `dialUdpChecked`. A name is resolved once, every answer is
+classified, and the connection (or the connected datagram socket) is made to an address that passed, never to the name again.
+`exchange` is the fetch form's HTTP client, over that same checked `dial`; it is the one file of the package that terminates TLS.
 
 | Option | Default | What it is |
 | --- | --- | --- |
@@ -161,6 +198,7 @@ to an address that passed, never to the name again.
 | `denyOwnAddresses` | `true` | also refuse the public addresses of this machine's own interfaces |
 | `refuseMixed` | `true` | see below |
 | `lookup` | the system's | the resolver; a test replaces it |
+| `ca` | Node's roots | certificate authorities the fetch form trusts for `https:` (a private PKI) |
 
 **A name whose answers mix a permitted and a refused address is refused whole (`refuseMixed: true`).** wsh's own default is
 to drop the refused answers and connect to the rest. This package chooses the stricter one: a name that answers with both a
@@ -181,8 +219,17 @@ one segment and a block or a suffix cannot be written in a grant: those live in 
 | `egress:tcp:<host>:*:connect` | any port of exactly that host; the blocked ports still apply |
 | `egress:dns:<name>:resolve` | look up exactly that name; connecting by name does not carry it |
 | `egress:set:<name>:connect` | connect to anything the operator's set of that name lists |
+| `egress:http:<host>:<port>:fetch` | the fetch form to exactly that host and port: **the provider makes the request and sees it** |
+| `egress:http:<host>:*:fetch` | the fetch form to any port of exactly that host; the blocked ports still apply |
+| `egress:set:<name>:fetch` | the fetch form to anything the operator's set lists (a set's `connect` grant is not this one) |
+| `egress:udp:<host>:<port>:send` | UDP datagrams to exactly that host and port, and what that address answers |
+| `egress:udp:<host>:*:send` | UDP to any port of exactly that host; the blocked UDP ports still apply |
+| `egress:set:<name>:send` | UDP to anything the operator's set lists |
 <!-- scopes-table:end -->
 
+- **One grant per form and per destination.** A TCP grant is not a fetch grant, a fetch grant is not a UDP grant, and none is a
+  lookup grant: each says a different thing about what the provider sees. A fetch grant names an origin (host and port); the
+  default port of the scheme is used when the URL has none.
 - `<host>` and `<name>` are lowercase DNS names or four plain decimal numbers (no `:`, no `*`). A grant for a name does not
   cover that name's address, and the reverse. Every other spelling of an address (`127.1`, `0x7f.1`, `2130706433`, a
   trailing dot) and every IPv6 literal is `bad-destination` before any rule is asked, so no rule sees two spellings of
@@ -209,7 +256,8 @@ construction: wide access is a mode, never a set. A set name is a scope segment 
 ## Wide mode
 
 By default a peer can reach only what a grant names. A **wildcard grant** (a literal `*` where a host goes:
-`egress:tcp:*:443:connect`, `egress:tcp:*:*:connect`, `egress:dns:*:resolve`, `egress:*`, `egress:tcp:*`, `*`) would make
+`egress:tcp:*:443:connect`, `egress:tcp:*:*:connect`, `egress:http:*:*:fetch`, `egress:udp:*:*:send`, `egress:dns:*:resolve`,
+`egress:*`, `egress:tcp:*`, `*`) would make
 the provider an open proxy for its holder, so:
 
 - **A wildcard grant is refused `wide-not-acknowledged`** unless the operator acknowledged it. The provider asks the
@@ -228,6 +276,131 @@ the provider an open proxy for its holder, so:
   non-public one even from a dial that ignored the flag. Only the operator's own `allowPrivate`, for a destination an
   exact grant or a set names, admits private space. A peer's grant never does.
 
+## The fetch form
+
+`link.fetch(input, init)` takes what `fetch` takes and returns a `Response`. It exists because a browser page is bound by CORS
+and cannot run TLS on a raw stream: registries, APIs and feeds that do not send CORS headers can only be reached by a peer that
+makes the request for it.
+
+**The provider is the HTTP client, so it sees everything.** For `https:` the provider does the TLS: it reads the URL, the
+headers (an `Authorization` the consumer sent, included), the request body and the response, and it could alter the response. The
+consumer cannot tell. That is why the fetch form has its own scope (`egress:http:<host>:<port>:fetch`, a grant per destination
+origin, never covered by a TCP grant), why the provider offers it only when given an `exchange`, and why this README says so
+plainly: a fetch grant is trust in the provider with that request and its answer, not only in its network. Where the page can
+run TLS itself over `connect()`, use that: the provider then carries bytes it cannot read.
+
+What the provider does, per request, in this order:
+
+1. **The request is checked.** `http:` or `https:` only, no credentials in the URL, a lowercase DNS name or a dotted IPv4
+   address (no IPv6 literal, no pod id), at most 8192 characters; the method must be one the operator lists (`fetchMethods`,
+   default GET and HEAD; CONNECT and TRACE never). `no-grant` is said before anything about the URL or the network is looked at.
+2. **Headers are an allow-list in both directions.** On the way out only `accept`, `accept-language`, `authorization`,
+   `cache-control`, `content-length`, `content-type`, the conditional headers, `pragma` and `range` are sent on, each once.
+   `Host` is built from the parsed URL, never taken from the consumer. The provider adds `user-agent: browsermesh-egress`,
+   `accept-encoding: identity` and `connection: close`; it adds no `Authorization`, no cookie and no `Origin` or `Referer`, and
+   the consumer's pod id only if the operator set `identifyConsumers`. On the way back only a short list describing the body
+   passes (`content-type`, `content-length`, `content-range`, `content-encoding`, `etag`, `last-modified`, `cache-control`,
+   `location`, ...): no `Set-Cookie`, no hop-by-hop or proxy header.
+3. **The destination is checked, then dialled at the address that was checked.** The name is resolved once by wsh's address
+   guard, every answer is classified, and the connection (and, for `https:`, the TLS handshake, whose SNI and certificate
+   check use the name) goes to an address that passed: a second DNS answer cannot change where the connection goes.
+   Private, loopback, link-local and metadata addresses are refused with their class.
+4. **Redirects are followed by the provider, hop by hop, and each hop is a new request:** the target must be a destination the
+   consumer also holds a fetch grant for (`redirect-refused` otherwise, before any lookup), its address is checked again, the
+   blocked ports and the operator's `deny` apply, `https:` never falls back to `http:`, `Authorization` is dropped when the
+   origin changes, 303 (and 301 or 302 after a POST) become a GET without the body, and a 307 or 308 that would need the body
+   again is refused. At most `maxRedirects` (5). `redirect: 'manual'` returns the 3xx with its `Location`; `'error'` rejects.
+5. **The response is streamed with backpressure.** The next chunk is read from the destination only when the consumer has read
+   the last, so a page that stops reading stops the destination. The body is never decompressed (the destination's bytes and
+   `content-encoding` reach the consumer as sent). It is bounded in bytes (`maxFetchResponseBytes`, 8 MiB), in time
+   (`maxFetchDurationMs`, 30 s, and `headersTimeoutMs` for the head, and the idle budget) and the request body in
+   `maxFetchRequestBytes` (1 MiB). A bigger blob is a job for `connect()`, or for an operator who raises the limit.
+6. **It is audited and metered like the other forms.** One `egress-hop` per hop, an `egress-open` and an `egress-close`. The audit
+   has the method, the host, the port, the **length** of the path and query, the status, the redirects and the checked address;
+   never a header or a body, and the path and query only if the operator opted in with `auditUrls: 'path'` or `'full'`. The
+   meter carries bytes and no destination.
+
+What the consumer can and cannot trust from a provider it picked: the `Response` is the provider's word. `status`, `headers`,
+`body` and `response.url` can be invented by a dishonest provider, and for `https:` the consumer cannot check the certificate
+itself. The consumer pins the provider's pod id and the response is bounded and filtered (a status outside 200 to 599, headers
+that are not pairs, a header outside the allow-list or with a control character, a URL that is not `http(s)`: `bad-answer` or
+dropped), but nothing authenticates the content. Treat the body as untrusted bytes, as for any fetch, and check what you can
+check yourself (a registry client checks the digest of what it downloaded).
+
+## UDP
+
+`link.udp(host, port)` opens one flow to one destination: `send(datagram)`, `read()`, `close()`. The grant is
+`egress:udp:<host>:<port>:send`, and DNS stays its own form: UDP port 53 is refused for every grant, wide mode included.
+
+- **Over the mesh a flow is a pair of reliable streams** (datagrams as frames: a 2-byte length and the payload), so datagrams
+  reach the provider in order and with backpressure. **Beyond the provider the network keeps UDP's semantics**: a datagram can
+  be lost, reordered or duplicated there. The provider **drops** a datagram it will not pass on, silently, as a network would;
+  `stats().udp.dropped` counts each reason and the audit says how many a flow lost.
+- **The socket is connected to the checked address** (wsh's `dialUdpChecked`): the kernel drops every datagram that does not
+  come from that address and port, so the destination cannot be made a relay for others, and a name that answers differently
+  later does not matter.
+- **Budgets, per flow and per consumer.** A flow carries at most `maxDatagramBytes` per datagram (1472: what fits an Ethernet
+  frame, at most 65507), `maxUdpDatagramsPerFlow` datagrams and `maxUdpBytesPerFlow` bytes in both directions, and idles out
+  after `udpIdleMs`. A consumer has `maxUdpFlowsPerConsumer` flows at once, a rate of `udpDatagramRate` datagrams in both
+  directions (over it, datagrams are dropped; they still count against the flow's datagram budget, so a flood ends the
+  flow), and its bytes count against the same per-consumer budget as the other forms.
+- **No amplification: replies are bounded by what the consumer sent.** A reply from the destination is passed on only if the
+  consumer's own sends earned the credit for it. Each datagram sent earns `max(udpReplyFloorBytes, size * udpReplyRatio)`
+  bytes of credit (at least 4096, or 8 times the datagram), held up to `udpReplyCreditMaxBytes`, and a reply larger than the
+  credit left is dropped (so a flow starts with none, and a destination that sends unprompted is not heard). A destination
+  cannot turn one small datagram into more than a few kilobytes of replies, and cannot bank a burst by staying silent. The
+  consumer's stream also holds at most `udpOutboxBytes` of replies it is not reading; the rest are dropped.
+- **What a consumer can trust:** a datagram read is the provider's word. A dishonest provider can invent a reply; a datagram is
+  the destination's only if the protocol inside authenticates it (DTLS, QUIC, a signature). A frame longer than the bound the
+  provider announced fails the flow `bad-answer`.
+
+## The command line
+
+`browsermesh-egress` runs a provider on a Node host: it joins a signaling server under a persistent identity, prints its pod
+id (the id a consumer connects to), applies the grants of a JSON file, and prints one line per audit event.
+
+```
+npx browsermesh-egress --config grants.json --signaling wss://signal.example --identity ./egress-identity.json
+npx browsermesh-egress --config grants.json --dry-run        # print what would be allowed, start nothing, touch no key
+```
+
+```json
+{
+  "grants": [
+    { "peer": "<the consumer's pod id>", "scopes": ["egress:tcp:registry.npmjs.org:443:connect", "egress:http:registry.npmjs.org:443:fetch", "egress:dns:registry.npmjs.org:resolve"], "expiresAt": "2026-12-31T00:00:00Z" }
+  ],
+  "sets": { "package-hosts": ["registry.npmjs.org:443", "*.alpinelinux.org:80,443"] },
+  "limits": { "maxFetchResponseBytes": 33554432 }
+}
+```
+
+- `--allow PODID=SCOPE[,SCOPE]` and `--set NAME=ENTRY[,ENTRY]` are the same as the file's `grants` and `sets`; `--allow-private`
+  and `--deny` take CIDR blocks; `--fetch-methods`, `--audit-urls` and `--identify-consumers` are the library's options;
+  `--json` prints each audit record as one JSON line. Run `--help` for all of them.
+- **Only the exact scopes of this package are accepted** (a broad `egress:*` or `*` is not written in a CLI grant, and a typo is
+  refused, not ignored), a pod id must be a pod id, an `expiresAt` must be in the future, and a set a grant names must exist.
+- **`--dry-run` says in sentences what each peer could do**, including that a fetch grant lets this machine read the request,
+  and validates the limits and sets exactly as the running provider would. It starts no node and reads or writes no identity.
+- **Wide mode takes two flags every time: `--wide --acknowledge-wide any-public-address`.** A wildcard grant (a `*` in the
+  host place) without both is refused at start (exit 2), and the config file cannot turn wide mode on. Private, loopback,
+  link-local and metadata space stay refused in wide mode.
+- The audit lines carry what the audit table below says and nothing of the payloads; paths and queries only with
+  `--audit-urls`.
+
+## Compatibility with 0.1.1
+
+Protocol `egress` is still version 1 and nothing in 0.1.1's messages changed: the fetch form and UDP are two **new request
+methods** (`fetch`, `udp`) on the same protocol, with new scopes and new refusal codes only they can produce. A consumer that does
+not ask for them is never sent anything new.
+
+- **A 0.1.1 consumer against this provider** works unchanged: the same requests get the same answers, whether the new forms are
+  on or off (a test pins 0.1.1's messages as literals).
+- **This consumer against a 0.1.1 provider**: `connect` and `lookup` work; `fetch` and `udp` are answered
+  method-not-found by the older provider, which the consumer reports as `provider-no-form`. Nothing is left open, the older
+  provider's handlers are never reached, and the link keeps working.
+- **This consumer against this provider with a form off** (no `exchange`, no `dialUdp`): `not-offered`, said only after the grant
+  check, so a consumer learns nothing about the provider's configuration without a grant.
+
 ## Budgets
 
 <!-- defaults-table:begin -->
@@ -244,6 +417,22 @@ the provider an open proxy for its holder, so:
 | `idleMs` | 300000 | nothing moving in either direction | the connection ends `idle` |
 | `maxDurationMs` | 3600000 | the life of a connection | the connection ends `time-budget` |
 | `upWaitMs` | 10000 | the consumer opening its sending stream after the answer | the connection ends `up-timeout` |
+| `maxFetchRequestBytes` | 1 MiB | the request body of one fetch | `budget-exceeded` (`fetch-request-bytes`) |
+| `maxFetchResponseBytes` | 8 MiB | the response body of one fetch | the body fails `byte-budget` |
+| `maxFetchDurationMs` | 30000 | the whole life of a fetch, request to last body byte | the body fails `time-budget` |
+| `maxRedirects` | 5 | redirects followed for one fetch | `too-many-redirects` |
+| `maxHeaderBytes` | 16384 | the header block of a fetch request or a response | `bad-request` or `bad-response` |
+| `headersTimeoutMs` | 30000 | the request to the final response head, every hop together | `connect-failed` (`timeout`) |
+| `maxDatagramBytes` | 1472 | the payload of one datagram | dropped (a reply); the consumer's `send` rejects `datagram-too-large` |
+| `maxUdpFlowsPerConsumer` | 8 | open UDP flows of one consumer | `budget-exceeded` (`udp-flows-per-consumer`) |
+| `udpIdleMs` | 30000 | nothing sent or received on a flow | the flow ends `idle` |
+| `udpDatagramRate` | 500 a second | datagrams of one consumer, both directions | the rest are dropped |
+| `udpOutboxBytes` | 65536 | replies held for a consumer that is not reading | the rest are dropped |
+| `maxUdpDatagramsPerFlow` | 50000 | datagrams of one flow, both directions, dropped ones included | the flow ends `datagram-budget` |
+| `maxUdpBytesPerFlow` | 16 MiB | payload bytes of one flow, both directions | the flow ends `byte-budget` |
+| `udpReplyRatio` | 8 | reply credit earned per byte the consumer sends | a reply over the credit is dropped |
+| `udpReplyFloorBytes` | 4096 | reply credit earned per datagram sent, at least | a reply over the credit is dropped |
+| `udpReplyCreditMaxBytes` | 262144 | reply credit held at once | a reply over the credit is dropped |
 <!-- defaults-table:end -->
 
 Also `meterIntervalMs` (60000), `maxBadRequests` (8: malformed requests and refused streams of one channel before the
@@ -275,12 +464,18 @@ below to its export.
 | `wide-not-acknowledged` | The consumer holds a wildcard grant and the provider's operator has not acknowledged wide mode. |
 | `chaining-refused` | The request arrived through, or names, another egress; a provider only dials from its own network. |
 | `shutting-down` | The provider is stopping and takes no new work. |
-| `port-blocked` | The port is on the provider's blocked list (mail submission ports by default). |
+| `port-blocked` | The port is on the provider's blocked list (mail submission ports for TCP and the fetch form, port 53 for UDP, by default). |
 | `bad-request` | The request is not shaped as protocol `egress` version 1 asks. |
 | `bad-destination` | The host is not a lowercase DNS name or a canonical IPv4 dotted quad, or the port is not 1 to 65535. |
 | `name-not-found` | The name does not exist (the resolver said so). |
 | `lookup-failed` | The name could not be looked up (the resolver failed, or timed out). |
-| `connect-failed` | The connection was not made; `detail` is `refused`, `unreachable`, `timeout` or `failed`. |
+| `connect-failed` | The connection was not made; `detail` is `refused`, `unreachable`, `timeout`, `certificate` (the server's certificate is not valid for the name asked for) or `failed`. |
+| `bad-url` | The URL is not an `http:` or `https:` URL this provider serves: another scheme, credentials in it, or too long. |
+| `method-not-allowed` | The method is not one this provider lets a consumer use for the fetch form (GET and HEAD unless the operator lists more). |
+| `redirect-refused` | The destination answered with a redirect this provider will not follow: the target is a destination the consumer holds no grant for, another scheme, a downgrade from https, or needs a request body to be sent again. |
+| `too-many-redirects` | The destination redirected more times than the provider follows (`limits.maxRedirects`). |
+| `bad-response` | The destination's answer is not one the provider will pass on: a malformed or oversized head, or too many headers. |
+| `not-offered` | This provider does not offer this form (it was given no way to make the request). |
 | `unknown` | The provider refused for a reason this version does not name, or answered with something unreadable. |
 <!-- refusals-table:end -->
 
@@ -300,6 +495,8 @@ there: it is denied before any dial, so the provider's own network cannot be pro
 | `connect-rate-global` | All consumers together asked for more connections in the window than `limits.globalConnectRate` allows. |
 | `dns-rate` | This consumer asked for more lookups in the window than `limits.dnsRate` allows. |
 | `bytes-per-consumer` | This consumer has moved `limits.maxBytesPerConsumer` bytes (both directions) in the window. |
+| `fetch-request-bytes` | The request body of a fetch is larger than `limits.maxFetchRequestBytes`. |
+| `udp-flows-per-consumer` | Open UDP flows of this consumer are at `limits.maxUdpFlowsPerConsumer`. |
 <!-- budgets-table:end -->
 
 **Why an open connection ended** (the audit's and the meter's `reason`, and `error.reason` on a socket that fails with
@@ -311,10 +508,11 @@ there: it is denied before any dial, so the provider's own network cannot be pro
 | `closed` | Both halves finished, or the origin closed after it had finished sending. |
 | `revoked` | The consumer's grant for this destination was revoked or expired, or its access to the protocol was. |
 | `shutdown` | The provider stopped. |
-| `byte-budget` | The connection moved `limits.maxBytesPerConnection` bytes (both directions together). |
+| `byte-budget` | The connection moved `limits.maxBytesPerConnection` bytes (both directions together); a UDP flow, `limits.maxUdpBytesPerFlow`; a fetch, `limits.maxFetchRequestBytes` for its request body or `limits.maxFetchResponseBytes` for its response body. |
+| `datagram-budget` | A UDP flow carried `limits.maxUdpDatagramsPerFlow` datagrams (both directions together). |
 | `consumer-budget` | The consumer reached `limits.maxBytesPerConsumer` for the window while this connection was open. |
-| `idle` | Nothing moved for `limits.idleMs`. |
-| `time-budget` | The connection lived `limits.maxDurationMs`. |
+| `idle` | Nothing moved for `limits.idleMs` (a UDP flow: `limits.udpIdleMs`). |
+| `time-budget` | The connection lived `limits.maxDurationMs` (a fetch: `limits.maxFetchDurationMs`). |
 | `stream-abuse` | The consumer broke more stream rules than the provider allows, and was cut off. |
 | `origin-error` | The destination reset or failed the connection. |
 | `consumer-left` | The consumer closed or cancelled its end, or its channel closed. |
@@ -333,6 +531,8 @@ there: it is denied before any dial, so the provider's own network cannot be pro
 | `provider-unreachable` | The provider is not reachable over a direct link; routed delivery is not supported. |
 | `provider-pin-mismatch` | The channel is bound to a different pod than the one named; refused. |
 | `provider-closed` | The channel to the provider closed. |
+| `provider-no-form` | The provider does not know this form of request (it is older than the form). |
+| `datagram-too-large` | The datagram is larger than the provider's bound for one (`limits.maxDatagramBytes`, or the flow's answered bound). |
 | `bad-answer` | The provider answered with something this package cannot read. |
 | `connection-ended` | The provider ended an open connection; `reason` is one of the END_REASONS. |
 | `link-closed` | This link was closed locally. |
@@ -360,16 +560,19 @@ a consumer on purpose: the operator is trusted with `dial`.
 
 | `event` | When | Fields |
 | --- | --- | --- |
-| `egress-open` | a connection was made | `peer`, `form: 'tcp'`, `host`, `port`, `address`, `addressClass`, `via` (`exact`, `host`, `set` or `wide`), `outcome: 'opened'` |
-| `egress-close` | it ended | the same, plus `bytesUp`, `bytesDown`, `durationMs`, `reason` (an end reason), `outcome: 'closed'` |
+| `egress-open` | a connection, flow or fetch was made | `peer`, `form` (`tcp`, `udp` or `fetch`), `host`, `port`, `address`, `addressClass`, `via` (`exact`, `host`, `set` or `wide`), `outcome: 'opened'`; a fetch also `method`, `status`, `redirects`, `pathLength` |
+| `egress-hop` | a fetch's hop was answered | `peer`, `form: 'fetch'`, `hop`, `method`, `host`, `port`, `address`, `addressClass`, `pathLength`, `status`, `outcome: 'hop'` |
+| `egress-close` | it ended | the same, plus `bytesUp`, `bytesDown`, `durationMs`, `reason` (an end reason), `outcome: 'closed'`; a UDP flow also `datagramsUp`, `datagramsDown`, `droppedUp`, `droppedDown` |
 | `egress-refused` | a request was refused | `peer`, `form`, `host`, `port`, `code`, and `budget`, `addressClass` or `detail` where the code defines one, `outcome: 'refused'` |
 | `egress-resolve` | a lookup was answered | `peer`, `form: 'dns'`, `host` (the name), `addresses` (a count), `durationMs`, `outcome: 'answered'` |
 | `egress-abuse` | a consumer was cut off | `peer`, `reason`, `outcome: 'closed'` |
 
 `address` is the checked address that was dialled, so an operator can answer "which of your consumers connected to X at
-time T". There is never a path, query, header, payload byte or lookup answer.
+time T". There is never a header, payload byte or lookup answer; the path and query of a fetch are there only as lengths,
+unless the operator chose `auditUrls: 'path'` (adds `path`) or `'full'` (adds `query` too), and then they are the only
+contents an audit line can carry.
 
-`onMeter(record)` is the hook for billing or quotas, with no payment logic in the package: `{ peer, form: 'tcp' | 'dns',
+`onMeter(record)` is the hook for billing or quotas, with no payment logic in the package: `{ peer, form: 'tcp' | 'dns' | 'fetch' | 'udp',
 connections, bytesUp, bytesDown, durationMs, reason, final }`. `final: true` is the one record of a connection (with
 `connections: 1`) or a lookup; a connection longer than `meterIntervalMs` also sends `final: false` deltas
 (`connections: 0`) so the sums add up. **No destination is in it**, so a meter can be handed to another party without
@@ -414,7 +617,8 @@ Threat model and what is verified how: [`docs/security.md`](../../docs/security.
 
 ## Wire
 
-Protocol `egress` v1 on a protocol channel; bodies are protocol streams, there is no framing of its own.
+Protocol `egress` v1 on a protocol channel; bodies are protocol streams, there is no framing of its own beyond a UDP flow's
+datagram frames.
 
 ```
 request  connect  { cid, host, port, hops: 0, nonce?, sig? }  -> { ok: true } | { ok: false, code, budget?, addressClass?, detail? }
@@ -422,6 +626,13 @@ stream   meta { cid, kind: 'down' }   provider -> consumer, opened BEFORE the an
 stream   meta { cid, kind: 'up' }     consumer -> provider, opened after the answer
 request  resolve  { name, type: 'A', hops: 0, nonce?, sig? }  -> { ok: true, addresses: [string] } | { ok: false, code, ... }
 notify   end      { cid, reason }     provider -> consumer, before it aborts the streams of a connection it ended
+
+request  fetch    { cid, url, method, headers: [[name, value]], body: boolean, redirect: 'follow' | 'manual', hops: 0, nonce?, sig? }
+                  -> { ok: true, status, statusText, headers: [[name, value]], url, redirected } | { ok: false, code, ... }
+                  `down` (the response body) is opened BEFORE the answer; when `body` is true the consumer opens `up` (the request
+                  body) right behind the request, not after the answer
+request  udp      { cid, host, port, hops: 0, nonce?, sig? }  -> { ok: true, maxDatagramBytes } | { ok: false, code, ... }
+                  `down` opened BEFORE the answer, `up` after it; a datagram is a frame: a 2-byte big-endian length, then the payload
 ```
 
 Ending a stream is the half-close; cancelling it is a destroy; closing the channel or revoking a grant ends every
@@ -430,17 +641,10 @@ else, so an older peer is never sent something it would mis-handle.
 
 ## Not in this version yet
 
-The first version of the package is meant to include more than this release does. What is left, with the seam each will
-use:
+The forms and the command line of the first version are all here. What is left:
 
-- **The fetch form** (`link.fetch(url)`: the provider is the HTTP client, a different promise: it sees the request and the
-  response). It will be a third request on the same protocol (`fetch`), with its own grant (`egress:http:<host>:<port>:fetch`),
-  and will reuse `authorise`, the budgets, the audit and the meter of `provider.mjs` and the checked `dial` seam.
-- **UDP** (one destination per flow, replies read). A second dial seam beside `dial` (wsh's `dialUdpChecked`), the grant
-  `egress:udp:<host>:<port>:send`, and the same budgets.
-- **A command-line provider** (`browsermesh-egress`): an identity file, `--allow`, `--set`, a refusal of wide mode without
-  its acknowledgement. It will be `createMeshEgress` with `nodeDialer`, in the shape of the ingress CLI.
-- **The browser spec**: a page as the consumer against a Node provider, in Chromium, Firefox and WebKit, as for ingress.
-  Nothing here has run in a browser; the consumer imports no `node:` module (a test asserts it) and uses only
-  web-standard globals.
 - **An adapter example** from `link` to a callback-style TCP backend with pause and resume, for a container engine.
+- **Connection reuse and HTTP/2 in the fetch form**: each fetch is one connection, HTTP/1.1, closed after the response.
+- **Changing the grants of a running command-line provider**: edit the file and restart (an embedder has the registry, which
+  can grant and revoke live).
+- **IPv6 destinations** (see "What is not defended").

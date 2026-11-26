@@ -190,7 +190,7 @@ describe('methods', () => {
   })
 
   it('a request body streams to the origin with every byte checked', async () => {
-    const { o, link } = await plain((req, res) => { req.on('end', () => res.end('stored')) }, { egress: { fetchMethods: ['GET', 'HEAD', 'POST', 'PUT'] } })
+    const { o, link } = await plain((req, res) => { req.on('end', () => res.end('stored')) }, { egress: { fetchMethods: ['GET', 'HEAD', 'POST', 'PUT'], limits: { maxFetchRequestBytes: 4 * MiB } } })
     const total = 3 * MiB + 17
     let at = 0
     const body = new ReadableStream({ pull(c) { if (at >= total) { c.close(); return } const n = Math.min(100_000, total - at); c.enqueue(patternChunk(at, n)); at += n } })
@@ -286,6 +286,21 @@ describe('redirects: every hop is authorised and checked again', () => {
     await assert.rejects(link.fetch('http://plain.test/blocked'), code('port-blocked'))
     for (const path of ['/ftp', '/creds', '/v6', '/junk']) await assert.rejects(link.fetch(`http://plain.test${path}`), code('redirect-refused'), path)
     assert.equal(pass.seen.length, 0)
+  })
+
+  it('a redirect chain that ends at the metadata address, or at a loopback or private literal, is refused at that hop with its class, even where each earlier hop was granted', async () => {
+    const pass = await origin(ok('must not be reached'))
+    const chain = { '/start': 'http://hop.test/second', '/second': 'http://169.254.169.254/latest/meta-data/', '/lo': 'http://127.0.0.1:8080/', '/lan': 'http://192.168.1.1/' }
+    const hop = await origin((req, res) => { res.writeHead(302, { location: chain[req.url] }); res.end() })
+    const { link, audit } = await fetchRig(cleanups, { names: { 'plain.test': [A1], 'hop.test': [A2] }, origins: { [`${A1}:80`]: hop.port, [`${A2}:80`]: hop.port }, grants: [EGRESS_SCOPES.http('plain.test', 80), EGRESS_SCOPES.http('hop.test', 80), EGRESS_SCOPES.http('169.254.169.254', 80), EGRESS_SCOPES.http('127.0.0.1', 8080), EGRESS_SCOPES.http('192.168.1.1', 80)] })
+    const meta = await link.fetch('http://plain.test/start').catch((e) => e)
+    assert.ok(meta.code === 'destination-refused' && meta.addressClass === 'metadata', String(meta.code))
+    const lo = await link.fetch('http://plain.test/lo').catch((e) => e)
+    assert.ok(lo.code === 'destination-refused' && lo.addressClass === 'loopback', String(lo.code))
+    const lan = await link.fetch('http://plain.test/lan').catch((e) => e)
+    assert.ok(lan.code === 'destination-refused' && lan.addressClass === 'private', String(lan.code))
+    assert.equal(pass.seen.length, 0)
+    assert.ok(audit.some((r) => r.event === 'egress-refused' && r.code === 'destination-refused' && r.addressClass === 'metadata'), 'the refusal is audited, with the class')
   })
 
   it('at most maxRedirects hops: a loop is too-many-redirects, and each hop was checked', async () => {
@@ -393,7 +408,7 @@ describe('response limits and what a hostile origin can make the consumer hold',
       res.writeHead(200)
       const pump = () => { while (written < total) { const n = Math.min(64 * KiB, total - written); const okay = res.write(Buffer.from(patternChunk(written, n))); written += n; if (!okay) { res.once('drain', pump); return } } res.end() }
       pump()
-    })
+    }, { egress: { limits: { maxFetchResponseBytes: 64 * MiB } } })
     const res = await link.fetch('http://plain.test/')
     await until(() => provider.stats().bytesDown > 128 * KiB, 'the first bytes to move')
     let last = -1
@@ -409,6 +424,42 @@ describe('response limits and what a hostile origin can make the consumer hold',
       got += value.length
     }
     assert.equal(got, total)
+  })
+
+  it('the fetch form\'s own byte and time budgets: a response over maxFetchResponseBytes, a request body over maxFetchRequestBytes, a fetch over maxFetchDurationMs', async () => {
+    const { EGRESS_LIMIT_DEFAULTS } = await import('../src/index.mjs')
+    assert.deepEqual([EGRESS_LIMIT_DEFAULTS.maxFetchRequestBytes, EGRESS_LIMIT_DEFAULTS.maxFetchResponseBytes, EGRESS_LIMIT_DEFAULTS.maxFetchDurationMs], [1 * MiB, 8 * MiB, 30_000])
+    const big = await plain(ok('y'.repeat(3000)), { egress: { limits: { maxFetchResponseBytes: 1000 } } })
+    const e = await (await big.link.fetch('http://plain.test/')).arrayBuffer().catch((x) => x)
+    assert.ok(e instanceof EgressError && e.code === 'connection-ended' && e.reason === 'byte-budget', String(e?.reason ?? e))
+    const post = await plain(ok('done'), { egress: { fetchMethods: ['GET', 'POST'], limits: { maxFetchRequestBytes: 1000 } } })
+    const sent = await post.link.fetch('http://plain.test/', { method: 'POST', body: new Uint8Array(3000) }).then((r) => r.arrayBuffer()).catch((x) => x)
+    assert.ok(sent instanceof EgressError && sent.code === 'budget-exceeded' && sent.budget === 'fetch-request-bytes', String(sent.budget ?? sent))
+    await until(() => post.provider.stats().open === 0, 'the upload to be released')
+    const hold = deferred()
+    const slow = await plain((req, res) => { res.writeHead(200); res.write('x'); hold.promise.then(() => res.end()) }, { egress: { limits: { maxFetchDurationMs: 150 } } })
+    const t = await (await slow.link.fetch('http://plain.test/')).arrayBuffer().catch((x) => x)
+    assert.ok(t instanceof EgressError && t.reason === 'time-budget', String(t?.reason ?? t))
+    hold.resolve()
+  })
+
+  it('an origin that accepts the connection and never sends a response head is ended at headersTimeoutMs: connect-failed (timeout), nothing left open', async () => {
+    const hold = deferred()
+    const { link, provider } = await plain((req, res) => { hold.promise.then(() => res.end()) }, { egress: { limits: { headersTimeoutMs: 150 } } })
+    const e = await link.fetch('http://plain.test/').catch((x) => x)
+    assert.ok(e.code === 'connect-failed' && e.detail === 'timeout', String(e.code))
+    await until(() => provider.stats().open === 0, 'the connection to be released')
+    hold.resolve()
+  })
+
+  it('an origin that trickles its body is ended idle: the body fails connection-ended (idle), however slowly it keeps the socket open', async () => {
+    const hold = deferred()
+    const { link, provider } = await plain((req, res) => { res.writeHead(200); res.write('x'); hold.promise.then(() => res.end()) }, { egress: { limits: { idleMs: 120 } } })
+    const res = await link.fetch('http://plain.test/')
+    const e = await res.arrayBuffer().catch((x) => x)
+    assert.ok(e instanceof EgressError && e.code === 'connection-ended' && e.reason === 'idle', String(e?.reason ?? e))
+    await until(() => provider.stats().open === 0, 'the connection to be released')
+    hold.resolve()
   })
 
   it('a response that claims more than it sends fails the body, one that claims less is cut at its length', async () => {

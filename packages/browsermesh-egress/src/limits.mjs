@@ -43,6 +43,12 @@ export const EGRESS_LIMIT_DEFAULTS = Object.freeze({
   maxHeaderBytes: 16 * 1024,
   /** Fetch form: time from the request to the final response head, every hop together, ms. */
   headersTimeoutMs: 30_000,
+  /** Fetch form: bytes of a request body (the note's 1 MiB); more ends the fetch `byte-budget`. */
+  maxFetchRequestBytes: 1 * MiB,
+  /** Fetch form: bytes of a response body (the note's 8 MiB); more ends the body `byte-budget`. A bigger blob is a job for `connect()`, or a raised limit. */
+  maxFetchResponseBytes: 8 * MiB,
+  /** Fetch form: the whole life of a fetch, request to last body byte (the note's 30 s), ms; then `time-budget`. */
+  maxFetchDurationMs: 30_000,
   /** UDP: bytes of one datagram's payload (1472 is what fits an Ethernet frame). */
   maxDatagramBytes: 1472,
   /** UDP: open flows of one consumer (each is one destination). */
@@ -68,7 +74,7 @@ export const EGRESS_LIMIT_DEFAULTS = Object.freeze({
 })
 
 const POSITIVE = ['maxConnectionsPerConsumer', 'maxConnections', 'maxBytesPerConnection', 'connectTimeoutMs', 'idleMs', 'maxDurationMs', 'upWaitMs',
-  'meterIntervalMs', 'maxBadRequests', 'maxViolations', 'streamWindowBytes', 'maxTracked', 'maxRedirects', 'maxHeaderBytes', 'headersTimeoutMs',
+  'meterIntervalMs', 'maxBadRequests', 'maxViolations', 'streamWindowBytes', 'maxTracked', 'maxRedirects', 'maxHeaderBytes', 'headersTimeoutMs', 'maxFetchRequestBytes', 'maxFetchResponseBytes', 'maxFetchDurationMs',
   'maxDatagramBytes', 'maxUdpFlowsPerConsumer', 'udpIdleMs', 'udpOutboxBytes', 'maxUdpDatagramsPerFlow', 'maxUdpBytesPerFlow', 'udpReplyRatio', 'udpReplyFloorBytes', 'udpReplyCreditMaxBytes']
 const RATES = ['connectRate', 'globalConnectRate', 'dnsRate', 'udpDatagramRate']
 

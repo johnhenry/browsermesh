@@ -12,11 +12,10 @@ const answers = (table) => async (name, { family }) => { (answers.log ??= []).pu
 const refusedWith = (cls) => (e) => e.name === 'AddressGuardError' && e.code === 'ADDRESS_REFUSED' && e.refused?.[0]?.class === cls
 
 describe('nodeDialer', () => {
-  it('returns the two options createMeshEgress takes', () => {
+  it('returns the options createMeshEgress takes: the TCP dial, the UDP dial, the lookup and the fetch form\'s HTTP client', () => {
     const d = nodeDialer()
-    assert.equal(typeof d.dial, 'function')
-    assert.equal(typeof d.resolve, 'function')
-    assert.deepEqual(Object.keys(d).sort(), ['dial', 'resolve'])
+    for (const name of ['dial', 'dialUdp', 'resolve', 'exchange']) assert.equal(typeof d[name], 'function', name)
+    assert.deepEqual(Object.keys(d).sort(), ['dial', 'dialUdp', 'exchange', 'resolve'])
   })
 
   it('refuses private, loopback, link-local and metadata addresses by literal and by name, before any connection', async () => {

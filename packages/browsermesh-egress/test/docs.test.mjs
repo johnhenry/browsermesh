@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 import { readFile, readdir } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
-import { REFUSAL_CODES, BUDGET_NAMES, END_REASONS, LINK_CODES, EGRESS_LIMIT_DEFAULTS, EGRESS_SCOPES, DEFAULT_BLOCKED_PORTS } from '../src/index.mjs'
+import { REFUSAL_CODES, BUDGET_NAMES, END_REASONS, LINK_CODES, EGRESS_LIMIT_DEFAULTS, EGRESS_SCOPES, DEFAULT_BLOCKED_PORTS, DEFAULT_BLOCKED_UDP_PORTS } from '../src/index.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const readme = await readFile(path.join(root, 'README.md'), 'utf8')
@@ -48,6 +48,8 @@ describe('the scopes and the defaults', () => {
     const named = rows(block('scopes-table')).map(([s]) => unticked(s))
     const built = [
       EGRESS_SCOPES.tcp('<host>', '<port>'), EGRESS_SCOPES.tcpAnyPort('<host>'), EGRESS_SCOPES.dns('<name>'), EGRESS_SCOPES.set('<name>'),
+      EGRESS_SCOPES.http('<host>', '<port>'), EGRESS_SCOPES.httpAnyPort('<host>'), EGRESS_SCOPES.setFetch('<name>'),
+      EGRESS_SCOPES.udp('<host>', '<port>'), EGRESS_SCOPES.udpAnyPort('<host>'), EGRESS_SCOPES.setUdp('<name>'),
     ]
     assert.deepEqual(named, ['protocol:egress:open', ...built])
   })
@@ -55,25 +57,34 @@ describe('the scopes and the defaults', () => {
   it('the defaults table has every budget the code has, with the values the code has', () => {
     const table = Object.fromEntries(rows(block('defaults-table')).map(([name, value]) => [unticked(name), unticked(value)]))
     const d = EGRESS_LIMIT_DEFAULTS
-    assert.deepEqual(Object.keys(table).sort(), ['connectRate', 'connectTimeoutMs', 'dnsRate', 'globalConnectRate', 'idleMs', 'maxBytesPerConnection', 'maxBytesPerConsumer', 'maxConnections', 'maxConnectionsPerConsumer', 'maxDurationMs', 'upWaitMs'])
-    for (const name of Object.keys(table)) assert.ok(Object.hasOwn(d, name), name)
-    assert.equal(table.maxConnectionsPerConsumer, String(d.maxConnectionsPerConsumer))
-    assert.equal(table.maxConnections, String(d.maxConnections))
-    assert.equal(table.connectRate, `${d.connectRate.limit} a minute`)
-    assert.equal(table.globalConnectRate, `${d.globalConnectRate.limit} a minute`)
-    assert.equal(table.dnsRate, `${d.dnsRate.limit} a minute`)
-    assert.equal(table.maxBytesPerConnection, `${d.maxBytesPerConnection / 1048576} MiB`)
-    assert.equal(table.maxBytesPerConsumer, `${d.maxBytesPerConsumer.limit / 1073741824} GiB per ${d.maxBytesPerConsumer.windowMs / 3_600_000} hours`)
-    for (const k of ['connectTimeoutMs', 'idleMs', 'maxDurationMs', 'upWaitMs']) assert.equal(table[k], String(d[k]), k)
+    // Every limit with a user-facing budget meaning is in the table; these are the housekeeping ones that are not.
+    const housekeeping = ['meterIntervalMs', 'maxBadRequests', 'maxViolations', 'streamWindowBytes', 'maxTracked']
+    assert.deepEqual(Object.keys(table).sort(), Object.keys(d).filter((k) => !housekeeping.includes(k)).sort())
+    const MiB = 1048576
+    const say = (k, v) => {
+      if (k === 'maxBytesPerConsumer') return `${v.limit / 1073741824} GiB per ${v.windowMs / 3_600_000} hours`
+      if (v && typeof v === 'object') return `${v.limit} a ${{ 1000: 'second', 60000: 'minute' }[v.windowMs]}`
+      return v >= MiB && v % MiB === 0 ? `${v / MiB} MiB` : String(v)
+    }
+    for (const [k, v] of Object.entries(table)) assert.equal(v, say(k, d[k]), k)
   })
 
-  it('the blocked ports the README names are the defaults', () => {
+  it('the blocked ports the README names are the defaults, TCP and UDP', () => {
     assert.deepEqual([...DEFAULT_BLOCKED_PORTS], [25, 465, 587])
+    assert.deepEqual([...DEFAULT_BLOCKED_UDP_PORTS], [53])
     assert.match(readme, /`\[25, 465, 587\]`/)
+    assert.match(readme, /`\[53\]`/)
   })
 
-  it('the README lists what is not built yet, at its end', () => {
+  it('the README says plainly what the fetch form exposes, in the places an operator and a consumer read first', () => {
+    assert.match(readme, /The fetch form is a different promise: the provider is the HTTP client, so it sees the request and the\s+response in\s+plaintext/)
+    assert.match(readme, /With the fetch form on, your machine reads what the consumer fetches/)
+    assert.match(readme, /\*\*The provider is the HTTP client, so it sees everything\.\*\*/)
+  })
+
+  it('the README no longer lists the fetch form, UDP, the command line or the browser spec as not built', () => {
     const tail = readme.slice(readme.lastIndexOf('## Not in this version yet'))
-    for (const word of ['fetch form', 'UDP', 'command-line', 'browser spec']) assert.ok(tail.includes(word), word)
+    for (const word of ['The fetch form (', 'UDP (one destination', 'command-line provider (', 'The browser spec:']) assert.ok(!tail.includes(word), word)
+    for (const heading of ['## The fetch form', '## UDP', '## The command line', '## Compatibility with 0.1.1']) assert.ok(readme.includes(heading), heading)
   })
 })

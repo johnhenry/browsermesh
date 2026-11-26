@@ -21,7 +21,7 @@ const { dialChecked, dialUdpChecked, resolveChecked, isPublicAddress, checkAddre
 
 import { createExchange } from './node-exchange.mjs'
 
-export { createMeshEgress, DEFAULT_BLOCKED_PORTS, WIDE_ACKNOWLEDGEMENT } from './provider.mjs'
+export { createMeshEgress, DEFAULT_BLOCKED_PORTS, DEFAULT_BLOCKED_UDP_PORTS, WIDE_ACKNOWLEDGEMENT } from './provider.mjs'
 export { createExchange, nodeExchange } from './node-exchange.mjs'
 
 /** The public addresses of this machine's own interfaces: a name that resolves to one is the provider itself. */

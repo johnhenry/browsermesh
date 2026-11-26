@@ -52,7 +52,7 @@ describe('the browser-safe entry', () => {
     }
     for (const file of await files(path.join(root, 'src'))) {
       const text = await readFile(file, 'utf8')
-      if (/node-exchange\.mjs/.test(text)) assert.ok(['src/node.mjs', 'src/node.d.ts'].includes(path.relative(root, file)), `${path.relative(root, file)} imports the node exchange`)
+      if (/from\s+['"]\.\/node-exchange\.mjs['"]/.test(text)) assert.equal(path.relative(root, file), 'src/node.mjs', `${path.relative(root, file)} imports the node exchange`)
     }
   })
 
