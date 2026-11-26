@@ -39,9 +39,9 @@
     "@johnhenry/wsh": ">=0.49.0 <1.0.0"
   },
   "devDependencies": {
-    "@johnhenry/browsermesh-apps": "^0.23.0",
+    "@johnhenry/browsermesh-apps": "^0.24.0",
     "@johnhenry/browsermesh-core": "^0.13.0",
-    "@johnhenry/browsermesh-discovery": "^0.5.0",
+    "@johnhenry/browsermesh-discovery": "^0.6.0",
     "@johnhenry/browsermesh-primitives": "^0.7.0",
     "@johnhenry/wsh": "^0.55.0",
     "node-datachannel": "^0.33.4"
