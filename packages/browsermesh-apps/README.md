@@ -258,6 +258,27 @@ This reaches the `WebRTCMeshManager` that `createMeshNode()` attaches to the
 returned node as `node.meshManager`, and from there every
 `WebRTCPeerConnection` it creates.
 
+### DHT discovery: signed stores and a store policy (opt-in)
+
+`createMeshNode({ enableDht: true, dhtBootstrapPeers })` discovers peers through a DHT whose messages ride the signaling
+transport. By default a DHT node accepts a store from anyone and the record this node stores is unsigned, as it always was. Two
+opt-in options use the discovery package's owned stores (`docs/design/discovery-records.md`, item 3):
+
+```js
+createMeshNode({
+  enableDht: true, dhtBootstrapPeers,
+  dhtSignStores: true,        // the record this node stores is signed with the pod's own key (a seq that rises with every announce)
+  dhtStorePolicy: 'owned',    // and this node holds only records that carry a valid proof; 'open' takes unsigned ones too
+  dhtStoreLifetimeMs: 86_400_000, // how long a signed store is valid (default 24 h), re-signed with every announce
+})
+```
+
+A node that does not check ignores the proof and stores the value as it always did, so `dhtSignStores` is safe in a mixed swarm.
+`dhtStorePolicy: 'owned'` is the strict one: a record from a node that does not sign is not held there (counted in
+`node.dht.dhtNode.storeStats.refused`), so use it among nodes you have upgraded; it needs `dhtSignStores` (the node announces
+itself). `createMeshDht({ transport, signStores, identity, storePolicy })` is the same without a node. Both need
+`@johnhenry/browsermesh-discovery` 0.7.0 or later and throw with an older one rather than quietly storing unsigned.
+
 ### A node for a page that reaches one pod: `createLeanMeshNode()`
 
 `createMeshNode` imports every optional service the package has, so a bundler that follows the package root pulls in about a

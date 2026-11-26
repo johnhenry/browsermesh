@@ -202,6 +202,12 @@ policy, `handleMessage` for a store and `store()` return promises. `new StealthA
 ownedStores: true })` signs its shard stores with a per-shard writer key derived from the identity: the anonymous keys do not
 change and are not linked by it, group members who hold the nonce can read but cannot store under them.
 
+`DhtDiscoveryStrategy` takes the same `storePolicy` for its node, and (opt-in) `signStore: async (key, record) => auth`, called by
+`announce` for the record it stores: return a proof to store with it, or nothing to store unsigned as before. A signer that throws
+stores nothing and `onStoreRefused({ key, refused })` is told (`sign-failed`, or the node's own refusal); `announce` never throws for
+a refusal. `strategy.storePolicy` and `dhtNode.storePolicy` report what is in force (`null` when there is none). `browsermesh-apps`'
+`createMeshNode({ enableDht, dhtSignStores, dhtStorePolicy })` uses these.
+
 The plain `hide()` / `reconstitute()` below are unchanged and plaintext:
 
 `StealthAgent.hide(stateString)` / `reconstitute()` split a state string into

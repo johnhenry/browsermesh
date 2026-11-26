@@ -56,7 +56,11 @@ else).
   the caller's transport says (the DHT does no authentication of its own). `findValue` / `get` return the value after a TTL
   check (`:402-413`, `:485-492`); `ttl` 0 never expires. There is no iterative lookup and no republish (`docs/security.md`
   "Discovery and StealthAgent").
-- `DhtDiscoveryStrategy.announce` (`:850-855`) stores the announced record under `record.podId`, unsigned.
+- `DhtDiscoveryStrategy.announce` (`:850-855`) stores the announced record under `record.podId`, unsigned. (Since then the strategy
+  takes `storePolicy`, `signStore` and `onStoreRefused`, and `browsermesh-apps`' `createMeshDht` / `createMeshNode` use them behind
+  `signStores` / `dhtSignStores` and `storePolicy` / `dhtStorePolicy`, all off by default: a node signs the record it announces with the
+  pod's key and, if asked, checks the stores it receives. A node that does not sign is still what it was; one that checks in
+  `owned` mode does not hold its record.)
   `browsermesh-apps`' `mesh_dht_store` tool (`tools.mjs:395-410`) stores arbitrary keys.
 - Unknown message fields are ignored by `handleMessage` (it reads `type`, `key`, `value`, `ttl`, `targetId`).
 

@@ -519,6 +519,13 @@ export class DhtNode {
     return entry.owner ?? null
   }
 
+  /** The store policy in force (a copy: `{ mode, maxValueBytes, ..., openPrefixes }`), or `null` for the unrestricted node. */
+  get storePolicy() {
+    if (!this.#policy) return null
+    const { onRefuse, rate, openPrefixes, ...rest } = this.#policy
+    return { ...rest, rate: rate ? { ...rate } : null, openPrefixes: [...openPrefixes] }
+  }
+
   /** Counters of the store policy: `{ accepted, refused: { <name>: n } }`. */
   get storeStats() {
     return { accepted: this.#stats.accepted, refused: { ...this.#stats.refused } }
@@ -978,22 +985,43 @@ export class DhtDiscoveryStrategy extends DiscoveryStrategy {
   /** @type {Array<{podId: string}>} */
   #bootstrapContacts
 
+  #signStore = null
+  #onStoreRefused = null
+
   /**
    * @param {object} opts
    * @param {string} opts.localId - This node's identifier
    * @param {Function} [opts.sendFn] - Function to send messages
    * @param {number} [opts.k=20] - Bucket size
    * @param {Array<{podId: string}>} [opts.bootstrapContacts=[]] - Initial seed contacts
+   * @param {object} [opts.storePolicy] - Handed to the underlying `DhtNode` (see its `storePolicy`): who may store under which key
+   *   on this node. Absent (the default): the node accepts any store, as it always did.
+   * @param {() => number} [opts.now] - Clock for the node, in ms (default `Date.now`)
+   * @param {(key: string, record: object) => (object|undefined|Promise<object|undefined>)} [opts.signStore] - Opt-in. Called by
+   *   `announce` for the record it is about to store: return a proof (`signDhtStore`) to store with it, or nothing to store unsigned
+   *   as before. A signer that throws stores nothing (an unsigned store is never put in its place) and is reported to
+   *   `onStoreRefused` as `sign-failed`. Older nodes ignore the proof a store carries.
+   * @param {(info: { key: string, refused: string }) => void} [opts.onStoreRefused] - Told when `announce`'s own store was refused
+   *   (by this node's policy, or because the signer failed). `announce` itself never throws for a refusal.
    */
-  constructor({ localId, sendFn, k = 20, bootstrapContacts = [] }) {
+  constructor({ localId, sendFn, k = 20, bootstrapContacts = [], storePolicy, now, signStore, onStoreRefused }) {
     super({ type: 'dht' })
-    this.#dhtNode = new DhtNode({ localId, sendFn })
+    if (signStore !== undefined && typeof signStore !== 'function') throw new Error('signStore must be a function')
+    if (onStoreRefused !== undefined && typeof onStoreRefused !== 'function') throw new Error('onStoreRefused must be a function')
+    this.#dhtNode = new DhtNode({ localId, sendFn, ...(storePolicy === undefined ? {} : { storePolicy }), ...(now === undefined ? {} : { now }) })
     this.#bootstrapContacts = bootstrapContacts
+    this.#signStore = signStore ?? null
+    this.#onStoreRefused = onStoreRefused ?? null
   }
 
   /** @returns {DhtNode} The underlying DHT node */
   get dhtNode() {
     return this.#dhtNode
+  }
+
+  /** The store policy of the underlying node, or `null` (see `DhtNode#storePolicy`). */
+  get storePolicy() {
+    return this.#dhtNode.storePolicy
   }
 
   /**
@@ -1026,7 +1054,23 @@ export class DhtDiscoveryStrategy extends DiscoveryStrategy {
   async announce(record) {
     if (!this.active) return
     const key = record.podId ?? record.key
-    this.#dhtNode.store(key, record)
+    // Without a signer or a policy this is exactly what it always was: a synchronous store, nothing awaited.
+    if (!this.#signStore) {
+      const result = this.#dhtNode.store(key, record)
+      if (typeof result?.then === 'function') this.#reportRefusal(key, await result)
+      return
+    }
+    let auth
+    try { auth = await this.#signStore(key, record) } catch {
+      this.#reportRefusal(key, { stored: false, refused: 'sign-failed' })
+      return
+    }
+    this.#reportRefusal(key, await this.#dhtNode.store(key, record, 0, auth === undefined ? undefined : { auth }))
+  }
+
+  #reportRefusal(key, result) {
+    if (result?.stored !== false || !this.#onStoreRefused) return
+    try { this.#onStoreRefused({ key, refused: result.refused }) } catch { /* a reporting hook never changes the outcome */ }
   }
 
   /**

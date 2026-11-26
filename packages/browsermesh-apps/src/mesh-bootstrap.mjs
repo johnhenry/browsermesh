@@ -539,6 +539,17 @@ import { registerOrchestratorTools } from './mesh-orchestrator-tools.mjs'
  *   to distinguish DHT wire messages sharing `signalingTransport` with
  *   WebRTC signaling traffic (default `'dht-relay'`). Only used when
  *   `enableDht`.
+ * @param {boolean} [options.dhtSignStores=false] - Opt-in, with `enableDht`.
+ *   Sign the record this node stores in the DHT with the node's own pod key
+ *   (`createMeshDht`'s `signStores`), so a node that checks stores can tell it
+ *   is the pod's own. Nodes that do not check ignore the proof. Needs
+ *   `@johnhenry/browsermesh-discovery` 0.7.0 or later.
+ * @param {'open'|'owned'|object} [options.dhtStorePolicy] - Opt-in, with
+ *   `enableDht`. Who may store under which key on THIS node (`createMeshDht`'s
+ *   `storePolicy`). `'owned'` requires `dhtSignStores`. Absent: any store is
+ *   accepted, as before.
+ * @param {number} [options.dhtStoreLifetimeMs] - How long a signed store is
+ *   valid (default 24 h). Only used with `dhtSignStores`.
  * @param {boolean} [options.enableHealthCheck=false] - Attach
  *   `mesh-keepalive.mjs`'s `createMeshKeepaliveService()` (issue #110): a
  *   real ping/pong keepalive envelope protocol, one
@@ -866,6 +877,9 @@ export async function createMeshNode(options = {}) {
     dhtBootstrapPeers = [],
     dhtK,
     dhtMessageType,
+    dhtSignStores = false,
+    dhtStorePolicy,
+    dhtStoreLifetimeMs,
     enableHealthCheck = false,
     healthCheckOptions,
     enableRouting = false,
@@ -923,6 +937,12 @@ export async function createMeshNode(options = {}) {
   ])
 
   // -- Identity ---------------------------------------------------------
+  if (!enableDht && (dhtSignStores || dhtStorePolicy !== undefined || dhtStoreLifetimeMs !== undefined)) {
+    throw new Error('createMeshNode: dhtSignStores, dhtStorePolicy and dhtStoreLifetimeMs only apply with enableDht: true')
+  }
+  if (!dhtSignStores && dhtStorePolicy !== undefined && (dhtStorePolicy === 'owned' || dhtStorePolicy?.mode === 'owned')) {
+    throw new Error("createMeshNode: an 'owned' dhtStorePolicy needs dhtSignStores: true, since this node announces its own record and its own policy would refuse it")
+  }
   const identityManager = providedIdentityManager || new MeshIdentityManager({ onLog })
   const wallet = new IdentityWallet({ identityManager, onLog })
   const { podId } = await wallet.createIdentity(label)
@@ -984,6 +1004,9 @@ export async function createMeshNode(options = {}) {
       k: dhtK,
       messageType: dhtMessageType,
       onLog,
+      ...(dhtSignStores ? { signStores: true, identity: identityManager.getIdentity(podId) } : {}),
+      ...(dhtStorePolicy !== undefined ? { storePolicy: dhtStorePolicy } : {}),
+      ...(dhtStoreLifetimeMs !== undefined ? { storeLifetimeMs: dhtStoreLifetimeMs } : {}),
     })
     strategies.push(dht.strategy)
   }

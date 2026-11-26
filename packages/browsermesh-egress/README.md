@@ -572,6 +572,27 @@ npx browsermesh-egress --config grants.json --dry-run        # print what would 
 - The audit lines carry what the audit table below says and nothing of the payloads; paths and queries only with
   `--audit-urls`.
 
+## Example: a local port that goes through a peer
+
+[`examples/local-listener.mjs`](examples/local-listener.mjs) is a small, self-contained Node consumer: it listens on a loopback port
+and carries each connection through `connectEgress` to one destination the provider's operator has granted, for any program that
+only knows how to open a local socket (a database client, a container engine's published port). `listenThroughEgress(link, { target })`
+is the part to copy: half-close both ways, a paused local socket pauses the destination, a destination without a grant closes the
+local connection and says why (`onError`), the link ending closes every local connection, and it binds to loopback only (a local
+port anyone on a network could use would lend the pod's grant to them). It is in the repository, not in the published package.
+
+```
+node examples/local-listener.mjs                                         # a self-contained run: provider, consumer and a stand-in destination in one process
+node examples/local-listener.mjs --print-pod-id --identity ./consumer.json   # the pod id to put in the grants file
+browsermesh-egress --config examples/local-listener.grants.json --signaling wss://signal.example/signaling --identity ./egress-identity.json
+node examples/local-listener.mjs --provider <the provider's pod id> --signaling wss://signal.example/signaling --identity ./consumer.json \
+  --target db.internal.example:5432 --listen 127.0.0.1:5432
+```
+
+[`examples/local-listener.grants.json`](examples/local-listener.grants.json) is the grants file the provider command reads (put the
+consumer's pod id in it; `--dry-run` says what it allows in sentences). The repository's `npm run examples` runs the self-contained
+form, and a real-peer test runs both ends as child processes over real WebRTC.
+
 ## Compatibility with 0.1.1
 
 Protocol `egress` is still version 1 and nothing in 0.1.1's messages changed: the fetch form and UDP are two **new request
@@ -877,7 +898,8 @@ The forms and the command line of the first version are all here. What is left:
 - **UDP in a guest's network backend.** A container engine's guest kernel talks to its host through a network backend interface
   that has no datagram method, so a guest's UDP cannot be routed through `link.udp` yet. That is upstream of this repository
   (the engine and its kernel); this package's UDP form works for a page's own code and for anything that can call it.
-- **An adapter example** from `link` to a callback-style TCP backend with pause and resume, for a container engine.
+- **An adapter for a container engine's own network backend** (a callback-style TCP backend with pause and resume, in the
+  engine's terms). What is built is the Node-side example below: a local TCP port whose connections go through the link.
 - **Connection reuse and HTTP/2 in the fetch form**: each fetch is one connection, HTTP/1.1, closed after the response.
 - **Changing the grants of a running command-line provider**: edit the file and restart (an embedder has the registry, which
   can grant and revoke live).
