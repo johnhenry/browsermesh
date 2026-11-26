@@ -5,10 +5,10 @@ Every example runs headless under plain Node (>= 26) with no browser and no
 external network or service. Peers and transports are simulated in-process
 (a shared bus, a fake relay, wsh's in-process pipe relay, `mem://` virtual
 sockets), but the actual protocol, CRDT, capability and sealed-link logic
-exercised is exactly what runs in production. Four examples do open a real
+exercised is exactly what runs in production. Five examples do open a real
 listener, always on the loopback interface (`127.0.0.1`, an ephemeral port)
 and closed before they exit: `14` (a `node:http` gateway), `21` (the HTTP
-ingress), `22` (a local echo server standing in for the network) and
+ingress), `22` (a local echo server standing in for the network), `25` (a wsh pipe relay, with `meshctl` run as a child process against it) and
 `packages/browsermesh-egress/examples/local-listener.mjs` (a local TCP port
 and an echo origin). The simulated transports are not a browser check: what is
 verified over a real browser link (real WebRTC, WebSocket, BroadcastChannel,
@@ -44,6 +44,9 @@ non-zero exit stops it.
 | [`20-escrow-over-the-wire.mjs`](./20-escrow-over-the-wire.mjs) | Issue #239: an inbound `ESCROW_CREATE` becomes a real, funded contract through a ledger hook the deployment supplies (`router.attachEscrowLedger(createMultiPartyLedgerHook(ledger))`, the default per-pod shape). The authenticated sender is the payer (a message naming another payer is refused before the ledger is touched), a repeated request is not charged twice, an unfunded or oversized request creates nothing, every refusal is audited without an amount, and release pays the payee. Nothing is on by default. |
 | [`21-http-ingress.mjs`](./21-http-ingress.mjs) | `@johnhenry/browsermesh-ingress`: real HTTP in, a mesh pod answers. Node's `fetch` reaches a loopback listener; the ingress forwards each request over protocol `http` to the one pod the mapping names, whose `(Request) => Response` handler answers. The provider needs the grant `protocol:http:open` (before it, the HTTP client is told, by name, that it was refused); a second pod that also serves the protocol is never asked; the client gets the ingress's policy (no `Set-Cookie`, an inert `Content-Security-Policy`, `no-store`), not the pod's; methods the operator did not allow, a body over the cap and an unmapped host are refused; the audit record has the pod, status, bytes and duration and never the query. |
 | [`22-mesh-egress.mjs`](./22-mesh-egress.mjs) | `@johnhenry/browsermesh-egress`: a pod lends its network to a peer that holds a grant. A local echo server stands in for the network. The provider serves protocol `egress` (off until `start()`); the consumer needs `protocol:egress:open` and then a grant per destination (`egress:tcp:<host>:<port>:connect`, `egress:dns:<name>:resolve`): before them it is refused by name, another port of a granted host is refused, and nothing is dialled for a refusal. The provider checks the address a name resolves to with wsh's address guard and dials the checked address: this machine's loopback is reachable only because the operator listed it in `allowPrivate`. Bytes move with half-close; the audit line has who, where, the address class, bytes each way and duration and never contents; revoking the grant ends the live connection at once. |
+| [`23-mcp-tools-over-mesh.mjs`](./23-mcp-tools-over-mesh.mjs) | `@johnhenry/browsermesh-mcp`: a page's tools (an explicit `tools` list, no `window`) served to a remote client over the mesh bus. Default deny (no grant, no channel); `mcp:<tool>:list` and `mcp:<tool>:call` let the client see and call exactly that tool and no other (an ungranted tool answers like one that does not exist); a consequential tool also needs the person at the SERVING page to say yes (approved once, denied once, the tool ran once); every result is labelled untrusted; revoking a grant refuses the next call and revoking `protocol:mcp:open` closes the channel. |
+| [`24-wsh-services-and-relaying-pod.mjs`](./24-wsh-services-and-relaying-pod.mjs) | A pod's wsh services (`WshServices`: objects and one MCP tool, nothing else) used by a STOCK `WshClient` through wsh's pipe relay (a key with no grant refused at login, an object path the allow-list does not name refused, the relay copies ciphertext only), then the same through a RELAYING POD (`WshRelay`): refused without `wsh-relay:<target>:open`, allowed with it, ended at once when it is revoked. Needs the optional peer `@johnhenry/wsh`. |
+| [`25-meshctl-through-a-relay.mjs`](./25-meshctl-through-a-relay.mjs) | The real `meshctl` binary, run as a child process with `--wsh-relay`, through a REAL pipe relay on a loopback port (the one socket in this example) to a pod-host service on `InMemoryPodHostDriver`: `hosts`, `pods spawn`, `status`, `send` and `drain` answer for the identity the host allowed, while an identity it has not allowed exits 3 with `WSH_REFUSED`. The child is always killed and the listeners always closed. Takes a few seconds: each command is a process of its own with a sealed link to make. |
 | [`27-dht-and-stealth-records.mjs`](./27-dht-and-stealth-records.mjs) | `@johnhenry/browsermesh-discovery` beyond a handshake. A ring of in-process `DhtNode`s, where a stranger finds a stored value by walking the ring; owned stores (`storePolicy: { mode: 'owned' }`), where a store signed by the key's owner is allowed and a forged one is refused as `not-key-owner`; `StealthAgent` shard format 3, where any 3 of 5 shards rebuild the state, so losing two holders is survived and losing a third fails with `unavailable`; and `SwimMembership` feeding a `SwarmCoordinator` so three pods see each other. |
 | [`packages/browsermesh-egress/examples/local-listener.mjs`](../packages/browsermesh-egress/examples/local-listener.mjs) | `@johnhenry/browsermesh-egress`: a local TCP port whose connections are carried through `connectEgress` to a destination a provider granted, with the grants file and the provider command (`npm run examples` runs this one too). A destination with no grant closes the local connection and says why. |
 
@@ -59,15 +62,17 @@ What they cover, by package:
   message-oriented channel service (`17`) and escrow over the wire (`20`).
 - `browsermesh-pod`: the relay-backed `WebSocketTransport` for pods hosted
   outside the browser (`12`).
-- `browsermesh-transport`: the sealed wsh peer link (`18`).
+- `browsermesh-transport`: the sealed wsh peer link (`18`), and wsh services on a pod with the relaying pod (`24`).
 - `browsermesh-objects`: wsh's remote-object layer over a protocol channel
   (`19`).
 - `browsermesh-discovery`: DHT and stealth records (`27`).
+- `browsermesh-mcp`: a page's tools served over the mesh (`23`).
+- `browsermesh-meshctl`: the real `meshctl` binary through a pipe relay (`25`).
 - `browsermesh-ingress` (`21`) and `browsermesh-egress` (`22` and
   `local-listener.mjs`): real HTTP in, and a pod lending its network.
 
 Not covered by an example: `browsermesh-core`, `-embed`,
-`-mcp`, `-priority-mux`, `-meshctl` and the private `-realm`. They are
+`-priority-mux` and the private `-realm`. They are
 exercised by their own test suites (`-core` and `-embed`
 also by the host application's panels); see their package READMEs for
 API-level usage.

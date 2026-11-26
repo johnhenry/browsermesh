@@ -86,7 +86,7 @@ a partial publish, use "Run workflow" on `release.yml` (Actions tab) against
 
 ## Examples
 
-[`examples/`](examples/) has 23 self-contained, runnable demonstrations, in
+[`examples/`](examples/) has 26 self-contained, runnable demonstrations, in
 order of dependency: the five foundational packages first (real
 identity/signing, two Pods discovering and messaging each other, a
 virtual-network loopback stream, kernel capability enforcement, CRDT sync
