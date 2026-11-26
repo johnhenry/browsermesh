@@ -43,7 +43,7 @@
     "@johnhenry/browsermesh-core": "^0.14.0",
     "@johnhenry/browsermesh-discovery": "^0.7.0",
     "@johnhenry/browsermesh-primitives": "^0.8.0",
-    "@johnhenry/wsh": "^0.57.0",
+    "@johnhenry/wsh": "^0.59.0",
     "node-datachannel": "^0.33.4"
   },
   "engines": {
