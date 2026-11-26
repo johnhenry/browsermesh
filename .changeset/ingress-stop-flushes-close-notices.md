@@ -1,0 +1,6 @@
+---
+"@johnhenry/browsermesh-ingress": minor
+"@johnhenry/browsermesh-apps": minor
+---
+
+A request in flight when a pod is torn down in the README's order is ended at once with a status and a reason, instead of waiting for its deadline. `serveHttpOnMesh(...).stop()` now returns a promise that resolves once the close notices of its `http` channels have left the pod (it used to return before they were sent, and the node's close that followed lost them, so the ingress was never told); `await` it before closing the node (README, "Closing a pod: the order", now says so). New option `stop({ graceMs })` (default 0, unchanged behaviour: end everything now) lets the requests being answered finish first, for at most `graceMs`; a request that arrives meanwhile is refused and the visitor gets 503 `provider-stopping` (new reason, with `Retry-After`; an older ingress shows it as 502 `provider-failed`). `openNameClient(...).close()` also waits for its channel's close notice. Apps: a protocol channel's `close()` returns a promise that settles (never rejects) once the notice to the other end has left; callers that ignore the return value are unaffected, and an older apps gives `undefined`, which `stop()` and `close()` accept (they then have nothing to wait for).

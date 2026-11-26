@@ -29,6 +29,8 @@ export const PROVIDER_LIMIT_DEFAULTS = Object.freeze({
   maxTargetLength: 2048,
 })
 
+/** How long `stop()` waits for the close notices to leave the pod: a link that cannot send them does not hold the stop up. */
+const CLOSE_FLUSH_MS = 2_000
 const unref = (t) => { t?.unref?.(); return t }
 const asChannelError = (e) => (e instanceof MeshChannelError ? e
   : e instanceof IngressError ? new MeshChannelError(e.status === 405 ? ChannelErrorCode.UNSUPPORTED : ChannelErrorCode.INVALID, e.reason, e.message)
@@ -110,6 +112,8 @@ export function serveHttpOnMesh(service, handler, { allowFrom, limits: limitOpti
   const log = onLog || (() => {})
 
   const channels = new Set()
+  let stopping = false // set by `stop()`: no request is begun any more (a pod that is stopping answers `stopping`)
+  const idleListeners = new Set() // called whenever a request in flight ends
   const counters = { channels: 0, requests: 0, refused: 0, declined: 0, errors: 0, requestBytes: 0, responseBytes: 0, inflight: 0 }
   // Why `verifyRequest` refused, by named reason: `request-unverified` for a hook that said no, or one of `requireLinkKey`'s.
   const refusals = {}
@@ -167,6 +171,8 @@ export function serveHttpOnMesh(service, handler, { allowFrom, limits: limitOpti
 
     channel.onRequest(FETCH_METHOD, async (params, ctx) => {
       if (open === false) { counters.refused += 1; throw new MeshChannelError(ChannelErrorCode.UNAUTHORIZED, 'not-authorized', 'not served') }
+      // Told before anything is read or run: the ingress answers the visitor 503 `provider-stopping` and the handler never sees it.
+      if (stopping) { counters.refused += 1; throw new MeshChannelError(ChannelErrorCode.BUSY, 'stopping', 'this pod is stopping') }
       // Asked again for every request, so a function that stops saying yes stops the next request, and a decision still
       // pending at the open is settled before any work (a list is a plain lookup).
       if ((await decide(peer, context)) !== true) {
@@ -195,6 +201,7 @@ export function serveHttpOnMesh(service, handler, { allowFrom, limits: limitOpti
         if (had) { clearTimeout(had.timer); bodies.delete(head.rid) }
         inflight -= 1
         counters.inflight -= 1
+        for (const listener of [...idleListeners]) listener()
       }
       try {
         const { request, body: bodyBytes } = await buildRequest(head, ac, claimBody, limits.maxRequestBodyBytes, counters)
@@ -263,11 +270,40 @@ export function serveHttpOnMesh(service, handler, { allowFrom, limits: limitOpti
   }
 
   const unserve = api.serveProtocol(protocol, accept, { versions: [...HTTP_VERSIONS] })
+  /** Resolves when no request is in flight, or after `ms`. */
+  const drained = (ms) => new Promise((resolve) => {
+    let timer
+    const check = () => { if (counters.inflight === 0) done() }
+    const done = () => { clearTimeout(timer); idleListeners.delete(check); resolve() }
+    timer = unref(setTimeout(done, ms))
+    idleListeners.add(check)
+    check()
+  })
+  let stopped = null
   return {
-    stop() {
+    /**
+     * Stop serving: no new link is accepted, and the channels close. Returns a promise that resolves once the channels' close
+     * notices have left this pod (at most `CLOSE_FLUSH_MS`), so `await served.stop()` before closing the node is what makes
+     * the ingress hear that its requests are over. `graceMs` (default 0: end everything at once, as before) lets the requests
+     * being answered finish first, for at most that long; a request that arrives meanwhile is refused (the ingress answers
+     * the visitor 503 `provider-stopping`). A second call is the same stop.
+     */
+    stop({ graceMs = 0 } = {}) {
+      if (!Number.isSafeInteger(graceMs) || graceMs < 0) throw new TypeError('serveHttpOnMesh: stop({ graceMs }) must be a non-negative integer of milliseconds')
+      if (stopped) return stopped
+      stopping = true
       unserve()
-      for (const channel of [...channels]) { try { channel.close('stopped') } catch { /* gone */ } }
-      channels.clear()
+      stopped = (async () => {
+        if (graceMs > 0 && counters.inflight > 0) await drained(graceMs)
+        const notices = [...channels].map((channel) => { try { return channel.close('stopped') } catch { return undefined } })
+        channels.clear()
+        // (a channel of an older apps closes without a promise: there is nothing to wait for)
+        await new Promise((resolve) => {
+          const timer = unref(setTimeout(resolve, CLOSE_FLUSH_MS))
+          Promise.allSettled(notices).then(() => { clearTimeout(timer); resolve() })
+        })
+      })()
+      return stopped
     },
     stats: () => ({ ...counters, open: channels.size, refusals: { ...refusals } }),
   }

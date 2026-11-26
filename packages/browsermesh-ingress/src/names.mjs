@@ -279,7 +279,14 @@ export async function openNameClient(service, ingressPodId, { timeoutMs = 10_000
     async close() {
       if (channel.closed) return
       try { await channel.request('bye', {}, { timeoutMs: closeTimeoutMs }) } catch { /* an older ingress, or none: the close below says it */ }
-      channel.close(GOODBYE_REASON)
+      // The close notice (the reason `done`) is what an ingress without `bye` reads as the goodbye: wait for it to leave too (a
+      // channel of an older apps gives no promise, and a link that cannot send it does not hold the close up past `closeTimeoutMs`).
+      const left = channel.close(GOODBYE_REASON)
+      if (left && typeof left.then === 'function') {
+        let timer
+        await Promise.race([left, new Promise((resolve) => { timer = setTimeout(resolve, closeTimeoutMs); timer.unref?.() })])
+        clearTimeout(timer)
+      }
     },
   }
 }

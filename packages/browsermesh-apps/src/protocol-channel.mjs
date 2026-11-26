@@ -16,7 +16,8 @@
  *   channel.onRequest(method, handler)       handler(params, { peer, signal, progress })
  *   channel.onNotification(method, handler)  handler(params, { peer })
  *   channel.onClose(cb)                cb(error)
- *   channel.close()
+ *   channel.close(reason?)             closes now; returns a Promise that settles (never rejects) once the notice to the
+ *                                      other end has left, so a caller about to close the node can wait for it
  *
  * `assertProtocolChannel(x)` checks an object has that shape. The mesh channel
  * link (`mesh-channel.mjs`), the named protocol channels built here, and any
@@ -173,7 +174,7 @@ export function createProtocolHost({ authorize, onLog } = {}) {
         return () => closeListeners.delete(cb)
       },
       close(reason, { notifyRemote = true, remoteReason } = {}) {
-        if (closed) return
+        if (closed) return Promise.resolve()
         closed = true
         if (typeof remoteReason === 'string' && REASON_RE.test(remoteReason)) channel.remoteReason = remoteReason
         for (const off of unsubs.splice(0)) { try { off() } catch { /* already gone */ } }
@@ -181,10 +182,13 @@ export function createProtocolHost({ authorize, onLog } = {}) {
         st.messageListeners.delete(name)
         // The other end is told why, when the reason is short plain text: `{ name, reason }`. A peer that predates the field ignores it.
         const said = typeof reason === 'string' && REASON_RE.test(reason) ? { reason } : {}
-        if (notifyRemote && !link.closed) link.notify(PROTOCOL_CLOSE_METHOD, { name, ...said }).catch(() => {})
+        // The notice is queued now; the returned promise settles once it has left (or could not), so a caller that is about to close
+        // the node under the link can wait for it. It never rejects.
+        const left = notifyRemote && !link.closed ? link.notify(PROTOCOL_CLOSE_METHOD, { name, ...said }).then(() => {}, () => {}) : Promise.resolve()
         const why = reason instanceof Error ? reason : null
         for (const cb of [...closeListeners]) { try { cb(why) } catch (e) { log('protocol:close-listener-threw', { name, error: e?.message }) } }
         closeListeners.clear()
+        return left
       },
     }
     st.channels.set(name, channel)

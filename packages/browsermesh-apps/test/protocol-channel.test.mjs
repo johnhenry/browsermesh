@@ -299,6 +299,31 @@ test('closing a channel closes the other end; closing the link closes every chan
   } finally { teardown() }
 })
 
+test('close() returns a promise that settles once the close notice has left, and never rejects', async () => {
+  const { alice, bob, regB, a, b, teardown } = await meshPair()
+  try {
+    b.api.serveProtocol('counter', () => {})
+    regB.grantCapabilities(alice.podId, [protocolScope('counter')])
+    const client = await a.api.openProtocol(bob.podId, 'counter')
+    await flush()
+    // Alice's node sends each frame a turn of the event loop later; what it has not sent when the link is cut never leaves.
+    const sent = []
+    const send = alice.sendTo.bind(alice)
+    alice.sendTo = async (to, data) => { await new Promise(r => setImmediate(r)); sent.push(data); return send(to, data) }
+    const closing = client.close('stopped')
+    assert.ok(closing && typeof closing.then === 'function', 'close() returns a promise')
+    assert.equal(sent.length, 0, 'nothing has left yet')
+    assert.equal(await closing, undefined)
+    assert.equal(sent.length, 1, 'the notice has left when the promise settles')
+    assert.equal(client.closed, true)
+    // a channel that is already closed, and a link that is gone: still a promise, still settles
+    assert.equal(await client.close(), undefined)
+    const second = await a.api.openProtocol(bob.podId, 'counter')
+    a.api.channel.link(bob.podId).close()
+    assert.equal(await second.close(), undefined)
+  } finally { teardown() }
+})
+
 test('a peer that does not support protocols answers the open with an error, and a peer without the channel is refused cleanly', async () => {
   const [alice, bob, oldPeer] = await network()
   registryFor(alice); registryFor(bob)
