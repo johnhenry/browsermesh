@@ -424,6 +424,16 @@ response read as a stream error, and the ingress cut the visitor off after the w
 link. Now one connection is one session, a link ends when its connection ends, and a frame left over from a link that has ended
 cannot touch the one that replaced it.
 
+**A pod that only serves** (a hand `--map`, no name claimed: the pod never opens a channel to the ingress) and restarts on the
+connection the ingress still holds open was not noticed: the ingress went on sending over a link the new node knows nothing of,
+and the visitor waited out `openTimeoutMs` (10 s) for a 504 `provider-timeout`, on every request, for as long as the ingress kept
+that link (a pod that claims a name opens a channel and says hello, which is why a claimed name did not have this). Now an offer that
+arrives for a connection the node holds open ends the channel link that ran over it (in `@johnhenry/browsermesh-apps`, on the ingress's side), so the
+requests on it end at once with 502 `provider-closed` and the next one opens a new link on the pod's new connection. Nothing else
+is needed from the pod: serve, dial, and (for a pod that stops) `await served.stop()` as above. The change is on the ingress's
+side and adds nothing to the wire: an older pod is served as well as a new one, and an older ingress is as it was (the stale link
+stays until something ends it).
+
 **What an older peer does.** Both fixes are in `@johnhenry/browsermesh-apps` (0.28), which the ingress and the pod each run.
 - *A pod older than the fix, an ingress with it*: restarts are served (the duplicate connection was the ingress's), and a crossing
   dial is won by the ingress (an older pod's offers carry no marker, so it is assumed to give way, as every older pod does): the

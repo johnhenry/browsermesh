@@ -448,9 +448,12 @@ export class PeerNode {
    *   `DEFAULT_CONNECTION_ID`. `webrtc-negotiator.mjs`'s
    *   `onIncomingConnection` hook passes through whichever connectionId the
    *   inbound offer carried.
+   * @param {boolean} [opts.restarted] - The peer started over on a connection this node held open (the negotiator saw an
+   *   offer for it): emits `peer:transport-restart` `{ pubKey, sessionId, transport, connectionId }`, which a channel
+   *   link to that peer follows by ending.
    * @returns {Promise<object>} Session info (same shape as `connectToPeer()`'s)
    */
-  async adoptIncomingSession(pubKey, transportInstance, transportType, { connectionId = DEFAULT_CONNECTION_ID } = {}) {
+  async adoptIncomingSession(pubKey, transportInstance, transportType, { connectionId = DEFAULT_CONNECTION_ID, restarted = false } = {}) {
     this.#ensureRunning('adoptIncomingSession')
     if (!pubKey || typeof pubKey !== 'string') {
       throw new Error('adoptIncomingSession: pubKey is required')
@@ -468,6 +471,9 @@ export class PeerNode {
       pubKey,
       transport: transportType,
     })
+
+    // The peer started over on the connection this node held open: whatever ran over the old one (a mesh-channel link) is over.
+    if (restarted) this.#emit('peer:transport-restart', { pubKey, sessionId: session.sessionId, transport: transportType, connectionId })
 
     await this.#audit('peer-node:connect', {
       sessionId: session.sessionId,

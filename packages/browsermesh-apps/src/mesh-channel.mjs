@@ -693,8 +693,16 @@ export function createMeshChannelService({
         if (typeof peerNode.hasActiveSession === 'function' && peerNode.hasActiveSession(peer)) return
         cores.get(peer)?.close(err(ChannelErrorCode.CANCELLED, 'transport-closed', 'the transport to the peer closed'), { notifyRemote: false })
       }
+      // A peer that started over on the connection this node held open (a page loaded again, a node made anew) has no memory of
+      // the link: it answers nothing sent over it, and sends no hello of its own if it only serves. The link ends now, so
+      // what ran on it hears of it at once and the next one is opened afresh (a new hello) on the connection the peer made.
+      const onTransportRestart = (event) => {
+        const peer = event?.pubKey
+        if (closed || typeof peer !== 'string' || (event.connectionId !== undefined && event.connectionId !== 'default')) return
+        cores.get(peer)?.close(err(ChannelErrorCode.CANCELLED, 'transport-restart', 'the peer started over on the connection'), { notifyRemote: false })
+      }
       const canWatch = typeof peerNode.on === 'function' && typeof peerNode.hasActiveSession === 'function'
-      if (canWatch) peerNode.on('peer:transport-close', onTransportClose)
+      if (canWatch) { peerNode.on('peer:transport-close', onTransportClose); peerNode.on('peer:transport-restart', onTransportRestart) }
 
       async function open(peer, { timeoutMs } = {}) {
         if (closed) throw new Error('mesh-channel: service torn down')
@@ -724,7 +732,7 @@ export function createMeshChannelService({
           if (closed) return
           closed = true
           unsubscribe()
-          if (canWatch && typeof peerNode.off === 'function') peerNode.off('peer:transport-close', onTransportClose)
+          if (canWatch && typeof peerNode.off === 'function') { peerNode.off('peer:transport-close', onTransportClose); peerNode.off('peer:transport-restart', onTransportRestart) }
           for (const core of [...cores.values()]) core.close(err(ChannelErrorCode.CANCELLED, 'channel-closed', 'service torn down'))
           cores.clear()
         },

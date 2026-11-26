@@ -120,8 +120,8 @@ export async function createLeanMeshNode(options = {}) {
       node.reportBindingFailure(remotePodId, { transport: 'webrtc', connectionId, reason })
     },
     // The callee side gets the same session bookkeeping the caller side does, so sendTo and incoming data work either way round.
-    onIncomingConnection: (remotePodId, adapter, connectionId) => {
-      node.adoptIncomingSession(remotePodId, adapter, 'webrtc', { connectionId }).catch((err) => {
+    onIncomingConnection: (remotePodId, adapter, connectionId, info) => {
+      node.adoptIncomingSession(remotePodId, adapter, 'webrtc', { connectionId, restarted: info?.restarted === true }).catch((err) => {
         onLog('lean-node:adopt-incoming-session-failed', { remotePodId, connectionId, error: err?.message || String(err) })
       })
     },
