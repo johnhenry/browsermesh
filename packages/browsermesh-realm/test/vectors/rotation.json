@@ -1,0 +1,483 @@
+{
+  "description": "Root rotation vectors (docs/design/realms.md 5.1). A statement is signed by the outgoing root under 'browsermesh-realm/rotation/1' and countersigned by the successor under 'browsermesh-realm/rotation-accept/1' over the statement INCLUDING the first signature. The realm id is the hash of the genesis key. 'held' is the chain the verifier already holds (first seen wins).",
+  "realmId": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+  "keys": {
+    "root0": {
+      "seed": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "publicKey": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+      "keyId": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw"
+    },
+    "root1": {
+      "seed": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "publicKey": "Kay64UG8yvCyLhqU000LxzYeUm0L_hLIl5S8kyKWbdc",
+      "keyId": "JPbtasv-EAnAMNfKVnwzykgwkRSYI2tVYabIKr7F3ig"
+    },
+    "root2": {
+      "seed": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+      "publicKey": "JUO5L_EJVRFHatyDadtt3JM2ZaEZeN2hQE7hBmypVZ0",
+      "keyId": "AzliGSN_daZPEq6385cjq_QAsWDDZJgKdl2sJK66JGQ"
+    },
+    "rogue": {
+      "seed": "606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f",
+      "publicKey": "F0VTtFbd38aQjsqxwQH-arIeK6oGF3lbfUOmNIKZP9U",
+      "keyId": "aIlNWPGPLDTUnrL0sRDgQs0PMVCk3DkkPX9jvVmMB4M"
+    }
+  },
+  "documents": [
+    {
+      "name": "rotation 1: root0 to root1",
+      "domain": "browsermesh-realm/rotation/1",
+      "signer": "root0",
+      "unsigned": "{\"effective\":1800000001,\"from\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\",\"pos\":1,\"realm\":\"Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw\",\"to\":\"Kay64UG8yvCyLhqU000LxzYeUm0L_hLIl5S8kyKWbdc\",\"v\":1}",
+      "signature": "5SOaDK-Kc0GeHxvokCKdfP8aPVj1y20zExkm0MTnIxyxuSU2z8F0Hy9bZgZT8syfZbiCj7tcc8N-ieKP2GDVCw",
+      "signed": "{\"effective\":1800000001,\"from\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\",\"pos\":1,\"realm\":\"Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw\",\"sig\":\"5SOaDK-Kc0GeHxvokCKdfP8aPVj1y20zExkm0MTnIxyxuSU2z8F0Hy9bZgZT8syfZbiCj7tcc8N-ieKP2GDVCw\",\"to\":\"Kay64UG8yvCyLhqU000LxzYeUm0L_hLIl5S8kyKWbdc\",\"v\":1}",
+      "signingBytesHex": "62726f777365726d6573682d7265616c6d2f726f746174696f6e2f31007b22656666656374697665223a313830303030303030312c2266726f6d223a2241364548765f504f454c3464634e3059353076416d57666b316a436270513166486479475a424a564d6267222c22706f73223a312c227265616c6d223a22566b64617031526a52307743686439647679764b747a326d555457494f656d336449477936724548634977222c22746f223a224b61793634554738797643794c6871553030304c787a5965556d304c5f684c496c3553386b794b57626463222c2276223a317d",
+      "countersigner": "root1",
+      "countersignDomain": "browsermesh-realm/rotation-accept/1",
+      "countersignature": "OY35YaZYvc0ZYExCVrB7XqgcIMxrYRlkRwTxH7iPEfKXTsGY529cQWRVojVYkkHAz7UWBkVnKSQHypG3mERcBQ"
+    }
+  ],
+  "cases": [
+    {
+      "name": "valid statement",
+      "op": "verifyRotation",
+      "statement": {
+        "v": 1,
+        "realm": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+        "pos": 1,
+        "from": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+        "to": "Kay64UG8yvCyLhqU000LxzYeUm0L_hLIl5S8kyKWbdc",
+        "effective": 1800000001,
+        "sig": "5SOaDK-Kc0GeHxvokCKdfP8aPVj1y20zExkm0MTnIxyxuSU2z8F0Hy9bZgZT8syfZbiCj7tcc8N-ieKP2GDVCw",
+        "countersig": "OY35YaZYvc0ZYExCVrB7XqgcIMxrYRlkRwTxH7iPEfKXTsGY529cQWRVojVYkkHAz7UWBkVnKSQHypG3mERcBQ"
+      },
+      "options": {
+        "realm": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw"
+      },
+      "expect": {
+        "ok": true
+      }
+    },
+    {
+      "name": "tampered effective time",
+      "op": "verifyRotation",
+      "statement": {
+        "v": 1,
+        "realm": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+        "pos": 1,
+        "from": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+        "to": "Kay64UG8yvCyLhqU000LxzYeUm0L_hLIl5S8kyKWbdc",
+        "effective": 1800000002,
+        "sig": "5SOaDK-Kc0GeHxvokCKdfP8aPVj1y20zExkm0MTnIxyxuSU2z8F0Hy9bZgZT8syfZbiCj7tcc8N-ieKP2GDVCw",
+        "countersig": "OY35YaZYvc0ZYExCVrB7XqgcIMxrYRlkRwTxH7iPEfKXTsGY529cQWRVojVYkkHAz7UWBkVnKSQHypG3mERcBQ"
+      },
+      "options": {
+        "realm": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw"
+      },
+      "expect": {
+        "ok": false,
+        "reason": "bad-signature"
+      }
+    },
+    {
+      "name": "tampered successor",
+      "op": "verifyRotation",
+      "statement": {
+        "v": 1,
+        "realm": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+        "pos": 1,
+        "from": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+        "to": "F0VTtFbd38aQjsqxwQH-arIeK6oGF3lbfUOmNIKZP9U",
+        "effective": 1800000001,
+        "sig": "5SOaDK-Kc0GeHxvokCKdfP8aPVj1y20zExkm0MTnIxyxuSU2z8F0Hy9bZgZT8syfZbiCj7tcc8N-ieKP2GDVCw",
+        "countersig": "OY35YaZYvc0ZYExCVrB7XqgcIMxrYRlkRwTxH7iPEfKXTsGY529cQWRVojVYkkHAz7UWBkVnKSQHypG3mERcBQ"
+      },
+      "options": {
+        "realm": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw"
+      },
+      "expect": {
+        "ok": false,
+        "reason": "bad-signature"
+      }
+    },
+    {
+      "name": "wrong domain: countersigned under the rotation domain",
+      "op": "verifyRotation",
+      "statement": {
+        "v": 1,
+        "realm": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+        "pos": 1,
+        "from": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+        "to": "Kay64UG8yvCyLhqU000LxzYeUm0L_hLIl5S8kyKWbdc",
+        "effective": 1800000001,
+        "sig": "5SOaDK-Kc0GeHxvokCKdfP8aPVj1y20zExkm0MTnIxyxuSU2z8F0Hy9bZgZT8syfZbiCj7tcc8N-ieKP2GDVCw",
+        "countersig": "9QY8llWISF9mQXDHGeG4WeZxHgAyC4wrgLh_AeEAOPK7QtnMNAxBRe2W1v2fdeJ6ZkxjtGfaZxQenczBf13mDg"
+      },
+      "options": {
+        "realm": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw"
+      },
+      "expect": {
+        "ok": false,
+        "reason": "bad-countersignature"
+      }
+    },
+    {
+      "name": "countersigned by a key that is not the successor",
+      "op": "verifyRotation",
+      "statement": {
+        "v": 1,
+        "realm": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+        "pos": 1,
+        "from": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+        "to": "Kay64UG8yvCyLhqU000LxzYeUm0L_hLIl5S8kyKWbdc",
+        "effective": 1800000001,
+        "sig": "5SOaDK-Kc0GeHxvokCKdfP8aPVj1y20zExkm0MTnIxyxuSU2z8F0Hy9bZgZT8syfZbiCj7tcc8N-ieKP2GDVCw",
+        "countersig": "DIFsaG3pBa1RhtLgUGDNn0_-gbu3qakEtN7cFovJutocD_X_nIxmLQYfqdn5o6WOYaMZtE_7tg9a47H7sObXAw"
+      },
+      "options": {
+        "realm": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw"
+      },
+      "expect": {
+        "ok": false,
+        "reason": "bad-countersignature"
+      }
+    },
+    {
+      "name": "missing countersignature",
+      "op": "verifyRotation",
+      "statement": {
+        "v": 1,
+        "realm": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+        "pos": 1,
+        "from": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+        "to": "Kay64UG8yvCyLhqU000LxzYeUm0L_hLIl5S8kyKWbdc",
+        "effective": 1800000001,
+        "sig": "5SOaDK-Kc0GeHxvokCKdfP8aPVj1y20zExkm0MTnIxyxuSU2z8F0Hy9bZgZT8syfZbiCj7tcc8N-ieKP2GDVCw"
+      },
+      "options": {
+        "realm": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw"
+      },
+      "expect": {
+        "ok": false,
+        "reason": "malformed"
+      }
+    },
+    {
+      "name": "statement for another realm",
+      "op": "verifyRotation",
+      "statement": {
+        "v": 1,
+        "realm": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+        "pos": 1,
+        "from": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+        "to": "Kay64UG8yvCyLhqU000LxzYeUm0L_hLIl5S8kyKWbdc",
+        "effective": 1800000001,
+        "sig": "5SOaDK-Kc0GeHxvokCKdfP8aPVj1y20zExkm0MTnIxyxuSU2z8F0Hy9bZgZT8syfZbiCj7tcc8N-ieKP2GDVCw",
+        "countersig": "OY35YaZYvc0ZYExCVrB7XqgcIMxrYRlkRwTxH7iPEfKXTsGY529cQWRVojVYkkHAz7UWBkVnKSQHypG3mERcBQ"
+      },
+      "options": {
+        "realm": "aIlNWPGPLDTUnrL0sRDgQs0PMVCk3DkkPX9jvVmMB4M"
+      },
+      "expect": {
+        "ok": false,
+        "reason": "wrong-realm"
+      }
+    },
+    {
+      "name": "valid chain of two",
+      "op": "verifyChain",
+      "chain": [
+        {
+          "v": 1,
+          "realm": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+          "pos": 1,
+          "from": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+          "to": "Kay64UG8yvCyLhqU000LxzYeUm0L_hLIl5S8kyKWbdc",
+          "effective": 1800000001,
+          "sig": "5SOaDK-Kc0GeHxvokCKdfP8aPVj1y20zExkm0MTnIxyxuSU2z8F0Hy9bZgZT8syfZbiCj7tcc8N-ieKP2GDVCw",
+          "countersig": "OY35YaZYvc0ZYExCVrB7XqgcIMxrYRlkRwTxH7iPEfKXTsGY529cQWRVojVYkkHAz7UWBkVnKSQHypG3mERcBQ"
+        },
+        {
+          "v": 1,
+          "realm": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+          "pos": 2,
+          "from": "Kay64UG8yvCyLhqU000LxzYeUm0L_hLIl5S8kyKWbdc",
+          "to": "JUO5L_EJVRFHatyDadtt3JM2ZaEZeN2hQE7hBmypVZ0",
+          "effective": 1800000002,
+          "sig": "U_FWJCVbM3fud8HT_PPukwYRwMeEMsfJ0Kpb-Ob1PNm_MpqPoTo1UCbsvF0f5R7Eb2xEc8r3GxwdrkW6-AhuAQ",
+          "countersig": "tdBOBZg08CKCV75OzGMRtKZmemAmUaMwTRl27xjhSNhaYYne69Wru_sYH01P1bebvVlvyiYwMN2ThcUfYoz2Cw"
+        }
+      ],
+      "options": {
+        "id": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+        "key": "JUO5L_EJVRFHatyDadtt3JM2ZaEZeN2hQE7hBmypVZ0"
+      },
+      "expect": {
+        "ok": true
+      }
+    },
+    {
+      "name": "empty chain at the genesis key",
+      "op": "verifyChain",
+      "chain": [],
+      "options": {
+        "id": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+        "key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg"
+      },
+      "expect": {
+        "ok": true
+      }
+    },
+    {
+      "name": "empty chain at a key that is not the genesis key",
+      "op": "verifyChain",
+      "chain": [],
+      "options": {
+        "id": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+        "key": "Kay64UG8yvCyLhqU000LxzYeUm0L_hLIl5S8kyKWbdc"
+      },
+      "expect": {
+        "ok": false,
+        "reason": "bad-id"
+      }
+    },
+    {
+      "name": "chain with a gap",
+      "op": "verifyChain",
+      "chain": [
+        {
+          "v": 1,
+          "realm": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+          "pos": 2,
+          "from": "Kay64UG8yvCyLhqU000LxzYeUm0L_hLIl5S8kyKWbdc",
+          "to": "JUO5L_EJVRFHatyDadtt3JM2ZaEZeN2hQE7hBmypVZ0",
+          "effective": 1800000002,
+          "sig": "U_FWJCVbM3fud8HT_PPukwYRwMeEMsfJ0Kpb-Ob1PNm_MpqPoTo1UCbsvF0f5R7Eb2xEc8r3GxwdrkW6-AhuAQ",
+          "countersig": "tdBOBZg08CKCV75OzGMRtKZmemAmUaMwTRl27xjhSNhaYYne69Wru_sYH01P1bebvVlvyiYwMN2ThcUfYoz2Cw"
+        }
+      ],
+      "options": {
+        "id": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+        "key": "JUO5L_EJVRFHatyDadtt3JM2ZaEZeN2hQE7hBmypVZ0"
+      },
+      "expect": {
+        "ok": false,
+        "reason": "bad-chain"
+      }
+    },
+    {
+      "name": "chain ending at the wrong key",
+      "op": "verifyChain",
+      "chain": [
+        {
+          "v": 1,
+          "realm": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+          "pos": 1,
+          "from": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+          "to": "Kay64UG8yvCyLhqU000LxzYeUm0L_hLIl5S8kyKWbdc",
+          "effective": 1800000001,
+          "sig": "5SOaDK-Kc0GeHxvokCKdfP8aPVj1y20zExkm0MTnIxyxuSU2z8F0Hy9bZgZT8syfZbiCj7tcc8N-ieKP2GDVCw",
+          "countersig": "OY35YaZYvc0ZYExCVrB7XqgcIMxrYRlkRwTxH7iPEfKXTsGY529cQWRVojVYkkHAz7UWBkVnKSQHypG3mERcBQ"
+        },
+        {
+          "v": 1,
+          "realm": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+          "pos": 2,
+          "from": "Kay64UG8yvCyLhqU000LxzYeUm0L_hLIl5S8kyKWbdc",
+          "to": "JUO5L_EJVRFHatyDadtt3JM2ZaEZeN2hQE7hBmypVZ0",
+          "effective": 1800000002,
+          "sig": "U_FWJCVbM3fud8HT_PPukwYRwMeEMsfJ0Kpb-Ob1PNm_MpqPoTo1UCbsvF0f5R7Eb2xEc8r3GxwdrkW6-AhuAQ",
+          "countersig": "tdBOBZg08CKCV75OzGMRtKZmemAmUaMwTRl27xjhSNhaYYne69Wru_sYH01P1bebvVlvyiYwMN2ThcUfYoz2Cw"
+        }
+      ],
+      "options": {
+        "id": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+        "key": "Kay64UG8yvCyLhqU000LxzYeUm0L_hLIl5S8kyKWbdc"
+      },
+      "expect": {
+        "ok": false,
+        "reason": "bad-chain"
+      }
+    },
+    {
+      "name": "chain over the length cap",
+      "op": "verifyChain",
+      "chain": [
+        {
+          "v": 1,
+          "realm": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+          "pos": 1,
+          "from": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+          "to": "Kay64UG8yvCyLhqU000LxzYeUm0L_hLIl5S8kyKWbdc",
+          "effective": 1800000001,
+          "sig": "5SOaDK-Kc0GeHxvokCKdfP8aPVj1y20zExkm0MTnIxyxuSU2z8F0Hy9bZgZT8syfZbiCj7tcc8N-ieKP2GDVCw",
+          "countersig": "OY35YaZYvc0ZYExCVrB7XqgcIMxrYRlkRwTxH7iPEfKXTsGY529cQWRVojVYkkHAz7UWBkVnKSQHypG3mERcBQ"
+        },
+        {
+          "v": 1,
+          "realm": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+          "pos": 2,
+          "from": "Kay64UG8yvCyLhqU000LxzYeUm0L_hLIl5S8kyKWbdc",
+          "to": "JUO5L_EJVRFHatyDadtt3JM2ZaEZeN2hQE7hBmypVZ0",
+          "effective": 1800000002,
+          "sig": "U_FWJCVbM3fud8HT_PPukwYRwMeEMsfJ0Kpb-Ob1PNm_MpqPoTo1UCbsvF0f5R7Eb2xEc8r3GxwdrkW6-AhuAQ",
+          "countersig": "tdBOBZg08CKCV75OzGMRtKZmemAmUaMwTRl27xjhSNhaYYne69Wru_sYH01P1bebvVlvyiYwMN2ThcUfYoz2Cw"
+        }
+      ],
+      "options": {
+        "id": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+        "key": "JUO5L_EJVRFHatyDadtt3JM2ZaEZeN2hQE7hBmypVZ0",
+        "maxChain": 1
+      },
+      "expect": {
+        "ok": false,
+        "reason": "chain-too-long"
+      }
+    },
+    {
+      "name": "forked chain: a fresh verifier cannot tell (known limit)",
+      "op": "verifyChain",
+      "chain": [
+        {
+          "v": 1,
+          "realm": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+          "pos": 1,
+          "from": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+          "to": "F0VTtFbd38aQjsqxwQH-arIeK6oGF3lbfUOmNIKZP9U",
+          "effective": 1800000001,
+          "sig": "wQJjm2w29CT-ux-mbiaAC93AWPNopzcpOTjrX4PVhlmg7fK2EXBlxCleWEFOsNCCuON_JXTWkFgyHVQCk29tDw",
+          "countersig": "bh-Lrk4HJQuyWjf3bx4yctc5KNc4MVEm_y-cE8jEJWkT2gnqxeKefm2Vrs1Me6E-Bwfst8aEnAJrkCOwnW4NDw"
+        }
+      ],
+      "options": {
+        "id": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+        "key": "F0VTtFbd38aQjsqxwQH-arIeK6oGF3lbfUOmNIKZP9U"
+      },
+      "expect": {
+        "ok": true
+      }
+    },
+    {
+      "name": "forked chain refused by first-seen rule",
+      "op": "verifyChain",
+      "chain": [
+        {
+          "v": 1,
+          "realm": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+          "pos": 1,
+          "from": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+          "to": "F0VTtFbd38aQjsqxwQH-arIeK6oGF3lbfUOmNIKZP9U",
+          "effective": 1800000001,
+          "sig": "wQJjm2w29CT-ux-mbiaAC93AWPNopzcpOTjrX4PVhlmg7fK2EXBlxCleWEFOsNCCuON_JXTWkFgyHVQCk29tDw",
+          "countersig": "bh-Lrk4HJQuyWjf3bx4yctc5KNc4MVEm_y-cE8jEJWkT2gnqxeKefm2Vrs1Me6E-Bwfst8aEnAJrkCOwnW4NDw"
+        }
+      ],
+      "options": {
+        "id": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+        "key": "F0VTtFbd38aQjsqxwQH-arIeK6oGF3lbfUOmNIKZP9U",
+        "held": [
+          {
+            "v": 1,
+            "realm": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+            "pos": 1,
+            "from": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+            "to": "Kay64UG8yvCyLhqU000LxzYeUm0L_hLIl5S8kyKWbdc",
+            "effective": 1800000001,
+            "sig": "5SOaDK-Kc0GeHxvokCKdfP8aPVj1y20zExkm0MTnIxyxuSU2z8F0Hy9bZgZT8syfZbiCj7tcc8N-ieKP2GDVCw",
+            "countersig": "OY35YaZYvc0ZYExCVrB7XqgcIMxrYRlkRwTxH7iPEfKXTsGY529cQWRVojVYkkHAz7UWBkVnKSQHypG3mERcBQ"
+          }
+        ]
+      },
+      "expect": {
+        "ok": false,
+        "reason": "chain-fork"
+      }
+    },
+    {
+      "name": "regressed chain refused",
+      "op": "verifyChain",
+      "chain": [
+        {
+          "v": 1,
+          "realm": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+          "pos": 1,
+          "from": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+          "to": "Kay64UG8yvCyLhqU000LxzYeUm0L_hLIl5S8kyKWbdc",
+          "effective": 1800000001,
+          "sig": "5SOaDK-Kc0GeHxvokCKdfP8aPVj1y20zExkm0MTnIxyxuSU2z8F0Hy9bZgZT8syfZbiCj7tcc8N-ieKP2GDVCw",
+          "countersig": "OY35YaZYvc0ZYExCVrB7XqgcIMxrYRlkRwTxH7iPEfKXTsGY529cQWRVojVYkkHAz7UWBkVnKSQHypG3mERcBQ"
+        }
+      ],
+      "options": {
+        "id": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+        "key": "Kay64UG8yvCyLhqU000LxzYeUm0L_hLIl5S8kyKWbdc",
+        "held": [
+          {
+            "v": 1,
+            "realm": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+            "pos": 1,
+            "from": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+            "to": "Kay64UG8yvCyLhqU000LxzYeUm0L_hLIl5S8kyKWbdc",
+            "effective": 1800000001,
+            "sig": "5SOaDK-Kc0GeHxvokCKdfP8aPVj1y20zExkm0MTnIxyxuSU2z8F0Hy9bZgZT8syfZbiCj7tcc8N-ieKP2GDVCw",
+            "countersig": "OY35YaZYvc0ZYExCVrB7XqgcIMxrYRlkRwTxH7iPEfKXTsGY529cQWRVojVYkkHAz7UWBkVnKSQHypG3mERcBQ"
+          },
+          {
+            "v": 1,
+            "realm": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+            "pos": 2,
+            "from": "Kay64UG8yvCyLhqU000LxzYeUm0L_hLIl5S8kyKWbdc",
+            "to": "JUO5L_EJVRFHatyDadtt3JM2ZaEZeN2hQE7hBmypVZ0",
+            "effective": 1800000002,
+            "sig": "U_FWJCVbM3fud8HT_PPukwYRwMeEMsfJ0Kpb-Ob1PNm_MpqPoTo1UCbsvF0f5R7Eb2xEc8r3GxwdrkW6-AhuAQ",
+            "countersig": "tdBOBZg08CKCV75OzGMRtKZmemAmUaMwTRl27xjhSNhaYYne69Wru_sYH01P1bebvVlvyiYwMN2ThcUfYoz2Cw"
+          }
+        ]
+      },
+      "expect": {
+        "ok": false,
+        "reason": "chain-regressed"
+      }
+    },
+    {
+      "name": "forked chain: descriptor adoption refused",
+      "op": "adoptDescriptor",
+      "held": "{\"admitters\":[],\"epoch\":0,\"extensions\":{},\"id\":\"Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw\",\"issuers\":[],\"labels\":{},\"mode\":\"invite\",\"name\":\"rotated\",\"rendezvous\":{\"bootstrap\":[\"https://boot.example.test/\"],\"ice\":[{\"urls\":[\"stun:stun.example.test:3478\"]}],\"relays\":[\"wss://relay.example.test/wsh\"],\"signaling\":[\"wss://sig.example.test/ws\"]},\"revoked\":[],\"roles\":{\"guest\":[\"protocol:mcp:open\"],\"member\":[\"mcp:search:call\",\"objects:window:get\",\"protocol:mcp:open\"]},\"root\":{\"chain\":[{\"countersig\":\"OY35YaZYvc0ZYExCVrB7XqgcIMxrYRlkRwTxH7iPEfKXTsGY529cQWRVojVYkkHAz7UWBkVnKSQHypG3mERcBQ\",\"effective\":1800000001,\"from\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\",\"pos\":1,\"realm\":\"Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw\",\"sig\":\"5SOaDK-Kc0GeHxvokCKdfP8aPVj1y20zExkm0MTnIxyxuSU2z8F0Hy9bZgZT8syfZbiCj7tcc8N-ieKP2GDVCw\",\"to\":\"Kay64UG8yvCyLhqU000LxzYeUm0L_hLIl5S8kyKWbdc\",\"v\":1}],\"key\":\"Kay64UG8yvCyLhqU000LxzYeUm0L_hLIl5S8kyKWbdc\"},\"serial\":2,\"sig\":\"69dlEW_3XkXmirCKpeiMISpBe9CmzfCLZ6pAQ3OufAmxSkmRldlEYf-zGrJ3jHXRhh8VeSBLhfNOpRsgC_RXDg\",\"ttl\":604800,\"v\":1}",
+      "offered": "{\"admitters\":[],\"epoch\":0,\"extensions\":{},\"id\":\"Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw\",\"issuers\":[],\"labels\":{},\"mode\":\"invite\",\"name\":\"rotated\",\"rendezvous\":{\"bootstrap\":[\"https://boot.example.test/\"],\"ice\":[{\"urls\":[\"stun:stun.example.test:3478\"]}],\"relays\":[\"wss://relay.example.test/wsh\"],\"signaling\":[\"wss://sig.example.test/ws\"]},\"revoked\":[],\"roles\":{\"guest\":[\"protocol:mcp:open\"],\"member\":[\"mcp:search:call\",\"objects:window:get\",\"protocol:mcp:open\"]},\"root\":{\"chain\":[{\"countersig\":\"bh-Lrk4HJQuyWjf3bx4yctc5KNc4MVEm_y-cE8jEJWkT2gnqxeKefm2Vrs1Me6E-Bwfst8aEnAJrkCOwnW4NDw\",\"effective\":1800000001,\"from\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\",\"pos\":1,\"realm\":\"Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw\",\"sig\":\"wQJjm2w29CT-ux-mbiaAC93AWPNopzcpOTjrX4PVhlmg7fK2EXBlxCleWEFOsNCCuON_JXTWkFgyHVQCk29tDw\",\"to\":\"F0VTtFbd38aQjsqxwQH-arIeK6oGF3lbfUOmNIKZP9U\",\"v\":1}],\"key\":\"F0VTtFbd38aQjsqxwQH-arIeK6oGF3lbfUOmNIKZP9U\"},\"serial\":9,\"sig\":\"5QtbIxjryLKeuGKXxGzHN47kzn5qvmxv0gR1itpzCMEUjQB8fqdYZCYDr3D1x49koEhWfiVpc96CFxrfK7TNDw\",\"ttl\":604800,\"v\":1}",
+      "options": {
+        "pinnedId": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+        "now": 1800000000
+      },
+      "expect": {
+        "ok": false,
+        "reason": "chain-fork"
+      }
+    },
+    {
+      "name": "extending chain: descriptor adoption accepted",
+      "op": "adoptDescriptor",
+      "held": "{\"admitters\":[],\"epoch\":0,\"extensions\":{},\"id\":\"Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw\",\"issuers\":[],\"labels\":{},\"mode\":\"invite\",\"name\":\"rotated\",\"rendezvous\":{\"bootstrap\":[\"https://boot.example.test/\"],\"ice\":[{\"urls\":[\"stun:stun.example.test:3478\"]}],\"relays\":[\"wss://relay.example.test/wsh\"],\"signaling\":[\"wss://sig.example.test/ws\"]},\"revoked\":[],\"roles\":{\"guest\":[\"protocol:mcp:open\"],\"member\":[\"mcp:search:call\",\"objects:window:get\",\"protocol:mcp:open\"]},\"root\":{\"chain\":[{\"countersig\":\"OY35YaZYvc0ZYExCVrB7XqgcIMxrYRlkRwTxH7iPEfKXTsGY529cQWRVojVYkkHAz7UWBkVnKSQHypG3mERcBQ\",\"effective\":1800000001,\"from\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\",\"pos\":1,\"realm\":\"Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw\",\"sig\":\"5SOaDK-Kc0GeHxvokCKdfP8aPVj1y20zExkm0MTnIxyxuSU2z8F0Hy9bZgZT8syfZbiCj7tcc8N-ieKP2GDVCw\",\"to\":\"Kay64UG8yvCyLhqU000LxzYeUm0L_hLIl5S8kyKWbdc\",\"v\":1}],\"key\":\"Kay64UG8yvCyLhqU000LxzYeUm0L_hLIl5S8kyKWbdc\"},\"serial\":2,\"sig\":\"69dlEW_3XkXmirCKpeiMISpBe9CmzfCLZ6pAQ3OufAmxSkmRldlEYf-zGrJ3jHXRhh8VeSBLhfNOpRsgC_RXDg\",\"ttl\":604800,\"v\":1}",
+      "offered": "{\"admitters\":[],\"epoch\":0,\"extensions\":{},\"id\":\"Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw\",\"issuers\":[],\"labels\":{},\"mode\":\"invite\",\"name\":\"rotated\",\"rendezvous\":{\"bootstrap\":[\"https://boot.example.test/\"],\"ice\":[{\"urls\":[\"stun:stun.example.test:3478\"]}],\"relays\":[\"wss://relay.example.test/wsh\"],\"signaling\":[\"wss://sig.example.test/ws\"]},\"revoked\":[],\"roles\":{\"guest\":[\"protocol:mcp:open\"],\"member\":[\"mcp:search:call\",\"objects:window:get\",\"protocol:mcp:open\"]},\"root\":{\"chain\":[{\"countersig\":\"OY35YaZYvc0ZYExCVrB7XqgcIMxrYRlkRwTxH7iPEfKXTsGY529cQWRVojVYkkHAz7UWBkVnKSQHypG3mERcBQ\",\"effective\":1800000001,\"from\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\",\"pos\":1,\"realm\":\"Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw\",\"sig\":\"5SOaDK-Kc0GeHxvokCKdfP8aPVj1y20zExkm0MTnIxyxuSU2z8F0Hy9bZgZT8syfZbiCj7tcc8N-ieKP2GDVCw\",\"to\":\"Kay64UG8yvCyLhqU000LxzYeUm0L_hLIl5S8kyKWbdc\",\"v\":1},{\"countersig\":\"tdBOBZg08CKCV75OzGMRtKZmemAmUaMwTRl27xjhSNhaYYne69Wru_sYH01P1bebvVlvyiYwMN2ThcUfYoz2Cw\",\"effective\":1800000002,\"from\":\"Kay64UG8yvCyLhqU000LxzYeUm0L_hLIl5S8kyKWbdc\",\"pos\":2,\"realm\":\"Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw\",\"sig\":\"U_FWJCVbM3fud8HT_PPukwYRwMeEMsfJ0Kpb-Ob1PNm_MpqPoTo1UCbsvF0f5R7Eb2xEc8r3GxwdrkW6-AhuAQ\",\"to\":\"JUO5L_EJVRFHatyDadtt3JM2ZaEZeN2hQE7hBmypVZ0\",\"v\":1}],\"key\":\"JUO5L_EJVRFHatyDadtt3JM2ZaEZeN2hQE7hBmypVZ0\"},\"serial\":3,\"sig\":\"A50ZkthowYaWZQzki5_Ecd1rDUzZg3eC-0AHjPme7rm8E3vLsMAQBd6s4f2VwQoGNRtBpQv1I34qULfSlnuSDw\",\"ttl\":604800,\"v\":1}",
+      "options": {
+        "pinnedId": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+        "now": 1800000000
+      },
+      "expect": {
+        "ok": true
+      }
+    },
+    {
+      "name": "descriptor signed by the retired root",
+      "op": "verifyDescriptor",
+      "input": "{\"admitters\":[],\"epoch\":0,\"extensions\":{},\"id\":\"Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw\",\"issuers\":[],\"labels\":{},\"mode\":\"invite\",\"name\":\"rotated\",\"rendezvous\":{\"bootstrap\":[\"https://boot.example.test/\"],\"ice\":[{\"urls\":[\"stun:stun.example.test:3478\"]}],\"relays\":[\"wss://relay.example.test/wsh\"],\"signaling\":[\"wss://sig.example.test/ws\"]},\"revoked\":[],\"roles\":{\"guest\":[\"protocol:mcp:open\"],\"member\":[\"mcp:search:call\",\"objects:window:get\",\"protocol:mcp:open\"]},\"root\":{\"chain\":[{\"countersig\":\"OY35YaZYvc0ZYExCVrB7XqgcIMxrYRlkRwTxH7iPEfKXTsGY529cQWRVojVYkkHAz7UWBkVnKSQHypG3mERcBQ\",\"effective\":1800000001,\"from\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\",\"pos\":1,\"realm\":\"Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw\",\"sig\":\"5SOaDK-Kc0GeHxvokCKdfP8aPVj1y20zExkm0MTnIxyxuSU2z8F0Hy9bZgZT8syfZbiCj7tcc8N-ieKP2GDVCw\",\"to\":\"Kay64UG8yvCyLhqU000LxzYeUm0L_hLIl5S8kyKWbdc\",\"v\":1}],\"key\":\"Kay64UG8yvCyLhqU000LxzYeUm0L_hLIl5S8kyKWbdc\"},\"serial\":2,\"sig\":\"1pDWxfnIUFxUWcLAePaVkC1dBOywCcioBAYXCMW0JIg8czh36n6QeMfJfnl_qOeNTxwtp5F98nprUdL9K4H2Dg\",\"ttl\":604800,\"v\":1}",
+      "options": {
+        "pinnedId": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+        "now": 1800000000
+      },
+      "expect": {
+        "ok": false,
+        "reason": "bad-signature"
+      }
+    }
+  ]
+}

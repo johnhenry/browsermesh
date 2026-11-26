@@ -1,0 +1,54 @@
+{
+  "name": "@johnhenry/browsermesh-realm",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Realms for browsermesh: signed realm descriptors, root rotation, roles, issuer-signed credentials and the issuer ledger, as pure functions over canonical JSON and Ed25519",
+  "type": "module",
+  "main": "./src/index.mjs",
+  "types": "./src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "import": "./src/index.mjs"
+    }
+  },
+  "files": [
+    "src",
+    "LICENSE",
+    "README.md"
+  ],
+  "keywords": [
+    "mesh",
+    "p2p",
+    "realm",
+    "credentials",
+    "canonical-json",
+    "ed25519"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/johnhenry/browsermesh",
+    "directory": "packages/browsermesh-realm"
+  },
+  "homepage": "https://opensource.johnhenry.me/browsermesh/",
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "pretest": "npm run typecheck",
+    "test": "node --test test/*.test.mjs",
+    "typecheck": "tsc --noEmit -p test/tsconfig.json",
+    "vectors": "node test/make-vectors.mjs"
+  },
+  "peerDependencies": {
+    "@johnhenry/browsermesh-primitives": ">=0.7.0 <1.0.0"
+  },
+  "devDependencies": {
+    "@johnhenry/browsermesh-primitives": ">=0.0.1 <1.0.0",
+    "typescript": "^7.0.2"
+  },
+  "engines": {
+    "node": ">=26.0.0"
+  }
+}
