@@ -14,6 +14,14 @@ Peer dependency: `@johnhenry/browsermesh-apps` `>=0.21.0` (the protocol channel 
 `@johnhenry/browsermesh-core`, `-pod`, `-primitives`, `-transport` and `-discovery` (optional dependencies, installed by
 default) and `node-datachannel` (an optional dependency) to reach pods over WebRTC from Node.
 
+## Install
+
+```bash
+npm install @johnhenry/browsermesh-ingress @johnhenry/browsermesh-apps
+```
+
+Needs Node 26 or later. `@johnhenry/browsermesh-apps` is a peer dependency. The package also installs a `browsermesh-ingress` command (see [CLI](#cli)).
+
 ## What it is, and what it is not
 
 - **It is** a bounded request forwarder: one mapping, one pod, protocol `http` v1 on the existing protocol channel
@@ -629,3 +637,7 @@ provider, `{ rid, kind: 'response' }` opened by the provider before it answers).
 the head and the `services` request (above), and the separate `ingress-names` protocol. No new framing; a peer without the
 protocol answers the open with `unknown-protocol` and is sent nothing else. Design: [`docs/design/http-ingress.md`](../../docs/design/http-ingress.md);
 threat model: [`docs/security.md`](../../docs/security.md#http-ingress).
+
+## License
+
+MIT

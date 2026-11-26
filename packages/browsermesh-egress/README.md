@@ -21,6 +21,14 @@ needs `>=0.25.0`, which has `@johnhenry/browsermesh-apps/lean-node`) and
 `node-datachannel` (an optional dependency). [Installing for a page](#installing-for-a-page-that-only-consumes) says what
 a consumer-only install brings, and how to leave the provider's parts out.
 
+## Install
+
+```bash
+npm install @johnhenry/browsermesh-egress @johnhenry/browsermesh-apps @johnhenry/browsermesh-netway
+```
+
+Needs Node 26 or later. `@johnhenry/browsermesh-apps` and `@johnhenry/browsermesh-netway` are peer dependencies; `@johnhenry/wsh` is an optional one (the Node dialer's address guard). The package also installs a `browsermesh-egress` command (see [The command line](#the-command-line)); a page that only consumes should read [Installing for a page that only consumes](#installing-for-a-page-that-only-consumes).
+
 ## What it is, and what it is not
 
 - **It is** a bounded way to lend a network: protocol `egress` v1 on the existing protocol channel
@@ -908,3 +916,7 @@ The forms and the command line of the first version are all here. What is left:
 - **Changing the grants of a running command-line provider**: edit the file and restart (an embedder has the registry, which
   can grant and revoke live).
 - **IPv6 destinations** (see "What is not defended").
+
+## License
+
+MIT

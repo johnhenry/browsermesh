@@ -18,10 +18,17 @@ care about:
 - [`packages/browsermesh-kernel/CHANGELOG.md`](packages/browsermesh-kernel/CHANGELOG.md)
 - [`packages/browsermesh-apps/CHANGELOG.md`](packages/browsermesh-apps/CHANGELOG.md)
 - [`packages/browsermesh-embed/CHANGELOG.md`](packages/browsermesh-embed/CHANGELOG.md)
+- [`packages/browsermesh-objects/CHANGELOG.md`](packages/browsermesh-objects/CHANGELOG.md)
+- [`packages/browsermesh-mcp/CHANGELOG.md`](packages/browsermesh-mcp/CHANGELOG.md)
+- [`packages/browsermesh-ingress/CHANGELOG.md`](packages/browsermesh-ingress/CHANGELOG.md)
+- [`packages/browsermesh-egress/CHANGELOG.md`](packages/browsermesh-egress/CHANGELOG.md)
+- [`packages/browsermesh-meshctl/CHANGELOG.md`](packages/browsermesh-meshctl/CHANGELOG.md)
+
+`browsermesh-realm` is private and in progress: it is not published and has no changelog yet.
 
 ## 0.0.0 -- npm scope migration
 
-This repo consolidates 10 previously-scattered packages
+This repo consolidates 11 previously-scattered packages
 (`browsermesh-primitives`, `-netway`, `-pod`, `-core`, `-transport`,
 `-priority-mux`, `-sync`, `-discovery`, `-kernel`, `-apps`, `-embed`) into
 one monorepo under the `@johnhenry` npm scope, per the family's
