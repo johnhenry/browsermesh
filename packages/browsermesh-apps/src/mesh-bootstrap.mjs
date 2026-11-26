@@ -347,11 +347,20 @@ import { registerOrchestratorTools } from './mesh-orchestrator-tools.mjs'
  * already exists and does not create a second one.
  *
  * @param {object} [options]
- * @param {string} [options.label='default'] - Identity label.
+ * @param {string} [options.label='default'] - Identity label (ignored when
+ *   `options.identity` is given).
  * @param {import('@johnhenry/browsermesh-core').MeshIdentityManager} [options.identityManager]
  *   Pre-constructed identity manager (e.g. one backed by
  *   `IndexedDBIdentityStorage` for persistence). Defaults to a fresh
  *   in-memory `MeshIdentityManager`.
+ * @param {{ podId: string }} [options.identity]
+ *   Adopt an identity that ALREADY exists in `options.identityManager`
+ *   instead of creating a new one, so a page can keep its key across a
+ *   reload (a manager backed by persistent storage, the pod id remembered
+ *   by the caller). Requires `identityManager`; throws if the pod id is not
+ *   in it. The adopted identity is made the manager's default, which is
+ *   what `node.podId` reports; nothing is created. Without this option a
+ *   fresh identity is created on every call, as before.
  * @param {import('@johnhenry/browsermesh-core').MeshPeerManager} [options.peerManager]
  * @param {import('@johnhenry/browsermesh-core').TrustGraph} [options.trustGraph]
  * @param {import('@johnhenry/browsermesh-core').MeshACL} [options.acl]
@@ -837,6 +846,7 @@ export async function createMeshNode(options = {}) {
   const {
     label = 'default',
     identityManager: providedIdentityManager,
+    identity: providedIdentity,
     peerManager,
     trustGraph,
     acl,
@@ -943,9 +953,29 @@ export async function createMeshNode(options = {}) {
   if (!dhtSignStores && dhtStorePolicy !== undefined && (dhtStorePolicy === 'owned' || dhtStorePolicy?.mode === 'owned')) {
     throw new Error("createMeshNode: an 'owned' dhtStorePolicy needs dhtSignStores: true, since this node announces its own record and its own policy would refuse it")
   }
+  if (providedIdentity !== undefined) {
+    if (providedIdentity === null || typeof providedIdentity !== 'object' ||
+        typeof providedIdentity.podId !== 'string' || providedIdentity.podId === '') {
+      throw new TypeError('createMeshNode: options.identity must be { podId: <non-empty string> }')
+    }
+    if (!providedIdentityManager) {
+      throw new Error('createMeshNode: options.identity needs options.identityManager (the manager that holds that identity)')
+    }
+    if (!providedIdentityManager.has(providedIdentity.podId)) {
+      throw new Error(`createMeshNode: options.identity.podId "${providedIdentity.podId}" is not in the supplied identityManager`)
+    }
+  }
   const identityManager = providedIdentityManager || new MeshIdentityManager({ onLog })
   const wallet = new IdentityWallet({ identityManager, onLog })
-  const { podId } = await wallet.createIdentity(label)
+  let podId
+  if (providedIdentity !== undefined) {
+    // Adopt: the node's identity is the wallet's default (PeerNode.podId), so
+    // the adopted one must be the default. No identity is created.
+    podId = providedIdentity.podId
+    wallet.setDefault(podId)
+  } else {
+    ;({ podId } = await wallet.createIdentity(label))
+  }
 
   // -- Audit chain (opt-in, boolean enableAudit or pass-your-own via
   // auditChain) -- resolved here, before PeerNode is constructed, since
