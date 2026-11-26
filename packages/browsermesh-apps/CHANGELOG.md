@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.24.0
+
+### Minor Changes
+
+- 2055c23: Hosted pods can sleep and wake by use (cold boot as sleep). `@johnhenry/browsermesh-pod` adds `createHibernatingDriver(innerDriver, opts)`, a `PodHostDriver` wrapper: a pod idle for `idleMs` is drained to a record in a `HibernationStore` (podspec and `podId`) and reports `state: 'cold'` with `sleeping: true`; a `send`, `exec` or `deliver()` boots it again within `wakeTimeoutMs`, concurrent callers sharing one boot in order, bounded by `maxQueuedPerPod` and `maxConcurrentWakes`. A sleep sends no `exit` event, so a supervisor restarts nothing; `status`, `list` and `drain` never wake a pod; a wake fails rather than bring up a pod with a different `podId`. `PodHostDriver.spawn(spec, options)` takes an optional second argument (`{wake: {discoveryWindowMs}}`) that drivers may ignore. Also exports `MemoryHibernationStore`, `HIBERNATION_DEFAULTS`, `HIBERNATION_REASON` and `WAKE_FAILURE`.
+
+  `@johnhenry/browsermesh-apps`: a pod-host `describe()` now carries `hibernation` (the host's policy, or `null`); `createHostPool({ overcommitSleeping })` (default `false`, which changes nothing) lets a sleeping pod free its cpu and memory in the ledger while still counting as a pod and toward the requester quota, and refuses a wake that would not fit (`EBUSY`, `wake-refused`).
+
+  Nothing is on by default and nothing on the wire changes except the optional `sleeping`/`waking` status fields and the `hibernation` description field; an older client ignores them and sees a sleeping pod as `cold`. Not run against a real Durable Object.
+
+- abbd00e: A supervised pod can be placed, and re-placed after every exit, by the placement planner under the requester it was supervised for. `createPodSupervisor().supervise(host, spec, { requesterId, minBoundary })` records the requester; with either option stated, `'auto'` and every restart ask the planner (`MeshOrchestrator#decidePod()`, new: the decision and audit of `placePod()` without the spawn, or an injected `placer`), under that requester's trust and never the supervisor's own identity, preferring the current host or avoiding a lost one. If that requester's rules no longer allow any host, the supervisor emits `supervisor:replacement-refused` and `supervisor:gave-up` with the reason `replacement-refused:<plan code>`, audits both (`supervisor_replacement_refused`), spawns nothing and leaves the pod `dead`; `EBUSY` is retried as before. Without either option nothing changes (`pickHost`, `pickAutoHost()`, a restart on its own host). `list()` reports `requesterId` for such pods.
+
+  `meshctl pods supervise auto` accepts `--requester <pubKey>` and `--min-boundary`, as `pods spawn auto` does, with the same validation, and hands placement and restarts to the planner under that requester.
+
+### Patch Changes
+
+- 5ab097b: Documentation and code comments no longer point at the Manifest V3 extension spike, which has been removed from the repository (it never ran in a real browser). The browser lane has two drivers: in-page and CDP. No behaviour changes.
+
 ## 0.23.0
 
 ### Minor Changes
