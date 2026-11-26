@@ -570,3 +570,34 @@ export declare function sanitizeLabel(input: unknown, max?: number): string;
 
 /** Parse a case-sensitive mesh:// or *.mesh.local address. */
 export declare function parseMeshRequest(url: string): { podId: string; path: string } | null;
+
+// Strict canonical JSON (docs/design/realms.md 5.2)
+export type CanonicalJsonErrorCode =
+  | "unsupported-type"
+  | "number-not-integer"
+  | "negative-zero"
+  | "integer-out-of-range"
+  | "leading-zero"
+  | "key-not-ascii"
+  | "duplicate-key"
+  | "lone-surrogate"
+  | "whitespace"
+  | "not-canonical"
+  | "depth"
+  | "syntax"
+  | "bad-domain";
+export declare class CanonicalJsonError extends Error {
+  code: CanonicalJsonErrorCode;
+  constructor(code: CanonicalJsonErrorCode, message: string);
+}
+export type CanonicalJsonValue =
+  | null
+  | boolean
+  | number
+  | string
+  | CanonicalJsonValue[]
+  | { [key: string]: CanonicalJsonValue };
+export declare const CANONICAL_MAX_INTEGER: number;
+export declare function canonicalJson(value: unknown): string;
+export declare function parseCanonical(text: string): CanonicalJsonValue;
+export declare function domainSigningBytes(domain: string, canonicalText: string): Uint8Array;
