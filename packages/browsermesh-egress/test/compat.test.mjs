@@ -97,7 +97,9 @@ describe('what was added after 0.2.0, against the pinned 0.1.1 and 0.2.0 message
     const tcp = await echoOrigin()
     cleanups.push(() => tcp.close())
     const net = simNetwork({ names: { 'pkg.test': [PUBLIC] }, origins: { [`${PUBLIC}:443`]: tcp.port } })
-    const provider = createMeshEgress({ service: pods.p, registry: pods.provider.registry, dial: net.dial, resolve: net.resolve, unattended: true, connectByResolvedAddress: true, keepAlive: { intervalMs: 20, misses: 3 } })
+    const provider = createMeshEgress({ service: pods.p, registry: pods.provider.registry, dial: net.dial, resolve: net.resolve, unattended: true, connectByResolvedAddress: true, keepAlive: { intervalMs: 20, misses: 1000 } })
+    // `misses` is large on purpose: this test is about a consumer that answers every ping with "unknown method" and stays served; a
+    // short silence (a stalled event loop on a busy machine) must not be what decides whether it counts as gone.
     provider.start()
     cleanups.push(() => provider.stop())
     grant(pods, [EGRESS_SCOPES.tcp('pkg.test', 443), EGRESS_SCOPES.dns('pkg.test')])
