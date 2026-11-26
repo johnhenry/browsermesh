@@ -29,6 +29,11 @@ who belongs.
 - An always-on peer is **optional, and the realm defines whether it has one**.
 - **Eventual revocation is acceptable**, especially where there is no always-on peer.
 - The name is **realm**. ("Network" is taken: `VirtualNetwork` in `browsermesh-netway` is something else.)
+- **One identity per realm**, not one global identity, so realms cannot correlate a user across each other.
+- The **authority-less open realm** exists as its own form (section 5.9).
+- The code lives in a **new package, `browsermesh-realm`**, peer-depending on core and apps; meshctl's commands call it.
+- Descriptors and credentials are **canonical JSON with Ed25519, with test vectors**, using `browsermesh-core`'s canonical
+  encoder, so wsh or another language can verify them later.
 
 ## 3. Terms
 
@@ -130,8 +135,8 @@ role, expiry, state. You cannot revoke or audit what you cannot list, so this is
 `mode: open` means the descriptor alone is enough to join, at the `guest` role. Two forms:
 
 - a normal realm with a root and issuers, where privileged roles still need credentials; and
-- **Leaning:** an authority-less form, `issuers` empty and no root key, whose id is the hash of the immutable descriptor.
-  It can never be updated or rotated and has no privileged roles. Useful for "public room" apps.
+- an authority-less form (decided, 2026-11-26): `issuers` empty and no root key, whose id is the hash of the immutable
+  descriptor. It can never be updated or rotated and has no privileged roles. Useful for "public room" apps.
 
 ## 6. Threat model
 
@@ -191,15 +196,15 @@ a TUI, and server-side membership enforcement.
 
 ## 10. Open questions
 
-1. **One identity per realm, or one global?** A single key lets every realm correlate a user. **Leaning:** per realm.
-   It touches the identity wallet.
-2. **The authority-less open realm (5.9):** allowed as a form, or only an `open` flag on a normal realm? **Leaning:** allowed.
-3. **Where the code lives.** **Leaning:** a new small package, `browsermesh-realm`, peer-depending on core and apps;
-   meshctl commands call it.
-4. **Encoding.** **Leaning:** canonical JSON from `browsermesh-core` and Ed25519, with test vectors, so wsh or another
-   language can verify credentials later.
-5. **Defaults.** Credential `ttl`, clock-skew tolerance, and whether a descriptor can be adopted from an unauthenticated
-   gossip peer before it is verified (proposed: no, always verify first).
+Answered by the owner on 2026-11-26 (now in section 2): one identity per realm; the authority-less open realm as its own
+form; a new `browsermesh-realm` package; canonical JSON with Ed25519 and test vectors.
+
+Still open:
+
+1. **Defaults.** The credential `ttl`, the clock-skew tolerance, and whether a descriptor can be adopted from an
+   unauthenticated gossip peer before it is verified (proposed: no, always verify first).
+2. **The identity wallet.** One identity per realm means the wallet must hold several keys and pick one by realm id. How
+   that is derived (independent keys, or derived from one seed so a user can back up one secret) is not decided.
 
 ## 11. Staged order
 
