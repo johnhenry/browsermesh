@@ -234,12 +234,21 @@ describe('host realm policy (principle 2)', () => {
     assert.ok(events.some((e) => e.pubKey === A));
   });
 
-  it('a policy change that widens grants what the credential asked for and an earlier policy dropped', () => {
+  it('a policy change that widens grants nothing retroactively: the credential has to be presented again', () => {
     const { reg } = setup({ realmPolicy: { [REALM]: { roles: { member: [] } } } });
     grant(reg);
-    assert.equal(can(reg, A, 'protocol:mcp', 'open'), false);
     reg.setRealmPolicy(POLICY);
+    assert.equal(can(reg, A, 'protocol:mcp', 'open'), false);
+    grant(reg);
     assert.equal(can(reg, A, 'protocol:mcp', 'open'), true);
+  });
+
+  it('a policy change that narrows a role keeps the scopes it still admits', () => {
+    const { reg } = setup();
+    grant(reg, { scopes: ['protocol:mcp:open', 'files:a:read'] });
+    reg.setRealmPolicy({ [REALM]: { roles: { member: ['files:*:read'] } } });
+    assert.equal(can(reg, A, 'protocol:mcp', 'open'), false);
+    assert.equal(can(reg, A, 'files:a', 'read'), true);
   });
 
   it('setRealmPolicy validates its input', () => {
@@ -319,8 +328,9 @@ describe('removal and inspection', () => {
   it('removes by realm and peer, and only that realm\'s', () => {
     const { reg } = populated();
     assert.equal(reg.revokeRealmGrants({ realmId: REALM, peerKey: A }), 1);
-    assert.equal(can(reg, A, 'protocol:mcp', 'open'), false);
+    assert.equal(reg.listRealmGrants({ realmId: REALM, peerKey: A }).length, 0);
     assert.equal(reg.listRealmGrants({ realmId: OTHER_REALM, peerKey: A }).length, 1, 'the other realm\'s grant stays');
+    assert.equal(can(reg, A, 'protocol:mcp', 'open'), true, 'and still allows');
     assert.equal(reg.listRealmGrants({ peerKey: B }).length, 2);
   });
 

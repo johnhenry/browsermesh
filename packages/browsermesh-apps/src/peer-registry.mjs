@@ -63,6 +63,44 @@ function grantRefusal(scope) {
   return null
 }
 
+/**
+ * Scope families a realm never grants unless the host's policy names them: the ones that lend the host's network,
+ * serve its HTTP, run its pods or open its shells (docs/design/realms.md, principle 2).
+ */
+const REALM_SENSITIVE_PREFIXES = ['egress:', 'ingress:', 'pod-host', 'wsh-']
+
+/**
+ * Why a scope may not come from a realm, or null. A realm scope is concrete: under `matchScope` a wildcard segment or
+ * an empty or missing one matches anything, so such a scope is refused here, on top of the registry's own grammar.
+ * @param {unknown} scope
+ */
+function realmScopeRefusal(scope) {
+  const why = grantRefusal(scope)
+  if (why) return why
+  const parts = scope.split(':')
+  if (parts.length < 3) return 'a realm scope names three segments or more (a short scope matches everything beneath it)'
+  if (parts.some((part) => part === '' || part === '*')) return 'a realm scope has no wildcard or empty segment'
+  return null
+}
+
+/** The sensitive prefix a scope begins with, or null. */
+function sensitivePrefix(scope) {
+  return REALM_SENSITIVE_PREFIXES.find((prefix) => scope.startsWith(prefix)) ?? null
+}
+
+/**
+ * Whether a host allow list admits a (concrete) realm scope. A sensitive scope is admitted only by a pattern that
+ * itself begins with the same sensitive prefix: `*:*:*` does not name `egress:`.
+ * @param {string[]} allow @param {string} scope
+ * @returns {'ok'|'scope-not-allowed'|'sensitive-scope-not-named'}
+ */
+function realmAdmits(allow, scope) {
+  const prefix = sensitivePrefix(scope)
+  if (prefix === null) return allow.some((pattern) => matchScope(pattern, scope)) ? 'ok' : 'scope-not-allowed'
+  if (allow.some((pattern) => pattern.startsWith(prefix) && matchScope(pattern, scope))) return 'ok'
+  return allow.some((pattern) => matchScope(pattern, scope)) ? 'sensitive-scope-not-named' : 'scope-not-allowed'
+}
+
 /** Whether `grantCapabilities` would accept this scope. */
 export function isGrantableScope(scope) {
   return grantRefusal(scope) === null
@@ -153,6 +191,22 @@ export class PeerRegistry {
   /** Tokens whose expiry has been announced, so each is announced once. @type {WeakSet<object>} */
   #announcedExpiry = new WeakSet()
 
+  /**
+   * The realm grant source: peer -> (realm id + role) -> grant. Kept apart from `#capabilityTokens` and the ACL so the
+   * operator's grants are never read or changed by it; never persisted. See `grantRealmScopes()`.
+   * @type {Map<string, Map<string, { realmId: string, serial: string|number, peerKey: string, role: string, scopes: string[], notAfter: number, epoch: number }>>}
+   */
+  #realmGrants = new Map()
+
+  /** The host's realm policy: realm id -> (role -> allow list of scope patterns). Empty: no realm is honoured. @type {Map<string, Map<string, string[]>>} */
+  #realmPolicy = new Map()
+
+  /** Called for every scope (or whole grant) a realm asked for and the policy refused. */
+  #onRealmGrantDropped
+
+  /** No realm grant expires before this (ms epoch); it may be earlier than the real nearest, never later. */
+  #realmNextExpiry = null
+
   /** Validates/revokes tokens -- real `CapabilityValidator` when injected, a
    * duck-typed equivalent otherwise. @type {{ register: Function, revokeTree: Function }} */
   #capabilityValidator
@@ -182,14 +236,21 @@ export class PeerRegistry {
    * @param {{ now: () => number, setTimeout: Function, clearTimeout: Function }} [opts.clock] -
    *   The time source for grant expiry (`now()` in ms epoch, and a timer). Defaults to `Date.now` and the
    *   platform timer (unref'd, so it never keeps a process alive). Tests inject their own.
+   * @param {Record<string, { roles: Record<string, string[]> }>} [opts.realmPolicy] - Which realm ids this host
+   *   honours and, per role, the allow list of scope patterns a realm may grant under it (see `setRealmPolicy()`).
+   *   Default: none, so no realm grants anything.
+   * @param {(dropped: { realmId: string, serial: string|number, peerKey: string, role: string, scope: string|null, reason: string }) => void} [opts.onRealmGrantDropped] -
+   *   Told of every scope the policy refused (`scope` is null when the whole grant was: an unhonoured realm or role).
    */
-  constructor({ localPodId, peerManager, trustGraph, acl, capabilityValidator, tokenFactory, onLog, clock }) {
+  constructor({ localPodId, peerManager, trustGraph, acl, capabilityValidator, tokenFactory, onLog, clock, realmPolicy, onRealmGrantDropped }) {
     if (!localPodId || typeof localPodId !== 'string') {
       throw new Error('localPodId is required and must be a non-empty string')
     }
 
     this.#localPodId = localPodId
     this.#onLog = onLog || (() => {})
+    this.#onRealmGrantDropped = typeof onRealmGrantDropped === 'function' ? onRealmGrantDropped : () => {}
+    if (realmPolicy !== undefined) this.#setPolicyUnchecked(realmPolicy)
 
     // Accept injected instances or create bare defaults.
     // Callers importing from the actual modules can pass real instances;
@@ -256,6 +317,9 @@ export class PeerRegistry {
       this.#capabilityTokens.delete(pubKey)
       this.#scheduleExpiry()
     }
+
+    // ... and the realm grants it holds.
+    if (this.#realmGrants.delete(pubKey)) this.#scheduleExpiry()
 
     if (existed) {
       this.#onLog(2, `PeerRegistry: removed ${pubKey}`)
@@ -457,6 +521,16 @@ export class PeerRegistry {
    * @returns {{ allowed: boolean, reason?: string }}
    */
   checkAccess(pubKey, resource, action) {
+    const operator = this.#checkOperator(pubKey, resource, action)
+    if (operator.allowed) return operator
+    // The realm source is a second, separate source: it can allow where the operator's did not, and nothing in it
+    // (an expired grant, a wildcard) can deny what the operator's allows.
+    const realm = this.#checkRealm(pubKey, `${resource}:${action}`)
+    return realm ?? operator
+  }
+
+  /** The operator's grants: the ACL, then the live revocation status of the tokens `grantCapabilities()` issued. */
+  #checkOperator(pubKey, resource, action) {
     const aclResult = this.#acl.check(pubKey, resource, action)
     if (!aclResult.allowed) return aclResult
 
@@ -473,6 +547,232 @@ export class PeerRegistry {
     }
 
     return aclResult
+  }
+
+  /** A live realm grant that covers `scope`, as an allowing result, or null. */
+  #checkRealm(pubKey, scope) {
+    const held = this.#realmGrants.get(pubKey)
+    if (!held) return null
+    const now = this.#clock.now()
+    for (const grant of held.values()) {
+      if (grant.notAfter <= now) continue
+      if (grant.scopes.some((granted) => matchScope(granted, scope))) {
+        return { allowed: true, reason: 'realm_grant', realmId: grant.realmId }
+      }
+    }
+    return null
+  }
+
+  // ── Realm grants ────────────────────────────────────────────────────
+
+  /**
+   * Set which realms this host honours and what each role may be granted (docs/design/realms.md, principle 2). A
+   * descriptor's role is an upper bound; this is the host's own list, and it wins. Replaces any earlier policy; grants
+   * already held are cut back to what the new policy admits (an access change is announced for each peer affected). A
+   * wider policy does not grant anything retroactively: a realm credential has to be presented again.
+   *
+   * `{ [realmId]: { roles: { [role]: ['protocol:mcp:open', 'files:*:read'] } } }`. The allow list holds scope
+   * patterns, matched like every other scope. `egress:`, `ingress:`, `pod-host` and `wsh-` scopes are admitted only by
+   * a pattern that itself begins that way.
+   *
+   * @param {Record<string, { roles: Record<string, string[]> }>} policy
+   */
+  setRealmPolicy(policy) {
+    this.#setPolicyUnchecked(policy)
+    const affected = new Set()
+    for (const [peerKey, held] of this.#realmGrants) {
+      for (const [slot, grant] of held) {
+        const allow = this.#realmPolicy.get(grant.realmId)?.get(grant.role)
+        const keep = allow ? grant.scopes.filter((scope) => realmAdmits(allow, scope) === 'ok') : []
+        if (keep.length === grant.scopes.length) continue
+        affected.add(peerKey)
+        if (keep.length === 0) held.delete(slot)
+        else grant.scopes = keep
+      }
+      if (held.size === 0) this.#realmGrants.delete(peerKey)
+    }
+    this.#scheduleExpiry()
+    for (const peerKey of affected) this.#emitAccessChange(peerKey, 'realm-policy')
+  }
+
+  #setPolicyUnchecked(policy) {
+    if (policy === null || typeof policy !== 'object' || Array.isArray(policy)) {
+      throw new TypeError('PeerRegistry realm policy: an object of realm id to { roles }')
+    }
+    const next = new Map()
+    for (const [realmId, entry] of Object.entries(policy)) {
+      const roles = entry?.roles
+      if (roles === null || typeof roles !== 'object' || Array.isArray(roles)) {
+        throw new TypeError(`PeerRegistry realm policy: ${JSON.stringify(realmId)} needs { roles: { role: [scope patterns] } }`)
+      }
+      const byRole = new Map()
+      for (const [role, allow] of Object.entries(roles)) {
+        if (!Array.isArray(allow) || allow.some((pattern) => typeof pattern !== 'string' || pattern === '')) {
+          throw new TypeError(`PeerRegistry realm policy: ${JSON.stringify(realmId)} role ${JSON.stringify(role)} needs an array of scope patterns`)
+        }
+        byRole.set(role, [...allow])
+      }
+      next.set(realmId, byRole)
+    }
+    this.#realmPolicy = next
+  }
+
+  /**
+   * Grant a realm credential's scopes to a peer. The realm grant source is separate from `grantCapabilities()`: it is
+   * unioned with the operator's grants in `checkAccess()`, has its own expiry and epoch, is keyed by (realm, credential
+   * serial, peer) and is never persisted (`toJSON()` leaves it out, `fromJSON()` restores none), so nothing a realm does
+   * can extend, shorten, poison or remove a grant the operator made.
+   *
+   * What is stored is what the host's realm policy admits (`setRealmPolicy()`): a realm id the policy does not list
+   * grants nothing, nor does a role it does not list; a scope outside the role's allow list is dropped; a sensitive
+   * scope (`egress:`, `ingress:`, `pod-host`, `wsh-`) is dropped unless the allow list names it. Every drop goes to
+   * `onRealmGrantDropped` and is returned. A scope that is a wildcard, or has an empty or missing segment (so it would
+   * match anything under `matchScope`), is not dropped but refused: the call throws and nothing is granted.
+   *
+   * Renewal: a grant for the same (realm, peer, role) replaces the earlier one whole, whatever its serial, so a new
+   * credential with a later `notAfter` extends access and scopes it no longer carries are gone. The caller (the realm
+   * layer) decides which credential is newer; the registry does not order serials. A grant that ends up with no scope
+   * removes what it replaces.
+   *
+   * @param {object} grant
+   * @param {string} grant.realmId
+   * @param {string|number} grant.serial - The credential's serial
+   * @param {string} grant.peerKey - The peer's key, proven on the link
+   * @param {string} grant.role
+   * @param {string[]} grant.scopes - What the credential's role carries
+   * @param {number} grant.notAfter - Expiry, ms epoch on the registry's clock (a credential's seconds times 1000)
+   * @param {number} grant.epoch - The realm epoch the credential was issued under
+   * @returns {{ granted: string[], dropped: { scope: string|null, reason: string }[] }}
+   */
+  grantRealmScopes({ realmId, serial, peerKey, role, scopes, notAfter, epoch } = {}) {
+    const fail = (what) => { throw new TypeError(`PeerRegistry.grantRealmScopes: ${what}`) }
+    if (typeof realmId !== 'string' || realmId === '') fail('realmId is a non-empty string')
+    if (typeof serial !== 'string' && typeof serial !== 'number') fail('serial is a string or a number')
+    if (typeof peerKey !== 'string' || peerKey === '') fail('peerKey is a non-empty string')
+    if (typeof role !== 'string' || role === '') fail('role is a non-empty string')
+    if (!Array.isArray(scopes)) fail('scopes is an array')
+    if (typeof notAfter !== 'number' || !Number.isFinite(notAfter)) fail('notAfter is a finite number (ms epoch)')
+    if (!Number.isInteger(epoch) || epoch < 0) fail('epoch is a non-negative integer')
+    for (const scope of scopes) {
+      const why = realmScopeRefusal(scope)
+      if (why) fail(`${JSON.stringify(scope)} is not a scope a realm may grant (${why})`)
+    }
+
+    const drop = (scope, reason, into) => {
+      into.push({ scope, reason })
+      this.#onLog(2, `PeerRegistry: realm ${realmId} role ${role}: dropped ${scope ?? 'the whole grant'} for ${peerKey} (${reason})`)
+      try {
+        this.#onRealmGrantDropped({ realmId, serial, peerKey, role, scope, reason })
+      } catch (err) {
+        this.#onLog(1, `PeerRegistry: onRealmGrantDropped threw: ${err?.message || err}`)
+      }
+    }
+
+    const dropped = []
+    const granted = []
+    const roles = this.#realmPolicy.get(realmId)
+    const allow = roles?.get(role)
+    if (!roles) drop(null, 'realm-not-honoured', dropped)
+    else if (!allow) drop(null, 'role-not-allowed', dropped)
+    else {
+      for (const scope of [...new Set(scopes)]) {
+        const verdict = realmAdmits(allow, scope)
+        if (verdict === 'ok') granted.push(scope)
+        else drop(scope, verdict, dropped)
+      }
+    }
+    if (notAfter <= this.#clock.now()) return { granted: [], dropped } // already over: nothing to hold
+
+    const slot = `${realmId}\u0000${role}`
+    let held = this.#realmGrants.get(peerKey)
+    const had = held?.has(slot) ?? false
+    if (granted.length === 0) {
+      if (had) {
+        held.delete(slot)
+        if (held.size === 0) this.#realmGrants.delete(peerKey)
+        this.#scheduleExpiry()
+        this.#emitAccessChange(peerKey, 'realm-revoked')
+      }
+      return { granted, dropped }
+    }
+    if (!held) {
+      held = new Map()
+      this.#realmGrants.set(peerKey, held)
+    }
+    held.set(slot, { realmId, serial, peerKey, role, scopes: granted, notAfter, epoch })
+    if (this.#realmNextExpiry === null || notAfter < this.#realmNextExpiry) this.#realmNextExpiry = notAfter
+    this.#scheduleExpiry()
+    this.#onLog(3, `PeerRegistry: realm ${realmId} granted ${granted.join(', ')} to ${peerKey} until ${notAfter}`)
+    this.#emitAccessChange(peerKey, had ? 'realm-replaced' : 'realm-granted')
+    return { granted, dropped }
+  }
+
+  /**
+   * Remove realm grants. `realmId` is required, and at least one of `peerKey`, `serial` and `belowEpoch`; those given
+   * all have to match. `{ realmId, peerKey }` removes a peer's grants in that realm, `{ realmId, serial }` one
+   * credential's, `{ realmId, belowEpoch: N }` everything issued under an epoch lower than N (a realm's epoch bump).
+   * Announces an access change (`realm-revoked`) once for each peer that lost a grant. Never touches the operator's
+   * grants.
+   *
+   * @param {object} selector
+   * @param {string} selector.realmId
+   * @param {string} [selector.peerKey]
+   * @param {string|number} [selector.serial]
+   * @param {number} [selector.belowEpoch]
+   * @returns {number} How many grants were removed
+   */
+  revokeRealmGrants({ realmId, peerKey, serial, belowEpoch } = {}) {
+    if (typeof realmId !== 'string' || realmId === '') throw new TypeError('PeerRegistry.revokeRealmGrants: realmId is a non-empty string')
+    if (peerKey === undefined && serial === undefined && belowEpoch === undefined) {
+      throw new TypeError('PeerRegistry.revokeRealmGrants: name peerKey, serial or belowEpoch as well as the realm')
+    }
+    if (belowEpoch !== undefined && typeof belowEpoch !== 'number') throw new TypeError('PeerRegistry.revokeRealmGrants: belowEpoch is a number')
+    const peers = peerKey === undefined ? [...this.#realmGrants.keys()] : [peerKey]
+    const affected = []
+    let removed = 0
+    for (const key of peers) {
+      const held = this.#realmGrants.get(key)
+      if (!held) continue
+      let lost = false
+      for (const [slot, grant] of held) {
+        if (grant.realmId !== realmId) continue
+        if (serial !== undefined && grant.serial !== serial) continue
+        if (belowEpoch !== undefined && !(grant.epoch < belowEpoch)) continue
+        held.delete(slot)
+        removed += 1
+        lost = true
+      }
+      if (held.size === 0) this.#realmGrants.delete(key)
+      if (lost) affected.push(key)
+    }
+    if (removed > 0) {
+      this.#scheduleExpiry()
+      this.#onLog(3, `PeerRegistry: removed ${removed} realm grant(s) of ${realmId}`)
+      for (const key of affected) this.#emitAccessChange(key, 'realm-revoked')
+    }
+    return removed
+  }
+
+  /**
+   * The live realm grants, for inspection (copies; an expired grant is not listed).
+   *
+   * @param {object} [filter]
+   * @param {string} [filter.realmId]
+   * @param {string} [filter.peerKey]
+   * @returns {{ realmId: string, serial: string|number, peerKey: string, role: string, scopes: string[], notAfter: number, epoch: number }[]}
+   */
+  listRealmGrants({ realmId, peerKey } = {}) {
+    const now = this.#clock.now()
+    const out = []
+    for (const [key, held] of this.#realmGrants) {
+      if (peerKey !== undefined && key !== peerKey) continue
+      for (const grant of held.values()) {
+        if (realmId !== undefined && grant.realmId !== realmId) continue
+        if (grant.notAfter <= now) continue
+        out.push({ ...grant, scopes: [...grant.scopes] })
+      }
+    }
+    return out
   }
 
   // ── Trust management ────────────────────────────────────────────────
@@ -585,8 +885,10 @@ export class PeerRegistry {
 
   /**
    * Subscribe to changes that can reduce what a peer is allowed to do:
-   * `revokeCapabilities()`, `removePeer()`, `updatePermissions()` and
-   * `notifyAccessChange()`. Long-lived users of `checkAccess()` (relayed
+   * `revokeCapabilities()`, `removePeer()`, `updatePermissions()`,
+   * `notifyAccessChange()` and the realm grant source (`kind` `realm-granted`,
+   * `realm-replaced`, `realm-revoked`, `realm-policy`, and `expired` when a
+   * grant runs out). Long-lived users of `checkAccess()` (relayed
    * connections, for example) re-check on this event instead of on every use.
    *
    * @param {(event: { pubKey: string, kind: string }) => void} cb
@@ -623,6 +925,8 @@ export class PeerRegistry {
         if (next === null || at < next) next = at
       }
     }
+    if (this.#realmGrants.size === 0) this.#realmNextExpiry = null
+    else if (this.#realmNextExpiry !== null && (next === null || this.#realmNextExpiry < next)) next = this.#realmNextExpiry
     if (next === this.#expiryAt && (next === null || this.#expiryTimer !== null)) return
     if (this.#expiryTimer !== null) {
       this.#clock.clearTimeout(this.#expiryTimer)
@@ -650,6 +954,18 @@ export class PeerRegistry {
         }
       }
     }
+    // Realm grants: drop the ones that are over and take the exact nearest of the rest.
+    let realmNext = null
+    for (const [pubKey, held] of this.#realmGrants) {
+      for (const [slot, grant] of held) {
+        if (grant.notAfter <= now) {
+          held.delete(slot)
+          expired.add(pubKey)
+        } else if (realmNext === null || grant.notAfter < realmNext) realmNext = grant.notAfter
+      }
+      if (held.size === 0) this.#realmGrants.delete(pubKey)
+    }
+    this.#realmNextExpiry = realmNext
     // Re-arm first: a listener that grants again must find the timer in a consistent state.
     this.#scheduleExpiry()
     for (const pubKey of expired) this.#emitAccessChange(pubKey, 'expired')
