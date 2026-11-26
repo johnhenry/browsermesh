@@ -17,8 +17,8 @@ import { BUDGET_NAMES, EgressError, REFUSAL_CODES, refusalAnswer } from './error
 import { CONSUMER_HEADER, DEFAULT_FETCH_METHODS, FETCH_USER_AGENT, KNOWN_METHODS, MAX_HEADERS, NO_BODY_STATUSES, REDIRECT_STATUSES, headerBytes, originOf, parseTarget, requestHeaders, responseHeaders } from './http-policy.mjs'
 import { createByteBudget, createInflight, createRateLimiter, resolveLimits } from './limits.mjs'
 import {
-  CONNECT_METHOD, EGRESS_CONSUMER, EGRESS_PROTOCOL, EGRESS_VERSIONS, END_METHOD, FETCH_METHOD, KIND_DOWN, KIND_UP, MAX_ANSWER_ADDRESSES, RESOLVE_METHOD,
-  signedRequestBytes, validateConnect, validateFetch, validateResolve, validateStreamMeta,
+  CONNECT_METHOD, EGRESS_CONSUMER, EGRESS_PROTOCOL, EGRESS_VERSIONS, END_METHOD, FETCH_METHOD, KIND_DOWN, KIND_UP, MAX_ANSWER_ADDRESSES, RESOLVE_METHOD, UDP_METHOD,
+  createFrameReader, encodeDatagram, signedRequestBytes, validateConnect, validateFetch, validateResolve, validateStreamMeta,
 } from './wire.mjs'
 
 /** Ports refused by default: mail submission (SMTP relay, SMTPS, submission). */
@@ -101,8 +101,8 @@ const endedAnswer = (conn) => (conn.endReason === 'shutdown' ? refusalAnswer('sh
  * @param {string} [opts.protocol='egress']
  */
 export function createMeshEgress({
-  service, registry, dial, resolve, exchange, fetchMethods = DEFAULT_FETCH_METHODS, identifyConsumers = false, sets, wide, blockedPorts = DEFAULT_BLOCKED_PORTS,
-  limits: limitOptions, allowFrom, deny, verifyRequest, indicator, unattended, onAudit, onMeter, clock, recheckIntervalMs = 30_000, protocol = EGRESS_PROTOCOL, onLog,
+  service, registry, dial, resolve, exchange, dialUdp, fetchMethods = DEFAULT_FETCH_METHODS, identifyConsumers = false, auditUrls = 'none', sets, wide, blockedPorts = DEFAULT_BLOCKED_PORTS,
+  blockedUdpPorts = DEFAULT_BLOCKED_UDP_PORTS, limits: limitOptions, allowFrom, deny, verifyRequest, indicator, unattended, onAudit, onMeter, clock, recheckIntervalMs = 30_000, protocol = EGRESS_PROTOCOL, onLog,
 } = {}) {
   const api = service && typeof service === 'object' ? (service.api ?? service) : null
   if (typeof api?.serveProtocol !== 'function') throw new TypeError('createMeshEgress: service is a mesh service with serveProtocol (createMeshProtocolService)')
@@ -112,8 +112,11 @@ export function createMeshEgress({
     // A provider dials from its own network. One built on another egress would pass its consumers on (a chain).
     if (fn[EGRESS_CONSUMER]) throw new TypeError(`createMeshEgress: ${name} is an egress consumer; a provider cannot be built on another egress (chaining is refused)`)
   }
-  for (const [name, fn] of Object.entries({ deny, verifyRequest, onAudit, onMeter, exchange })) if (fn !== undefined && typeof fn !== 'function') throw new TypeError(`createMeshEgress: ${name} must be a function`)
-  if (exchange?.[EGRESS_CONSUMER]) throw new TypeError('createMeshEgress: exchange is an egress consumer; a provider cannot be built on another egress (chaining is refused)')
+  for (const [name, fn] of Object.entries({ deny, verifyRequest, onAudit, onMeter, exchange, dialUdp })) if (fn !== undefined && typeof fn !== 'function') throw new TypeError(`createMeshEgress: ${name} must be a function`)
+  for (const [name, fn] of Object.entries({ exchange, dialUdp })) if (fn?.[EGRESS_CONSUMER]) throw new TypeError(`createMeshEgress: ${name} is an egress consumer; a provider cannot be built on another egress (chaining is refused)`)
+  if (!['none', 'path', 'full'].includes(auditUrls)) throw new TypeError('createMeshEgress: auditUrls is \'none\' (the default: only the length of the path), \'path\' or \'full\' (path and query)')
+  if (!Array.isArray(blockedUdpPorts) || !blockedUdpPorts.every((p) => Number.isSafeInteger(p) && p >= 1 && p <= 65535)) throw new TypeError('createMeshEgress: blockedUdpPorts is a list of ports (1-65535)')
+  const blockedUdp = new Set(blockedUdpPorts)
   if (!Array.isArray(fetchMethods) || !fetchMethods.length || !fetchMethods.every((m) => KNOWN_METHODS.includes(m))) throw new TypeError(`createMeshEgress: fetchMethods is a non-empty list of ${KNOWN_METHODS.join(', ')} (CONNECT and TRACE are never served)`)
   const methods = new Set(fetchMethods)
   if (typeof identifyConsumers !== 'boolean') throw new TypeError('createMeshEgress: identifyConsumers is true or false')
@@ -130,6 +133,7 @@ export function createMeshEgress({
       throw new TypeError(`createMeshEgress: wide mode lets a holder of a wildcard grant reach any public destination; say so with wide: { acknowledge: '${WIDE_ACKNOWLEDGEMENT}' }`)
     }
     for (const p of DEFAULT_BLOCKED_PORTS) if (!blocked.has(p)) throw new TypeError(`createMeshEgress: wide mode keeps port ${p} blocked; it cannot be removed from blockedPorts while wide mode is on`)
+    for (const p of DEFAULT_BLOCKED_UDP_PORTS) if (!blockedUdp.has(p)) throw new TypeError(`createMeshEgress: wide mode keeps UDP port ${p} blocked (names are looked up through the lookup form); it cannot be removed from blockedUdpPorts while wide mode is on`)
     wideOn = true
   }
   let decide = null
@@ -149,6 +153,7 @@ export function createMeshEgress({
   const connectRate = createRateLimiter(limits.connectRate, { now, maxTracked: limits.maxTracked })
   const globalRate = createRateLimiter(limits.globalConnectRate, { now, maxTracked: 1 })
   const dnsRate = createRateLimiter(limits.dnsRate, { now, maxTracked: limits.maxTracked })
+  const udpRate = createRateLimiter(limits.udpDatagramRate, { now, maxTracked: limits.maxTracked })
   const byteBudget = createByteBudget(limits.maxBytesPerConsumer, { now, maxTracked: limits.maxTracked })
   const inflight = createInflight({ maxTracked: limits.maxTracked })
 
@@ -156,6 +161,7 @@ export function createMeshEgress({
   const conns = new Set()
   const perPeer = new Map() // peer -> { connections, open, bytesUp, bytesDown, refused, lookups }
   const counters = { channels: 0, requests: 0, opened: 0, refused: 0, closed: 0, lookups: 0, fetches: 0, bytesUp: 0, bytesDown: 0, reasons: {}, ends: {} }
+  const udpCounters = { flows: 0, datagramsUp: 0, datagramsDown: 0, dropped: { rate: 0, credit: 0, size: 0, outbox: 0 } }
   let started = false
   let stopped = false
   let stopServing = null
@@ -220,7 +226,7 @@ export function createMeshEgress({
     conns.delete(conn)
     conn.chan.conns.delete(conn.cid)
     try { conn.ac.abort(new Error(reason)) } catch { /* already aborted */ }
-    try { conn.socket?.destroy() } catch { /* already closed */ }
+    try { if (conn.form === 'udp') conn.socket?.close(); else conn.socket?.destroy() } catch { /* already closed */ }
     try { conn.upReady?.reject(new Error(reason)) } catch { /* settled */ }
     if (reason !== 'closed') {
       if (notify) { try { Promise.resolve(conn.chan.channel.notify(END_METHOD, { cid: conn.cid, reason })).catch(() => {}) } catch { /* channel gone */ } }
@@ -232,14 +238,24 @@ export function createMeshEgress({
       counters.closed += 1
       counters.ends[reason] = (counters.ends[reason] ?? 0) + 1
       peerStats(conn.peer).open -= 1
-      audit('egress-close', { outcome: 'closed', peer: conn.peer, form: conn.form, ...fetchFields(conn), host: conn.host, port: conn.port, address: conn.address, addressClass: conn.addressClass, bytesUp: conn.bytesUp, bytesDown: conn.bytesDown, durationMs: Math.max(0, now() - conn.startedAt), reason })
+      audit('egress-close', { outcome: 'closed', peer: conn.peer, form: conn.form, ...fetchFields(conn), ...udpFields(conn), host: conn.host, port: conn.port, address: conn.address, addressClass: conn.addressClass, bytesUp: conn.bytesUp, bytesDown: conn.bytesDown, durationMs: Math.max(0, now() - conn.startedAt), reason })
       emitMeter(conn, true, reason)
       try { indicator?.disconnected({ peer: conn.peer, host: conn.host, port: conn.port }) } catch { /* the embedder's callback */ }
     }
   }
 
   /** What the audit adds for the fetch form: the method, how long the path was, the final status and the redirects followed. Never the path itself. */
-  const fetchFields = (conn) => (conn.form === 'fetch' ? { method: conn.method, pathLength: conn.pathLength, status: conn.status, redirects: conn.redirects } : {})
+  const fetchFields = (conn) => (conn.form === 'fetch' ? { method: conn.method, ...urlFields(conn.target), status: conn.status, redirects: conn.redirects } : {})
+  /** What the audit adds for a UDP flow: datagrams each way, and the datagrams dropped on the way in and the way out. Never a payload. */
+  const udpFields = (conn) => (conn.form === 'udp' ? { datagramsUp: conn.datagramsUp, datagramsDown: conn.datagramsDown, droppedUp: conn.droppedUp, droppedDown: conn.droppedDown } : {})
+  /** What the audit says of a URL: the length of its path and query, and, only if the operator chose `auditUrls`, the path (`'path'`) and the query (`'full'`). */
+  function urlFields(t) {
+    if (!t) return {}
+    const out = { pathLength: t.pathLength }
+    if (auditUrls !== 'none') out.path = t.url.pathname
+    if (auditUrls === 'full' && t.url.search) out.query = t.url.search.slice(1)
+    return out
+  }
 
   function emitMeter(conn, final, reason) {
     const bytesUp = conn.bytesUp - conn.meteredUp
@@ -262,7 +278,7 @@ export function createMeshEgress({
   function touch(conn) {
     if (conn.ended) return
     clearTimeout(conn.idleTimer)
-    conn.idleTimer = unref(setTimeout(() => endConnection(conn, 'idle'), limits.idleMs))
+    conn.idleTimer = unref(setTimeout(() => endConnection(conn, 'idle'), conn.form === 'udp' ? limits.udpIdleMs : limits.idleMs))
   }
 
   /** Origin to consumer: one chunk at a time, the origin paused until the stream has taken it (credit-paced). */
@@ -323,6 +339,81 @@ export function createMeshEgress({
     endConnection(conn, 'closed')
   }
 
+  // ----------------------------------------------------------- UDP: datagrams as frames
+  /** Count a datagram seen in either direction (dropped ones too) against the flow's datagram budget; ends the flow when it is spent. */
+  function seenDatagram(conn) {
+    conn.datagramsSeen += 1
+    if (conn.datagramsSeen > limits.maxUdpDatagramsPerFlow) { endConnection(conn, 'datagram-budget'); return false }
+    return true
+  }
+
+  /** Count a datagram that is going on against the flow's and the consumer's byte budgets. */
+  function accountDatagram(conn, direction, n) {
+    if (conn.ended) return false
+    if (direction === 'up') { conn.datagramsUp += 1; conn.bytesUp += n; udpCounters.datagramsUp += 1; counters.bytesUp += n; peerStats(conn.peer).bytesUp += n } else {
+      conn.datagramsDown += 1; conn.bytesDown += n; udpCounters.datagramsDown += 1; counters.bytesDown += n; peerStats(conn.peer).bytesDown += n
+    }
+    if (conn.bytesUp + conn.bytesDown > limits.maxUdpBytesPerFlow) { endConnection(conn, 'byte-budget'); return false }
+    if (!byteBudget.add(conn.peer, n)) { endConnection(conn, 'consumer-budget'); return false }
+    touch(conn)
+    return true
+  }
+
+  const dropped = (conn, direction, why) => {
+    if (direction === 'up') conn.droppedUp += 1; else conn.droppedDown += 1
+    udpCounters.dropped[why] += 1
+  }
+
+  /**
+   * Consumer to destination: the stream's chunks are cut into datagrams (a frame may be split across chunks), each is bounded in
+   * size, counted, rate-limited (over the rate it is dropped, as a network would) and sent on the connected socket. Each datagram
+   * the consumer sends earns the flow credit for replies.
+   */
+  async function pumpDatagramsUp(conn) {
+    const { socket, up } = conn
+    const frames = createFrameReader(limits.maxDatagramBytes)
+    try {
+      for (;;) {
+        const { done, value } = await up.read()
+        if (done) break
+        if (conn.ended) return
+        let datagrams
+        try { datagrams = frames.push(value) } catch { endConnection(conn, 'stream-abuse'); return }
+        for (const payload of datagrams) {
+          if (conn.ended || !seenDatagram(conn)) return
+          if (!udpRate.take(conn.peer).ok) { dropped(conn, 'up', 'rate'); continue }
+          if (!accountDatagram(conn, 'up', payload.byteLength)) return
+          conn.replyCredit = Math.min(limits.udpReplyCreditMaxBytes, conn.replyCredit + Math.max(limits.udpReplyFloorBytes, payload.byteLength * limits.udpReplyRatio))
+          // One at a time: the next frame is not read until the socket has taken this one, so a slow network slows the consumer.
+          await new Promise((resolve) => { try { socket.send(payload, () => resolve()) } catch { resolve() } })
+        }
+      }
+    } catch (e) {
+      if (!conn.ended) endConnection(conn, ['stream-abuse', 'stream-violation', 'stream-too-large'].includes(e?.reason) ? 'stream-abuse' : 'consumer-left')
+      return
+    }
+    // A flow has no half-close: the consumer finishing its sending ends it.
+    if (!conn.ended) endConnection(conn, 'closed')
+  }
+
+  /**
+   * Destination to consumer: a reply is passed on only if it fits the datagram bound, the credit the consumer's own sends earned, the
+   * rate and the outbox; otherwise it is dropped and counted. Nothing is truncated or split.
+   */
+  function onReply(conn, message) {
+    if (conn.ended || !conn.opened || !seenDatagram(conn)) return
+    const n = message.byteLength
+    if (n > limits.maxDatagramBytes) return dropped(conn, 'down', 'size')
+    if (n > conn.replyCredit) return dropped(conn, 'down', 'credit')
+    if (!udpRate.take(conn.peer).ok) return dropped(conn, 'down', 'rate')
+    if (conn.outboxBytes + n + 2 > limits.udpOutboxBytes) return dropped(conn, 'down', 'outbox')
+    conn.replyCredit -= n
+    if (!accountDatagram(conn, 'down', n)) return
+    const frame = encodeDatagram(new Uint8Array(message.buffer, message.byteOffset, n))
+    conn.outboxBytes += frame.byteLength
+    conn.outbox = conn.outbox.then(() => (conn.ended ? undefined : conn.down.write(frame))).then(() => { conn.outboxBytes -= frame.byteLength }, () => endConnection(conn, 'consumer-left'))
+  }
+
   // ----------------------------------------------------------- one channel (one consumer)
   function accept(channel, { peer, version }) {
     const context = { peer, protocol, version }
@@ -368,8 +459,9 @@ export function createMeshEgress({
       clearTimeout(conn.upTimer)
       conn.up = reader
       conn.state = 'open'
-      // A fetch request's body is read by the exchange as it sends; a TCP connection's by the relay to the socket.
+      // A fetch request's body is read by the exchange as it sends; a TCP connection's by the relay to the socket; a UDP flow's as datagram frames.
       if (conn.upReady) conn.upReady.resolve(reader)
+      else if (conn.form === 'udp') pumpDatagramsUp(conn)
       else pumpUp(conn)
     })
 
@@ -489,7 +581,7 @@ export function createMeshEgress({
         return refuse({}, 'fetch', refusalAnswer(e instanceof EgressError ? e.code : 'bad-request'))
       }
       const view = { host: req.target?.host, port: req.target?.port }
-      const about = { method: req.method, pathLength: req.target?.pathLength }
+      const about = { method: req.method, ...urlFields(req.target) }
       // Registered before anything is awaited: the consumer sends a request body's stream right behind the request, and it must find this.
       let conn = null
       if (req.hops === 0) {
@@ -497,7 +589,7 @@ export function createMeshEgress({
         conn = {
           cid: req.cid, form: 'fetch', peer, chan, host: req.target.host, port: req.target.port, via: undefined, stills: [], ac: new AbortController(), releases: [], state: req.body ? 'awaiting-up' : 'dialing',
           socket: null, up: null, down: null, address: undefined, addressClass: undefined, startedAt: now(), opened: false, ended: false, bytesUp: 0, bytesDown: 0, meteredUp: 0, meteredDown: 0,
-          method: req.method, pathLength: req.target.pathLength, status: undefined, redirects: 0, upReady: req.body ? deferred() : null,
+          method: req.method, target: req.target, status: undefined, redirects: 0, upReady: req.body ? deferred() : null,
         }
         conn.still = () => conn.stills.every((f) => f())
         // The consumer cancelling the request (its signal aborted before the answer) ends it now, whatever it is doing.
@@ -592,7 +684,7 @@ export function createMeshEgress({
           }
           conn.host = target.host
           conn.port = target.port
-          conn.pathLength = target.pathLength
+          conn.target = target
           resp = await exchange({
             url: target.href, method, headers: outgoing, body: bodySource, dial: checkedDial, signal: conn.ac.signal,
             timeoutMs: limits.connectTimeoutMs, maxHeaderBytes: limits.maxHeaderBytes, headersTimeoutMs: limits.headersTimeoutMs,
@@ -601,7 +693,7 @@ export function createMeshEgress({
           if (!resp || !Number.isSafeInteger(resp.status) || !Array.isArray(resp.headers) || !resp.body) throw Object.assign(new Error('exchange returned no response'), { code: 'BAD_RESPONSE' })
           if (resp.headers.length > MAX_HEADERS || headerBytes(resp.headers) > limits.maxHeaderBytes) throw Object.assign(new Error('the response head is too large'), { code: 'BAD_RESPONSE' })
           conn.status = resp.status
-          audit('egress-hop', { outcome: 'hop', peer, form: 'fetch', hop, method, host: target.host, port: target.port, address: conn.address, addressClass: conn.addressClass, pathLength: target.pathLength, status: resp.status, via: grant.via })
+          audit('egress-hop', { outcome: 'hop', peer, form: 'fetch', hop, method, host: target.host, port: target.port, address: conn.address, addressClass: conn.addressClass, ...urlFields(target), status: resp.status, via: grant.via })
           const location = req.redirect === 'follow' && REDIRECT_STATUSES.includes(resp.status) ? resp.headers.find(([k]) => String(k).toLowerCase() === 'location')?.[1] : undefined
           if (location === undefined) break
           // A redirect: the next destination is judged exactly as the first was, by the same rules, before anything is dialled.
@@ -636,7 +728,7 @@ export function createMeshEgress({
         counters.opened += 1
         peerStats(peer).connections += 1
         peerStats(peer).open += 1
-        audit('egress-open', { outcome: 'opened', peer, form: 'fetch', method, host: target.host, port: target.port, address: conn.address, addressClass: conn.addressClass, via: grant.via, pathLength: target.pathLength, status: resp.status, redirects: conn.redirects })
+        audit('egress-open', { outcome: 'opened', peer, form: 'fetch', method, host: target.host, port: target.port, address: conn.address, addressClass: conn.addressClass, via: grant.via, ...urlFields(target), status: resp.status, redirects: conn.redirects })
         try { indicator?.connected({ peer, host: conn.host, port: conn.port, form: 'fetch' }, { stop: async () => { endConnection(conn, 'shutdown'); return true } }) } catch { /* the embedder's callback */ }
         conn.meterTimer = unref(setInterval(() => emitMeter(conn, false), limits.meterIntervalMs))
         const noBody = method === 'HEAD' || NO_BODY_STATUSES.includes(resp.status)
@@ -644,7 +736,6 @@ export function createMeshEgress({
         return { ok: true, status: resp.status, statusText, headers: answerHeaders, url: target.href, redirected: conn.redirects > 0 }
       } catch (e) {
         clearTimeout(headersTimer)
-        if (process.env.EGRESS_DEBUG) console.error('fetch failed', e)
         const answer = conn.ended && ['revoked', 'shutdown'].includes(conn.endReason) ? endedAnswer(conn)
           : conn.headersTimedOut ? refusalAnswer('connect-failed', { detail: 'timeout' })
             : e?.code === 'CERTIFICATE' ? refusalAnswer('connect-failed', { detail: 'certificate' })
@@ -652,6 +743,89 @@ export function createMeshEgress({
                 : conn.ended ? endedAnswer(conn) : refusalOf(e, 'dial')
         return drop(answer, { address: conn.address })
       }
+    })
+
+    // ---- udp: one flow to one destination, over a datagram socket connected to the address that was checked
+    channel.onRequest(UDP_METHOD, async (params) => {
+      counters.requests += 1
+      const { req, answer: early } = await admit(params, 'udp', validateConnect)
+      if (early) return refuse(req, 'udp', early)
+      if (!connectRate.take(peer).ok) return refuse(req, 'udp', refusalAnswer('budget-exceeded', { budget: 'connect-rate' }))
+      if (!globalRate.take('*').ok) return refuse(req, 'udp', refusalAnswer('budget-exceeded', { budget: 'connect-rate-global' }))
+      const grant = authorise(peer, req.host, req.kind, req.port, 'udp')
+      if (!grant.ok) return refuse(req, 'udp', refusalAnswer(grant.code))
+      if (!(await verified(req, 'udp'))) return refuse(req, 'udp', refusalAnswer('bad-request'), { detail: 'request-unverified' })
+      // DNS is its own form, with its own grant and rate: no grant, wide mode included, talks to a resolver over UDP.
+      if (blockedUdp.has(req.port)) return refuse(req, 'udp', refusalAnswer('port-blocked'))
+      if (deny) {
+        let vetoed
+        try { vetoed = (await deny({ peer, host: req.host, port: req.port })) === true } catch { vetoed = true }
+        if (vetoed) return refuse(req, 'udp', refusalAnswer('destination-refused'))
+      }
+      if (!dialUdp) return refuse(req, 'udp', refusalAnswer('not-offered'))
+      if (chan.conns.has(req.cid)) { badRequest('cid'); return refuse(req, 'udp', refusalAnswer('bad-request')) }
+      if (byteBudget.spent(peer)) return refuse(req, 'udp', refusalAnswer('budget-exceeded', { budget: 'bytes-per-consumer' }))
+      const releases = []
+      const flows = inflight.enter(`u:${peer}`, limits.maxUdpFlowsPerConsumer)
+      if (!flows) return refuse(req, 'udp', refusalAnswer('budget-exceeded', { budget: 'udp-flows-per-consumer' }))
+      releases.push(flows)
+      const mine = inflight.enter(`p:${peer}`, limits.maxConnectionsPerConsumer)
+      if (!mine) { flows(); return refuse(req, 'udp', refusalAnswer('budget-exceeded', { budget: 'connections-per-consumer' })) }
+      releases.push(mine)
+      const all = inflight.enter('*', limits.maxConnections)
+      if (!all) { flows(); mine(); return refuse(req, 'udp', refusalAnswer('budget-exceeded', { budget: 'connections-global' })) }
+      releases.push(all)
+
+      const conn = {
+        cid: req.cid, form: 'udp', peer, chan, host: req.host, port: req.port, via: grant.via, still: grant.still, ac: new AbortController(), releases, state: 'dialing',
+        socket: null, up: null, down: null, address: undefined, addressClass: undefined, startedAt: now(), opened: false, ended: false,
+        bytesUp: 0, bytesDown: 0, meteredUp: 0, meteredDown: 0, originEnded: false, upDone: false,
+        datagramsUp: 0, datagramsDown: 0, droppedUp: 0, droppedDown: 0, datagramsSeen: 0, replyCredit: 0, outbox: Promise.resolve(), outboxBytes: 0,
+      }
+      chan.conns.set(conn.cid, conn)
+      conns.add(conn)
+      try {
+        const timeoutMs = limits.connectTimeoutMs
+        const guard = deferred()
+        const timer = unref(setTimeout(() => { conn.ac.abort(new Error('connect timeout')); guard.reject(Object.assign(new Error('connect timed out'), { code: 'TIMEOUT' })) }, timeoutMs))
+        let dialed
+        try { dialed = await Promise.race([dialUdp({ host: conn.host, port: conn.port, wide: grant.via === 'wide', signal: conn.ac.signal, timeoutMs }), guard.promise]) } finally { clearTimeout(timer) }
+        if (!dialed || typeof dialed !== 'object' || !dialed.socket || typeof dialed.socket.on !== 'function' || typeof dialed.socket.send !== 'function') throw Object.assign(new Error('dialUdp returned no socket'), { code: 'FAILED' })
+        conn.socket = dialed.socket
+        conn.socket.on('error', () => endConnection(conn, 'origin-error'))
+        conn.socket.on('close', () => endConnection(conn, 'origin-error'))
+        conn.address = text(dialed.address, 64)
+        conn.addressClass = text(dialed.class, 32)
+        if (conn.ended) return refuse(req, 'udp', endedAnswer(conn), { detail: conn.endReason })
+        // Wide mode is public addresses only, whatever a dial was configured to allow for named destinations.
+        if (grant.via === 'wide' && dialed.class !== 'public') {
+          endConnection(conn, 'closed')
+          return refuse(req, 'udp', refusalAnswer('destination-refused', { addressClass: conn.addressClass }), { address: conn.address })
+        }
+        conn.down = await chan.streams.open({ cid: conn.cid, kind: KIND_DOWN }, { signal: conn.ac.signal, timeoutMs: limits.upWaitMs })
+        if (conn.ended) return refuse(req, 'udp', endedAnswer(conn), { detail: conn.endReason })
+      } catch (e) {
+        const answer = conn.ended && ['revoked', 'shutdown'].includes(conn.endReason) ? endedAnswer(conn) : refusalOf(e, 'dial')
+        endConnection(conn, 'closed')
+        return refuse(req, 'udp', answer, { address: conn.address })
+      }
+      conn.opened = true
+      conn.state = 'awaiting-up'
+      counters.opened += 1
+      udpCounters.flows += 1
+      peerStats(peer).connections += 1
+      peerStats(peer).open += 1
+      conn.upTimer = unref(setTimeout(() => endConnection(conn, 'up-timeout'), limits.upWaitMs))
+      conn.durationTimer = unref(setTimeout(() => endConnection(conn, 'time-budget'), limits.maxDurationMs))
+      conn.meterTimer = unref(setInterval(() => emitMeter(conn, false), limits.meterIntervalMs))
+      touch(conn)
+      conn.socket.on('message', (message) => onReply(conn, message))
+      conn.down.signal?.addEventListener('abort', () => { if (!conn.ended) endConnection(conn, 'consumer-left') }, { once: true })
+      audit('egress-open', { outcome: 'opened', peer, form: 'udp', host: conn.host, port: conn.port, address: conn.address, addressClass: conn.addressClass, via: conn.via })
+      try {
+        indicator?.connected({ peer, host: conn.host, port: conn.port, form: 'udp' }, { stop: async () => { endConnection(conn, 'shutdown'); return true } })
+      } catch { /* the embedder's callback */ }
+      return { ok: true, maxDatagramBytes: limits.maxDatagramBytes }
     })
 
     // ---- resolve
@@ -746,7 +920,7 @@ export function createMeshEgress({
     get connections() { return [...conns].filter((c) => c.opened).map((c) => ({ peer: c.peer, host: c.host, port: c.port, address: c.address, since: c.startedAt, bytesUp: c.bytesUp, bytesDown: c.bytesDown })) },
     stats() {
       return {
-        ...counters, reasons: { ...counters.reasons }, ends: { ...counters.ends },
+        ...counters, reasons: { ...counters.reasons }, ends: { ...counters.ends }, udp: { ...udpCounters, dropped: { ...udpCounters.dropped } },
         open: [...conns].filter((c) => c.opened).length, channels: channels.size,
         peers: Object.fromEntries([...perPeer].map(([k, v]) => [k, { ...v }])),
       }

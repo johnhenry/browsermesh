@@ -475,6 +475,26 @@ describe('budgets, audit and meter', () => {
     assert.ok(!JSON.stringify(meter).includes('plain.test'))
   })
 
+  it('auditUrls is the operator\'s opt-in: "path" adds the path, "full" adds the query too, and nothing else ever (no header, no body)', async () => {
+    for (const [mode, wantPath, wantQuery] of [['path', '/where', undefined], ['full', '/where', 'q=1&k=v']]) {
+      const { link, audit } = await plain((req, res) => { res.writeHead(200, { 'x-reply': 'hdr-marker' }); res.end('body-marker') }, { egress: { auditUrls: mode } })
+      await (await link.fetch('http://plain.test/where?q=1&k=v', { headers: { accept: 'hdr-marker' } })).arrayBuffer()
+      await until(() => audit.some((r) => r.event === 'egress-close'), 'the close to be audited')
+      for (const event of ['egress-hop', 'egress-open', 'egress-close']) {
+        const r = audit.find((x) => x.event === event)
+        assert.equal(r.path, wantPath, `${mode} ${event} path`)
+        assert.equal(r.query, wantQuery, `${mode} ${event} query`)
+      }
+      assert.ok(!JSON.stringify(audit).includes('marker'))
+    }
+  })
+
+  it('a bad auditUrls is refused at construction', async () => {
+    const pods = await threePods()
+    cleanups.push(() => pods.teardown())
+    assert.throws(() => createMeshEgress({ service: pods.p, registry: pods.provider.registry, dial: async () => {}, resolve: async () => {}, unattended: true, auditUrls: true }), /auditUrls/)
+  })
+
   it('every hop is in the audit, with its own host and address; a refusal says which hop', async () => {
     const b = await origin(ok('landed'))
     const a = await origin((req, res) => { res.writeHead(302, { location: 'http://other.test/final' }); res.end() })

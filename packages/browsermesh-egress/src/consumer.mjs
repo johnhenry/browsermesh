@@ -18,8 +18,8 @@ import { checkHost, checkPort, looksLikePodId } from './destination.mjs'
 import { END_REASONS, EgressError, errorFromAnswer } from './errors.mjs'
 import { NO_BODY_STATUSES, parseTarget } from './http-policy.mjs'
 import {
-  CONNECT_METHOD, EGRESS_CONSUMER, EGRESS_PROTOCOL, EGRESS_VERSIONS, END_METHOD, FETCH_METHOD, KIND_DOWN, KIND_UP, RESOLVE_METHOD, randomHex,
-  signedRequestBytes, validateAddresses, validateFetchAnswer, validateStreamMeta,
+  CONNECT_METHOD, EGRESS_CONSUMER, EGRESS_PROTOCOL, EGRESS_VERSIONS, END_METHOD, FETCH_METHOD, KIND_DOWN, KIND_UP, RESOLVE_METHOD, UDP_METHOD, randomHex,
+  createFrameReader, encodeDatagram, signedRequestBytes, validateAddresses, validateFetchAnswer, validateStreamMeta, validateUdpAnswer,
 } from './wire.mjs'
 import { EgressBackend } from './backend.mjs'
 
@@ -464,9 +464,140 @@ export async function connectEgress(service, provider, { signal, limits: limitOp
     return response
   }
 
+  /**
+   * `udp(host, port)`: one flow to one destination, datagrams out and the destination's datagrams back.
+   *
+   *   const flow = await link.udp('time.example', 123)
+   *   await flow.send(bytes)           // rejects `datagram-too-large` above `flow.maxDatagramBytes`; resolves when the provider has the datagram
+   *   const reply = await flow.read()  // one datagram, or null once the flow has ended cleanly; rejects with an EgressError when it ended otherwise
+   *   await flow.close()
+   *
+   * What a flow is and is not. The flow runs over a reliable, ordered stream to the provider, which sends each datagram once on a
+   * socket connected to the checked destination. The network beyond the provider keeps datagram semantics (a datagram can be lost,
+   * reordered or duplicated there), and the provider DROPS datagrams it is not willing to pass on (over its rate, over the credit
+   * your own sends earned for replies, larger than `maxDatagramBytes`, or past its outbox when you are not reading): a drop is silent,
+   * as it is on a network. A flow ends when the provider's budgets say so (`connection-ended` with a `reason`, `idle` after
+   * `limits.udpIdleMs` of silence among them) or when you close it. DNS is not a flow: use `lookup()`; port 53 is refused.
+   *
+   * The datagrams you read are the provider's word: a provider can invent a reply. Do not treat one as the destination's unless the
+   * protocol inside authenticates it.
+   */
+  async function udp(host, port, { signal: callSignal } = {}) {
+    live()
+    const dest = destinationOf(host, port)
+    if (dest.port === undefined) throw new EgressError('bad-destination', 'A UDP flow needs a port.')
+    if (pending.size + active.size >= limits.maxConnections) throw new EgressError('too-many-connections')
+    if (callSignal?.aborted) throw callSignal.reason ?? new EgressError('aborted')
+    const cid = nextCid++
+    const entry = { cid, reader: null, ready: deferred(), endReason: undefined, fail: null }
+    pending.set(cid, entry)
+    const ac = new AbortController()
+    const onAbort = () => ac.abort(callSignal.reason)
+    callSignal?.addEventListener('abort', onAbort, { once: true })
+    entry.fail = (e) => ac.abort(e)
+    let answer
+    try {
+      answer = await channel.request(UDP_METHOD, { cid, host: dest.host, port: dest.port, hops: 0, ...(await sign('udp', { cid, host: dest.host, port: dest.port })) }, { signal: ac.signal, timeoutMs: limits.requestTimeoutMs })
+    } catch (e) {
+      callSignal?.removeEventListener('abort', onAbort)
+      abandon(entry, 'request failed')
+      if (callSignal?.aborted) throw callSignal.reason
+      if (ac.signal.aborted && ac.signal.reason instanceof EgressError) throw ac.signal.reason
+      throw requestFailure(e)
+    }
+    if (!answer || typeof answer !== 'object' || typeof answer.ok !== 'boolean') { callSignal?.removeEventListener('abort', onAbort); abandon(entry, 'unreadable answer'); throw new EgressError('bad-answer') }
+    if (!answer.ok) { callSignal?.removeEventListener('abort', onAbort); abandon(entry, 'refused'); counters.refused += 1; throw errorFromAnswer(answer) }
+    let info
+    let down
+    let up
+    try {
+      info = validateUdpAnswer(answer)
+      down = await within(entry.ready.promise, limits.requestTimeoutMs, () => new EgressError('provider-timeout', 'The provider announced a flow and did not open its stream.'))
+      up = await streams.open({ cid, kind: KIND_UP }, { signal: ac.signal, timeoutMs: limits.openTimeoutMs })
+    } catch (e) {
+      callSignal?.removeEventListener('abort', onAbort)
+      abandon(entry, 'no stream')
+      throw requestFailure(e)
+    }
+    pending.delete(cid)
+    active.set(cid, entry)
+    counters.connections += 1
+    const frames = createFrameReader(info.maxDatagramBytes)
+    const queue = []
+    let over = false // nothing more will be sent or read from the provider
+    let closing = false
+    let failure = null // what reads and sends fail with after the flow failed; null for a flow closed on this side or ended cleanly
+    let sending = Promise.resolve()
+    let reading = Promise.resolve()
+    const failureNow = () => (callSignal?.aborted ? new EgressError('aborted') : new EgressError(closed ? 'link-closed' : channel.closed ? 'provider-closed' : 'connection-ended', undefined, { reason: entry.endReason }))
+    const finish = (error) => {
+      if (over) return
+      over = true
+      failure = error ?? null
+      down.cancel('closed').catch(() => {})
+      try { up.abort('closed') } catch { /* gone */ }
+      active.delete(cid)
+      callSignal?.removeEventListener('abort', onAbort)
+    }
+    entry.fail = (e) => finish(e instanceof EgressError ? e : failureNow())
+    ac.signal.addEventListener('abort', () => { if (callSignal?.aborted) finish(new EgressError('aborted')) }, { once: true })
+
+    async function readOne() {
+      for (;;) {
+        if (queue.length) return queue.shift()
+        if (over) { if (failure) throw failure; return null }
+        let step
+        try { step = await down.read() } catch { if (!over) finish(failureNow()); continue }
+        if (over) continue
+        if (step.done) {
+          if (frames.pending() > 0) finish(new EgressError('bad-answer', 'The provider ended the flow inside a datagram.'))
+          else finish()
+          continue
+        }
+        try { for (const d of frames.push(step.value)) { counters.bytesDown += d.byteLength; queue.push(d) } } catch { finish(new EgressError('bad-answer', 'The provider sent a datagram longer than the bound it announced.')) }
+      }
+    }
+    const flow = {
+      /** The longest datagram the provider passes on for this flow. */
+      maxDatagramBytes: info.maxDatagramBytes,
+      get closed() { return over || closing },
+      async send(datagram) {
+        const bytes = datagram instanceof Uint8Array ? datagram : ArrayBuffer.isView(datagram) ? new Uint8Array(datagram.buffer, datagram.byteOffset, datagram.byteLength) : datagram instanceof ArrayBuffer ? new Uint8Array(datagram) : null
+        if (!bytes) throw new TypeError('A datagram is a Uint8Array.')
+        if (over || closing) throw failure ?? new EgressError('link-closed', 'This flow is closed.')
+        if (bytes.byteLength > info.maxDatagramBytes) throw new EgressError('datagram-too-large', `The datagram is ${bytes.byteLength} bytes; this flow allows ${info.maxDatagramBytes}.`)
+        const frame = encodeDatagram(bytes)
+        const turn = sending.then(() => (over ? undefined : up.write(frame)))
+        sending = turn.catch(() => {})
+        try { await turn } catch { finish(failureNow()); throw failure }
+        if (over && failure) throw failure
+        counters.bytesUp += bytes.byteLength
+      },
+      read() {
+        const turn = reading.then(readOne, readOne)
+        reading = turn.catch(() => {})
+        return turn
+      },
+      async close() {
+        if (over || closing) return
+        closing = true
+        try { await sending; await up.end() } catch { /* the provider is gone: nothing more to say */ }
+        finish()
+      },
+      [Symbol.asyncIterator]() {
+        return {
+          next: async () => { const value = await flow.read(); return value === null ? { done: true, value: undefined } : { done: false, value } },
+          return: async () => { await flow.close(); return { done: true, value: undefined } },
+        }
+      },
+    }
+    return flow
+  }
+
   connect[EGRESS_CONSUMER] = true
   lookup[EGRESS_CONSUMER] = true
   fetchUrl[EGRESS_CONSUMER] = true
+  udp[EGRESS_CONSUMER] = true
   const link = {
     /** The provider's pod id (the channel's verified peer). */
     peer: provider,
@@ -474,6 +605,7 @@ export async function connectEgress(service, provider, { signal, limits: limitOp
     connect,
     lookup,
     fetch: fetchUrl,
+    udp,
     /** A netway `Backend` (connect and resolve) to register on a `VirtualNetwork`: `net.addBackend('tcp', link.asBackend())`. */
     asBackend() { return new EgressBackend(link) },
     stats: () => ({ ...counters, open: active.size + pending.size }),

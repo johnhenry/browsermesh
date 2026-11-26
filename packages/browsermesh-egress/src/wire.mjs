@@ -131,6 +131,50 @@ export function validateAddresses(answer) {
 
 export const MAX_ANSWER_ADDRESSES = MAX_ADDRESSES
 
+/** A provider's answer to `udp`, from a pod this side does not control. Throws EgressError('bad-answer'). */
+export function validateUdpAnswer(answer) {
+  const max = answer?.maxDatagramBytes
+  if (!Number.isSafeInteger(max) || max < 1 || max > 65507) throw new EgressError('bad-answer', 'The provider\'s datagram bound is not a number from 1 to 65507.')
+  return { maxDatagramBytes: max }
+}
+
+/** One datagram as a frame of a UDP flow's stream: a 2-byte big-endian length, then the payload. */
+export function encodeDatagram(payload) {
+  const out = new Uint8Array(2 + payload.byteLength)
+  out[0] = payload.byteLength >>> 8
+  out[1] = payload.byteLength & 0xff
+  out.set(payload, 2)
+  return out
+}
+
+/**
+ * Cuts a stream's chunks into datagrams: a chunk may hold several frames, part of one, or a frame split across chunks. A frame
+ * longer than `max` is `bad-request` (the caller names it: a consumer that did it is cut off, a provider that did it is `bad-answer`).
+ * What is held between calls is at most one frame.
+ * @returns {{ push(chunk: Uint8Array): Uint8Array[], pending(): number }}
+ */
+export function createFrameReader(max) {
+  let held = new Uint8Array(0)
+  return {
+    push(chunk) {
+      let buf = held
+      if (held.byteLength) { buf = new Uint8Array(held.byteLength + chunk.byteLength); buf.set(held); buf.set(chunk, held.byteLength) } else buf = chunk
+      const out = []
+      let at = 0
+      while (buf.byteLength - at >= 2) {
+        const len = (buf[at] << 8) | buf[at + 1]
+        if (len > max) throw new EgressError('bad-request', 'A datagram is longer than the flow allows.')
+        if (buf.byteLength - at - 2 < len) break
+        out.push(buf.slice(at + 2, at + 2 + len))
+        at += 2 + len
+      }
+      held = buf.slice(at)
+      return out
+    },
+    pending: () => held.byteLength,
+  }
+}
+
 /**
  * What a request signature covers (`signRequest` on the consumer, `verifyRequest` on the provider): the form, the request's
  * id and a fresh nonce (so a signature cannot be replayed for another request), and the destination.
