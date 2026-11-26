@@ -32,6 +32,11 @@ who belongs.
 - **One identity per realm**, not one global identity, so realms cannot correlate a user across each other.
 - The **authority-less open realm** exists as its own form (section 5.9).
 - The code lives in a **new package, `browsermesh-realm`**, peer-depending on core and apps; meshctl's commands call it.
+- The default credential **`ttl` is 7 days** (a realm may set its own in the descriptor), which is also the default
+  worst-case revocation delay.
+- The verifier's **clock-skew tolerance is 5 minutes**, configurable per verifier.
+- Per-realm keys are **derived from one seed**, so a single backup recovers every realm identity while realms still cannot
+  link the keys to each other. The wallet gains a key-derivation step (a different derivation context per realm id).
 - Descriptors and credentials are **canonical JSON with Ed25519, with test vectors**, using `browsermesh-core`'s canonical
   encoder, so wsh or another language can verify them later.
 
@@ -196,15 +201,16 @@ a TUI, and server-side membership enforcement.
 
 ## 10. Open questions
 
-Answered by the owner on 2026-11-26 (now in section 2): one identity per realm; the authority-less open realm as its own
-form; a new `browsermesh-realm` package; canonical JSON with Ed25519 and test vectors.
+Answered by the owner on 2026-11-26 (now in section 2): one identity per realm, derived from one seed; the authority-less
+open realm as its own form; a new `browsermesh-realm` package; canonical JSON with Ed25519 and test vectors; a 7-day
+default credential `ttl`; a 5-minute clock-skew tolerance.
 
 Still open:
 
-1. **Defaults.** The credential `ttl`, the clock-skew tolerance, and whether a descriptor can be adopted from an
-   unauthenticated gossip peer before it is verified (proposed: no, always verify first).
-2. **The identity wallet.** One identity per realm means the wallet must hold several keys and pick one by realm id. How
-   that is derived (independent keys, or derived from one seed so a user can back up one secret) is not decided.
+1. **Adopting a descriptor from gossip.** Proposed: a peer always verifies a higher-serial descriptor against the pinned
+   realm id and its rotation chain before adopting it, and never adopts an unverified one. Not yet confirmed.
+2. **The derivation scheme.** Which KDF and which context string per realm id, and how the seed is stored and exported in
+   the wallet. To be settled with the wallet code, not here.
 
 ## 11. Staged order
 
