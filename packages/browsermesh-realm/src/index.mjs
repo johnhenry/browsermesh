@@ -13,3 +13,7 @@ export { adoptDescriptor } from "./adopt.mjs";
 export { issueCredential, verifyCredential, checkSubject } from "./credential.mjs";
 export { createCredentialTracker } from "./tracker.mjs";
 export { createLedger, importLedger } from "./ledger.mjs";
+export { FRAME_TYPES, MAX_FRAME_BYTES, MIN_SEAM_FRAME_BYTES, parseFrame } from "./frames.mjs";
+export { createDescriptorStore } from "./store.mjs";
+export { createRealmVerifier } from "./verifier.mjs";
+export { createRealmProver } from "./prover.mjs";

@@ -31,10 +31,11 @@ async function world({ realm, registry: regOpts, verifier: vOpts, now = NOW } = 
 
   /** Run the real prover against the verifier; resolves { w, result }. */
   async function connect(peerKey, credential, { proven = true, text = false, store, timeoutMs = 3000 } = {}) {
+    const pstore = store ?? (await proverStore());
     const w = wire({ peerKey, proven, text, log });
     const done = verifier.handler(w.link);
     const result = await createRealmProver({
-      pinnedId: r.id, store: store ?? (await proverStore()), credential, channel: w.channel, now: () => clock.now, timeoutMs,
+      pinnedId: r.id, store: pstore, credential, channel: w.channel, now: () => clock.now, timeoutMs,
     });
     await done?.catch?.(() => {});
     return { w, result };
@@ -184,14 +185,23 @@ describe("realm exchange: credential refusals", () => {
     await refused(w, {}, "issuer-not-listed", { issuer: w.r.issuerB });
     await refused(await world({ realm: { epoch: 2 } }), { epoch: 1 }, "epoch-too-old");
     await refused(await world(), { role: "root" }, "unknown-role");
-    await refused(await world(), { realm: "B".repeat(43) }, "wrong-realm");
+    const other = await world();
+    await refused(other, { realm: other.r.aliceKey }, "wrong-realm");
   });
 
   it("a stale descriptor snapshot (past validUntil) honours nothing", async () => {
-    const w = await world({ realm: { validUntil: T0 + 50 } });
-    await refused(w, {}, "descriptor-stale");
-    const guest = await world({ realm: { mode: "open", validUntil: T0 + 50 } });
-    const { result } = await guest.connect(guest.r.bobKey, null);
+    // held and verified while fresh; the clock then passes validUntil
+    const w = await world({ realm: { validUntil: T0 + 50 }, now: T0 + 10 });
+    const credential = await w.cred();
+    const proverStore = await w.proverStore();
+    w.clock.now = T0 + 60;
+    const { result: r1 } = await w.connect(w.r.aliceKey, credential, { store: proverStore });
+    assert.equal(reason(r1), "descriptor-stale");
+    assert.equal(w.registry.grants.length, 0);
+    const guest = await world({ realm: { mode: "open", validUntil: T0 + 50 }, now: T0 + 10 });
+    const gStore = await guest.proverStore();
+    guest.clock.now = T0 + 60;
+    const { result } = await guest.connect(guest.r.bobKey, null, { store: gStore });
     assert.equal(reason(result), "descriptor-stale");
   });
 
@@ -384,9 +394,9 @@ describe("realm exchange: descriptors", () => {
     const registry = fakeRegistry();
     const verifier = createRealmVerifier({ pinnedId: r.id, store, registry, now: NOW });
     const w = wire({ peerKey: r.aliceKey });
-    verifier.handler(w.link);
     const proverStore = createDescriptorStore({ pinnedId: r.id, held: r.text, now: NOW });
     const cred = (await issueCredential({ realm: r.id, subject: r.aliceKey, role: "member", serial: 1, notBefore: T0, notAfter: T0 + DAY, epoch: 0 }, r.issuerA)).text;
+    verifier.handler(w.link);
     const result = await createRealmProver({ pinnedId: r.id, store: proverStore, credential: cred, channel: w.channel, now: NOW, timeoutMs: 2000 });
     assert.equal(result.ok, true);
     assert.equal(store.current().serial, 1);
