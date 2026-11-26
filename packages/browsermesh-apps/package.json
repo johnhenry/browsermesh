@@ -40,6 +40,7 @@
     "@johnhenry/browsermesh-netway": ">=0.0.0 <1.0.0",
     "@johnhenry/browsermesh-pod": ">=0.2.0 <1.0.0",
     "@johnhenry/browsermesh-primitives": ">=0.5.0 <1.0.0",
+    "@johnhenry/browsermesh-realm": ">=0.0.0 <1.0.0",
     "@johnhenry/browsermesh-sync": ">=0.0.0 <1.0.0",
     "@johnhenry/browsermesh-transport": ">=0.6.0 <1.0.0"
   },
@@ -60,6 +61,9 @@
       "optional": true
     },
     "@johnhenry/andbox": {
+      "optional": true
+    },
+    "@johnhenry/browsermesh-realm": {
       "optional": true
     }
   },
