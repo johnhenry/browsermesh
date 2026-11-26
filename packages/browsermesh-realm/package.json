@@ -42,7 +42,7 @@
     "vectors": "node test/make-vectors.mjs"
   },
   "peerDependencies": {
-    "@johnhenry/browsermesh-primitives": ">=0.7.0 <1.0.0"
+    "@johnhenry/browsermesh-primitives": ">=0.8.0 <1.0.0"
   },
   "devDependencies": {
     "@johnhenry/browsermesh-primitives": ">=0.0.1 <1.0.0",
