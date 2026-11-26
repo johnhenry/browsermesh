@@ -98,7 +98,7 @@ describe('the package', () => {
     assert.equal(pkg.peerDependenciesMeta['@johnhenry/wsh'].optional, true)
     assert.ok(pkg.peerDependencies['@johnhenry/browsermesh-apps'])
     assert.ok(pkg.peerDependencies['@johnhenry/browsermesh-netway'])
-    assert.ok(pkg.devDependencies['@johnhenry/wsh'].startsWith('^0.55'))
+    assert.ok(pkg.devDependencies['@johnhenry/wsh'].startsWith('^0.56'))
   })
 
   it('the entries export what the README says', async () => {
