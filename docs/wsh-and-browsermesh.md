@@ -53,7 +53,7 @@ The strings for the shared forms coincide. The full table, with where the two di
 | `rpc:NAME` | `protocol:NAME:open` | `checkAccess(peer, 'protocol:NAME', 'open')` |
 | `expires="..."` | `grantCapabilities(peer, scopes, { expiresAt })` | refused at the instant, both |
 | `exec`, `pty`, `fs:*`, `gateway:*`, `unix:*`, `endpoint:*`, `target:*`, `relay` | none | machine rights are not granted from mesh trust |
-| none | `egress:tcp:HOST:PORT:connect`, `egress:dns:NAME:resolve`, `egress:set:NAME:connect` | the egress package's own grants for an operator-lent network, not a translation of `gateway:*` ([capability-notation.md](capability-notation.md#egress-scopes)) |
+| none | `egress:tcp:HOST:PORT:connect`, `egress:http:HOST:PORT:fetch`, `egress:udp:HOST:PORT:send`, `egress:dns:NAME:resolve`, `egress:set:NAME:connect` | the egress package's own grants for an operator-lent network, not a translation of `gateway:*` ([capability-notation.md](capability-notation.md#egress-scopes)) |
 
 ## Identity
 

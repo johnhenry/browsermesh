@@ -15,8 +15,12 @@
       "default": "./src/node.mjs"
     }
   },
+  "bin": {
+    "browsermesh-egress": "./bin/browsermesh-egress.mjs"
+  },
   "files": [
     "src",
+    "bin",
     "LICENSE",
     "README.md"
   ],
@@ -28,6 +32,8 @@
     "egress",
     "tcp",
     "dns",
+    "udp",
+    "fetch",
     "proxy",
     "gateway",
     "mesh",

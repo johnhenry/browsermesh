@@ -8,17 +8,19 @@ import type { Backend, StreamSocket } from '@johnhenry/browsermesh-netway'
 export type RefusalCode =
   | 'no-grant' | 'destination-refused' | 'budget-exceeded' | 'wide-not-acknowledged' | 'chaining-refused' | 'shutting-down'
   | 'port-blocked' | 'bad-request' | 'bad-destination' | 'name-not-found' | 'lookup-failed' | 'connect-failed' | 'unknown'
+  | 'bad-url' | 'method-not-allowed' | 'redirect-refused' | 'too-many-redirects' | 'bad-response' | 'not-offered'
 
 /** What a consumer reports when the link, not the provider's answer, failed. */
 export type LinkCode =
   | 'provider-not-authorized' | 'provider-no-egress' | 'provider-version' | 'provider-timeout' | 'provider-unreachable'
-  | 'provider-pin-mismatch' | 'provider-closed' | 'bad-answer' | 'connection-ended' | 'link-closed' | 'too-many-connections' | 'aborted'
+  | 'provider-pin-mismatch' | 'provider-closed' | 'provider-no-form' | 'datagram-too-large' | 'bad-answer' | 'connection-ended' | 'link-closed'
+  | 'too-many-connections' | 'aborted'
 
-export type BudgetName = 'connections-per-consumer' | 'connections-global' | 'connect-rate' | 'connect-rate-global' | 'dns-rate' | 'bytes-per-consumer'
+export type BudgetName = 'connections-per-consumer' | 'connections-global' | 'connect-rate' | 'connect-rate-global' | 'dns-rate' | 'bytes-per-consumer' | 'udp-flows-per-consumer'
 
 /** Why a connection that was open ended. `closed` is the only clean one. */
 export type EndReason =
-  | 'closed' | 'revoked' | 'shutdown' | 'byte-budget' | 'consumer-budget' | 'idle' | 'time-budget' | 'stream-abuse' | 'origin-error' | 'consumer-left' | 'up-timeout'
+  | 'closed' | 'revoked' | 'shutdown' | 'byte-budget' | 'datagram-budget' | 'consumer-budget' | 'idle' | 'time-budget' | 'stream-abuse' | 'origin-error' | 'consumer-left' | 'up-timeout'
 
 /** The kind of address a destination resolved to (wsh's address guard names them). */
 export type AddressClass =
@@ -38,8 +40,8 @@ export class EgressError extends Error {
   readonly budget?: BudgetName
   /** `destination-refused`: what kind of address the destination is. */
   readonly addressClass?: string
-  /** `connect-failed`: `refused`, `unreachable`, `timeout` or `failed`. */
-  readonly detail?: 'refused' | 'unreachable' | 'timeout' | 'failed'
+  /** `connect-failed`: `refused`, `unreachable`, `timeout`, `certificate` (fetch form) or `failed`. */
+  readonly detail?: 'refused' | 'unreachable' | 'timeout' | 'certificate' | 'failed'
   /** `connection-ended`: why the provider ended the connection, when it said. */
   readonly reason?: EndReason
   /** The nearest POSIX error name (`ENOTFOUND`, `ECONNREFUSED`, `ETIMEDOUT`, ...), when there is one. */
@@ -83,6 +85,39 @@ export interface ResolveRequest {
   timeoutMs: number
 }
 
+/** What `dialUdp` returns: a datagram socket (`node:dgram` shape) connected to the address that was checked. */
+export interface DialedUdpSocket {
+  socket: {
+    on(event: string, listener: (...args: any[]) => void): unknown
+    send(message: Uint8Array, callback?: (error?: Error | null) => void): unknown
+    close(): unknown
+  }
+  address: string
+  class: string
+  family?: number
+}
+
+/** One HTTP exchange the fetch form asks the provider's client for: one request, one response head, a streamed body, over `dial`. */
+export interface ExchangeRequest {
+  url: string
+  method: string
+  headers: Array<[string, string]>
+  body: AsyncIterable<Uint8Array> | null
+  /** The checked dial for this hop: the connection goes to the address that was checked. */
+  dial: (request: { host: string; port: number; timeoutMs?: number }) => Promise<DialedSocket>
+  signal: AbortSignal
+  timeoutMs: number
+  maxHeaderBytes: number
+  headersTimeoutMs: number
+}
+export interface ExchangeResponse {
+  status: number
+  statusText?: string
+  headers: Array<[string, string]>
+  body: AsyncIterable<Uint8Array>
+  destroy?(): void
+}
+
 export interface RateLimit { limit: number; windowMs: number }
 
 export interface EgressLimits {
@@ -102,15 +137,39 @@ export interface EgressLimits {
   maxViolations: number
   streamWindowBytes: number
   maxTracked: number
+  /** Fetch form: redirects followed for one request, each authorised and address-checked again. */
+  maxRedirects: number
+  /** Fetch form: bytes of a request's or a response's header block. */
+  maxHeaderBytes: number
+  /** Fetch form: time from the request to the final response head, every hop together, ms. */
+  headersTimeoutMs: number
+  /** UDP: bytes of one datagram's payload. */
+  maxDatagramBytes: number
+  /** UDP: open flows of one consumer. */
+  maxUdpFlowsPerConsumer: number
+  /** UDP: a flow with nothing moving for this long ends `idle`, ms. */
+  udpIdleMs: number
+  /** UDP: datagrams per window per consumer, both directions; the rest are dropped. */
+  udpDatagramRate: RateLimit
+  /** UDP: replies held for a consumer that is not reading; past this they are dropped. */
+  udpOutboxBytes: number
+  /** UDP: datagrams of one flow, both directions, dropped ones included; then `datagram-budget`. */
+  maxUdpDatagramsPerFlow: number
+  /** UDP: payload bytes of one flow, both directions; then `byte-budget`. */
+  maxUdpBytesPerFlow: number
+  /** UDP: reply credit earned per datagram sent is `max(udpReplyFloorBytes, size * udpReplyRatio)`, held up to `udpReplyCreditMaxBytes`. */
+  udpReplyRatio: number
+  udpReplyFloorBytes: number
+  udpReplyCreditMaxBytes: number
 }
 export const EGRESS_LIMIT_DEFAULTS: Readonly<EgressLimits>
 
 export interface AuditRecord {
-  event: 'egress-open' | 'egress-close' | 'egress-refused' | 'egress-resolve' | 'egress-abuse'
+  event: 'egress-open' | 'egress-close' | 'egress-refused' | 'egress-resolve' | 'egress-abuse' | 'egress-hop'
   at: number
-  outcome: 'opened' | 'closed' | 'refused' | 'answered'
+  outcome: 'opened' | 'closed' | 'refused' | 'answered' | 'hop'
   peer: string
-  form?: 'tcp' | 'dns'
+  form?: 'tcp' | 'dns' | 'fetch' | 'udp'
   host?: string
   port?: number
   address?: string
@@ -125,11 +184,27 @@ export interface AuditRecord {
   budget?: BudgetName
   detail?: string
   via?: 'exact' | 'host' | 'set' | 'wide'
+  /** Fetch form: the method, the redirect hop (`egress-hop`), the final status and the redirects followed. */
+  method?: string
+  hop?: number
+  status?: number
+  redirects?: number
+  /** Fetch form: the length of the path and query; never the path unless the operator chose `auditUrls`. */
+  pathLength?: number
+  /** Only with `auditUrls: 'path'` or `'full'`. */
+  path?: string
+  /** Only with `auditUrls: 'full'`. */
+  query?: string
+  /** UDP, `egress-close`: datagrams passed on each way and datagrams dropped each way. */
+  datagramsUp?: number
+  datagramsDown?: number
+  droppedUp?: number
+  droppedDown?: number
 }
 
 export interface MeterRecord {
   peer: string
-  form: 'tcp' | 'dns'
+  form: 'tcp' | 'dns' | 'fetch' | 'udp'
   /** 1 on the final record of a connection or a lookup, 0 on the periodic deltas of a long connection. */
   connections: number
   bytesUp: number
@@ -148,6 +223,21 @@ export interface MeshEgressOptions {
   dial: (request: DialRequest) => Promise<DialedSocket>
   /** The A records of a name, checked by the same policy. */
   resolve: (request: ResolveRequest) => Promise<Array<string | { address: string; family?: number; class?: string }>>
+  /**
+   * The fetch form's HTTP client (`nodeDialer().exchange`). Without it the fetch form is answered `not-offered`. THE PROVIDER SEES the
+   * URL, headers, bodies and responses it carries in plaintext.
+   */
+  exchange?: (request: ExchangeRequest) => Promise<ExchangeResponse>
+  /** The UDP form's socket (`nodeDialer().dialUdp`): resolve once, check, connect a datagram socket to the checked address. Without it UDP is answered `not-offered`. */
+  dialUdp?: (request: DialRequest) => Promise<DialedUdpSocket>
+  /** Methods the fetch form serves (default `['GET', 'HEAD']`; CONNECT and TRACE are never served). */
+  fetchMethods?: Array<'GET' | 'HEAD' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'OPTIONS'>
+  /** Add `x-browsermesh-consumer: <pod id>` to each fetch request (default false: the destination never learns who asked). */
+  identifyConsumers?: boolean
+  /** What the audit says of a URL: `'none'` (default: the length only), `'path'` or `'full'` (path and query). */
+  auditUrls?: 'none' | 'path' | 'full'
+  /** UDP ports no one reaches (default `[53]`: names are looked up through the lookup form). With wide mode 53 cannot be removed. */
+  blockedUdpPorts?: number[]
   /** Operator-named destination sets: `host:ports`, `*.suffix:ports`, `a.b.c.d/n:ports`, `a.b.c.d:ports`. */
   sets?: Record<string, string[]>
   /** `{ acknowledge: 'any-public-address' }`: a holder of a wildcard grant may reach any public destination. */
@@ -180,6 +270,8 @@ export interface EgressStats {
   open: number
   reasons: Record<string, number>
   ends: Record<string, number>
+  fetches: number
+  udp: { flows: number; datagramsUp: number; datagramsDown: number; dropped: { rate: number; credit: number; size: number; outbox: number } }
   peers: Record<string, { connections: number; open: number; bytesUp: number; bytesDown: number; refused: number; lookups: number }>
 }
 
@@ -197,6 +289,7 @@ export interface MeshEgress {
 
 export function createMeshEgress(options: MeshEgressOptions): MeshEgress
 export const DEFAULT_BLOCKED_PORTS: readonly number[]
+export const DEFAULT_BLOCKED_UDP_PORTS: readonly number[]
 export const WIDE_ACKNOWLEDGEMENT: 'any-public-address'
 
 // ---------------------------------------------------------------- consumer
@@ -227,9 +320,32 @@ export interface EgressLink {
   connect(host: string, port: number, options?: { signal?: AbortSignal }): Promise<StreamSocket>
   /** The IPv4 addresses of a name. Rejects `name-not-found` (`posix: 'ENOTFOUND'`) for a name that does not exist. */
   lookup(name: string, options?: { signal?: AbortSignal }): Promise<string[]>
+  /**
+   * `fetch` through the provider. THE PROVIDER IS THE HTTP CLIENT: it does the TLS for `https:` and sees the URL, headers, bodies and
+   * response in plaintext. Redirects are followed by the provider only to destinations you also hold a grant for; no cookies either way.
+   * Rejects with an `EgressError`; an aborted signal rejects with its reason. The body streams only as it is read.
+   */
+  fetch(input: string | URL | Request, init?: RequestInit): Promise<Response>
+  /** One UDP flow to one destination. See `EgressUdpFlow`. */
+  udp(host: string, port: number, options?: { signal?: AbortSignal }): Promise<EgressUdpFlow>
   /** A netway `Backend` for `VirtualNetwork.addBackend('tcp', ...)`. */
   asBackend(): EgressBackend
   stats(): { connections: number; refused: number; lookups: number; bytesUp: number; bytesDown: number; open: number }
+  close(): Promise<void>
+}
+
+/**
+ * A UDP flow. Datagram semantics beyond the provider, and the provider drops what it will not pass on (silently, as a network
+ * would). The datagrams read are the provider's word: a provider can invent a reply.
+ */
+export interface EgressUdpFlow extends AsyncIterable<Uint8Array> {
+  /** The longest datagram the provider passes on for this flow. */
+  readonly maxDatagramBytes: number
+  readonly closed: boolean
+  /** Rejects `datagram-too-large` above `maxDatagramBytes`; resolves when the provider has taken the datagram. */
+  send(datagram: Uint8Array | ArrayBuffer | ArrayBufferView): Promise<void>
+  /** The next datagram, or null once the flow ended cleanly; rejects with an `EgressError` (`connection-ended` with a `reason`, ...) when it ended otherwise. */
+  read(): Promise<Uint8Array | null>
   close(): Promise<void>
 }
 
@@ -249,6 +365,13 @@ export const EGRESS_SCOPES: Readonly<{
   tcpAnyPort(host: string): string
   dns(name: string): string
   set(name: string): string
+  /** The fetch form: the provider makes the HTTP(S) request and sees it in plaintext. */
+  http(host: string, port: number): string
+  httpAnyPort(host: string): string
+  setFetch(name: string): string
+  udp(host: string, port: number): string
+  udpAnyPort(host: string): string
+  setUdp(name: string): string
 }>
 
 export interface SetEntry { text: string; kind: 'name' | 'suffix' | 'ipv4' | 'cidr'; ports: '*' | number[][] }
@@ -262,4 +385,4 @@ export const EGRESS_PROTOCOL: 'egress'
 export const EGRESS_VERSIONS: readonly number[]
 /** Marks a function or object as an egress consumer; a provider refuses to be built on one. */
 export const EGRESS_CONSUMER: unique symbol
-export function signedRequestBytes(fields: { form: 'connect' | 'resolve'; cid?: number; nonce: string; host: string; port?: number }): Uint8Array
+export function signedRequestBytes(fields: { form: 'connect' | 'resolve' | 'fetch' | 'udp'; cid?: number; nonce: string; host: string; port?: number }): Uint8Array

@@ -90,6 +90,14 @@ Locally you may point Playwright at a browser you already have with
   `/signaling`), and a real HTTP client talks to the listener. Default deny then a grant then a revocation, the
   verified ingress pod id as the only identity the handler sees, a POST body and a 600 KB answer in chunks, a
   page's cookie, policy and redirect not reaching the client, and a client that hangs up aborting the handler.
+- A page as the consumer of a lent network (`@johnhenry/browsermesh-egress`, `egress.spec.mjs`,
+  `docs/design/egress.md`): the egress provider runs in the test process on a real `node-datachannel` peer, the page
+  asks it for TCP, a fetch and UDP, and the destinations are local servers. The protocol is refused until granted
+  and every destination is refused by name until granted; granted, the bytes the destination sees are the bytes the page
+  wrote, the fetch carries no cookie either way, and the audit has no payload. The provider's address guard (the operator
+  lists only `127.0.0.1`) refuses another loopback address, the metadata address and a private one **even with a grant**,
+  and refuses a redirect to the metadata address; the mail ports and a wildcard grant stay refused; a revocation takes
+  effect on the next request, and a page that cancels a big body stops the destination.
 - Examples 01, 02 and 05 unmodified in a page (their own transports stay
   simulated).
 - The packages load and run under the strict policy above.

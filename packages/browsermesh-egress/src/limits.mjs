@@ -37,11 +37,46 @@ export const EGRESS_LIMIT_DEFAULTS = Object.freeze({
   streamWindowBytes: 256 * 1024,
   /** Distinct consumers tracked at once (bounds this module's own memory). */
   maxTracked: 10_000,
+  /** Fetch form: redirects followed for one request (each hop is authorised and address-checked again). */
+  maxRedirects: 5,
+  /** Fetch form: bytes of a request's or a response's header block. */
+  maxHeaderBytes: 16 * 1024,
+  /** Fetch form: time from the request to the final response head, every hop together, ms. */
+  headersTimeoutMs: 30_000,
+  /** Fetch form: bytes of a request body (the note's 1 MiB); more ends the fetch `byte-budget`. */
+  maxFetchRequestBytes: 1 * MiB,
+  /** Fetch form: bytes of a response body (the note's 8 MiB); more ends the body `byte-budget`. A bigger blob is a job for `connect()`, or a raised limit. */
+  maxFetchResponseBytes: 8 * MiB,
+  /** Fetch form: the whole life of a fetch, request to last body byte (the note's 30 s), ms; then `time-budget`. */
+  maxFetchDurationMs: 30_000,
+  /** UDP: bytes of one datagram's payload (1472 is what fits an Ethernet frame). */
+  maxDatagramBytes: 1472,
+  /** UDP: open flows of one consumer (each is one destination). */
+  maxUdpFlowsPerConsumer: 8,
+  /** UDP: nothing sent or received on a flow for this long closes it, ms. */
+  udpIdleMs: 30_000,
+  /** UDP: datagrams per window, per consumer, both directions; the rest are dropped, as a network would. */
+  udpDatagramRate: Object.freeze({ limit: 500, windowMs: 1000 }),
+  /** UDP: replies held for a consumer that is not reading; past this they are dropped. */
+  udpOutboxBytes: 64 * 1024,
+  /** UDP: datagrams of one flow, both directions together (dropped ones count too, so a flood ends the flow); the flow ends `datagram-budget`. */
+  maxUdpDatagramsPerFlow: 50_000,
+  /** UDP: payload bytes of one flow, both directions together; the flow ends `byte-budget`. */
+  maxUdpBytesPerFlow: 16 * MiB,
+  /**
+   * UDP, replies are bounded by what the consumer sent (no amplification): each datagram the consumer sends earns its flow
+   * `max(udpReplyFloorBytes, size * udpReplyRatio)` bytes of reply credit, up to `udpReplyCreditMaxBytes` held at once; a reply
+   * larger than the credit left is dropped.
+   */
+  udpReplyRatio: 8,
+  udpReplyFloorBytes: 4096,
+  udpReplyCreditMaxBytes: 256 * 1024,
 })
 
 const POSITIVE = ['maxConnectionsPerConsumer', 'maxConnections', 'maxBytesPerConnection', 'connectTimeoutMs', 'idleMs', 'maxDurationMs', 'upWaitMs',
-  'meterIntervalMs', 'maxBadRequests', 'maxViolations', 'streamWindowBytes', 'maxTracked']
-const RATES = ['connectRate', 'globalConnectRate', 'dnsRate']
+  'meterIntervalMs', 'maxBadRequests', 'maxViolations', 'streamWindowBytes', 'maxTracked', 'maxRedirects', 'maxHeaderBytes', 'headersTimeoutMs', 'maxFetchRequestBytes', 'maxFetchResponseBytes', 'maxFetchDurationMs',
+  'maxDatagramBytes', 'maxUdpFlowsPerConsumer', 'udpIdleMs', 'udpOutboxBytes', 'maxUdpDatagramsPerFlow', 'maxUdpBytesPerFlow', 'udpReplyRatio', 'udpReplyFloorBytes', 'udpReplyCreditMaxBytes']
+const RATES = ['connectRate', 'globalConnectRate', 'dnsRate', 'udpDatagramRate']
 
 /** @returns {typeof EGRESS_LIMIT_DEFAULTS} defaults overlaid with `given`, each value checked */
 export function resolveLimits(given = {}) {
@@ -56,6 +91,12 @@ export function resolveLimits(given = {}) {
   const b = out.maxBytesPerConsumer
   if (!b || !Number.isSafeInteger(b.limit) || b.limit <= 0 || !Number.isSafeInteger(b.windowMs) || b.windowMs <= 0) throw new TypeError('egress limits: maxBytesPerConsumer must be { limit, windowMs } of positive integers')
   if (out.streamWindowBytes > 16 * MiB) throw new TypeError('egress limits: streamWindowBytes is at most 16 MiB')
+  if (out.maxDatagramBytes > 65507) throw new TypeError('egress limits: maxDatagramBytes is at most 65507 (the largest UDP payload)')
+  if (out.maxRedirects > 20) throw new TypeError('egress limits: maxRedirects is at most 20')
+  if (out.maxHeaderBytes > 1024 * 1024) throw new TypeError('egress limits: maxHeaderBytes is at most 1 MiB')
+  if (out.udpReplyCreditMaxBytes < out.maxDatagramBytes) throw new TypeError('egress limits: udpReplyCreditMaxBytes must hold at least one datagram (maxDatagramBytes)')
+  // A datagram is carried whole in one frame of one stream chunk; the stream window must hold a few.
+  if (out.streamWindowBytes < 4 * (out.maxDatagramBytes + 2)) throw new TypeError('egress limits: streamWindowBytes must hold at least four datagrams (maxDatagramBytes + 2 each)')
   return out
 }
 

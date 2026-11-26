@@ -1,10 +1,11 @@
 # Egress: a pod that lends its network access to peers
 
 Status: research and design for [#379](https://github.com/johnhenry/browsermesh/issues/379), written 2026-11-25 against
-`main` and `@johnhenry/wsh` 0.54.1. **Option (ii), stage 1 is built** as `@johnhenry/browsermesh-egress` (TCP connect and
-A lookup, grants, destination sets, wide mode, budgets, audit, metering, revocation, no chaining, a consumer with a netway
-backend); what the package does is in its README and in [security.md](../security.md#egress). The rest of this page is the
-design as it was written and is kept as it was, except where the owner's decisions replaced it:
+`main` and `@johnhenry/wsh` 0.54.1. **Option (ii) is built, stages 1 to 4**, as `@johnhenry/browsermesh-egress` (TCP connect
+and A lookup, grants, destination sets, wide mode, budgets, audit, metering, revocation, no chaining, a consumer with a netway
+backend; then the fetch form, UDP, the `browsermesh-egress` command and a browser spec); what the package does is in its README
+and in [security.md](../security.md#egress). The rest of this page is the design as it was written and is kept as it was,
+except where the owner's decisions and the building replaced it:
 
 - The package is `@johnhenry/browsermesh-egress`.
 - A wide "any public destination" mode exists, only behind the provider operator's explicit acknowledgement
@@ -13,9 +14,32 @@ design as it was written and is kept as it was, except where the owner's decisio
   admits private space, never a peer's grant (section 4.2 and 4.3 as built).
 - The provider's address check is wsh's own, `@johnhenry/wsh/address-guard` (wsh 0.55.0): section 3.2's options (A) and (B)
   are replaced by it, behind a `dial` / `resolve` seam (`nodeDialer` on `./node`).
-- The first version includes TCP, DNS, the fetch form and UDP; the core (this stage) is built first, and the fetch form,
-  UDP, the CLI and the browser spec follow in the same package. Not built yet: they are listed at the end of the package
-  README.
+- The first version includes TCP, DNS, the fetch form and UDP, in one package; all four are built.
+- **The fetch form, as built (stage 3, section 4.5):** the provider is the HTTP client (the note's choice; a page has no
+  TLS stack), so the provider sees the URL, headers, bodies and responses, and the README, `security.md` and the CLI's dry run
+  say so. Its own scope per origin (`egress:http:<host>:<port>:fetch`; a TCP grant is not one), offered only when the provider
+  is given an `exchange` (`nodeDialer().exchange`: Node's `http` over the guard's checked socket, `tls` with the NAME as SNI;
+  the one file that terminates TLS). The note's budgets are the defaults (1 MiB request body, 8 MiB response, 30 s), the audit
+  has the length of the path and query and the opt-in `auditUrls: 'path' | 'full'` adds them, redirects are each a new
+  request authorised against the consumer's own fetch grants (so the redirect to a destination without a grant is
+  `redirect-refused` before any lookup), GET and HEAD by default and POST and the other methods only when the operator lists
+  them (CONNECT and TRACE never), and the headers are allow-lists in both directions.
+- **UDP, as built (stage 4, the owner wanted it):** one flow per destination as two streams carrying datagram frames (a
+  2-byte length and the payload), over a datagram socket connected to the checked address (wsh's `dialUdpChecked`: the kernel
+  drops every other source). Datagram semantics are stated: over the mesh the flow is reliable and ordered, beyond the provider
+  the network keeps UDP's, and the provider drops, silently and counted, what it will not pass on. The note's "wsh's bounds"
+  became: 8 flows per consumer, 500 datagrams a second per consumer (both directions), 1472-byte datagrams, 30 s idle, 50 000
+  datagrams and 16 MiB a flow. **Amplification, decided:** replies are bounded by what the consumer sent: each datagram sent
+  earns `max(4096, 8 * size)` bytes of reply credit (held up to 256 KiB), a reply over the credit is dropped, a flow starts with
+  none, and a provider holds at most 64 KiB of replies for a consumer that is not reading. Port 53 is refused for every grant
+  (DNS is its own form, with its own grant and rate), wide mode included.
+- **Compatibility, as built:** protocol `egress` stays version 1; `fetch` and `udp` are new request methods, so an older
+  provider answers them method-not-found (the consumer says `provider-no-form`) and an older consumer is never sent anything it
+  does not know (the package pins 0.1.1's messages in a test and was run against the published 0.1.1 in both directions).
+- **The command and the browser spec, as built (stage 2):** `browsermesh-egress` (a JSON grants file, `--dry-run`, wide mode
+  only with `--wide --acknowledge-wide any-public-address`, never from the file) and `tests/browser/egress.spec.mjs` (a page
+  as the consumer against a Node provider on real WebRTC, in Chromium, Firefox and WebKit). The adapter example for a container
+  engine is not built.
 - Choices made while building, where the note left room: a name whose answers mix a refused address with a permitted one is
   refused whole (`refuseMixed`); the blocked ports (25, 465, 587) are absolute for every grant and wide mode keeps them
   (the note let an exact-port grant override them); a `*.suffix` in a set needs at least two labels after the star; sets

@@ -16,9 +16,10 @@ import { StreamSocket } from '@johnhenry/browsermesh-netway'
 import { createStreamLayer } from '@johnhenry/browsermesh-apps/protocol-stream'
 import { checkHost, checkPort, looksLikePodId } from './destination.mjs'
 import { END_REASONS, EgressError, errorFromAnswer } from './errors.mjs'
+import { NO_BODY_STATUSES, parseTarget } from './http-policy.mjs'
 import {
-  CONNECT_METHOD, EGRESS_CONSUMER, EGRESS_PROTOCOL, EGRESS_VERSIONS, END_METHOD, KIND_DOWN, KIND_UP, RESOLVE_METHOD, randomHex,
-  signedRequestBytes, validateAddresses, validateStreamMeta,
+  CONNECT_METHOD, EGRESS_CONSUMER, EGRESS_PROTOCOL, EGRESS_VERSIONS, END_METHOD, FETCH_METHOD, KIND_DOWN, KIND_UP, RESOLVE_METHOD, UDP_METHOD, randomHex,
+  createFrameReader, encodeDatagram, signedRequestBytes, validateAddresses, validateFetchAnswer, validateStreamMeta, validateUdpAnswer,
 } from './wire.mjs'
 import { EgressBackend } from './backend.mjs'
 
@@ -78,6 +79,7 @@ function requestFailure(e) {
   const reason = e?.reason
   if (reason === 'timeout') return new EgressError('provider-timeout')
   if (reason === 'not-authorized') return new EgressError('provider-not-authorized')
+  if (reason === 'method-not-found' || e?.code === -32601) return new EgressError('provider-no-form')
   if (reason === 'channel-closed' || reason === 'stream-abuse') return new EgressError('provider-closed')
   if (e?.name === 'AbortError' || reason === 'cancelled') return new EgressError('aborted')
   return new EgressError('unknown')
@@ -305,14 +307,311 @@ export async function connectEgress(service, provider, { signal, limits: limitOp
     return validateAddresses(answer)
   }
 
+  /**
+   * `fetch(input, init)` through the provider: the same arguments as `fetch`, a `Response` back, `init.signal` honoured.
+   *
+   * THE PROVIDER IS THE HTTP CLIENT. For `https:` it does the TLS, so its operator can read and alter the URL, the headers, the
+   * request body and the response. It is not private from the provider. A page cannot terminate TLS itself; where that matters,
+   * use `connect()` and run your own TLS over the socket, so the provider carries bytes it cannot read.
+   *
+   * What the provider does for you, and what you get: redirects are followed by the provider, only to destinations you also hold a
+   * grant for (`redirect: 'manual'` returns the 3xx instead; `'error'` rejects); no cookies in either direction and no `Cookie`,
+   * `Origin`, `Referer` or `User-Agent` of yours; only a short list of request headers is sent on (accept, accept-language,
+   * authorization, cache-control, content-type, content-length, conditionals, range, pragma) and of response headers returned;
+   * the body is never decompressed (`accept-encoding: identity` is sent; if the destination compresses anyway you get its bytes
+   * and its `content-encoding` header, and decode them yourself); GET and HEAD unless the provider's operator allows more.
+   * `response.url` is the final URL and `response.redirected` says whether a redirect was followed. The body is a stream that
+   * only moves as it is read.
+   *
+   * Rejects with an `EgressError` (`no-grant`, `redirect-refused`, `connect-failed` with `detail: 'certificate'`, ...) or, for an
+   * aborted signal, with the signal's reason.
+   */
+  async function fetchUrl(input, init) {
+    live()
+    const asked = init?.body instanceof ReadableStream && init.duplex === undefined ? { ...init, duplex: 'half' } : init
+    const request = new Request(input, asked) // the platform's own parsing of the arguments: a TypeError for what `fetch` would reject
+    let hostname
+    try { hostname = new URL(request.url).hostname } catch { throw new EgressError('bad-url') }
+    if (looksLikePodId(hostname) || hostname === provider) throw new EgressError('chaining-refused', 'A mesh pod is not a destination: a provider dials a network, never another egress.')
+    const target = parseTarget(request.url)
+    const callSignal = request.signal
+    if (callSignal.aborted) throw callSignal.reason
+    if (pending.size + active.size >= limits.maxConnections) throw new EgressError('too-many-connections')
+    const cid = nextCid++
+    const entry = { cid, reader: null, ready: deferred(), endReason: undefined, fail: null }
+    pending.set(cid, entry)
+    const ac = new AbortController()
+    const onAbort = () => ac.abort(callSignal.reason)
+    callSignal.addEventListener('abort', onAbort, { once: true })
+    const done = () => callSignal.removeEventListener('abort', onAbort)
+    entry.fail = (e) => ac.abort(e)
+    const wasAborted = () => (callSignal.aborted ? callSignal.reason : ac.signal.aborted && ac.signal.reason instanceof EgressError ? ac.signal.reason : null)
+    // A platform whose Request has no `body` stream (an older Firefox answers undefined, not null): take the bytes whole, as one chunk.
+    let bodyStream = request.body ?? null
+    if (request.body === undefined && request.method !== 'GET' && request.method !== 'HEAD') {
+      const whole = new Uint8Array(await request.arrayBuffer())
+      if (whole.byteLength) bodyStream = new ReadableStream({ start(c) { c.enqueue(whole); c.close() } })
+    }
+    const hasBody = bodyStream !== null
+    const bodyReader = hasBody ? bodyStream.getReader() : null
+    const dropBody = () => { try { bodyReader?.cancel().catch(() => {}) } catch { /* gone */ } }
+    let up = null
+    let answer
+    try {
+      const signature = await sign('fetch', { cid, host: target.host, port: target.port })
+      // The request goes first and its body's stream right behind it, before the answer: the provider reads the body while it sends.
+      const answered = channel.request(FETCH_METHOD, {
+        cid, url: target.href, method: request.method, headers: [...request.headers].map(([k, v]) => [k, v]), body: hasBody,
+        redirect: request.redirect === 'follow' ? 'follow' : 'manual', hops: 0, ...signature,
+      }, { signal: ac.signal, timeoutMs: limits.requestTimeoutMs })
+      let upFailure = null
+      if (hasBody) { try { up = await streams.open({ cid, kind: KIND_UP }, { signal: ac.signal, timeoutMs: limits.openTimeoutMs }) } catch (e) { upFailure = e } }
+      // The body goes out while the answer is awaited: the provider's HTTP client sends the request head with the first of the body,
+      // and the destination does not answer before it has it.
+      if (up) {
+        ;(async () => {
+          try {
+            for (;;) {
+              const { done: finished, value } = await bodyReader.read()
+              if (finished) break
+              if (!(value instanceof Uint8Array)) throw new TypeError('A request body streams bytes (Uint8Array chunks).')
+              await up.write(value)
+              counters.bytesUp += value.byteLength
+            }
+            await up.end()
+          } catch {
+            dropBody()
+            try { up.abort('failed') } catch { /* gone */ }
+          }
+        })()
+      }
+      answer = await answered
+      if (upFailure && answer?.ok === true) throw upFailure
+    } catch (e) {
+      done()
+      abandon(entry, 'request failed')
+      try { up?.abort('failed') } catch { /* gone */ }
+      dropBody()
+      const why = wasAborted()
+      if (why) throw why
+      throw requestFailure(e)
+    }
+    if (!answer || typeof answer !== 'object' || typeof answer.ok !== 'boolean') { done(); abandon(entry, 'unreadable answer'); try { up?.abort('failed') } catch { /* gone */ } dropBody(); throw new EgressError('bad-answer') }
+    if (!answer.ok) { done(); abandon(entry, 'refused'); try { up?.abort('refused') } catch { /* gone */ } dropBody(); counters.refused += 1; throw errorFromAnswer(answer) }
+    let info
+    let down
+    try {
+      info = validateFetchAnswer(answer)
+      down = await within(entry.ready.promise, limits.requestTimeoutMs, () => new EgressError('provider-timeout', 'The provider answered and did not open its stream.'))
+    } catch (e) {
+      done()
+      abandon(entry, 'no stream')
+      try { up?.abort('failed') } catch { /* gone */ }
+      dropBody()
+      throw requestFailure(e)
+    }
+    pending.delete(cid)
+    active.set(cid, entry)
+    counters.connections += 1
+    const method = request.method
+    const noBody = method === 'HEAD' || NO_BODY_STATUSES.includes(info.status)
+    let controller = null
+    let over = false
+    const settle = () => { active.delete(cid); done() }
+    const teardown = (error) => {
+      if (over) return
+      over = true
+      down.cancel('failed').catch(() => {})
+      try { up?.abort('failed') } catch { /* gone */ }
+      dropBody()
+      settle()
+      try { controller?.error(error) } catch { /* closed */ }
+    }
+    const failure = () => wasAborted() ?? new EgressError(closed ? 'link-closed' : channel.closed ? 'provider-closed' : 'connection-ended', undefined, { reason: entry.endReason })
+    entry.fail = (e) => teardown(e instanceof EgressError ? e : failure())
+    ac.signal.addEventListener('abort', () => { if (!over) teardown(wasAborted() ?? failure()) }, { once: true })
+
+    let body = null
+    if (noBody) {
+      down.cancel('no body').catch(() => {})
+      settle()
+    } else {
+      // The next chunk is read only when the caller asks for it, so a Response nobody reads stops the origin.
+      body = new ReadableStream({
+        start(c) { controller = c },
+        async pull(c) {
+          if (over) return
+          try {
+            const { done: finished, value } = await down.read()
+            if (finished) { over = true; settle(); c.close(); return }
+            counters.bytesDown += value.byteLength
+            c.enqueue(value)
+          } catch (e) { teardown(wasAborted() ?? (e instanceof EgressError ? e : failure())) }
+        },
+        cancel() {
+          if (over) return
+          over = true
+          down.cancel('cancelled').catch(() => {})
+          try { up?.abort('cancelled') } catch { /* gone */ }
+          settle()
+        },
+      }, { highWaterMark: 0 })
+    }
+    const headers = new Headers()
+    for (const [k, v] of info.headers) { try { headers.append(k, v) } catch { /* a value this platform will not take */ } }
+    const response = new Response(body, { status: info.status, statusText: info.statusText, headers })
+    Object.defineProperty(response, 'url', { value: info.url ?? target.href })
+    Object.defineProperty(response, 'redirected', { value: info.redirected })
+    if (request.redirect === 'error' && info.status >= 300 && info.status < 400 && info.headers.some(([k]) => k === 'location')) {
+      down.cancel('redirect').catch(() => {})
+      teardown(new TypeError('The destination redirected and redirect is "error".'))
+      throw new TypeError('The destination redirected and redirect is "error".')
+    }
+    return response
+  }
+
+  /**
+   * `udp(host, port)`: one flow to one destination, datagrams out and the destination's datagrams back.
+   *
+   *   const flow = await link.udp('time.example', 123)
+   *   await flow.send(bytes)           // rejects `datagram-too-large` above `flow.maxDatagramBytes`; resolves when the provider has the datagram
+   *   const reply = await flow.read()  // one datagram, or null once the flow has ended cleanly; rejects with an EgressError when it ended otherwise
+   *   await flow.close()
+   *
+   * What a flow is and is not. The flow runs over a reliable, ordered stream to the provider, which sends each datagram once on a
+   * socket connected to the checked destination. The network beyond the provider keeps datagram semantics (a datagram can be lost,
+   * reordered or duplicated there), and the provider DROPS datagrams it is not willing to pass on (over its rate, over the credit
+   * your own sends earned for replies, larger than `maxDatagramBytes`, or past its outbox when you are not reading): a drop is silent,
+   * as it is on a network. A flow ends when the provider's budgets say so (`connection-ended` with a `reason`, `idle` after
+   * `limits.udpIdleMs` of silence among them) or when you close it. DNS is not a flow: use `lookup()`; port 53 is refused.
+   *
+   * The datagrams you read are the provider's word: a provider can invent a reply. Do not treat one as the destination's unless the
+   * protocol inside authenticates it.
+   */
+  async function udp(host, port, { signal: callSignal } = {}) {
+    live()
+    const dest = destinationOf(host, port)
+    if (dest.port === undefined) throw new EgressError('bad-destination', 'A UDP flow needs a port.')
+    if (pending.size + active.size >= limits.maxConnections) throw new EgressError('too-many-connections')
+    if (callSignal?.aborted) throw callSignal.reason ?? new EgressError('aborted')
+    const cid = nextCid++
+    const entry = { cid, reader: null, ready: deferred(), endReason: undefined, fail: null }
+    pending.set(cid, entry)
+    const ac = new AbortController()
+    const onAbort = () => ac.abort(callSignal.reason)
+    callSignal?.addEventListener('abort', onAbort, { once: true })
+    entry.fail = (e) => ac.abort(e)
+    let answer
+    try {
+      answer = await channel.request(UDP_METHOD, { cid, host: dest.host, port: dest.port, hops: 0, ...(await sign('udp', { cid, host: dest.host, port: dest.port })) }, { signal: ac.signal, timeoutMs: limits.requestTimeoutMs })
+    } catch (e) {
+      callSignal?.removeEventListener('abort', onAbort)
+      abandon(entry, 'request failed')
+      if (callSignal?.aborted) throw callSignal.reason
+      if (ac.signal.aborted && ac.signal.reason instanceof EgressError) throw ac.signal.reason
+      throw requestFailure(e)
+    }
+    if (!answer || typeof answer !== 'object' || typeof answer.ok !== 'boolean') { callSignal?.removeEventListener('abort', onAbort); abandon(entry, 'unreadable answer'); throw new EgressError('bad-answer') }
+    if (!answer.ok) { callSignal?.removeEventListener('abort', onAbort); abandon(entry, 'refused'); counters.refused += 1; throw errorFromAnswer(answer) }
+    let info
+    let down
+    let up
+    try {
+      info = validateUdpAnswer(answer)
+      down = await within(entry.ready.promise, limits.requestTimeoutMs, () => new EgressError('provider-timeout', 'The provider announced a flow and did not open its stream.'))
+      up = await streams.open({ cid, kind: KIND_UP }, { signal: ac.signal, timeoutMs: limits.openTimeoutMs })
+    } catch (e) {
+      callSignal?.removeEventListener('abort', onAbort)
+      abandon(entry, 'no stream')
+      throw requestFailure(e)
+    }
+    pending.delete(cid)
+    active.set(cid, entry)
+    counters.connections += 1
+    const frames = createFrameReader(info.maxDatagramBytes)
+    const queue = []
+    let over = false // nothing more will be sent or read from the provider
+    let closing = false
+    let failure = null // what reads and sends fail with after the flow failed; null for a flow closed on this side or ended cleanly
+    let sending = Promise.resolve()
+    let reading = Promise.resolve()
+    const failureNow = () => (callSignal?.aborted ? new EgressError('aborted') : new EgressError(closed ? 'link-closed' : channel.closed ? 'provider-closed' : 'connection-ended', undefined, { reason: entry.endReason }))
+    const finish = (error) => {
+      if (over) return
+      over = true
+      failure = error ?? null
+      down.cancel('closed').catch(() => {})
+      try { up.abort('closed') } catch { /* gone */ }
+      active.delete(cid)
+      callSignal?.removeEventListener('abort', onAbort)
+    }
+    entry.fail = (e) => finish(e instanceof EgressError ? e : failureNow())
+    ac.signal.addEventListener('abort', () => { if (callSignal?.aborted) finish(new EgressError('aborted')) }, { once: true })
+
+    async function readOne() {
+      for (;;) {
+        if (queue.length) return queue.shift()
+        if (over) { if (failure) throw failure; return null }
+        let step
+        try { step = await down.read() } catch { if (!over) finish(failureNow()); continue }
+        if (over) continue
+        if (step.done) {
+          if (frames.pending() > 0) finish(new EgressError('bad-answer', 'The provider ended the flow inside a datagram.'))
+          else finish()
+          continue
+        }
+        try { for (const d of frames.push(step.value)) { counters.bytesDown += d.byteLength; queue.push(d) } } catch { finish(new EgressError('bad-answer', 'The provider sent a datagram longer than the bound it announced.')) }
+      }
+    }
+    const flow = {
+      /** The longest datagram the provider passes on for this flow. */
+      maxDatagramBytes: info.maxDatagramBytes,
+      get closed() { return over || closing },
+      async send(datagram) {
+        const bytes = datagram instanceof Uint8Array ? datagram : ArrayBuffer.isView(datagram) ? new Uint8Array(datagram.buffer, datagram.byteOffset, datagram.byteLength) : datagram instanceof ArrayBuffer ? new Uint8Array(datagram) : null
+        if (!bytes) throw new TypeError('A datagram is a Uint8Array.')
+        if (over || closing) throw failure ?? new EgressError('link-closed', 'This flow is closed.')
+        if (bytes.byteLength > info.maxDatagramBytes) throw new EgressError('datagram-too-large', `The datagram is ${bytes.byteLength} bytes; this flow allows ${info.maxDatagramBytes}.`)
+        const frame = encodeDatagram(bytes)
+        const turn = sending.then(() => (over ? undefined : up.write(frame)))
+        sending = turn.catch(() => {})
+        try { await turn } catch { finish(failureNow()); throw failure }
+        if (over && failure) throw failure
+        counters.bytesUp += bytes.byteLength
+      },
+      read() {
+        const turn = reading.then(readOne, readOne)
+        reading = turn.catch(() => {})
+        return turn
+      },
+      async close() {
+        if (over || closing) return
+        closing = true
+        try { await sending; await up.end() } catch { /* the provider is gone: nothing more to say */ }
+        finish()
+      },
+      [Symbol.asyncIterator]() {
+        return {
+          next: async () => { const value = await flow.read(); return value === null ? { done: true, value: undefined } : { done: false, value } },
+          return: async () => { await flow.close(); return { done: true, value: undefined } },
+        }
+      },
+    }
+    return flow
+  }
+
   connect[EGRESS_CONSUMER] = true
   lookup[EGRESS_CONSUMER] = true
+  fetchUrl[EGRESS_CONSUMER] = true
+  udp[EGRESS_CONSUMER] = true
   const link = {
     /** The provider's pod id (the channel's verified peer). */
     peer: provider,
     get closed() { return closed || channel.closed },
     connect,
     lookup,
+    fetch: fetchUrl,
+    udp,
     /** A netway `Backend` (connect and resolve) to register on a `VirtualNetwork`: `net.addBackend('tcp', link.asBackend())`. */
     asBackend() { return new EgressBackend(link) },
     stats: () => ({ ...counters, open: active.size + pending.size }),

@@ -7,15 +7,25 @@
  *   stream   meta { cid, kind: 'down' }  provider -> consumer, opened BEFORE the answer
  *   stream   meta { cid, kind: 'up' }    consumer -> provider, opened after the answer
  *   request  resolve  { name, type: 'A', hops: 0, nonce?, sig? }  -> { ok: true, addresses: [string] } | { ok: false, code, ... }
+ *   request  fetch    { cid, url, method, headers: [[name, value]], body, redirect, hops: 0, nonce?, sig? }
+ *                     -> { ok: true, status, statusText, headers: [[name, value]], url, redirected } | { ok: false, code, ... }
+ *                     the `down` stream of the cid (the response body) is opened BEFORE the answer; when `body` is true the consumer opens
+ *                     the `up` stream (the request body) right after sending the request, not after the answer
+ *   request  udp      { cid, host, port, hops: 0, nonce?, sig? }  -> { ok: true, maxDatagramBytes } | { ok: false, code, ... }
+ *                     one flow to one destination; `down` is opened BEFORE the answer, `up` after it; each stream carries
+ *                     datagrams as frames: a 2-byte big-endian length, then that many bytes
  *   notify   end      { cid, reason }    provider -> consumer, before it aborts the streams of a connection it ended
  */
 import { EgressError } from './errors.mjs'
 import { checkHost, checkName, checkPort } from './destination.mjs'
+import { MAX_HEADERS, MAX_URL_LENGTH, RESPONSE_HEADERS, checkHeaderPairs, isHeader, parseTarget } from './http-policy.mjs'
 
 export const EGRESS_PROTOCOL = 'egress'
 export const EGRESS_VERSIONS = Object.freeze([1])
 export const CONNECT_METHOD = 'connect'
 export const RESOLVE_METHOD = 'resolve'
+export const FETCH_METHOD = 'fetch'
+export const UDP_METHOD = 'udp'
 export const END_METHOD = 'end'
 export const KIND_UP = 'up'
 export const KIND_DOWN = 'down'
@@ -65,6 +75,50 @@ export function validateStreamMeta(meta, kind) {
   return meta
 }
 
+/**
+ * The fetch form's request: `{ cid, url, method, headers: [[name, value]], body: boolean, redirect: 'follow'|'manual', hops, nonce?, sig? }`.
+ * The URL is parsed here (`bad-url`, `bad-destination`); the method is only checked for shape (the provider's list decides).
+ * @returns {{ cid: number, hops: number, method: string, headers: Array<[string,string]>, body: boolean, redirect: string, target: object, nonce?: string, sig?: string }}
+ */
+export function validateFetch(params, { maxHeaderBytes } = {}) {
+  if (!params || typeof params !== 'object' || Array.isArray(params)) throw new EgressError('bad-request', 'The request is not an object.')
+  const { cid, hops } = params
+  if (!Number.isSafeInteger(cid) || cid <= 0) throw new EgressError('bad-request', 'The connection id is not a positive integer.')
+  if (!Number.isSafeInteger(hops) || hops < 0) throw new EgressError('bad-request', 'The hop count is not a whole number.')
+  checkSigFields(params)
+  if (hops !== 0) return { cid, hops, method: 'GET', headers: [], body: false, redirect: 'follow', target: null }
+  if (typeof params.url !== 'string') throw new EgressError('bad-request', 'The URL is not a string.')
+  if (typeof params.method !== 'string' || !/^[A-Z]{3,7}$/.test(params.method)) throw new EgressError('bad-request', 'The method is not an upper-case word.')
+  if (typeof params.body !== 'boolean') throw new EgressError('bad-request', 'body is true or false.')
+  if (params.redirect !== 'follow' && params.redirect !== 'manual') throw new EgressError('bad-request', 'redirect is follow or manual.')
+  if (params.body && (params.method === 'GET' || params.method === 'HEAD')) throw new EgressError('bad-request', 'A GET or HEAD request has no body.')
+  const headers = checkHeaderPairs(params.headers, { maxBytes: maxHeaderBytes })
+  return { cid, hops, method: params.method, headers, body: params.body, redirect: params.redirect, target: parseTarget(params.url), nonce: params.nonce, sig: params.sig }
+}
+
+/** A provider's answer to `fetch`, from a pod this side does not control. Throws EgressError('bad-answer'). */
+export function validateFetchAnswer(answer) {
+  const bad = (why) => new EgressError('bad-answer', `The provider's fetch answer is not readable: ${why}.`)
+  const { status, headers, url, statusText } = answer ?? {}
+  if (!Number.isSafeInteger(status) || status < 200 || status > 599) throw bad('status')
+  if (!Array.isArray(headers) || headers.length > 4 * MAX_HEADERS) throw bad('headers')
+  const pairs = []
+  for (const pair of headers) {
+    if (!Array.isArray(pair) || pair.length !== 2 || typeof pair[0] !== 'string' || typeof pair[1] !== 'string') throw bad('a header')
+    // What this side will not put in a Response, it drops: a cookie, a hop-by-hop header, a name or value that is not plain.
+    const name = pair[0].toLowerCase()
+    if (pairs.length < MAX_HEADERS && RESPONSE_HEADERS.includes(name) && isHeader(name, pair[1])) pairs.push([name, pair[1]])
+  }
+  let final
+  if (url !== undefined) {
+    if (typeof url !== 'string' || url.length > MAX_URL_LENGTH) throw bad('url')
+    try { final = new URL(url) } catch { throw bad('url') }
+    if (final.protocol !== 'http:' && final.protocol !== 'https:') throw bad('url')
+  }
+  const text = typeof statusText === 'string' && statusText.length <= 64 && /^[\t\x20-\x7e]*$/.test(statusText) ? statusText : ''
+  return { status, statusText: text, headers: pairs, url: final?.href, redirected: answer.redirected === true }
+}
+
 /** A provider's answer to `resolve`, from a pod this side does not control. Throws EgressError('bad-answer'). */
 export function validateAddresses(answer) {
   const list = answer?.addresses
@@ -76,6 +130,50 @@ export function validateAddresses(answer) {
 }
 
 export const MAX_ANSWER_ADDRESSES = MAX_ADDRESSES
+
+/** A provider's answer to `udp`, from a pod this side does not control. Throws EgressError('bad-answer'). */
+export function validateUdpAnswer(answer) {
+  const max = answer?.maxDatagramBytes
+  if (!Number.isSafeInteger(max) || max < 1 || max > 65507) throw new EgressError('bad-answer', 'The provider\'s datagram bound is not a number from 1 to 65507.')
+  return { maxDatagramBytes: max }
+}
+
+/** One datagram as a frame of a UDP flow's stream: a 2-byte big-endian length, then the payload. */
+export function encodeDatagram(payload) {
+  const out = new Uint8Array(2 + payload.byteLength)
+  out[0] = payload.byteLength >>> 8
+  out[1] = payload.byteLength & 0xff
+  out.set(payload, 2)
+  return out
+}
+
+/**
+ * Cuts a stream's chunks into datagrams: a chunk may hold several frames, part of one, or a frame split across chunks. A frame
+ * longer than `max` is `bad-request` (the caller names it: a consumer that did it is cut off, a provider that did it is `bad-answer`).
+ * What is held between calls is at most one frame.
+ * @returns {{ push(chunk: Uint8Array): Uint8Array[], pending(): number }}
+ */
+export function createFrameReader(max) {
+  let held = new Uint8Array(0)
+  return {
+    push(chunk) {
+      let buf = held
+      if (held.byteLength) { buf = new Uint8Array(held.byteLength + chunk.byteLength); buf.set(held); buf.set(chunk, held.byteLength) } else buf = chunk
+      const out = []
+      let at = 0
+      while (buf.byteLength - at >= 2) {
+        const len = (buf[at] << 8) | buf[at + 1]
+        if (len > max) throw new EgressError('bad-request', 'A datagram is longer than the flow allows.')
+        if (buf.byteLength - at - 2 < len) break
+        out.push(buf.slice(at + 2, at + 2 + len))
+        at += 2 + len
+      }
+      held = buf.slice(at)
+      return out
+    },
+    pending: () => held.byteLength,
+  }
+}
 
 /**
  * What a request signature covers (`signRequest` on the consumer, `verifyRequest` on the provider): the form, the request's

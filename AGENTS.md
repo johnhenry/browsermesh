@@ -34,7 +34,7 @@ Higher-level packages that sit on top of those:
 | [`@johnhenry/browsermesh-embed`](packages/browsermesh-embed) | Thin widget for embedding a browsermesh-pod-backed workspace on a page |
 | [`@johnhenry/browsermesh-mcp`](packages/browsermesh-mcp) | A page's WebMCP tools over a protocol channel (peer-depends on wsh and apps) |
 | [`@johnhenry/browsermesh-ingress`](packages/browsermesh-ingress) | Real HTTP in, a mesh pod answers: request forwarder and CLI (peer-depends on apps) |
-| [`@johnhenry/browsermesh-egress`](packages/browsermesh-egress) | A pod lends its network to peers under per-destination grants: TCP and name lookup, consumer with a netway backend (peer-depends on apps and netway; the Node dialer on wsh's address guard) |
+| [`@johnhenry/browsermesh-egress`](packages/browsermesh-egress) | A pod lends its network to peers under per-destination grants: TCP, UDP, a fetch form (the provider is the HTTP client and sees it) and name lookup, consumer with a netway backend, a `browsermesh-egress` CLI (peer-depends on apps and netway; the Node dialer on wsh's address guard) |
 
 Packages version independently (see `RELEASING.md`); the root
 `package.json` version is only the release marker.

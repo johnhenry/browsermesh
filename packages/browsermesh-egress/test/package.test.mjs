@@ -44,7 +44,16 @@ describe('the browser-safe entry', () => {
       const text = await readFile(file, 'utf8')
       if (/(^|\n)\s*import[^\n]*['"]node:/.test(text) || /import\(\s*['"]@johnhenry\/wsh/.test(text)) withNode.push(path.relative(root, file))
     }
-    assert.deepEqual(withNode.sort(), ['src/node.mjs'])
+    // node-exchange.mjs is the fetch form's HTTP client (node:http, node:tls); only node.mjs imports it. src/cli is the command line, reached only from bin/.
+    assert.deepEqual(withNode.filter((f) => !f.startsWith('src/cli/')).sort(), ['src/node-exchange.mjs', 'src/node.mjs'])
+    for (const file of await files(path.join(root, 'src'))) {
+      if (path.relative(root, file).startsWith('src/cli/')) continue
+      assert.doesNotMatch(await readFile(file, 'utf8'), /cli\/(run|args|mesh-node)\.mjs/, `${path.relative(root, file)} reaches the CLI`)
+    }
+    for (const file of await files(path.join(root, 'src'))) {
+      const text = await readFile(file, 'utf8')
+      if (/from\s+['"]\.\/node-exchange\.mjs['"]/.test(text)) assert.equal(path.relative(root, file), 'src/node.mjs', `${path.relative(root, file)} imports the node exchange`)
+    }
   })
 
   it('the core entry imports only the apps subpaths it needs and netway, at load time', async () => {
@@ -57,10 +66,19 @@ describe('the browser-safe entry', () => {
     }
   })
 
-  it('nothing in the TCP path can see or alter a payload: no tls, no sniffing', async () => {
+  it('nothing in the TCP or UDP path can see or alter a payload: TLS lives in the fetch form\'s exchange and nowhere else', async () => {
     for (const file of await files(path.join(root, 'src'))) {
+      if (path.basename(file) === 'node-exchange.mjs') continue
       const text = await readFile(file, 'utf8')
       assert.ok(!/node:tls|from 'tls'|\bTLSSocket\b/.test(text), `${path.relative(root, file)} touches TLS`)
+    }
+    const exchange = await readFile(path.join(root, 'src/node-exchange.mjs'), 'utf8')
+    assert.match(exchange, /node:tls/)
+  })
+
+  it('the provider\'s core never reads the environment or the process (it is also what a pod without Node runs)', async () => {
+    for (const file of ['provider.mjs', 'consumer.mjs', 'wire.mjs', 'http-policy.mjs', 'limits.mjs']) {
+      assert.doesNotMatch(await readFile(path.join(root, 'src', file), 'utf8'), /\bprocess\.(env|argv|exit)\b/, file)
     }
   })
 })
