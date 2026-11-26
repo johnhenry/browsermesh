@@ -161,7 +161,12 @@ export class PodObject extends DurableObject {
     await this.ctx.storage.put('record', record)
 
     if (this.#bootPromise) return this.#bootPromise
-    this.#bootPromise = this.#doBoot().catch((err) => {
+    // A wake (a boot after the object was evicted for being idle) may ask for a shorter discovery window than the
+    // first boot; it can only shorten it. NOT run against a real Durable Object (needs a Cloudflare account).
+    const asked = Number.isInteger(body.discoveryWindowMs) && body.discoveryWindowMs >= 0
+      ? Math.min(body.discoveryWindowMs, DISCOVERY_TIMEOUT_MS)
+      : DISCOVERY_TIMEOUT_MS
+    this.#bootPromise = this.#doBoot(asked).catch((err) => {
       // Allow a subsequent /boot call to retry after a failure.
       this.#bootPromise = null
       throw err
@@ -169,7 +174,7 @@ export class PodObject extends DurableObject {
     return this.#bootPromise
   }
 
-  async #doBoot() {
+  async #doBoot(discoveryWindowMs = DISCOVERY_TIMEOUT_MS) {
     if (this.#pod && this.#pod.state === 'ready') {
       await this.#updateRecord({ state: POD_LIFECYCLE.REGISTERED })
       return { ...(await this.#statusSnapshot()), alreadyBooted: true, bootMs: 0 }
@@ -191,7 +196,7 @@ export class PodObject extends DurableObject {
       transport,
       localPodId: identity.podId,
       localKind: 'server',
-      timeout: DISCOVERY_TIMEOUT_MS,
+      timeout: discoveryWindowMs,
     })
 
     const pod = new EchoPod()

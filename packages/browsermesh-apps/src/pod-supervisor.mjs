@@ -75,6 +75,7 @@ export const SUPERVISOR_AUDIT = Object.freeze({
   GAVE_UP: 'supervisor_gave_up',
   CASCADE: 'supervisor_cascade',
   HOST_LOST: 'supervisor_host_lost',
+  REPLACEMENT_REFUSED: 'supervisor_replacement_refused',
 })
 
 // Restart policy, default `maxRestarts`/backoff and the backoff curve live in
@@ -112,6 +113,14 @@ function refKey(ref) {
  *   `orchestrator` for `spec.lane`, the same selection
  *   `MeshctlSpawnTool`/`meshctl spawn auto` use -- see `orchestrator.mjs`.
  *   Returns `null`/throws when no orchestrator and no override were given.
+ * @param {(request: {spec: object, requesterId: string|null, policy: object}) => Promise<string>} [opts.placer]
+ *   The placement planner's decision for a pod supervised WITH a requester or a minimum boundary
+ *   (`supervise(host, spec, {requesterId, minBoundary})`): resolves the host id, or rejects with a `PodHostDriverError`
+ *   whose `details.plan` names why no host may take the pod. Defaults to `orchestrator.decidePod()` when there is an
+ *   orchestrator. Used for `'auto'` at supervise time and for EVERY restart of such a pod, always with the requester
+ *   recorded at supervise time (never the supervisor's own identity, and never wider rights than that requester's): a
+ *   restart prefers the current host (`policy.preferHost`) or avoids a lost one (`policy.avoidHosts`). A pod
+ *   supervised without either is placed exactly as before (`pickHost`, `pickAutoHost()`).
  * @param {number} [opts.reconcileIntervalMs=0] - `0` disables the sweep
  *   (the default -- see module doc comment on why polling is not the
  *   primary mechanism).
@@ -137,6 +146,7 @@ export function createPodSupervisor({
   client,
   hosts,
   pickHost,
+  placer: injectedPlacer,
   reconcileIntervalMs = 0,
   maxConcurrentRestarts = 1,
   now = Date.now,
@@ -155,6 +165,11 @@ export function createPodSupervisor({
   const doClearTimeout = injectedClearTimeout || globalThis.clearTimeout.bind(globalThis)
   const effectivePeerNode = peerNode || orchestrator?.peerNode || null
   const maxConcurrent = Math.max(1, maxConcurrentRestarts)
+  const placer = typeof injectedPlacer === 'function'
+    ? injectedPlacer
+    : (typeof orchestrator?.decidePod === 'function'
+      ? async ({ spec, requesterId, policy }) => (await orchestrator.decidePod(spec, { requesterId: requesterId ?? undefined, policy })).hostPodId
+      : null)
 
   /** The `PodHostClient` every verb this file issues (other than restarts, which prefer `orchestrator.spawnPod()`) goes through. Built once, lazily. */
   let hostClient = client || null
@@ -313,7 +328,7 @@ export function createPodSupervisor({
    * @param {object} spec - A podspec (`validatePodSpec()`).
    * @returns {Promise<{ref: {host: string, name: string}, spec: object, host: string, status: object}>}
    */
-  async function supervise(hostPodId, spec) {
+  async function supervise(hostPodId, spec, { requesterId, minBoundary } = {}) {
     if (stopped) throw new Error('supervisor is stopped')
     const validated = validatePodSpec(spec)
     if (!validated.ok) {
@@ -321,9 +336,21 @@ export function createPodSupervisor({
     }
     const normalized = validated.value
 
+    // A stated requester or boundary hands placement, now and at every restart, to the planner under THAT requester.
+    // Without either, nothing changes. Never defaults to the supervisor's own identity.
+    const planned = requesterId !== undefined || minBoundary !== undefined
+    if (planned && !placer) {
+      throw new PodHostDriverError('EINVAL', 'supervise: a requester or minimum boundary needs a placement planner (opts.placer, or an orchestrator with decidePod())')
+    }
+    const placement = planned
+      ? { requesterId: requesterId ?? null, policy: minBoundary !== undefined ? { minBoundary } : {} }
+      : null
+
     let host = hostPodId
     if (!host || host === 'auto') {
-      host = await choosePlacement(normalized)
+      host = placement
+        ? await placer({ spec: normalized, requesterId: placement.requesterId, policy: { ...placement.policy } })
+        : await choosePlacement(normalized)
       if (!host) throw new Error(`supervise: no host available for lane '${normalized.lane}'`)
     }
 
@@ -339,6 +366,7 @@ export function createPodSupervisor({
       state: 'running',
       backoffTimer: null,
       createdAt: now(),
+      placement,
     }
     pods.set(refKey(ref), entry)
 
@@ -409,6 +437,7 @@ export function createPodSupervisor({
   function list() {
     return [...pods.values()].map((entry) => ({
       ref: entry.ref, spec: entry.spec, host: entry.host, restarts: entry.restarts, state: entry.state,
+      ...(entry.placement ? { requesterId: entry.placement.requesterId } : {}),
     }))
   }
 
@@ -555,6 +584,39 @@ export function createPodSupervisor({
     try {
       let targetHost = entry.host
       let placed = false
+
+      if (entry.placement) {
+        // Re-placement under the requester recorded at supervise time. The planner may refuse: then no host may take
+        // the pod under that requester's rules, and the supervisor stops with the reason rather than widen them.
+        const policy = {
+          ...entry.placement.policy,
+          ...(reason === 'host-lost' ? { avoidHosts: [targetHost] } : { preferHost: targetHost }),
+        }
+        let newHost
+        try {
+          newHost = await placer({ spec: entry.spec, requesterId: entry.placement.requesterId, policy })
+        } catch (err) {
+          if (err?.code === 'EBUSY' || !(err instanceof PodHostDriverError)) throw err
+          const plan = err.details?.plan ?? null
+          const data = {
+            ref: entry.ref, requesterId: entry.placement.requesterId, code: err.code, plan, message: err.message,
+            rejected: err.details?.rejected ?? [],
+          }
+          entry.state = 'dead'
+          emit('supervisor:replacement-refused', data)
+          await audit(SUPERVISOR_AUDIT.REPLACEMENT_REFUSED, { ref: entry.ref, requesterId: data.requesterId, code: data.code, plan })
+          const gaveUp = `replacement-refused:${plan ?? err.code}`
+          emit('supervisor:gave-up', { ref: entry.ref, restarts: entry.restarts, reason: gaveUp })
+          await audit(SUPERVISOR_AUDIT.GAVE_UP, { ref: entry.ref, restarts: entry.restarts, reason: gaveUp })
+          return
+        }
+        const status = await doSpawn(newHost, entry.spec)
+        if (newHost !== entry.host) rekey(entry, newHost)
+        entry.state = 'running'
+        emit('supervisor:restarted', { ref: entry.ref, attempt: entry.restarts, host: newHost, status })
+        await audit(SUPERVISOR_AUDIT.RESTARTED, { ref: entry.ref, attempt: entry.restarts, host: newHost })
+        return
+      }
 
       if (reason !== 'host-lost') {
         try {

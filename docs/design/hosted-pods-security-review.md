@@ -22,7 +22,7 @@ Firecracker lane has never booted a VM: see
 | isolate: Worker / Durable Object | **no**: runs a fixed echo pod; `run.ref` is not loaded | V8 isolate (workerd) | `spikes/isolate-pod-host` |
 | isolate: `isolated-vm` runtime (`createIsolatedVmRuntime()`) | modules from the host's catalog only | `language`, in the host's own process | `packages/browsermesh-pod/src/isolate-runtime.mjs` |
 | isolate: `workerd` runtime | specified only (`pod-runtime.mjs`) | `language` | not built |
-| browser: in-page, CDP, extension | yes (a page) | a tab / a browser context / an extension world | `packages/browsermesh-pod/src/browser-host-driver.mjs`, `spikes/browser-*-host` |
+| browser: in-page, CDP | yes (a page) | a tab / a browser context | `packages/browsermesh-pod/src/browser-host-driver.mjs`, `spikes/browser-*-host` |
 
 ## 1. Per-lane reach
 
@@ -107,7 +107,6 @@ that knows it listens beyond loopback without one serves only `/health`
 | --- | --- |
 | in-page (`createInPageDriver`) | A child `<iframe>` / window / worker at a `podUrl` the host chose. **No sandbox attribute is set** (an opaque origin could not join the `BroadcastChannel` discovery). A same-origin pod shares the origin's cookies, storage and IndexedDB with its parent; a cross-origin one does not. Documented in the driver: this is not a privilege boundary. Not tested as a denial (there is none). |
 | CDP (`spikes/browser-pod-host`) | A page in a browser the operator drives, one `BrowserContext` per pod when `contextPerPod` is set (separate cookies and storage). The page has the browser's network position (the host's loopback and LAN are reachable as far as the browser allows). Fake-CDP tested; one e2e test uses a real headless Chrome. |
-| extension (`spikes/browser-extension-host`) | A tab plus a content script and a MAIN-world bootstrap with the extension's own permissions (`host_permissions` scoped). Tested against a fake only. |
 
 ## 2. Across all lanes: the control plane and the service
 

@@ -66,7 +66,8 @@ function usageDocument() {
       'pods restore <host> <name>',
       'pods drain <host> <name> [--cascade]',
       'pods supervise <host|auto> --name <n> --kind <k> --ref <r> [--restart never|on-failure|always] '
-        + '[--max-restarts n] [--backoff ms] [--parent <name>] (same flags as pods spawn otherwise)',
+        + '[--max-restarts n] [--backoff ms] [--parent <name>] (same flags as pods spawn otherwise; '
+        + 'auto with --requester <pubKey> / --min-boundary hands placement and every restart to the planner under that requester)',
       'pods supervised',
       'pods crash <host> <name> [--code n]  (dev-only, --loopback only)',
       'watch <host>  (also prints supervisor:* events for pods supervised on this session)',

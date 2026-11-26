@@ -72,9 +72,10 @@ async function describeCandidates(session, refs) {
  * @param {object} opts.spec - A normalized podspec.
  * @param {string} [opts.requesterId]
  * @param {string} [opts.minBoundary]
+ * @param {object} [opts.policy] - More planner policy (`avoidHosts`, `preferHost`), as a supervisor's re-placement asks.
  * @returns {Promise<{podId: string, description: object, via: 'planner', placement: object}>}
  */
-export async function selectPlannedHost({ session, candidateRefs, spec, requesterId, minBoundary }) {
+export async function selectPlannedHost({ session, candidateRefs, spec, requesterId, minBoundary, policy = {} }) {
   const candidates = await describeCandidates(session, candidateRefs)
   if (candidates.length === 0) {
     throw new PodHostDriverError(
@@ -90,7 +91,7 @@ export async function selectPlannedHost({ session, candidateRefs, spec, requeste
     requesterId,
     registry: session.peerNode?.registry,
     localPodId: session.podId,
-    policy: minBoundary ? { minBoundary } : {},
+    policy: { ...policy, ...(minBoundary ? { minBoundary } : {}) },
   })
   if (!decision.plan.ok) throw decision.error
   const picked = candidates.find((c) => c.podId === decision.plan.host.id)

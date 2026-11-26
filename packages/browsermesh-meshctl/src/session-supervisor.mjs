@@ -8,6 +8,7 @@
  */
 
 import { createPodSupervisor } from '@johnhenry/browsermesh-apps'
+import { selectPlannedHost } from './auto-placement.mjs'
 
 /**
  * Wrap a session so `getSupervisor()` lazily builds (and caches, for the
@@ -22,11 +23,32 @@ export function withSupervisor(session) {
   /** @type {object|null} */
   let supervisor = null
   const baseClose = session.close
+  /** Hosts named with `--host` on a `pods supervise` call, kept so a later re-placement considers them too. */
+  const extraHostRefs = new Set()
   return {
     ...session,
+    rememberHostRefs(refs) { for (const ref of refs) extraHostRefs.add(ref) },
     async getSupervisor() {
       if (!supervisor) {
-        supervisor = createPodSupervisor({ client: session.client, peerNode: session.peerNode })
+        supervisor = createPodSupervisor({
+          client: session.client,
+          peerNode: session.peerNode,
+          // The planner's decision for a pod supervised with --requester / --min-boundary, at supervise time and at
+          // every restart: under the requester recorded then (its trust read from this CLI's trust graph), never
+          // under meshctl's own identity.
+          placer: async ({ spec, requesterId, policy }) => {
+            const { minBoundary, ...rest } = policy ?? {}
+            const planned = await selectPlannedHost({
+              session,
+              candidateRefs: [...new Set([...session.knownHosts(), ...extraHostRefs])],
+              spec,
+              requesterId: requesterId ?? undefined,
+              minBoundary,
+              policy: rest,
+            })
+            return planned.podId
+          },
+        })
       }
       return supervisor
     },

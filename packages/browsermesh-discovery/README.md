@@ -28,6 +28,9 @@ Extracted from a private monorepo (previously `packages/browsermesh-discovery`),
 | swarm | `SwarmCoordinator`, `LeaderElection`, `TaskDistributor`, `SwimMembership` |
 | sw-routing | `MeshFetchRouter`, `parseMeshRequest` |
 | stealth | `StealthAgent`, `ShardDistributor`, `ShardCollector` |
+| owned stores (opt-in) | `signDhtStore`, `verifyDhtStore`, `deriveWriteSigner`, `canonicalJson`, `classifyStoreKey`, `DHT_STORE_REFUSALS` |
+| shard parity (opt-in, format 3) | `rsEncode`, `rsDecode`, `ParityError`, `MAX_RS_SHARDS`, `stealthShardChecksum` |
+| share release (opt-in) | `createShareHolder`, `requestShareRelease`, `createReleaseRequest`, `createReleaseResponse`, `stealthReleaseChannel`, `stealthReleaseTag`, `RELEASE_REFUSALS` |
 | stealth threshold (opt-in) | `dealStealthShares`, `reconstructStealthSecret`, `verifyStealthShare`, `thresholdEpochKeys`, `stealthEpochKeyId`, `stealthShareSigningBytes` |
 
 ## Install
@@ -123,8 +126,8 @@ should be able to find the shards must hold the nonce:
 secret (HKDF-SHA-256), so every member computes the same one with nothing extra
 stored, and a new `epoch` moves the shards to new keys when membership changes;
 or keep a random one with the agent's other custodial keys. The data inside is
-plaintext unless you use the encrypted methods. The DHT still accepts a `store` from anyone,
-so an overwrite makes a shard unusable (refused) rather than accepted.
+plaintext unless you use the encrypted methods. By default the DHT still accepts a `store` from anyone,
+so an overwrite makes a shard unusable (refused) rather than accepted; see "Who may store under which key" below to change that.
 
 **Threshold sharing of the group secret** is opt-in and separate from `StealthAgent`
 (nothing on the existing wire changes). The agent's owner pod deals a fresh 32-byte secret
@@ -144,8 +147,62 @@ name is refused and counted; shares of different epochs are never mixed. When a 
 the rest, re-seal the latest state and pass `minEpoch`. A compromised dealer, `t` colluding holders, and what a leaving
 member already read are NOT protected, and shares are signed, not encrypted: see
 [docs/design/stealth-threshold.md](https://github.com/johnhenry/browsermesh/blob/main/docs/design/stealth-threshold.md).
-Also not done: a real checksum and multi-loss parity. The plain
-`hide()` / `reconstitute()` below are unchanged and plaintext:
+
+**On-demand share release** (opt-in; [design note](https://github.com/johnhenry/browsermesh/blob/main/docs/design/discovery-records.md), item 4).
+Instead of only holding shares dealt up front, a group member can ask the holders when it needs the secret. Each holder checks
+who is asking before it says anything about what it holds, and answers with its signed share sealed to the requester:
+
+```js
+// holder side: one per share holder, over the protocol channel stealthReleaseChannel(agentId) = `stealth:<agentId>:share:release`
+const holder = createShareHolder({ name: myPodId, identity, members: memberPublicKeys, trustedDealers: [dealerPublicKey], approve, log });
+await holder.addShare(myDealtShare);
+channel.onMessage((from, request) => channel.reply(from, holder.handle(from, request)));
+// reader side: a member
+const { secret, epoch, released, refused, unreachable } = await requestShareRelease({
+  identity, agentId, groupId, trustedDealers: [dealerPublicKey], minEpoch, holders: currentHolderNames,
+  peers: holders.map((h) => ({ holder: h.name, publicKey: h.publicKey, send: (request) => channel.request(h.podId, request) })),
+});
+```
+
+The request is signed by the member, bound to one holder, a time and a nonce, and names the agent only by a hash. A holder
+refuses by name (`not-a-member`, `replayed`, `stale-request`, `rate-limited`, `stale-epoch`, `no-share`, `not-approved`, ...)
+and a non-member gets the same answer whether or not the holder holds that agent. With fewer than `t` valid shares the reader
+throws `below-threshold` with who was refused or unreachable; an older peer that does not run the channel is simply
+unreachable. `holder.retire({ agentId, groupId, belowEpoch })` drops old shares and `holder.setMembers(keys)` follows the roster.
+
+**Shard format 3: a SHA-256 checksum and Reed-Solomon parity** (opt-in, `shardFormat: 3` or `[2, 3]`;
+[docs/design/discovery-records.md](https://github.com/johnhenry/browsermesh/blob/main/docs/design/discovery-records.md)).
+Format 3 shards are base64url byte slices of the UTF-8 state with `total - threshold` Reed-Solomon parity shards
+(GF(2^8), polynomial 0x11d, Cauchy matrix; `parity: 'xor'` keeps the old single-loss parity), so **any `threshold` of
+`totalShards` valid shards rebuild the state** (with the defaults 3 of 5, any two lost, data shards included). The
+checksum is the whole SHA-256 over the shard's bytes, index, threshold, total, parity code and state length: on the
+unsigned path a real corruption check (not authentication: it is unkeyed), on the signed path a cheap check before the
+signature that tells damage (`stats.shardCorrupt`) from forgery (`shardBadSignature`). Parity protects against lost
+shards, not forged ones, and is unrelated to the Shamir key shares above (those split the secret, this splits the
+state). Format 3 records live under **different DHT keys** (`stealth:<agentId>:shard3:<i>`, or the `lookup/3` label), so an
+older peer never reads one and cannot mis-verify it: `shardFormat: [2, 3]` writes both so older readers keep working,
+`shardFormat: 3` alone is for when every reader is upgraded; readers read both by default (`readFormats`). The
+synchronous `hide()` stays format 2 (it throws `async-required` if `shardFormat` includes 3; use `hideAsync()`).
+
+**Who may store under which key** (opt-in; [design note](https://github.com/johnhenry/browsermesh/blob/main/docs/design/discovery-records.md), item 3).
+By default a `DhtNode` accepts a `store` from anyone for any key, as it always did. Give it a `storePolicy` and a store may carry
+a proof (`signDhtStore`: the writer's key, a `seq`, an absolute expiry and an Ed25519 signature over key, value, `seq` and expiry):
+
+```js
+const node = new DhtNode({ localId, sendFn, storePolicy: { mode: 'open' } }); // or 'owned': every store needs a proof
+const auth = await signDhtStore({ signer: identity, key: identity.podId, value: record, seq: 1, exp: Date.now() + 3_600_000 });
+await node.store(identity.podId, record, 0, { auth }); // replicated with the proof; older nodes ignore it
+node.storeStats; // { accepted, refused: { 'owned-key': 1, 'rate-limited': 3, ... } }
+```
+
+A pod-id-shaped key can be stored only by that pod; an owned key is replaced only by its owner with a higher `seq`; sizes,
+entry counts, per-writer quotas, proof lifetimes and per-peer rates are bounded (`owned` mode defaults, or set
+`maxValueBytes`, `maxEntries`, `maxEntriesPerWriter`, `maxLifetimeMs`, `rate`) and every refusal is named and counted. With a
+policy, `handleMessage` for a store and `store()` return promises. `new StealthAgent({ identity, lookupNonce, shardFormat: 3,
+ownedStores: true })` signs its shard stores with a per-shard writer key derived from the identity: the anonymous keys do not
+change and are not linked by it, group members who hold the nonce can read but cannot store under them.
+
+The plain `hide()` / `reconstitute()` below are unchanged and plaintext:
 
 `StealthAgent.hide(stateString)` / `reconstitute()` split a state string into
 `threshold` plaintext data shards plus XOR parity shards and store them in the

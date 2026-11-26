@@ -62,7 +62,7 @@ const { port, close } = await listenNode(ingress, { port: 8080, host: '127.0.0.1
 ```
 
 `createMeshIngress({ node | service, resolve, authorize?, deny?, limits?, methods?, forwardHeaders?, exposeHeaders?,
-forwardClientAddress?, verifyResponse?, signRequest?, retry?, rpc?, onAudit?, clock? })` returns
+forwardClientAddress?, verifyResponse?, signRequest?, linkIdentity?, retry?, rpc?, onAudit?, clock? })` returns
 `{ handle(request, { clientAddress }), stats(), close() }`.
 
 - `resolve(request, { attempt, tried }) -> Promise<{ peer, path?, headers?, response? } | null>`: `peer` is the pod id the
@@ -92,20 +92,96 @@ node.registry.grantCapabilities(ingressPodId, ['protocol:http:open'])   // the r
 // served.stop(); served.stats()
 ```
 
-`handler` is a function or `{ fetch }`. `peer` is the ingress pod, the channel's verified peer (never a header);
-`signal` aborts when the client goes away or the deadline passes. `request.url` is `http://<the client's host><path>`.
+`handler` is a function or `{ fetch }`. `peer` is the ingress pod, the pod id the channel is addressed by (never a header);
+whether that id was proven on the link is a separate question, answered by the `peer` object the hooks get (next
+section). `signal` aborts when the client goes away or the deadline passes. `request.url` is `http://<the client's host><path>`.
 A request body is read whole (bounded) before the handler runs, so it works in every browser; response bodies stream.
 
 **`allowFrom` is required, and is a list or a function.** A list names the ingress pod ids served. A function
-`(podId, context) => boolean | Promise<boolean>` (`context` is `{ peer, protocol, version }`) is for an ingress whose pod
-identity is new each session and so cannot be listed: it is asked on open and again for every request, and only `true`
-serves (anything else, a throw or a rejection refuses; the handler never runs). Omitting `allowFrom` is still an error.
+`(podId, context, peer) => boolean | Promise<boolean>` (`context` is `{ peer, protocol, version }`; `peer` is what is verified
+about the link, below) is for an ingress whose pod identity is new each session and so cannot be listed: it is asked on open
+and again for every request, and only `true` serves (anything else, a throw or a rejection refuses; the handler never runs).
+Omitting `allowFrom` is still an error.
 **With a function, your own check carries the weight**: the registry grant and the pod id alone no longer say which ingress
-this is, so decide by another proof, for example a signed request (`verifyRequest`, below).
+this is, so decide by another proof, for example a signed request (`verifyRequest`, below) whose signer is bound to the link
+(`requireLinkKey`, below).
+
+### Who is at the other end of the link: `peer`, `verified`, `requireLinkKey`
+
+The channel says which pod id a session is addressed by. Whether that id was **proven** on the link depends on the
+transport underneath, and the channel does not carry it. So the provider's `allowFrom` (when a function) and `verifyRequest`
+get one more argument, a `peer` object, and the ingress's `signRequest` and `verifyResponse` get the same for the provider's
+link:
+
+```js
+// peer: { podId, verified, keyId?, publicKey? }
+serveHttpOnMesh(service, handler, {
+  node,                                                         // a mesh node (createMeshNode): where the link's identity is read from
+  allowFrom: (podId, context, peer) => peer.verified !== 'none',
+  verifyRequest: (request, { peer, sig, bytes, rid, nonce }, peerObject) => boolean,
+})
+createMeshIngress({ ..., node /* or linkIdentity */,
+  signRequest: (bytes, { peer }, link) => signature,
+  verifyResponse: ({ peer, bytes, sig, request }, link) => boolean,
+})
+```
+
+Compatibility: it is an extra **trailing argument**; the context objects (`{ peer, sig, bytes, rid, nonce }`, `{ peer, protocol,
+version }`, `{ peer }`) are unchanged, `peer` in them is still the pod id string, and a hook that takes fewer parameters is
+called as before. Nothing new is sent on the wire; an older peer is unaffected.
+
+`peer.verified` says how the identity was established **on this link**; `keyId` and `publicKey` are present only when something
+was proven, and never otherwise:
+
+<!-- link-identity-table:begin -->
+| Link to the peer | `verified` | What is proven |
+| --- | --- | --- |
+| Direct WebRTC, identity binding on (the `createMeshNode` default) | `bound` | the peer proved possession of the key behind its pod id, over the DTLS fingerprints of both session descriptions, on this connection |
+| A wsh peer link | `wsh` | the peer logged in with the key its pod id is the hash of, the dialler pinned the host key to the pod id it meant to reach, the session is sealed |
+| Both of those at once | `key` | each is key-proven; which one carried a given frame is not recorded |
+| WebRTC with the binding off, or an unbound peer (`webrtcIdentityBinding: false`, `webrtcAllowUnboundPeers`) | `none` | nothing: the pod id is the one the session was addressed by |
+| A relayed or otherwise vouched-for link, any other transport, no session, a node this package was not told about | `none` | nothing; `keyId` and `publicKey` are absent |
+<!-- link-identity-table:end -->
+
+A pod id is the base64url SHA-256 of the pod's Ed25519 public key, so where the id is proven the key's hash is proven with it:
+`keyId` is that value (equal to `podId`). `publicKey` (the 32 raw bytes) is present only when the source of the link's identity
+supplied it and it hashes to `podId`; the built-in sources do not supply it. Multi-hop (routed) delivery does not carry this
+protocol (see below), so it has no row. **A provider that needs the request's signer bound to the link must refuse a link whose
+`verified` is `none`**: `requireLinkKey` does.
+
+Where the information comes from: pass `node` (a `createMeshNode` result; `nodeLinkIdentity(node)` is the function it uses) or
+your own `linkIdentity: (podId) => ({ verified: 'bound' | 'wsh' | 'key', publicKey? }) | undefined`. A source can only
+narrow: anything that is not a clear proof, a throw, or a public key that does not hash to the pod id is `none`. With neither,
+`peer.verified` is always `none` (nothing is guessed). `nodeLinkIdentity` reports a proof only when **every** live session to
+that pod carries one (a frame may have arrived on any of them), and asks again on each request. `createMeshIngress` reads its
+`node` the same way when that is a mesh node.
+
+**Binding a request's signer to the link.** A request signature on its own shows that the request was not altered and that the
+holder of the signing key made it. With `requireLinkKey` it must also be the pod on the other end of the link:
+
+```js
+import { serveHttpOnMesh, requireLinkKey } from '@johnhenry/browsermesh-ingress'
+
+serveHttpOnMesh(service, handler, {
+  node,                                   // so the hooks can tell what the link proved
+  allowFrom: (podId, context, peer) => peer.verified !== 'none',
+  // verifySigner does the signature check you already do, and returns the key that made it
+  // (the 32 raw bytes, or the key id: base64url SHA-256 of the key), or a falsy value.
+  verifyRequest: requireLinkKey(async (request, { sig, bytes }) => verifyAndReturnSignerKey(sig, bytes)),
+})
+```
+
+`requireLinkKey(verifySigner)` returns a `verifyRequest` hook (it works as `verifyResponse` too: it reads the `peer` object from
+its last argument). It accepts only when the link proved a key and the signer's key hashes to the link's `keyId`. Otherwise the
+request is refused as `request-unverified` (the client sees 502 `provider-refused-request`, as for any `verifyRequest` that says
+no) and the handler never runs; the reason is named on the provider side: `link-unverified` (the link proved nothing),
+`signer-unverified` (your check said no or threw), `signer-key-invalid` (not a 32-byte key or a key id) or `link-key-mismatch`
+(the signer is not the link's key). Each goes to `onLog` as `http:request-refused` and is counted in `stats().refusals`. It is
+off unless you use it.
 
 ### Signed requests (optional)
 
-`serveHttpOnMesh(..., { verifyRequest: async (request, { peer, sig, bytes, rid, nonce }) => boolean })` runs before the
+`serveHttpOnMesh(..., { verifyRequest: async (request, { peer, sig, bytes, rid, nonce }, peerObject) => boolean })` runs before the
 handler, on a clone of the request (the body is still the handler's to read), and can refuse: only `true` lets the request
 through, and a refusal is a 502 `provider-refused-request` for the client. The ingress-side counterpart is
 `createMeshIngress({ signRequest: async (bytes, { peer }) => signature })`, symmetrical to `sign` / `verifyResponse`.
@@ -114,7 +190,8 @@ sent, the client address when forwarded, and the SHA-256 of the body, marked as 
 response's. `bytes` is rebuilt by the provider from what arrived, so any change in transit fails the check. A provider that
 wants signed requests only must itself refuse a request with no `sig` (the hook is called with `sig` undefined). A
 `signRequest` that throws or returns no text is a 500 `sign-error` and nothing is sent. The package chooses no
-cryptography; a provider that does not know `sig` ignores it, so an older provider simply does not verify.
+cryptography; a provider that does not know `sig` ignores it, so an older provider simply does not verify. Whose key signed is
+yours to establish; to require that it is the pod on the other end of the link, use `requireLinkKey` (above).
 
 ### Declining a request
 
@@ -246,9 +323,10 @@ A provider's own answer, including its own 4xx and 5xx and a plain 421, passes t
   mesh link, so it rides whatever link the mesh has to the pod, a direct WebRTC channel, a WebSocket, or a relayed link,
   as long as each message arrives from the peer the link says it is.
 - **On a link whose peer identity is only asserted by a third party** (a relay that vouches for who is on the other end,
-  rather than a key both ends checked), the pod id the ingress and the provider see is only as good as that third party. There
-  the signed-response (`sign` / `verifyResponse`) and signed-request (`signRequest` / `verifyRequest`) hooks should be
-  mandatory in your application: set all four, and refuse an unsigned answer or request.
+  rather than a key both ends checked), the pod id the ingress and the provider see is only as good as that third party; the
+  `peer.verified` of such a link is `none`. There the signed-response (`sign` / `verifyResponse`) and signed-request
+  (`signRequest` / `verifyRequest`) hooks should be mandatory in your application: set all four, and refuse an unsigned answer
+  or request. On a link that proved a key (`bound`, `wsh`), bind the signer to it with `requireLinkKey`.
 - **There is no multi-hop delivery**: the ingress asks the one pod a mapping names over a link it has; a pod it has no
   direct link to is a 502 `provider-unreachable`. `retry` picks another named pod; it does not route.
 

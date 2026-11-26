@@ -61,11 +61,11 @@ table; they come from the READMEs, source headers and test directories.
 | `browsermesh-kernel` | implemented | in-process microkernel with capability checks and resource tables; unit tests per module. No cryptography; isolation is by capability and ownership checks, not process boundaries. |
 | `browsermesh-priority-mux` | implemented | sender-side priority scheduler and framer (fake adapter tests). No authentication or encryption. The reassembler has no limit on pending messages. |
 | `browsermesh-mcp` | implemented | a page's WebMCP tools (or an explicit list) as the protocol `mcp` on the protocol seam, and a client for it; per-tool grants, approval kept with the serving page, bounds. In-memory bus (unit), real peers over WebRTC (Node) and two real browsers; threat model [below](#mcp-across-the-mesh). Depends on wsh's WebMCP bridge (peer dependency) through one adapter file. |
-| `browsermesh-ingress` | implemented | real HTTP in, a mesh pod answers: a bounded request forwarder (`createMeshIngress`, a Node listener on its own entry, a CLI) and the provider side (`serveHttpOnMesh`) over the protocol `http` on the protocol seam. Pinned to the pod a mapping names, default deny on the provider, safe defaults on every dimension (unit over an in-memory bus, hostile provider and hostile client suites on real sockets, real WebRTC peers including the CLI as a child process, and a page as the provider in three real browsers). Plain HTTP only, no WebSocket upgrade, direct links only; see [HTTP ingress](#http-ingress). |
+| `browsermesh-ingress` | implemented | real HTTP in, a mesh pod answers: a bounded request forwarder (`createMeshIngress`, a Node listener on its own entry, a CLI) and the provider side (`serveHttpOnMesh`) over the protocol `http` on the protocol seam. Pinned to the pod a mapping names, default deny on the provider, safe defaults on every dimension (unit over an in-memory bus, hostile provider and hostile client suites on real sockets, real WebRTC peers including the CLI as a child process, and a page as the provider in three real browsers). The hooks are told what the link proved (`peer.verified`: `bound`, `wsh`, `key`, or `none`), and `requireLinkKey` binds a request's signer to the link's key. Plain HTTP only, no WebSocket upgrade, direct links only; see [HTTP ingress](#http-ingress). |
 | `browsermesh-egress` | implemented (TCP and name lookup; the fetch form and UDP are not built) | a pod lends its network access to peers that hold a grant: TCP connections and A lookups to destinations the operator allows (`createMeshEgress`; `connectEgress` and a netway backend for the consumer, browser-safe; `nodeDialer` on its own entry, on wsh's address guard) over the protocol `egress` on the protocol seam. Off unless started, default deny, a grant per destination, every address checked after resolution and the checked address dialled, per-consumer and global budgets, audit and meter without contents, revocation ending live connections. Unit over an in-memory bus, a hostile-consumer suite, the real address guard with local sockets, and two real WebRTC peers moving several MiB each way; not run in a browser; see [Egress](#egress). |
 | `browsermesh-embed` | partial | widget wrapper tested against a DOM stub only. |
 | `browsermesh-meshctl` | partial | loopback mode exercised through all eight verbs; `--wsh-relay` (a sealed, key-authenticated wsh link through a pipe relay, no signalling server or WebRTC) exercised end to end against the in-process pipe relay and a real pod-host service, not a deployed relay; the WebRTC path is wired, not exercised end to end; `--relay` (the unsealed relay dialect) is not used for pod-host traffic, on purpose. |
-| `spikes/*` | spikes | `vm-pod-host` (Firecracker driver: never booted a VM), `isolate-pod-host`, `browser-pod-host`, `browser-extension-host`; see [hosted pods](#hosted-pods-per-lane). |
+| `spikes/*` | spikes | `vm-pod-host` (Firecracker driver: never booted a VM), `isolate-pod-host`, `browser-pod-host`; see [hosted pods](#hosted-pods-per-lane). |
 
 Facts that can be read from the tree are generated and checked by
 `npm test` (`scripts/status-facts.mjs`, `scripts/status-facts.test.mjs`): the
@@ -89,7 +89,7 @@ hand-written.
 | `browsermesh-ingress` | yes | `.` `./node` | yes | yes | yes |
 | `browsermesh-kernel` | yes | `.` | yes | no | no |
 | `browsermesh-mcp` | yes | `.` | yes | yes | yes |
-| `browsermesh-meshctl` | private | `.` | yes | no | no |
+| `browsermesh-meshctl` | yes | `.` | yes | no | no |
 | `browsermesh-netway` | yes | `.` | yes | no | no |
 | `browsermesh-objects` | yes | `.` | yes | yes | yes |
 | `browsermesh-pod` | yes | `.` `./node-runtimes` | yes | yes | yes |
@@ -808,12 +808,21 @@ Threat model, by what an attacker is and wants:
   ingress fetches: the target is built from parsed parts and the ingress fetches nothing. A provider serves only ingress
   pods it granted: `protocol:http:open` in its registry (default deny) and `allowFrom` (required); revoking the grant
   closes the channel at once.
-- **An ingress whose pod id is new each session.** `allowFrom` may be a function `(podId, context)` (asked on open and for
+- **An ingress whose pod id is new each session.** `allowFrom` may be a function `(podId, context, peer)` (asked on open and for
   every request; only `true` serves; a throw refuses; omitting `allowFrom` is still an error). With a function, **the
   provider's own check carries the weight**: the pod id and the registry grant no longer name the ingress, so the provider
-  verifies another proof, for example a signed request. `verifyRequest(request, { peer, sig, bytes })` on the provider runs
+  verifies another proof, for example a signed request. `verifyRequest(request, { peer, sig, bytes }, peer)` on the provider runs
   before the handler and refuses anything but `true`; the ingress's `signRequest` makes the signature, which covers the
-  request, a fresh nonce, the headers as sent and the body digest. The package picks no cryptography. On a link whose peer
+  request, a fresh nonce, the headers as sent and the body digest. The package picks no cryptography.
+- **What is verified about the link a request came over.** The channel names the pod id a session is addressed by; whether
+  that id was proven is a property of the transport. The extra `peer` argument says: `verified: 'bound'` (a direct WebRTC
+  connection whose peer proved the key behind its pod id over the connection's DTLS fingerprints), `'wsh'` (a wsh peer link:
+  key login, host key pinned to the pod id, sealed), `'key'` (both at once) or `'none'` (nothing was proven: an unbound
+  WebRTC connection, a relayed or otherwise vouched-for link, any other transport, or no node given to the package); the key
+  fields are present only when something was proven, and a source can only narrow. A request signature alone shows that the
+  request was intact and that the holder of the signing key made it; `requireLinkKey` makes the signer's key the link's key,
+  and refuses a link that proved nothing, with a named reason (`link-unverified`, `signer-unverified`, `signer-key-invalid`,
+  `link-key-mismatch`) in the provider's log and `stats().refusals`. Off unless used. On a link whose peer
   identity is only asserted by a third party (a relay that vouches for who is on the other end), the signed-response and
   signed-request hooks should be mandatory in the application, because the pod id alone is only as good as that third
   party; the protocol channel itself needs only a byte duplex with a peer identity.
@@ -851,8 +860,10 @@ Threat model, by what an attacker is and wants:
   in-memory bus; a real HTTP client against the Node listener; hostile provider and hostile client suites (raw sockets);
   two real Node peers over real WebRTC and the CLI as a child process through a real signalling server
   (`packages/browsermesh-ingress/test/real-peer`); a page as the provider, the ingress in Node, in Chromium, Firefox and
-  WebKit (`tests/browser/ingress.spec.mjs`). Not verified: a public deployment, TLS in front, a real CDN or proxy in
-  front, WebRTC through NAT.
+  WebKit (`tests/browser/ingress.spec.mjs`); the link identity (`peer.verified`, `requireLinkKey`) on a real bound WebRTC
+  link, a real unbound one and a real wsh link (`test/real-peer/link-identity.test.mjs`, `test/wsh-link-identity.test.mjs`).
+  Not verified: a public deployment, TLS in front, a real CDN or proxy in front, WebRTC through NAT, the link identity of a
+  relayed transport over a real relay (a double stands in: it must read `none`).
 
 ## Egress
 
@@ -937,7 +948,27 @@ Package: `browsermesh-discovery`.
   and sends to the local closest contacts, and nothing follows responses.
   Distance is computed over character codes, not a 160-bit hash. A `store` is
   accepted for any key with no signature or ownership check and no entry cap
-  (`k` = 20 per bucket; TTL optional, default none). Tests are single-process.
+  (`k` = 20 per bucket; TTL optional, default none) **unless the node is given a
+  `storePolicy`** (opt-in; below). Tests are single-process.
+  - **Owned stores** (opt-in, `storePolicy`; `design/discovery-records.md`, item 3): a
+    `DHT_STORE` may carry a proof (`auth`: writer key, `seq`, absolute expiry, Ed25519
+    signature over key, value digest, `seq`, expiry). A node with a policy verifies it
+    and enforces: a pod-id-shaped key can be stored only by that pod; the first valid
+    signer owns an agent-anonymous or `shard3` key (`open` mode) or any key outside
+    `openPrefixes` (`owned` mode, which also refuses unsigned stores) until the entry's
+    expiry; an owned key is replaced only by its owner with a higher `seq`. Bounded and
+    named refusals: `value-too-large`, `store-full`, `writer-quota`, `rate-limited`
+    (per sending peer), `lifetime-too-long`, `expired`, `stale-seq`, `owned-key`,
+    `not-key-owner`, `unsigned-store`, `bad-auth`, `malformed`; counted, logged with a
+    short hash of the key, never the value. A node without a policy ignores the field
+    (older nodes too), so nothing an older peer does changes; `owned` mode refuses an
+    older writer's unsigned store by name. `StealthAgent` `ownedStores` gives each shard of
+    an anonymous agent its own writer key derived from the agent identity (deterministic
+    Ed25519 signature), so the shard keys are unchanged and unlinkable, group members who
+    hold the lookup nonce read but cannot store, and a signer that is not deterministic is
+    refused. Not defended: the sending peer id is the transport's claim; a first-write
+    race on a pinned key at a node that has not yet seen the owner's store; replay of a
+    captured store after early eviction and before its expiry; nodes without a policy.
 - **Announcements.** Discovery records are unsigned. `RelayStrategy` accepts an
   optional `signFn` (off by default; checking is the server's job). Names
   (`MeshNameResolver`) are first-come-first-served, at most 64 characters, 1 h
@@ -946,7 +977,7 @@ Package: `browsermesh-discovery`.
   messages either.
 - **StealthAgent.** The plain `hide()` / `reconstitute()` path is **not
   encrypted and not anonymous**: `threshold` plaintext shards plus XOR parity,
-  a checksum that detects corruption but not tampering (defaults 3 of 5). With
+  a checksum that detects corruption but not tampering (defaults 3 of 5; format 3, below, has a real one). With
   `key` (`deriveStealthKey`: HKDF-SHA-256 then AES-256-GCM, agent id as AAD) or a
   `keyring` (key ids with rotation, sequence and issue-time replay refusal,
   optional `maxAgeMs` default unset, seal budget 2^32) the shards are encrypted
@@ -963,9 +994,9 @@ Package: `browsermesh-discovery`.
     synchronous `hide()` / `reconstitute()` / `isViable()` (they throw
     `async-required`) so it never writes or reads unsigned by accident; agents
     without an identity are unchanged. Signatures do not stop someone
-    overwriting a key: the DHT still accepts a `store` from anyone, so a
+    overwriting a key: by default the DHT still accepts a `store` from anyone, so a
     forged overwrite makes the shard unusable (refused, counted) rather than
-    accepted.
+    accepted (owned stores, above, stop it on nodes that opt in).
   - with a `lookupNonce` (at least 16 base64url characters; derive it from the
     group secret with `deriveStealthLookupNonce(secret, agentId, epoch)` so every
     member can find the shards, or keep a random one wherever the agent's
@@ -980,7 +1011,17 @@ Package: `browsermesh-discovery`.
   - not protected: the content of `hideSigned()` shards (plaintext slices),
     that something is stored, availability against overwrites, and a group-key
     holder reading or forging encrypted state (the sender is a label, not a
-    signature, on that path). Multi-loss parity is not done.
+    signature, on that path).
+  - **shard format 3** (opt-in, `shardFormat: 3` or `[2, 3]`; `design/discovery-records.md`): a
+    whole-SHA-256 checksum over the shard's bytes, place, parity code and state length
+    (unsigned: a corruption check, not authentication; signed: checked before the signature, so
+    damage is counted `shardCorrupt` and forgery `shardBadSignature`) and Reed-Solomon parity
+    (GF(2^8), 0x11d, Cauchy) so any `threshold` of `totalShards` shards rebuild the state.
+    Parity protects against lost shards, not forged ones, and is not the Shamir key sharing
+    (that protects who can read). Records sit under different DHT keys, so an older peer never
+    reads one; `[2, 3]` writes both. Not protected: a stale format-2 set can still be read back
+    unless readers pass `readFormats: [3]`; the parity code is hand-written (field vectors and
+    a second implementation in the tests, no audit); shard size is 4/3 of the bytes.
   - threshold sharing of the group secret (opt-in, `stealth-threshold.mjs`,
     `design/stealth-threshold.md`): the dealer (the owner pod) sees the secret; fewer
     than `t` shares reveal nothing; shares are signed (agent, group, epoch, index,
@@ -989,6 +1030,22 @@ Package: `browsermesh-discovery`.
     secrets; epochs are never mixed. Not protected: a compromised dealer, `t`
     colluding holders, share transport (signed, not encrypted), and what a leaving
     member already read (a new epoch re-seals the latest state only).
+  - **on-demand share release** (opt-in, `stealth-release.mjs`; `design/discovery-records.md`, item 4):
+    a member asks the holders for their shares when it needs the secret, instead of only holding
+    shares dealt up front. A request is Ed25519-signed by the member, bound to one holder, a time
+    and a nonce, and names the agent only by a hash tag; a holder checks in order size and
+    version, addressee and freshness (60 s), a rate limit per requester, the signature, the replay
+    cache, **membership against its roster** (a non-member gets the same refusal whether or not it
+    holds that agent), then the tag, the epoch floor (`minEpoch`, retired epochs) and an optional
+    approval hook, and answers with its signed share sealed (X25519 ECDH, HKDF, AES-256-GCM) to the
+    requester and signed by the holder, or a named refusal (`not-a-member`, `replayed`, `stale-request`,
+    `rate-limited`, `stale-epoch`, `no-share`, `not-approved`, ...). The reader verifies each share
+    against the dealer, `minEpoch` and `holders`, stops at `t`, and reports released, refused and
+    unreachable holders; an offline holder does not lower `t`. Logged: outcome, reason, requester pod id
+    and 8 characters of the tag, never a share or a key. Not defended: a member (membership is the
+    proof; `approve` is where more is added), a holder whose roster is wrong, guessable agent and group
+    ids (the tag only keeps names off the wire), colluding holders, a holder that is offline when
+    needed.
 - **Verified.** Unit, with in-process nodes and a no-op send function. Never over
   a network or in a browser.
 
@@ -1006,7 +1063,7 @@ Summary:
 | isolate (Worker / Durable Object spike) | **no**: runs a fixed echo pod | V8 isolate | the Worker's bindings and storage (which holds the pod key); control routes loopback-only with an optional bearer token | unit; no deployment |
 | isolate, `isolated-vm` (`createIsolatedVmRuntime()`, optional dependency) | modules from the host's catalog only | language, **in the host's own process** | no `require`, `process`, filesystem, network, timers or `WebAssembly`; one frozen context (`name`, `env`, `input`, `log`); only JSON strings and one log callback cross; heap and per-call time limits that dispose the isolate and report `oom` or `timeout`. A V8 or `isolated-vm` memory-safety bug is a bug in the host process (it can reach everything the host can); the heap limit is a guideline (2 to 3 times is possible); there is no cumulative CPU budget | unit, including escape tests (constructor chains, prototype walks, thenables, re-entrancy, memory and CPU exhaustion); run with the addon's prebuilt binary (no install script, no compiler) on macOS arm64 (Node 26.10), Linux arm64 and x64 on glibc (Debian, Node 26.0.0 and 26.13) and Linux arm64 on musl (Alpine, Node 26.13), and in CI on ubuntu-latest, where a missing addon fails the job instead of skipping. Do **not** start the host with `--no-node-snapshot`: it is not needed on Node 26, and with it the process sometimes aborts at exit (an `isolated-vm` assertion; about 1 run in 10 of the test file on Linux arm64, none in 165 runs without the flag). Never against a real V8 exploit |
 | isolate `workerd` | specified only | language | not built | never |
-| browser in-page / CDP / extension | yes (a page) | tab / browser context / extension world | in-page: no sandbox attribute, a same-origin pod shares the parent's storage; CDP: the browser's network position; extension: the extension's permissions | unit and fakes; one e2e with headless Chrome for CDP |
+| browser in-page / CDP | yes (a page) | tab / browser context | in-page: no sandbox attribute, a same-origin pod shares the parent's storage; CDP: the browser's network position | unit and fakes; one e2e with headless Chrome for CDP |
 
 Across lanes: a pod belongs to the requester that spawned it (`send`, `exec`,
 `snapshot`, `restore` and `drain` need ownership or an explicit grant on the pod,

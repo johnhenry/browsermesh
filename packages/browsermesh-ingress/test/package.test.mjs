@@ -63,6 +63,17 @@ describe('the package', () => {
     assert.equal(pkg.engines.node, '>=26.0.0')
   })
 
+  it('each entry is typed, and every .d.ts names what its module exports', async () => {
+    assert.equal(pkg.exports['.'].types, './src/index.d.ts')
+    assert.equal(pkg.exports['./node'].types, './src/node.d.ts')
+    const mod = await import('../src/index.mjs')
+    const dts = await readFile(path.join(root, 'src/index.d.ts'), 'utf8')
+    for (const name of Object.keys(mod)) assert.match(dts, new RegExp(`\\b${name}\\b`), `${name} is not in index.d.ts`)
+    const node = await import('../src/node.mjs')
+    const ndts = await readFile(path.join(root, 'src/node.d.ts'), 'utf8')
+    for (const name of Object.keys(node)) assert.match(ndts, new RegExp(`\\b${name}\\b`), `${name} is not in node.d.ts`)
+  })
+
   it('the core entry exports what the README says', async () => {
     const mod = await import('../src/index.mjs')
     for (const name of ['createMeshIngress', 'serveHttpOnMesh', 'fromSiteHandler', 'INGRESS_LIMIT_DEFAULTS', 'IngressError']) assert.equal(typeof mod[name], name === 'INGRESS_LIMIT_DEFAULTS' ? 'object' : 'function', name)

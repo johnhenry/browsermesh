@@ -30,7 +30,7 @@ Higher-level packages that sit on top of those:
 | [`@johnhenry/browsermesh-kernel`](packages/browsermesh-kernel) | Tenant/capability kernel: resource tables, byte streams, services, clock, tracing |
 | [`@johnhenry/browsermesh-apps`](packages/browsermesh-apps) | App/agent runtime: marketplace, resources, consensus, payments, quotas, GPU, audit |
 | [`@johnhenry/browsermesh-objects`](packages/browsermesh-objects) | wsh's remote-object layer over a protocol channel, authorised per root and per action |
-| [`@johnhenry/browsermesh-meshctl`](packages/browsermesh-meshctl) | External CLI for the hosted-pods control surface (`meshctl`, itself a pod); private, not yet published |
+| [`@johnhenry/browsermesh-meshctl`](packages/browsermesh-meshctl) | External CLI for the hosted-pods control surface (`meshctl`, itself a pod; peer-depends on apps, core, pod, primitives, optionally transport and wsh); published after the owner's first publish of the name, never run against a deployed host |
 | [`@johnhenry/browsermesh-embed`](packages/browsermesh-embed) | Thin widget for embedding a browsermesh-pod-backed workspace on a page |
 | [`@johnhenry/browsermesh-mcp`](packages/browsermesh-mcp) | A page's WebMCP tools over a protocol channel (peer-depends on wsh and apps) |
 | [`@johnhenry/browsermesh-ingress`](packages/browsermesh-ingress) | Real HTTP in, a mesh pod answers: request forwarder and CLI (peer-depends on apps) |

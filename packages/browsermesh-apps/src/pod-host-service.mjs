@@ -353,6 +353,11 @@ export function createPodHostService({
           // (`none|process|language|hardware`), or null when it says nothing.
           // It is the host's own claim: the planner reads it, it proves nothing.
           boundary: typeof driverBoundary === 'string' ? driverBoundary : null,
+          // Whether idle pods on this host may sleep and wake on use: `{idleMs, wakeTimeoutMs, discoveryWindowMs}`,
+          // or null. Additive; an older client ignores it.
+          hibernation: driverCapabilities.hibernation && typeof driverCapabilities.hibernation === 'object'
+            ? { ...driverCapabilities.hibernation }
+            : null,
         }
       }
 
@@ -365,9 +370,9 @@ export function createPodHostService({
        */
       function verbRefusal(verb) {
         // Lane first, driver second: a driver may not widen its lane by
-        // declaring a verb the lane excludes (found by the browser-lane
-        // extension driver, whose chrome.tabs.discard would otherwise have
-        // slipped through as 'snapshot').
+        // declaring a verb the lane excludes (found by a browser-lane
+        // driver whose tab discard would otherwise have slipped through
+        // as 'snapshot').
         if (!laneSupports(lane, verb)) {
           return new PodHostDriverError(POD_HOST_ERROR.ELANE, `lane '${lane}' cannot '${verb}'`, { verb, lane })
         }

@@ -30,7 +30,6 @@
 
 import { UsageError } from './output.mjs'
 import { createLoopbackSession } from './loopback.mjs'
-import { createRealMeshSession } from './real-mesh.mjs'
 
 // `getSupervisor()` itself is added by each session builder
 // (`loopback.mjs`/`real-mesh.mjs`, via `session-supervisor.mjs`'s
@@ -65,9 +64,26 @@ export async function connect({ flags, cliIdentity, timeoutMs, onLog, WebSocketC
   }
 
   const relayUrl = typeof flags.relay === 'string' ? flags.relay : undefined
+  const { createRealMeshSession } = await loadRealMesh()
   return createRealMeshSession({
     cliIdentity, signalingUrl, relayUrl, wshRelays, timeoutMs, onLog, WebSocketCtor,
   })
+}
+
+/**
+ * The real-mesh session builder, loaded only when a real mesh is asked for: it imports
+ * `@johnhenry/browsermesh-transport`, an optional peer, which `--loopback`, `identity` and `--help` must not
+ * need. A missing optional peer is a usage error that names what to install, not a crash.
+ */
+async function loadRealMesh() {
+  try {
+    return await import('./real-mesh.mjs')
+  } catch (cause) {
+    if (cause?.code === 'ERR_MODULE_NOT_FOUND' && /@johnhenry\/(browsermesh-transport|wsh)\b/.test(String(cause.message))) {
+      throw new UsageError(`--signaling and --wsh-relay need the optional peers @johnhenry/browsermesh-transport (0.11 or later) and @johnhenry/wsh: npm install @johnhenry/browsermesh-transport @johnhenry/wsh (${cause.message.split('\n')[0]})`)
+    }
+    throw cause
+  }
 }
 
 /**

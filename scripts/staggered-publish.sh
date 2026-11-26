@@ -2,7 +2,7 @@
 #
 # Staggered Publish Script for the browsermesh Monorepo
 #
-# Publishes all 10 packages to npm in dependency order with delays
+# Publishes every public package to npm in dependency order with delays
 # to avoid rate limiting. No build step — every package ships plain ESM
 # source directly (main/exports point at src/index.mjs).
 #
@@ -46,7 +46,7 @@ publish_package() {
   local pkg=$1
   TOTAL=$((TOTAL + 1))
 
-  echo -e "${BLUE}[$TOTAL/10]${NC} Publishing ${YELLOW}$pkg${NC}..."
+  echo -e "${BLUE}[$TOTAL]${NC} Publishing ${YELLOW}$pkg${NC}..."
 
   if $DRY_RUN; then
     echo "  -> Would run: npm publish --workspace=$pkg --access public $PROVENANCE"
@@ -104,7 +104,7 @@ publish_batch() {
 
 echo ""
 echo "browsermesh Staggered Publish Script"
-echo "Publishing 10 packages in dependency order"
+echo "Publishing every public package in dependency order"
 
 if [ ! -f "package.json" ]; then
   echo -e "${RED}Error: Must run from repository root${NC}"
@@ -117,7 +117,8 @@ fi
 publish_batch "Foundations (no internal deps)" \
   "@johnhenry/browsermesh-primitives" \
   "@johnhenry/browsermesh-netway" \
-  "@johnhenry/browsermesh-kernel"
+  "@johnhenry/browsermesh-kernel" \
+  "@johnhenry/browsermesh-priority-mux"
 
 wait_between "$DELAY_BETWEEN_BATCHES"
 
@@ -142,6 +143,7 @@ publish_batch "Runtime & Embed" \
   "@johnhenry/browsermesh-mcp" \
   "@johnhenry/browsermesh-ingress" \
   "@johnhenry/browsermesh-egress" \
+  "@johnhenry/browsermesh-meshctl" \
   "@johnhenry/browsermesh-embed"
 
 echo ""

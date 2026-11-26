@@ -1,8 +1,7 @@
 {
   "name": "@johnhenry/browsermesh-meshctl",
   "version": "0.1.0",
-  "private": true,
-  "description": "External CLI for the hosted-pods control surface (issue #185 item 5) -- meshctl is itself a pod: it joins the mesh and issues pod-host:request envelopes directly. Private for now; see README's Publishing note.",
+  "description": "Command-line client for hosted pods: meshctl is itself a pod, joins the mesh (a sealed wsh link through a relay, or WebRTC through a signalling server) and spawns, lists, sends to, snapshots and drains pods on the hosts that allow it",
   "type": "module",
   "main": "./src/index.mjs",
   "exports": {
@@ -33,6 +32,9 @@
     "directory": "packages/browsermesh-meshctl"
   },
   "homepage": "https://opensource.johnhenry.me/browsermesh/",
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "test": "node --test test/*.test.mjs"
   },
@@ -40,20 +42,25 @@
     "@johnhenry/browsermesh-primitives": ">=0.2.0 <1.0.0",
     "@johnhenry/browsermesh-pod": ">=0.1.0 <1.0.0",
     "@johnhenry/browsermesh-core": ">=0.5.0 <1.0.0",
-    "@johnhenry/browsermesh-apps": ">=0.12.0 <1.0.0",
-    "@johnhenry/browsermesh-transport": ">=0.1.0 <1.0.0"
+    "@johnhenry/browsermesh-apps": ">=0.18.0 <1.0.0",
+    "@johnhenry/browsermesh-transport": ">=0.11.0 <1.0.0",
+    "@johnhenry/wsh": ">=0.55.0 <1.0.0"
   },
   "peerDependenciesMeta": {
     "@johnhenry/browsermesh-transport": {
+      "optional": true
+    },
+    "@johnhenry/wsh": {
       "optional": true
     }
   },
   "devDependencies": {
     "@johnhenry/browsermesh-primitives": ">=0.0.1 <1.0.0",
-    "@johnhenry/browsermesh-pod": ">=0.0.1 <1.0.0",
+    "@johnhenry/browsermesh-pod": ">=0.6.0",
     "@johnhenry/browsermesh-core": ">=0.1.0 <1.0.0",
-    "@johnhenry/browsermesh-apps": ">=0.0.1 <1.0.0",
-    "@johnhenry/browsermesh-transport": ">=0.1.0 <1.0.0"
+    "@johnhenry/browsermesh-apps": ">=0.24.0",
+    "@johnhenry/browsermesh-transport": ">=0.11.0 <1.0.0",
+    "@johnhenry/wsh": "^0.55.0"
   },
   "engines": {
     "node": ">=26.0.0"

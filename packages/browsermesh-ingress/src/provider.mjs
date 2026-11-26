@@ -9,6 +9,7 @@ import { createStreamLayer } from '@johnhenry/browsermesh-apps/protocol-stream'
 import { ChannelErrorCode, MeshChannelError } from '@johnhenry/browsermesh-apps/mesh-channel'
 import { IngressError } from './errors.mjs'
 import { NO_BODY_STATUS, isPodId } from './headers.mjs'
+import { LINK_KEY_REFUSALS, LinkKeyRefusal, nodeLinkIdentity, resolvePeer, unverifiedPeer } from './peer-identity.mjs'
 import {
   FETCH_METHOD, HTTP_PROTOCOL, HTTP_VERSIONS, KIND_REQUEST, KIND_RESPONSE, sha256Hex, signedBytes, signedRequestBytes, validateRequestHead, validateStreamMeta,
 } from './wire.mjs'
@@ -40,36 +41,47 @@ function deferred() {
  * @param {object} service - a mesh service with the protocol channel (`attachService(node, undefined, createMeshProtocolService())`, or its `.api`)
  * @param {Function|{ fetch: Function }} handler - `(request, { peer, signal, client }) => Response | Promise<Response>`
  * @param {object} opts
- * @param {string[]|((podId: string, context: { peer: string, protocol: string, version: number }) => (boolean|Promise<boolean>))} opts.allowFrom
+ * @param {string[]|((podId: string, context: { peer: string, protocol: string, version: number }, peer: PeerIdentity) => (boolean|Promise<boolean>))} opts.allowFrom
  *   The ingress pods served; required, nothing is served to any other. A list names pod ids. A function is asked with the
- *   channel's verified pod id and a context, on open and again for every request; only `true` serves (anything else, a throw
- *   or a rejection refuses). With a function the provider's own check carries the weight (for an ingress whose pod id is new
- *   each session: verify a signed request with `verifyRequest`).
- * @param {(request: Request, context: { peer: string, sig: string|undefined, bytes: Uint8Array, rid: number, nonce: string }) => (boolean|Promise<boolean>)} [opts.verifyRequest]
+ *   channel's pod id, a context and (a third argument, new) what is verified about the link: the `peer` object, see
+ *   `PeerIdentity`; on open and again for every request; only `true` serves (anything else, a throw or a rejection refuses).
+ *   With a function the provider's own check carries the weight (for an ingress whose pod id is new each session: verify a
+ *   signed request with `verifyRequest`, and bind its signer to the link with `requireLinkKey`).
+ * @param {(request: Request, context: { peer: string, sig: string|undefined, bytes: Uint8Array, rid: number, nonce: string }, peer: PeerIdentity) => (boolean|Promise<boolean>)} [opts.verifyRequest]
  *   Runs before the handler, on a clone of the request (its body is still the handler's to read). Only `true` lets the request
  *   through; `false`, anything else or a throw refuses it and the handler never runs. `sig` is what the ingress's `signRequest`
- *   made (absent when it signed nothing) and `bytes` is exactly what it signed, rebuilt from what arrived.
+ *   made (absent when it signed nothing) and `bytes` is exactly what it signed, rebuilt from what arrived. The third argument
+ *   (new) says what is verified about the link the request came over; `context` is unchanged (its `peer` is still the pod id
+ *   string). `requireLinkKey(verifySigner)` makes a hook that also requires the signer to be the link's key.
+ * @param {object} [opts.node] - a mesh node (`createMeshNode`'s result): what the peer object says about a link is read from the node's sessions (`nodeLinkIdentity`). Without `node` or `linkIdentity` it is always `verified: 'none'`.
+ * @param {(podId: string) => ({ verified: 'bound'|'wsh'|'key', publicKey?: Uint8Array }|undefined|Promise<object|undefined>)} [opts.linkIdentity]
+ *   A custom source for the peer object, in place of `node`: say what is verified about the link to `podId`, or nothing. It can
+ *   only narrow (anything it does not say clearly, a throw, a public key that does not hash to the pod id: `'none'`).
  * @param {object} [opts.limits] - see `PROVIDER_LIMIT_DEFAULTS`
  * @param {(bytes: Uint8Array, info: { peer: string }) => (string|Promise<string>)} [opts.sign] - sign the response: the provider buffers it so the signature covers the body
  * @param {string} [opts.protocol='http']
  * @returns {{ stop(): void, stats(): object }}
  */
-export function serveHttpOnMesh(service, handler, { allowFrom, limits: limitOptions, sign, verifyRequest, protocol = HTTP_PROTOCOL, onLog } = {}) {
+export function serveHttpOnMesh(service, handler, { allowFrom, limits: limitOptions, sign, verifyRequest, node, linkIdentity, protocol = HTTP_PROTOCOL, onLog } = {}) {
   const api = service && typeof service === 'object' ? (service.api ?? service) : null
   if (typeof api?.serveProtocol !== 'function') throw new TypeError('serveHttpOnMesh: the first argument is a mesh service with serveProtocol (createMeshProtocolService)')
   const fn = typeof handler === 'function' ? handler : typeof handler?.fetch === 'function' ? (req, ctx) => handler.fetch(req, ctx) : null
   if (!fn) throw new TypeError('serveHttpOnMesh: handler must be a function or { fetch }')
   if (sign !== undefined && typeof sign !== 'function') throw new TypeError('serveHttpOnMesh: sign must be a function')
   if (verifyRequest !== undefined && typeof verifyRequest !== 'function') throw new TypeError('serveHttpOnMesh: verifyRequest must be a function')
+  if (linkIdentity !== undefined && typeof linkIdentity !== 'function') throw new TypeError('serveHttpOnMesh: linkIdentity must be a function')
+  // Where "what is verified about the link" comes from. Nothing configured: nothing is verified (`'none'`), never a guess.
+  const linkSource = linkIdentity ?? (node !== undefined ? nodeLinkIdentity(node) : null)
   /** @type {(peer: string, context: object) => (boolean|Promise<boolean>)} Never throws; true or false, or a promise of one. */
   let decide
   if (Array.isArray(allowFrom) && allowFrom.length && allowFrom.every(isPodId)) { const set = new Set(allowFrom); decide = (p) => set.has(p) }
   else if (typeof allowFrom === 'function') {
-    decide = (p, context) => {
+    const ask = (p, context, peer) => {
       let verdict
-      try { verdict = allowFrom(p, context) } catch { return false }
+      try { verdict = allowFrom(p, context, peer) } catch { return false }
       return verdict && typeof verdict.then === 'function' ? Promise.resolve(verdict).then((v) => v === true, () => false) : verdict === true
     }
+    decide = (p, context) => (linkSource ? resolvePeer(linkSource, p).then((peer) => ask(p, context, peer)) : ask(p, context, unverifiedPeer(p)))
   } else throw new TypeError('serveHttpOnMesh: allowFrom (a non-empty list of ingress pod ids, or a function) is required: nothing is served to a pod that is not named')
   const limits = { ...PROVIDER_LIMIT_DEFAULTS, ...limitOptions }
   for (const [k, v] of Object.entries(limits)) if (!Number.isSafeInteger(v) || v <= 0) throw new TypeError(`serveHttpOnMesh: limits.${k} must be a positive integer`)
@@ -77,6 +89,9 @@ export function serveHttpOnMesh(service, handler, { allowFrom, limits: limitOpti
 
   const channels = new Set()
   const counters = { channels: 0, requests: 0, refused: 0, declined: 0, errors: 0, requestBytes: 0, responseBytes: 0, inflight: 0 }
+  // Why `verifyRequest` refused, by named reason: `request-unverified` for a hook that said no, or one of `requireLinkKey`'s.
+  const refusals = {}
+  const KNOWN_REFUSALS = new Set(Object.values(LINK_KEY_REFUSALS))
 
   function accept(channel, { peer, version }) {
     const context = { peer, protocol, version }
@@ -155,8 +170,18 @@ export function serveHttpOnMesh(service, handler, { allowFrom, limits: limitOpti
             digest: await sha256Hex(bodyBytes ?? new Uint8Array(0)),
           })
           let ok = false
-          try { ok = (await verifyRequest(request.clone(), { peer, sig: head.sig, bytes, rid: head.rid, nonce: head.nonce })) === true } catch { ok = false }
-          if (!ok) { counters.refused += 1; throw new MeshChannelError(ChannelErrorCode.UNAUTHORIZED, 'request-unverified', 'the request was not accepted') }
+          let why = 'request-unverified'
+          const link = await resolvePeer(linkSource, peer)
+          try { ok = (await verifyRequest(request.clone(), { peer, sig: head.sig, bytes, rid: head.rid, nonce: head.nonce }, link)) === true } catch (e) {
+            ok = false
+            if (e instanceof LinkKeyRefusal && KNOWN_REFUSALS.has(e.reason)) why = e.reason
+          }
+          if (!ok) {
+            refusals[why] = (refusals[why] ?? 0) + 1
+            log('http:request-refused', { peer, reason: why })
+            counters.refused += 1
+            throw new MeshChannelError(ChannelErrorCode.UNAUTHORIZED, 'request-unverified', 'the request was not accepted')
+          }
         }
         const response = await fn(request, { peer, signal: ac.signal, client: head.client })
         if (response && typeof response === 'object' && DECLINED.has(response)) {
@@ -210,7 +235,7 @@ export function serveHttpOnMesh(service, handler, { allowFrom, limits: limitOpti
       for (const channel of [...channels]) { try { channel.close('stopped') } catch { /* gone */ } }
       channels.clear()
     },
-    stats: () => ({ ...counters, open: channels.size }),
+    stats: () => ({ ...counters, open: channels.size, refusals: { ...refusals } }),
   }
 }
 

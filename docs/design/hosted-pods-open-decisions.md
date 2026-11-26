@@ -10,6 +10,11 @@ Written 2026-11-24 against `main`. Where a claim was checked, how is said; where
 
 ## 1. Durable Object hibernation (the isolate lane, Cloudflare)
 
+**Decided 2026-11-25: B, built in process** (what sleep and wake do, the bounds, the placement and supervisor
+interplay: [`../hosted-pods.md`](../hosted-pods.md#44-hibernation-cold-boot-as-sleep)). Left for the owner: on a
+deployed Worker, measure `wakeMs` with the shortened `discoveryWindowMs` and the memory per idle pod; move to C only if
+that number is too slow for a use that needs a pod addressable while asleep.
+
 **State.** `spikes/isolate-pod-host` runs a pod in a Durable Object that dials out to the relay and the signalling
 server. Cloudflare's WebSocket Hibernation only covers sockets a Durable Object *accepts* as a server, and an open
 outbound socket keeps the object in memory (the spike's README quotes the platform's documentation for both). So "a
@@ -48,22 +53,40 @@ talk to.
 **Recommendation.** C, with B's steps ready. The package is small (16 files, about 31 kB packed) and self-contained now;
 what is missing is evidence from outside the test suite. Releases stop at a major: this would be a first minor.
 
+**Decided 2026-11-25: C. B's steps are done** (public manifest at version 0.0.0 with a minor changeset, so the release
+pull request makes it 0.1.0; in `scripts/staggered-publish.sh`; a user README; peers raised to the releases that carry
+what it calls). Left for the owner, in this order:
+
+1. The real run: against one deployed pod host that allows your identity (`meshctl identity` prints the pod id to grant
+   the pod-host verbs and `mesh:link:connect` to), run `meshctl hosts --wsh-relay <relay> --host <host pod id>`, then
+   `pods spawn`, `pods status`, `pods send` and `pods drain` on a harmless pod. Look for: the host is described
+   with its lane and verbs (not `WSH_UNREACHABLE` or `WSH_REFUSED`), each verb returns `{"ok":true}` with exit 0, a
+   refused verb returns `EACCES` (exit 3), and the pod id the host claims is the one you asked for. Record it, and repeat
+   with `--signaling` if the WebRTC path is to be claimed.
+2. The first publish of the new name, by hand (a name that does not exist yet cannot be published by the trusted
+   publisher): from a checkout at the released commit, `npm publish --workspace=@johnhenry/browsermesh-meshctl --access public`
+   after the release pull request has made the version 0.1.0; then enable trusted publishing for the name so later
+   releases go through the workflow.
+
 ## 3. The MV3 extension spike
 
-**State.** `spikes/browser-extension-host` is frozen (its `exec` evaluates a string in a page, which cannot work under a
-strict Content-Security-Policy; the README points to remote objects over a protocol channel instead), and #272 asks
-whether to retire it. The item "loaded in a real browser by hand" was done here with Playwright and the Chromium that is
-already installed, following the README's "Load unpacked": **the extension does not run.** Its service worker starts and
-exits at once, with no error shown on the extensions page. The cause was isolated: a worker with a trivial
+**Decided 2026-11-25: option A, done.** The spike has been removed; what was learned (why it did not run, what a
+working extension would need) is in [`../hosted-pods.md`](../hosted-pods.md#what-was-learned-from-the-mv3-extension-spike).
+The text below is the state and options as they were when the decision was asked.
+
+**State.** The extension spike was frozen (its `exec` evaluated a string in a page, which cannot work under a
+strict Content-Security-Policy), and #272 asked whether to retire it. Loaded by hand with Playwright and the Chromium
+that is already installed, following its README's "Load unpacked", **the extension did not run.** Its service worker
+started and exited at once, with no error shown on the extensions page. The cause was isolated: a worker with a trivial
 `background.mjs` stays up, and a worker whose `background.mjs` imports a file outside the extension directory (as the
-spike's does, `../../../packages/browsermesh-pod/src/index.mjs`) dies the same way, because an unpacked extension cannot
+spike's did) dies the same way, because an unpacked extension cannot
 import files outside its own root. The pod package also imports by bare package name, which an extension worker cannot
-resolve without a bundle. So nothing written about the extension's behaviour has been observable in a browser; only the
-driver, against a fake `chrome`, has ever run.
+resolve without a bundle. So nothing written about the extension's behaviour had been observable in a browser; only the
+driver, against a fake `chrome`, had ever run.
 
 | Option | What it takes | Cost of choosing it |
 | --- | --- | --- |
-| A. Retire it | Delete the spike and its README section, drop the extension driver from `docs/hosted-pods.md` section 8b, update `scripts/spike-frozen.test.mjs`. An hour. | The browser lane has two drivers (in-page and CDP) instead of three. |
+| A. Retire it | Delete the spike and its README section, drop the extension driver from `docs/hosted-pods.md` section 8b, replace the frozen-spike test with one that fails on a leftover reference. An hour. | The browser lane has two drivers (in-page and CDP) instead of three. |
 | B. Make it load | Bundle the worker and the pod package into the extension directory (a build step the repository does not have today), set `host_permissions` to a real origin, then add a Playwright test that loads it and drives `spawn` and `exec`. One to two days. | You then own an extension with `scripting` access whose `exec` is `eval`: the reason it was frozen. |
 | C. Replace it | Serve the remote-object layer from the page (`@johnhenry/wsh/objects`, `examples/19-wsh-objects-over-protocol-channel.mjs`) and let an extension, if one is wanted at all, only inject that. | Larger; a design of its own. |
 
