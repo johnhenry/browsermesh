@@ -927,7 +927,8 @@ origin (several MiB each way with every byte checked, a slow reader, a revocatio
 a metadata or private address, a name that answers differently the second time, a certificate for another name, an oversized,
 slow or lying response, a consumer that stops reading); UDP against a local datagram origin (a flood, replies over the credit,
 a consumer that does not read, a provider that lies to the consumer); the wire against the published 0.1.1's messages in both
-directions; and a page as the consumer in a real browser (`tests/browser/egress.spec.mjs`: TCP, a fetch and UDP granted, a
+directions; the `browsermesh-egress` command as a child process behind a local signalling server, reached over real WebRTC for
+TCP, a fetch and UDP, with its audit lines checked for contents; and a page as the consumer in a real browser (`tests/browser/egress.spec.mjs`: TCP, a fetch and UDP granted, a
 refusal by name, the guard refusing loopback, metadata and private space even with a grant, a revocation, a cancelled body).
 Not verified: a public destination, throughput
 or behaviour through NAT or a TURN relay, a registry grant arriving through an ACL template rather than
