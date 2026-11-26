@@ -9,6 +9,7 @@ import { describe, it, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 
 import { createMeshNode } from '../src/mesh-bootstrap.mjs'
+import { MeshIdentityManager } from '@johnhenry/browsermesh-core'
 import { ManualStrategy } from '@johnhenry/browsermesh-discovery'
 import { createInProcessPipeRelay } from '@johnhenry/browsermesh-transport/wsh-in-process'
 
@@ -165,5 +166,24 @@ describe('createMeshNode({ admission }) over wsh', () => {
     assert.equal(bob.admission, undefined)
     await assert.rejects(alice.wsh.links.connect(bob.podId, { keep: false }), (e) => e.code === 'WSH_REFUSED')
     assert.equal(bob.wsh.links.isConnected(alice.podId), false)
+  })
+
+  it('works together with the identity option: the adopted key is the one a stranger reaches, restricted', async () => {
+    const env = await createInProcessPipeRelay()
+    cleanups.push(() => env.close())
+    const manager = new MeshIdentityManager()
+    const { podId } = await manager.create('kept')
+    const { admission, seen } = bobAdmission()
+    const bob = await makeNode(env, 'bob', { admission, identityManager: manager, identity: { podId } })
+    const alice = await makeNode(env, 'alice')
+    assert.equal(bob.podId, podId)
+    assert.equal(manager.list().length, 1)
+    await alice.connectToPeer(bob.podId, { wsh: bob.podId })
+    await alice.sendTo(bob.podId, { type: 'x:hello' })
+    await waitFor(() => seen.frames.length === 1, 4000, 'the handler gets the frame')
+    assert.equal(seen.frames[0].from, alice.podId)
+    assert.equal(bob.hasActiveSession(alice.podId), false)
+    seen.links[0].promote()
+    await waitFor(() => bob.hasActiveSession(alice.podId))
   })
 })
