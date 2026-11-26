@@ -112,6 +112,63 @@ export class IdentityWallet {
   }
 
   /**
+   * Derive (or fetch) the identity of a realm from the wallet's seed. See
+   * `MeshIdentityManager#deriveRealmIdentity`.
+   *
+   * @param {string} realmId
+   * @param {object} [opts]
+   * @returns {Promise<import('./identity.mjs').IdentitySummary>}
+   */
+  async deriveRealmIdentity(realmId, opts) {
+    const summary = await this.#identityManager.deriveRealmIdentity(realmId, opts);
+    this.#onLog('wallet:identity:realm', { podId: summary.podId, realmId });
+    return summary;
+  }
+
+  /**
+   * Create a realm identity; `{ derive: false }` makes an independent random
+   * key that is NOT recoverable from the seed (the fallback).
+   *
+   * @param {string} realmId
+   * @param {object} [opts]
+   * @returns {Promise<import('./identity.mjs').IdentitySummary>}
+   */
+  async createRealmIdentity(realmId, opts) {
+    const summary = await this.#identityManager.createRealmIdentity(realmId, opts);
+    this.#onLog('wallet:identity:realm', { podId: summary.podId, realmId });
+    return summary;
+  }
+
+  /** Generate a random realm seed. @param {object} [opts] */
+  createSeed(opts) {
+    this.#identityManager.createSeed(opts);
+  }
+
+  /** @returns {boolean} Whether a realm seed is held */
+  get hasSeed() {
+    return this.#identityManager.hasSeed;
+  }
+
+  /**
+   * Passphrase-encrypted backup of the realm seed.
+   * @param {string} passphrase
+   * @param {object} [opts]
+   * @returns {Promise<string>}
+   */
+  async exportSeed(passphrase, opts) {
+    return this.#identityManager.exportSeed(passphrase, opts);
+  }
+
+  /**
+   * Restore the realm seed from a backup.
+   * @param {string|object} text
+   * @param {string} passphrase
+   */
+  async importSeed(text, passphrase) {
+    return this.#identityManager.importSeed(text, passphrase);
+  }
+
+  /**
    * Export an identity as JWK, optionally encrypted with a passphrase.
    *
    * With a passphrase this resolves to an encrypted envelope or it rejects —

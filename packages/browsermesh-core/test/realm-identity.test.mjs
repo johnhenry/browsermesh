@@ -36,7 +36,7 @@ describe('realm identity derivation: pinned vector', () => {
     assert.equal(encodeBase64url(pub), VECTOR.publicKeyX);
     const sig = await m.sign(s.podId, MSG);
     assert.equal(hex(sig), VECTOR.signatureHex);
-    assert.equal(await m.verify(s.podId, MSG, sig), true);
+    assert.equal(await m.verify(pub, sig, MSG), true);
   });
   it('podId is the hash of the public key like any identity', async () => {
     const m = withSeed();

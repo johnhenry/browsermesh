@@ -62,6 +62,49 @@ function requirePassphrase(passphrase, source) {
   return passphrase;
 }
 
+// ---------------------------------------------------------------------------
+// Realm seed (docs/design/realms.md, 5.10)
+// ---------------------------------------------------------------------------
+
+/** Domain string of the per-realm identity derivation (HKDF `info` prefix). */
+export const REALM_DERIVATION_DOMAIN = 'browsermesh/realm/v1';
+/** Record type of an exported realm seed. */
+export const REALM_SEED_TYPE = 'browsermesh-realm-seed';
+/** Format number of the readable, authenticated header of a seed export. */
+const REALM_SEED_FORMAT = 1;
+const SEED_BYTES = 32;
+/** Fixed 16-byte PKCS#8 header of an Ed25519 private key; the 32 key bytes follow. */
+const ED25519_PKCS8_HEADER = Uint8Array.of(
+  0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20
+);
+
+/**
+ * A realm seed could not be exported or imported. `code` is the keyvault
+ * `VaultError` code (`bad_passphrase`, `wrong_type`, `corrupt`, `unsupported`)
+ * or `bad_seed` for a record that opened but did not hold a 32-byte seed;
+ * `cause` is the original error.
+ */
+export class RealmSeedError extends Error {
+  /** @param {string} code @param {string} message @param {Error} [cause] */
+  constructor(code, message, cause) {
+    super(message, cause ? { cause } : undefined);
+    this.name = 'RealmSeedError';
+    this.code = code;
+  }
+}
+
+/**
+ * @param {*} realmId
+ * @returns {string}
+ * @throws {TypeError} Unless a non-empty string without a NUL character
+ */
+function requireRealmId(realmId) {
+  if (typeof realmId !== 'string' || realmId.length === 0 || realmId.includes('\0')) {
+    throw new TypeError('realmId must be a non-empty string without a NUL character');
+  }
+  return realmId;
+}
+
 /**
  * Encrypt a UTF-8 string under a passphrase with keyvault (PBKDF2-SHA256 at
  * keyvault's current default, AES-256-GCM, KDF parameters and `header`
@@ -241,6 +284,12 @@ export class MeshIdentityManager {
   /** @type {string|null} */
   #defaultId = null;
 
+  /** @type {Uint8Array|null} Realm seed; extractable by design (see exportSeed). */
+  #seed = null;
+
+  /** @type {{ label: string, createdAt: number }|null} */
+  #seedInfo = null;
+
   /** @type {InMemoryIdentityStorage} */
   #storage;
 
@@ -413,6 +462,233 @@ export class MeshIdentityManager {
       created,
       metadata,
     };
+  }
+
+  // -- Realm seed and per-realm identities ----------------------------------
+  //
+  // One random 32-byte seed; each realm gets its own Ed25519 identity,
+  // HKDF-derived from it. See docs/design/realms.md 5.10.
+  //
+  // Trade-offs, by decision: the seed is EXTRACTABLE (so one backup recovers
+  // every realm identity), which means any script running in the page can read
+  // it while it is loaded. The derived identity keys are not extractable.
+  // Per-realm keys unlink keys across realms; they do not hide an IP address
+  // or what a relay can see.
+
+  /** @returns {boolean} Whether a realm seed is held */
+  get hasSeed() {
+    return this.#seed !== null;
+  }
+
+  /**
+   * Generate a fresh random 32-byte realm seed and hold it. Replaces any seed
+   * already held (identities derived from the old one stay registered).
+   *
+   * @param {object} [opts]
+   * @param {string} [opts.label] - Label written into exports
+   */
+  createSeed(opts = {}) {
+    this.setSeed(crypto.getRandomValues(new Uint8Array(SEED_BYTES)), opts);
+  }
+
+  /**
+   * Hold a given 32-byte seed (copied). Use {@link MeshIdentityManager#importSeed}
+   * to restore from a backup.
+   *
+   * @param {Uint8Array} seed
+   * @param {object} [opts]
+   * @param {string} [opts.label]
+   * @param {number} [opts.createdAt]
+   * @throws {TypeError} Unless `seed` is a 32-byte Uint8Array
+   */
+  setSeed(seed, opts = {}) {
+    if (!(seed instanceof Uint8Array) || seed.length !== SEED_BYTES) {
+      throw new TypeError(`seed must be a ${SEED_BYTES}-byte Uint8Array`);
+    }
+    this.#seed = new Uint8Array(seed);
+    this.#seedInfo = {
+      label: typeof opts.label === 'string' ? opts.label : 'realm seed',
+      createdAt: Number.isFinite(opts.createdAt) ? opts.createdAt : Date.now(),
+    };
+    this.#onLog('identity:seed:set', {});
+  }
+
+  #requireSeed() {
+    if (!this.#seed) {
+      throw new Error('No realm seed: call createSeed(), setSeed() or importSeed() first');
+    }
+    return this.#seed;
+  }
+
+  /**
+   * The 32 bytes HKDF-SHA-256 derives for a realm: empty salt,
+   * `info = UTF-8("browsermesh/realm/v1 identity " + realmId)`. They are the
+   * Ed25519 private-key seed of that realm's identity, so treat them as secret.
+   *
+   * @param {string} realmId
+   * @returns {Promise<Uint8Array>}
+   */
+  async deriveRealmKeyBytes(realmId) {
+    requireRealmId(realmId);
+    const seed = this.#requireSeed();
+    const base = await crypto.subtle.importKey('raw', seed, 'HKDF', false, ['deriveBits']);
+    const bits = await crypto.subtle.deriveBits(
+      {
+        name: 'HKDF',
+        hash: 'SHA-256',
+        salt: new Uint8Array(0),
+        info: new TextEncoder().encode(`${REALM_DERIVATION_DOMAIN} identity ${realmId}`),
+      },
+      base,
+      SEED_BYTES * 8
+    );
+    return new Uint8Array(bits);
+  }
+
+  /**
+   * Derive (or return, if already registered) the identity of a realm from the
+   * seed. The same seed and realm id always give the same key; different realm
+   * ids give unrelated keys. The private key is NON-extractable. Existing
+   * random identities cannot be derived, and `save()` skips derived identities
+   * (they come back from the seed).
+   *
+   * @param {string} realmId
+   * @param {object} [opts]
+   * @param {string} [opts.label] - Default `realm:<realmId>`
+   * @param {object} [opts.metadata] - Merged under `{ realm, derived: true }`
+   * @returns {Promise<IdentitySummary>}
+   * @throws {TypeError} For an invalid realm id
+   * @throws {Error} If no seed is held
+   */
+  async deriveRealmIdentity(realmId, opts = {}) {
+    requireRealmId(realmId);
+    const bytes = await this.deriveRealmKeyBytes(realmId);
+    const pkcs8 = new Uint8Array(ED25519_PKCS8_HEADER.length + SEED_BYTES);
+    pkcs8.set(ED25519_PKCS8_HEADER);
+    pkcs8.set(bytes, ED25519_PKCS8_HEADER.length);
+    let identity;
+    try {
+      // A non-extractable Ed25519 key cannot give up its public key, so read it
+      // from an extractable probe import first, then keep only the other one.
+      const probe = await PodIdentity.fromPkcs8(pkcs8, { extractable: true });
+      identity = await PodIdentity.fromPkcs8(pkcs8, { extractable: false, publicKey: probe.keyPair.publicKey });
+    } finally {
+      pkcs8.fill(0);
+      bytes.fill(0);
+    }
+    if (this.#identities.has(identity.podId)) return this.get(identity.podId);
+    return this.#register(identity, opts.label ?? `realm:${realmId}`, {
+      ...(opts.metadata || {}),
+      realm: realmId,
+      derived: true,
+    }, true);
+  }
+
+  /**
+   * Create the identity of a realm.
+   *
+   * With `derive: true` (the default) this is {@link MeshIdentityManager#deriveRealmIdentity}.
+   *
+   * With `derive: false` it makes an INDEPENDENT RANDOM key labelled for the
+   * realm: the documented fallback for a browser that cannot derive. That key
+   * is NOT recoverable from the seed; it needs its own backup
+   * (`export(podId, passphrase)`), one per realm, and each call makes a new
+   * key.
+   *
+   * @param {string} realmId
+   * @param {object} [opts]
+   * @param {boolean} [opts.derive=true]
+   * @param {string} [opts.label]
+   * @param {object} [opts.metadata]
+   * @returns {Promise<IdentitySummary>}
+   */
+  async createRealmIdentity(realmId, opts = {}) {
+    requireRealmId(realmId);
+    if (opts.derive !== false) return this.deriveRealmIdentity(realmId, opts);
+    const identity = await PodIdentity.generate();
+    return this.#register(identity, opts.label ?? `realm:${realmId}`, {
+      ...(opts.metadata || {}),
+      realm: realmId,
+      derived: false,
+    }, false);
+  }
+
+  async #register(identity, label, metadata, derived) {
+    const created = Date.now();
+    let rawPubKey = null;
+    try {
+      rawPubKey = new Uint8Array(await crypto.subtle.exportKey('raw', identity.keyPair.publicKey));
+    } catch { /* fall back to legacy DID form */ }
+    this.#identities.set(identity.podId, { identity, label, metadata, created, rawPubKey, derived });
+    this.#onLog('identity:realm', { podId: identity.podId, label, derived });
+    if (this.#identities.size === 1) this.#defaultId = identity.podId;
+    return { podId: identity.podId, label, did: this.toDID(identity.podId), created, metadata };
+  }
+
+  /**
+   * Back the seed up as a passphrase-encrypted keyvault record (type
+   * `browsermesh-realm-seed`). One backup recovers every derived realm
+   * identity; it does not recover fallback (`derive: false`) identities.
+   * The readable, authenticated header is `{ fmt: 1, label, createdAt }`.
+   *
+   * @param {string} passphrase - Non-empty string
+   * @param {object} [opts]
+   * @param {string} [opts.label]
+   * @returns {Promise<string>} Record text (JSON)
+   * @throws {TypeError} For an empty or missing passphrase
+   * @throws {Error} If no seed is held
+   */
+  async exportSeed(passphrase, opts = {}) {
+    requirePassphrase(passphrase, 'passphrase');
+    const seed = this.#requireSeed();
+    return seal(seed, passphrase, {
+      type: REALM_SEED_TYPE,
+      header: {
+        fmt: REALM_SEED_FORMAT,
+        label: typeof opts.label === 'string' ? opts.label : this.#seedInfo.label,
+        createdAt: this.#seedInfo.createdAt,
+      },
+    });
+  }
+
+  /**
+   * Restore the seed from {@link MeshIdentityManager#exportSeed} output and
+   * hold it (replacing any seed held).
+   *
+   * @param {string|object} text - The record text (or parsed record)
+   * @param {string} passphrase
+   * @returns {Promise<{ label: string, createdAt: number }>}
+   * @throws {TypeError} For an empty or missing passphrase
+   * @throws {RealmSeedError} `code` is `bad_passphrase` (wrong passphrase or
+   *   modified record or header), `wrong_type`, `corrupt`, `unsupported` or `bad_seed`
+   */
+  async importSeed(text, passphrase) {
+    requirePassphrase(passphrase, 'passphrase');
+    let r;
+    try {
+      r = await openRecord(text, passphrase, { type: REALM_SEED_TYPE });
+    } catch (err) {
+      if (err instanceof VaultError) {
+        const why = {
+          bad_passphrase: 'the passphrase is wrong, or the seed backup was modified',
+          wrong_type: 'this is not a realm seed backup',
+          corrupt: 'the seed backup is damaged or not a backup at all',
+          unsupported: 'the seed backup uses a format or key derivation this version does not support',
+        }[err.code] ?? err.message;
+        throw new RealmSeedError(err.code, `Could not import the realm seed: ${why}.`, err);
+      }
+      throw err;
+    }
+    if (!(r.payload instanceof Uint8Array) || r.payload.length !== SEED_BYTES || r.header?.fmt !== REALM_SEED_FORMAT) {
+      throw new RealmSeedError('bad_seed', 'Could not import the realm seed: the record does not hold a version-1 32-byte seed.');
+    }
+    const info = {
+      label: typeof r.header.label === 'string' ? r.header.label : 'realm seed',
+      createdAt: Number.isFinite(r.header.createdAt) ? r.header.createdAt : Date.now(),
+    };
+    this.setSeed(r.payload, info);
+    r.payload.fill(0);
+    return info;
   }
 
   // -- Export -------------------------------------------------------------
@@ -670,7 +946,11 @@ export class MeshIdentityManager {
    * Persist all identities to the storage adapter.
    */
   async save() {
+    const saved = [];
     for (const [podId, entry] of this.#identities) {
+      // Derived realm identities are non-extractable and come back from the seed.
+      if (entry.derived) continue;
+      saved.push(podId);
       const jwk = await crypto.subtle.exportKey('jwk', entry.identity.keyPair.privateKey);
       await this.#storage.save(podId, {
         podId,
@@ -683,7 +963,7 @@ export class MeshIdentityManager {
     // Also persist the default and the list of ids
     await this.#storage.save('__meta__', {
       defaultId: this.#defaultId,
-      ids: [...this.#identities.keys()],
+      ids: saved,
     });
     this.#onLog('identity:save', { count: this.#identities.size });
   }

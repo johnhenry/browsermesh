@@ -50,6 +50,38 @@ npm install @johnhenry/browsermesh-core @johnhenry/browsermesh-primitives
 import { MeshIdentityManager, MeshKeyring, TrustGraph } from '@johnhenry/browsermesh-core';
 ```
 
+## Per-realm identities from one seed
+
+One identity per realm, so realms cannot correlate you by key. All of them derive from one random 32-byte seed, so one
+backup recovers every realm identity (design: `docs/design/realms.md`, 5.10). The methods are on `MeshIdentityManager`
+and `IdentityWallet`.
+
+```js
+const mgr = new MeshIdentityManager()
+mgr.createSeed()                                    // or mgr.setSeed(bytes32)
+const id = await mgr.deriveRealmIdentity('my-realm-id') // non-extractable Ed25519, registered like any identity
+const backup = await mgr.exportSeed('a long passphrase') // keyvault record, type 'browsermesh-realm-seed'
+
+const fresh = new MeshIdentityManager()
+await fresh.importSeed(backup, 'a long passphrase')
+const same = (await fresh.deriveRealmIdentity('my-realm-id')).podId === id.podId // true
+
+// Fallback for a browser that cannot derive: an independent random key. NOT recoverable from the seed.
+await mgr.createRealmIdentity('my-realm-id', { derive: false })
+```
+
+The key is HKDF-SHA-256 over the seed (empty salt, `info = "browsermesh/realm/v1 identity " + realmId`, 32 bytes) used as
+an Ed25519 private key. Different realm ids give unrelated keys. `importSeed` rejects with a `RealmSeedError` whose `code`
+is the keyvault code (`bad_passphrase` also covers a modified record or header, `wrong_type`, `corrupt`, `unsupported`);
+an empty passphrase throws `TypeError`. `save()` skips derived identities, which come back from the seed.
+
+Trade-offs, accepted by decision:
+
+- The seed is **extractable**, so any script that can run in the page can read it while it is loaded. The derived identity
+  keys are not extractable. Export the seed only under a passphrase.
+- Derived keys unlink **keys** across realms. They do not hide an IP address or what a relay sees.
+- Random identities that already exist cannot be derived, and neither can external-signer identities.
+
 ## Verifying key links and capabilities from peers
 
 - `MeshKeyring#verifyCryptoChain(from, to, getPublicKey)` requires every link
