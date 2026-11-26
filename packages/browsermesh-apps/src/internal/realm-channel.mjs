@@ -11,6 +11,8 @@
  * Frames that arrive before the prover subscribes are buffered. Internal: not exported from the package.
  */
 
+import { decodeWireData } from './wire-envelope.mjs'
+
 /** Failures the dialler's own timer reports, where the host is not at fault and the link is left as it is. */
 const KEEP_LINK = new Set(['peer-does-not-speak-realms', 'timeout'])
 
@@ -24,8 +26,9 @@ export function nodeChannel(node, hostId) {
   let onFrame = null
   let onClose = null
   let disposed = false
-  const offData = node.onIncomingData((from, data) => {
+  const offData = node.onIncomingData((from, raw) => {
     if (from !== hostId) return
+    const data = decodeWireData(raw)
     if (onFrame) onFrame(data)
     else pending.push(data)
   })

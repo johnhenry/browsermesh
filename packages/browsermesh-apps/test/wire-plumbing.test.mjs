@@ -536,7 +536,7 @@ describe('#221: raw PeerNode.onIncomingData() subscribers decode JSON text', () 
     const names = rawSubscribers.map((f) => f.split('/').pop()).sort()
     assert.deepEqual(names, [
       'mesh-relay-backend.mjs', 'mesh-relay-host.mjs', 'mesh-service.mjs', 'mesh-sync.mjs',
-      'mesh-websocket.mjs', 'peer-node-transport.mjs', 'pod-host-service.mjs',
+      'mesh-websocket.mjs', 'peer-node-transport.mjs', 'pod-host-service.mjs', 'realm-channel.mjs',
     ])
   })
 
