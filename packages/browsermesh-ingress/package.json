@@ -1,6 +1,6 @@
 {
   "name": "@johnhenry/browsermesh-ingress",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Real HTTP in, a mesh peer answers: a bounded request forwarder from an HTTP listener to the one BrowserMesh pod a mapping names, over a protocol channel",
   "type": "module",
   "main": "./src/index.mjs",
@@ -51,13 +51,13 @@
   },
   "optionalDependencies": {
     "@johnhenry/browsermesh-core": "^0.13.0",
-    "@johnhenry/browsermesh-discovery": "^0.6.0",
+    "@johnhenry/browsermesh-discovery": "^0.7.0",
     "@johnhenry/browsermesh-pod": "^0.6.0",
     "@johnhenry/browsermesh-primitives": "^0.7.0",
-    "@johnhenry/browsermesh-transport": "^0.12.0",
+    "@johnhenry/browsermesh-transport": "^0.12.2",
     "node-datachannel": "^0.33.4"
   },
   "devDependencies": {
-    "@johnhenry/browsermesh-apps": "^0.25.0"
+    "@johnhenry/browsermesh-apps": "^0.26.0"
   }
 }

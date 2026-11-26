@@ -1,5 +1,11 @@
 # @johnhenry/browsermesh-egress
 
+## 0.3.1
+
+### Patch Changes
+
+- 34687ff: The README no longer lists "an adapter example" as not built: `examples/local-listener.mjs` (in the repository) is a Node consumer that listens on a loopback port and carries each connection through `connectEgress` to a granted destination, with a grants file for the `browsermesh-egress` command. Documentation only; nothing in the package's code changed.
+
 ## 0.3.0
 
 ### Minor Changes
