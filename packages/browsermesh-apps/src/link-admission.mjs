@@ -210,16 +210,27 @@ export function createLinkAdmission({
  * its verdict kept when it allows; a peer it refuses is put to `admission.decide` with `transport: 'wsh'` and `proven: true`
  * (wsh has verified the key before `authorize` runs): `allow` is `true`, `restrict` is `{ restricted: true }`, `deny` is `false`.
  *
+ * `{ restricted: true }` is returned ONLY when the call carries `ctx.restricted === true`, which a transport that understands the
+ * verdict passes as `authorize(peer, { restricted: true })`. An older transport calls `authorize(peer)` and grants a full
+ * `endpoint:mesh` on ANY truthy verdict, so for it a `restrict` decision is a refusal (and `onEvent` says so).
+ *
  * @param {{ decide: Function }} admission
  * @param {(peer: object) => any} [inner]
+ * @param {{ onEvent?: (event: { type: string, peerKey?: string, transport?: string, reason?: string }) => void }} [opts]
  */
-export function createWshAdmissionAuthorize(admission, inner) {
+export function createWshAdmissionAuthorize(admission, inner, { onEvent } = {}) {
   if (!admission || typeof admission.decide !== 'function') throw new TypeError('createWshAdmissionAuthorize: an admission seam is required')
-  return async (peer) => {
+  return async (peer, ctx) => {
     let verdict = false
     try { verdict = inner ? await inner(peer) : false } catch { return false }
     if (verdict) return verdict
     const decision = await admission.decide({ peerKey: peer.podId, transport: 'wsh', proven: true })
-    return decision === 'allow' ? true : decision === 'restrict' ? { restricted: true } : false
+    if (decision === 'allow') return true
+    if (decision !== 'restrict') return false
+    if (ctx?.restricted === true) return { restricted: true }
+    try {
+      onEvent?.({ type: 'restricted-unsupported', peerKey: peer.podId, transport: 'wsh', reason: 'the wsh transport does not support restricted links (upgrade @johnhenry/browsermesh-transport); refused' })
+    } catch { /* a listener may not break a link */ }
+    return false
   }
 }

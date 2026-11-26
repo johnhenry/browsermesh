@@ -191,6 +191,9 @@ const EVENTS = ['peer-up', 'peer-down', 'message', 'refused', 'error', 'dropped'
  * `{ reason, who, detail }`, `error` `{ error }`, `dropped` `{ from, reason }`.
  */
 export class WshPeerLinks {
+  /** Capability flag: `authorize(peer, { restricted: true })` is called, and a `{ restricted: true }` verdict is understood. Absent in older releases. */
+  static supportsRestrictedAdmission = true;
+
   #identity;
   #cred = null;
   #credReady;
@@ -481,7 +484,9 @@ export class WshPeerLinks {
     if (podId === this.#cred.podId) return false;
     let verdict;
     try {
-      verdict = await this.#authorize({ podId, fingerprint: who.fingerprint, publicKey: who.publicKey });
+      // The second argument is a capability flag: `restricted: true` says this transport understands the `{ restricted: true }` verdict.
+      // An authorizer that answers it only when told so fails closed against a transport that predates it.
+      verdict = await this.#authorize({ podId, fingerprint: who.fingerprint, publicKey: who.publicKey }, { restricted: true });
     } catch (e) {
       this.#onLog(`authorize threw: ${e?.message ?? e}`);
       return false;
