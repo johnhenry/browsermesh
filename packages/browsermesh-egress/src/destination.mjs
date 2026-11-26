@@ -63,6 +63,18 @@ export const EGRESS_SCOPES = Object.freeze({
   dns: (name) => `egress:dns:${name}:resolve`,
   /** Connect to anything the operator's set of this name lists. */
   set: (name) => `egress:set:${name}:connect`,
+  /** Fetch an HTTP(S) URL on exactly this host and port, the provider being the HTTP client (it sees the request and the response). */
+  http: (host, port) => `egress:http:${host}:${port}:fetch`,
+  /** Fetch from any port of exactly this host (the blocked ports still apply). */
+  httpAnyPort: (host) => `egress:http:${host}:*:fetch`,
+  /** Fetch from anything the operator's set of this name lists. A set's `connect` grant is not this one. */
+  setFetch: (name) => `egress:set:${name}:fetch`,
+  /** Send UDP datagrams to exactly this host and port (and read what that address and port answers). */
+  udp: (host, port) => `egress:udp:${host}:${port}:send`,
+  /** UDP to any port of exactly this host (the blocked UDP ports still apply). */
+  udpAnyPort: (host) => `egress:udp:${host}:*:send`,
+  /** UDP to anything the operator's set of this name lists. */
+  setUdp: (name) => `egress:set:${name}:send`,
 })
 
 const SET_NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/

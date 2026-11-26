@@ -21,7 +21,13 @@ export const REFUSAL_CODES = Object.freeze({
   'bad-destination': 'The host is not a lowercase DNS name or a canonical IPv4 dotted quad, or the port is not 1 to 65535.',
   'name-not-found': 'The name does not exist (the resolver said so).',
   'lookup-failed': 'The name could not be looked up (the resolver failed, or timed out).',
-  'connect-failed': 'The connection was not made; `detail` is `refused`, `unreachable`, `timeout` or `failed`.',
+  'connect-failed': 'The connection was not made; `detail` is `refused`, `unreachable`, `timeout`, `certificate` (the server\'s certificate is not valid for the name asked for) or `failed`.',
+  'bad-url': 'The URL is not an `http:` or `https:` URL this provider serves: another scheme, credentials in it, or too long.',
+  'method-not-allowed': 'The method is not one this provider lets a consumer use for the fetch form (GET and HEAD unless the operator lists more).',
+  'redirect-refused': 'The destination answered with a redirect this provider will not follow: the target is a destination the consumer holds no grant for, another scheme, a downgrade from https, or needs a request body to be sent again.',
+  'too-many-redirects': 'The destination redirected more times than the provider follows (`limits.maxRedirects`).',
+  'bad-response': 'The destination\'s answer is not one the provider will pass on: a malformed or oversized head, or too many headers.',
+  'not-offered': 'This provider does not offer this form (it was given no way to make the request).',
   unknown: 'The provider refused for a reason this version does not name, or answered with something unreadable.',
 })
 
@@ -33,6 +39,7 @@ export const BUDGET_NAMES = Object.freeze({
   'connect-rate-global': 'All consumers together asked for more connections in the window than `limits.globalConnectRate` allows.',
   'dns-rate': 'This consumer asked for more lookups in the window than `limits.dnsRate` allows.',
   'bytes-per-consumer': 'This consumer has moved `limits.maxBytesPerConsumer` bytes (both directions) in the window.',
+  'udp-flows-per-consumer': 'Open UDP flows of this consumer are at `limits.maxUdpFlowsPerConsumer`.',
 })
 
 /** Why a connection that was open ended. `closed` is the only clean one. */
@@ -59,6 +66,8 @@ export const LINK_CODES = Object.freeze({
   'provider-unreachable': 'The provider is not reachable over a direct link; routed delivery is not supported.',
   'provider-pin-mismatch': 'The channel is bound to a different pod than the one named; refused.',
   'provider-closed': 'The channel to the provider closed.',
+  'provider-no-form': 'The provider does not know this form of request (it is older than the form).',
+  'datagram-too-large': 'The datagram is larger than the provider\'s bound for one (`limits.maxDatagramBytes`, or the flow\'s answered bound).',
   'bad-answer': 'The provider answered with something this package cannot read.',
   'connection-ended': 'The provider ended an open connection; `reason` is one of the END_REASONS.',
   'link-closed': 'This link was closed locally.',
@@ -116,7 +125,7 @@ export function refusalAnswer(code, extra = {}) {
 }
 
 const CLASS = /^[a-z-]{1,32}$/
-const DETAILS = new Set(['refused', 'unreachable', 'timeout', 'failed'])
+const DETAILS = new Set(['refused', 'unreachable', 'timeout', 'certificate', 'failed'])
 
 /** @returns {EgressError} what a consumer throws for a provider's `{ ok: false }` answer; an unreadable one is `unknown`. */
 export function errorFromAnswer(answer) {

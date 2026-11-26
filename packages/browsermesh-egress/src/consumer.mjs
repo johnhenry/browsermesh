@@ -16,9 +16,10 @@ import { StreamSocket } from '@johnhenry/browsermesh-netway'
 import { createStreamLayer } from '@johnhenry/browsermesh-apps/protocol-stream'
 import { checkHost, checkPort, looksLikePodId } from './destination.mjs'
 import { END_REASONS, EgressError, errorFromAnswer } from './errors.mjs'
+import { NO_BODY_STATUSES, parseTarget } from './http-policy.mjs'
 import {
-  CONNECT_METHOD, EGRESS_CONSUMER, EGRESS_PROTOCOL, EGRESS_VERSIONS, END_METHOD, KIND_DOWN, KIND_UP, RESOLVE_METHOD, randomHex,
-  signedRequestBytes, validateAddresses, validateStreamMeta,
+  CONNECT_METHOD, EGRESS_CONSUMER, EGRESS_PROTOCOL, EGRESS_VERSIONS, END_METHOD, FETCH_METHOD, KIND_DOWN, KIND_UP, RESOLVE_METHOD, randomHex,
+  signedRequestBytes, validateAddresses, validateFetchAnswer, validateStreamMeta,
 } from './wire.mjs'
 import { EgressBackend } from './backend.mjs'
 
@@ -78,6 +79,7 @@ function requestFailure(e) {
   const reason = e?.reason
   if (reason === 'timeout') return new EgressError('provider-timeout')
   if (reason === 'not-authorized') return new EgressError('provider-not-authorized')
+  if (reason === 'method-not-found' || e?.code === -32601) return new EgressError('provider-no-form')
   if (reason === 'channel-closed' || reason === 'stream-abuse') return new EgressError('provider-closed')
   if (e?.name === 'AbortError' || reason === 'cancelled') return new EgressError('aborted')
   return new EgressError('unknown')
@@ -305,14 +307,173 @@ export async function connectEgress(service, provider, { signal, limits: limitOp
     return validateAddresses(answer)
   }
 
+  /**
+   * `fetch(input, init)` through the provider: the same arguments as `fetch`, a `Response` back, `init.signal` honoured.
+   *
+   * THE PROVIDER IS THE HTTP CLIENT. For `https:` it does the TLS, so its operator can read and alter the URL, the headers, the
+   * request body and the response. It is not private from the provider. A page cannot terminate TLS itself; where that matters,
+   * use `connect()` and run your own TLS over the socket, so the provider carries bytes it cannot read.
+   *
+   * What the provider does for you, and what you get: redirects are followed by the provider, only to destinations you also hold a
+   * grant for (`redirect: 'manual'` returns the 3xx instead; `'error'` rejects); no cookies in either direction and no `Cookie`,
+   * `Origin`, `Referer` or `User-Agent` of yours; only a short list of request headers is sent on (accept, accept-language,
+   * authorization, cache-control, content-type, content-length, conditionals, range, pragma) and of response headers returned;
+   * the body is never decompressed (`accept-encoding: identity` is sent; if the destination compresses anyway you get its bytes
+   * and its `content-encoding` header, and decode them yourself); GET and HEAD unless the provider's operator allows more.
+   * `response.url` is the final URL and `response.redirected` says whether a redirect was followed. The body is a stream that
+   * only moves as it is read.
+   *
+   * Rejects with an `EgressError` (`no-grant`, `redirect-refused`, `connect-failed` with `detail: 'certificate'`, ...) or, for an
+   * aborted signal, with the signal's reason.
+   */
+  async function fetchUrl(input, init) {
+    live()
+    const asked = init?.body instanceof ReadableStream && init.duplex === undefined ? { ...init, duplex: 'half' } : init
+    const request = new Request(input, asked) // the platform's own parsing of the arguments: a TypeError for what `fetch` would reject
+    let hostname
+    try { hostname = new URL(request.url).hostname } catch { throw new EgressError('bad-url') }
+    if (looksLikePodId(hostname) || hostname === provider) throw new EgressError('chaining-refused', 'A mesh pod is not a destination: a provider dials a network, never another egress.')
+    const target = parseTarget(request.url)
+    const callSignal = request.signal
+    if (callSignal.aborted) throw callSignal.reason
+    if (pending.size + active.size >= limits.maxConnections) throw new EgressError('too-many-connections')
+    const cid = nextCid++
+    const entry = { cid, reader: null, ready: deferred(), endReason: undefined, fail: null }
+    pending.set(cid, entry)
+    const ac = new AbortController()
+    const onAbort = () => ac.abort(callSignal.reason)
+    callSignal.addEventListener('abort', onAbort, { once: true })
+    const done = () => callSignal.removeEventListener('abort', onAbort)
+    entry.fail = (e) => ac.abort(e)
+    const wasAborted = () => (callSignal.aborted ? callSignal.reason : ac.signal.aborted && ac.signal.reason instanceof EgressError ? ac.signal.reason : null)
+    const hasBody = request.body !== null
+    const bodyReader = hasBody ? request.body.getReader() : null
+    const dropBody = () => { try { bodyReader?.cancel().catch(() => {}) } catch { /* gone */ } }
+    let up = null
+    let answer
+    try {
+      const signature = await sign('fetch', { cid, host: target.host, port: target.port })
+      // The request goes first and its body's stream right behind it, before the answer: the provider reads the body while it sends.
+      const answered = channel.request(FETCH_METHOD, {
+        cid, url: target.href, method: request.method, headers: [...request.headers].map(([k, v]) => [k, v]), body: hasBody,
+        redirect: request.redirect === 'follow' ? 'follow' : 'manual', hops: 0, ...signature,
+      }, { signal: ac.signal, timeoutMs: limits.requestTimeoutMs })
+      let upFailure = null
+      if (hasBody) { try { up = await streams.open({ cid, kind: KIND_UP }, { signal: ac.signal, timeoutMs: limits.openTimeoutMs }) } catch (e) { upFailure = e } }
+      // The body goes out while the answer is awaited: the provider's HTTP client sends the request head with the first of the body,
+      // and the destination does not answer before it has it.
+      if (up) {
+        ;(async () => {
+          try {
+            for (;;) {
+              const { done: finished, value } = await bodyReader.read()
+              if (finished) break
+              if (!(value instanceof Uint8Array)) throw new TypeError('A request body streams bytes (Uint8Array chunks).')
+              await up.write(value)
+              counters.bytesUp += value.byteLength
+            }
+            await up.end()
+          } catch {
+            dropBody()
+            try { up.abort('failed') } catch { /* gone */ }
+          }
+        })()
+      }
+      answer = await answered
+      if (upFailure && answer?.ok === true) throw upFailure
+    } catch (e) {
+      done()
+      abandon(entry, 'request failed')
+      try { up?.abort('failed') } catch { /* gone */ }
+      dropBody()
+      const why = wasAborted()
+      if (why) throw why
+      throw requestFailure(e)
+    }
+    if (!answer || typeof answer !== 'object' || typeof answer.ok !== 'boolean') { done(); abandon(entry, 'unreadable answer'); try { up?.abort('failed') } catch { /* gone */ } dropBody(); throw new EgressError('bad-answer') }
+    if (!answer.ok) { done(); abandon(entry, 'refused'); try { up?.abort('refused') } catch { /* gone */ } dropBody(); counters.refused += 1; throw errorFromAnswer(answer) }
+    let info
+    let down
+    try {
+      info = validateFetchAnswer(answer)
+      down = await within(entry.ready.promise, limits.requestTimeoutMs, () => new EgressError('provider-timeout', 'The provider answered and did not open its stream.'))
+    } catch (e) {
+      done()
+      abandon(entry, 'no stream')
+      try { up?.abort('failed') } catch { /* gone */ }
+      dropBody()
+      throw requestFailure(e)
+    }
+    pending.delete(cid)
+    active.set(cid, entry)
+    counters.connections += 1
+    const method = request.method
+    const noBody = method === 'HEAD' || NO_BODY_STATUSES.includes(info.status)
+    let controller = null
+    let over = false
+    const settle = () => { active.delete(cid); done() }
+    const teardown = (error) => {
+      if (over) return
+      over = true
+      down.cancel('failed').catch(() => {})
+      try { up?.abort('failed') } catch { /* gone */ }
+      dropBody()
+      settle()
+      try { controller?.error(error) } catch { /* closed */ }
+    }
+    const failure = () => wasAborted() ?? new EgressError(closed ? 'link-closed' : channel.closed ? 'provider-closed' : 'connection-ended', undefined, { reason: entry.endReason })
+    entry.fail = (e) => teardown(e instanceof EgressError ? e : failure())
+    ac.signal.addEventListener('abort', () => { if (!over) teardown(wasAborted() ?? failure()) }, { once: true })
+
+    let body = null
+    if (noBody) {
+      down.cancel('no body').catch(() => {})
+      settle()
+    } else {
+      // The next chunk is read only when the caller asks for it, so a Response nobody reads stops the origin.
+      body = new ReadableStream({
+        start(c) { controller = c },
+        async pull(c) {
+          if (over) return
+          try {
+            const { done: finished, value } = await down.read()
+            if (finished) { over = true; settle(); c.close(); return }
+            counters.bytesDown += value.byteLength
+            c.enqueue(value)
+          } catch (e) { teardown(wasAborted() ?? (e instanceof EgressError ? e : failure())) }
+        },
+        cancel() {
+          if (over) return
+          over = true
+          down.cancel('cancelled').catch(() => {})
+          try { up?.abort('cancelled') } catch { /* gone */ }
+          settle()
+        },
+      }, { highWaterMark: 0 })
+    }
+    const headers = new Headers()
+    for (const [k, v] of info.headers) { try { headers.append(k, v) } catch { /* a value this platform will not take */ } }
+    const response = new Response(body, { status: info.status, statusText: info.statusText, headers })
+    Object.defineProperty(response, 'url', { value: info.url ?? target.href })
+    Object.defineProperty(response, 'redirected', { value: info.redirected })
+    if (request.redirect === 'error' && info.status >= 300 && info.status < 400 && info.headers.some(([k]) => k === 'location')) {
+      down.cancel('redirect').catch(() => {})
+      teardown(new TypeError('The destination redirected and redirect is "error".'))
+      throw new TypeError('The destination redirected and redirect is "error".')
+    }
+    return response
+  }
+
   connect[EGRESS_CONSUMER] = true
   lookup[EGRESS_CONSUMER] = true
+  fetchUrl[EGRESS_CONSUMER] = true
   const link = {
     /** The provider's pod id (the channel's verified peer). */
     peer: provider,
     get closed() { return closed || channel.closed },
     connect,
     lookup,
+    fetch: fetchUrl,
     /** A netway `Backend` (connect and resolve) to register on a `VirtualNetwork`: `net.addBackend('tcp', link.asBackend())`. */
     asBackend() { return new EgressBackend(link) },
     stats: () => ({ ...counters, open: active.size + pending.size }),

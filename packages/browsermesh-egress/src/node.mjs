@@ -19,7 +19,10 @@ try { guard = await import('@johnhenry/wsh/address-guard') } catch (cause) {
 }
 const { dialChecked, resolveChecked, isPublicAddress, checkAddress } = guard
 
+import { createExchange } from './node-exchange.mjs'
+
 export { createMeshEgress, DEFAULT_BLOCKED_PORTS, WIDE_ACKNOWLEDGEMENT } from './provider.mjs'
+export { createExchange, nodeExchange } from './node-exchange.mjs'
 
 /** The public addresses of this machine's own interfaces: a name that resolves to one is the provider itself. */
 function ownPublicAddresses() {
@@ -41,9 +44,10 @@ function ownPublicAddresses() {
  *   connects to the rest; here a name that answers with both a public and a private address is refused whole, because a name that
  *   mixes them is not one the operator can vouch for)
  * @param {(name: string, options: { family: number }) => Promise<Array<string|{ address: string }>>} [opts.lookup] - the resolver (default: the system's); tests replace it
- * @returns {{ dial: Function, resolve: Function }} the two options `createMeshEgress` takes
+ * @param {string|Buffer|Array<string|Buffer>} [opts.ca] - certificate authorities trusted for the fetch form's `https:` instead of Node's own list
+ * @returns {{ dial: Function, resolve: Function, exchange: Function }} the options `createMeshEgress` takes (`exchange` is the fetch form's HTTP client over `dial`)
  */
-export function nodeDialer({ allowPrivate = [], deny = [], denyOwnAddresses = true, refuseMixed = true, lookup } = {}) {
+export function nodeDialer({ allowPrivate = [], deny = [], denyOwnAddresses = true, refuseMixed = true, lookup, ca } = {}) {
   for (const [name, list] of Object.entries({ allowPrivate, deny })) {
     if (!Array.isArray(list) || !list.every((s) => typeof s === 'string')) throw new TypeError(`nodeDialer: ${name} is a list of CIDR blocks or addresses (strings); \`true\` is not accepted, name the space you mean`)
     for (const entry of list) checkAddress('203.0.113.1', { [name === 'deny' ? 'deny' : 'allow']: [entry] }) // a bad entry throws now, not at the first dial
@@ -65,5 +69,6 @@ export function nodeDialer({ allowPrivate = [], deny = [], denyOwnAddresses = tr
     async resolve({ name, wide = false, signal, timeoutMs }) {
       return resolveChecked(name, { ...policy(wide), family: 4, timeoutMs, signal })
     },
+    exchange: createExchange({ ca }),
   }
 }
