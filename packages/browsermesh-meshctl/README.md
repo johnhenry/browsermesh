@@ -182,7 +182,7 @@ be combined):
   `createMeshNode()` wires together). `--relay` optionally opens a second
   connection to a relay server; it is opened and closed correctly but
   deliberately **not used for pod-host traffic** (that relay is not sealed)
-  -- see [Known limitations](#known-limitations).
+  -- see [Known limitations](#what-is-not-supported).
 
 - **`--wsh-relay <wss://...>`** (repeatable) -- reaches a host through a
   pipe relay over a **sealed, key-authenticated wsh link**

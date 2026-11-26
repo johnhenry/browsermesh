@@ -66,9 +66,9 @@ stand-ins for the isolate lane) are in `packages/browsermesh-pod`.
 | Firecracker on a real host, full lifecycle | Needs a Linux/KVM host (none here; `/dev/kvm` is absent in Docker Desktop's VM, checked). Everything short of KVM now runs on Linux: the network policy against a real kernel, the guest's exec responder as a process, the whole spike suite. The steps for the rest are the list at the top of this document, with the commands in [`runbook-firecracker-kvm.md`](runbook-firecracker-kvm.md). |
 | `VmPod.restore()` bugs | Fixed in #243 against the fake API; confirmation against a real VMM is part of the runbook. |
 | Durable Object hibernation topology | Decided: cold boot is the sleep (option B). Built and tested in process behind the existing interfaces, see [4.4 Hibernation](#44-hibernation-cold-boot-as-sleep). Not run: a real Durable Object eviction, and the wake time on a deployed Worker (the owner's account). |
-| End to end across a relay | Done for the sealed path: `meshctl --wsh-relay` reaches a host through a pipe relay over a sealed, key-authenticated wsh link, with no signalling server or WebRTC, tested against the in-process pipe relay and a real pod-host service. The unsealed relay dialect is deliberately not used for pod-host traffic. Not run against a deployed relay. |
+| End to end across a relay | Done for the sealed path: `meshctl --wsh-relay` reaches a host through a pipe relay over a sealed, key-authenticated wsh link, with no signalling server or WebRTC, tested against the in-process pipe relay and a real pod-host service, and run once against a minimal deployed pod host (2026-11-25, the in-memory driver; see the [meshctl README's Status](../packages/browsermesh-meshctl/README.md)). The unsealed relay dialect is deliberately not used for pod-host traffic. `--signaling` (WebRTC) and VMM-backed hosts are not run against a deployment. |
 | Isolate hosts and the compute scorer | Done in #277. |
-| Publish meshctl | Prepared: the package is public, in the release list, with a changeset and a user README (decision 2 of the decisions note, option C). Packed, installed into an empty project and run from outside the repository against the in-process hosts. The one real run against a deployed host is done (2026-11-25, `--wsh-relay`, a minimal host with the in-memory driver; a VMM-backed host and `--signaling` are still unrun). What is left is the first publish of the name (the steps are in section 2 of [the decisions note](design/hosted-pods-open-decisions.md)). Starts without a repository checkout (#361); `vm` still needs one. |
+| Publish meshctl | Done: `@johnhenry/browsermesh-meshctl` 0.1.0 is on npm (published 2026-11-25), public, in the release list, with a user README (decision 2 of [the decisions note](design/hosted-pods-open-decisions.md), option C). Packed, installed into an empty project and run from outside the repository against the in-process hosts, and run once against a deployed host (2026-11-25, `--wsh-relay`, a minimal host with the in-memory driver; a VMM-backed host and `--signaling` are still unrun). Starts without a repository checkout (#361); `vm` still needs one. |
 | MV3 extension in a real browser | Retired. Loaded in real Chromium it did not run (its worker imported files outside the extension root and exited at once), so the spike was removed; why, and what a working extension would need, is [recorded below](#what-was-learned-from-the-mv3-extension-spike). |
 | Raw `onIncomingData()` subscribers; `WebSocketTransport` and Blob frames | Done (#208, #212, #243). |
 
@@ -201,7 +201,7 @@ is `'service-worker'`**, because workerd's global satisfies `instanceof
 ServiceWorkerGlobalScope`, which is checked first (measured in WP2). Hosted-pod
 logic must therefore treat both kinds as "not a browser window" and never
 branch on `'server'` alone. See the
-[`node:vm` warning](#node-vm-and-worker_threads-are-not-a-security-boundary)
+[`node:vm` warning](#nodevm-and-worker_threads-are-not-a-security-boundary)
 below for why that is not the same thing as a security boundary.
 
 ### What `browsermesh-pod` does not yet have
