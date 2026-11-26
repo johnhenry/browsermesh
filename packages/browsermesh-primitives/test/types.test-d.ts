@@ -88,3 +88,14 @@ async function checkShareCode(podId: string, key: Uint8Array): Promise<void> {
   void [bits, same, n, label];
 }
 void checkShareCode;
+
+// Strict canonical JSON.
+import { canonicalJson, parseCanonical, domainSigningBytes, CanonicalJsonError } from "@johnhenry/browsermesh-primitives";
+
+const canonicalText: string = canonicalJson({ a: 1 });
+const canonicalParsed = parseCanonical(canonicalText);
+const canonicalBytes: Uint8Array = domainSigningBytes("d", canonicalText);
+const canonicalCode: string = new CanonicalJsonError("syntax", "x").code;
+void canonicalParsed;
+void canonicalBytes;
+void canonicalCode;

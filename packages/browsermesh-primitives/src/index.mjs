@@ -110,3 +110,6 @@ export { DEFAULT_PAD_BUCKETS, PAD_TRAILER_BYTES, paddedLength, padTo, unpad } fr
 
 // Mesh addressing
 export { parseMeshRequest } from './mesh-address.mjs';
+
+// Strict canonical JSON (realm descriptors and credentials)
+export { canonicalJson, parseCanonical, domainSigningBytes, CanonicalJsonError, CANONICAL_MAX_INTEGER } from "./canonical-json.mjs";

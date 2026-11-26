@@ -144,6 +144,15 @@ With several grants for one grantee, the engine returns the reason from the last
 
 Apply `padTo()` before sealing (encrypting) a message, so a relay that only sees ciphertext learns the bucket rather than the exact length; the trailer is plaintext, so padding already-encrypted bytes hides nothing. Size only, no timing or cover traffic.
 
+### Strict canonical JSON
+
+A deterministic encoding that other languages can reproduce byte for byte (the profile in `docs/design/realms.md` 5.2). It is separate from the encoder inside `browsermesh-core` and changes no existing signing format.
+
+- `canonicalJson(value)` -- integers only (|n| <= 2^53-1), ASCII keys sorted by code unit, no whitespace, strings as raw UTF-8 with only `"`, `\` and U+0000..U+001F escaped (`\u00xx`, lowercase). Rejects floats, `NaN`, `-0`, bigint, `undefined`, functions, Dates, `Uint8Array` (pass bytes as base64url strings) and lone surrogates
+- `parseCanonical(text)` -- a strict parser (not `JSON.parse`): rejects duplicate keys, non-ASCII keys, floats and exponents, out-of-range integers, `-0`, leading zeros, whitespace, and anything not byte-identical to `canonicalJson` of its own result
+- `domainSigningBytes(domain, canonicalText)` -- `UTF-8(domain) || 0x00 || UTF-8(text)`, so a signature over one object type never verifies as another
+- Failures throw `CanonicalJsonError` with a stable string `code`; language-neutral vectors are in `test/vectors/canonical-json.json`
+
 ### CRDTs
 
 - `VectorClock` -- partial-order logical clock with merge
