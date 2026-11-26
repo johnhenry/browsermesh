@@ -74,7 +74,7 @@
     "node-datachannel": "^0.33.4"
   },
   "devDependencies": {
-    "@johnhenry/browsermesh-apps": "^0.27.0",
+    "@johnhenry/browsermesh-apps": "^0.28.0",
     "@johnhenry/browsermesh-netway": "^0.4.0",
     "@johnhenry/wsh": "^0.57.0"
   }
