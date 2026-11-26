@@ -37,6 +37,12 @@ number and the memory per idle pod can only be measured on a deployed Worker, wh
 
 ## 2. Publishing `@johnhenry/browsermesh-meshctl`
 
+**Superseded (2026-11-26).** The state below is the record as of 2026-11-24 and is no longer true: option C was taken.
+`@johnhenry/browsermesh-meshctl` 0.1.0 is published (`npm view` answers 0.1.0), the package is no longer `private`, and
+`meshctl` has been run once against a deployed pod host over `--wsh-relay` (2026-11-25, a minimal host with the in-memory
+driver; see `docs/hosted-pods.md`). A VMM-backed host and `--signaling` (WebRTC) are still unrun. The text below is left as
+it was written.
+
 **State.** `private: true`; not in `scripts/staggered-publish.sh`. The name is free on npm (`npm view` answers 404 for
 it, checked 2026-11-24). Until PR #361 the package could not start outside this repository (a static import of
 `spikes/vm-pod-host`, so every command failed with `ERR_MODULE_NOT_FOUND` in the packed package; checked by packing it

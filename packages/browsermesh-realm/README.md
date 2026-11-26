@@ -7,7 +7,7 @@ root rotation, roles, issuer-signed credentials, and the issuer ledger.
 of its own: every function takes plain objects and an injectable `now`. The realm exchange (below) talks to a duck-typed
 channel and a duck-typed registry, so it needs no transport either. `createMeshNode({ realm })` in `browsermesh-apps` now wires
 it in (the admission seam, the dialler, and renewal over the `realm` protocol of the protocol seam; see that README's "Realms"
-section); `meshctl` is a later stage. It depends on `@johnhenry/browsermesh-primitives` only (peer dependency, `>=0.8.0`,
+section); `meshctl realm` is in PR #424. It depends on `@johnhenry/browsermesh-primitives` only (peer dependency, `>=0.8.0`,
 the first release that exports `canonicalJson`), never on
 `browsermesh-apps` or `browsermesh-core`; the integration tests that use the real `PeerRegistry`, the real admission seam
 and a real wsh link live in `browsermesh-apps` (`test/realm-exchange-wsh.test.mjs`), which has this package as a devDependency.
