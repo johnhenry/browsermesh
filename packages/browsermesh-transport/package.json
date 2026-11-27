@@ -1,6 +1,6 @@
 {
   "name": "@johnhenry/browsermesh-transport",
-  "version": "0.13.2",
+  "version": "0.13.3",
   "description": "WebSocket, WebRTC, WebTransport, relay, and sealed wsh peer-link adapters for BrowserMesh",
   "type": "module",
   "main": "./src/index.mjs",

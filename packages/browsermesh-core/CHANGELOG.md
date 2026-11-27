@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.14.1
+
+### Patch Changes
+
+- c7808c1: Importing the package no longer prints Node's "ExperimentalWarning: localStorage is not available because --localstorage-file was not provided" on stderr. The debug-flag reader now inspects the `localStorage` property descriptor first and only calls Node's getter when `--localstorage-file` is set (or in a browser); data-property polyfills are still honoured.
+
 ## 0.14.0
 
 ### Minor Changes
