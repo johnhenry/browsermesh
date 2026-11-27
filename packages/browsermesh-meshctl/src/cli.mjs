@@ -18,7 +18,7 @@
  */
 
 import {
-  EXIT_CODE, UsageError, resolveFormat, formatDocument, okEnvelope, errorEnvelope, exitCodeForError,
+  EXIT_CODE, UsageError, resolveFormat, formatDocument, okEnvelope, errorEnvelope, exitCodeForError, exitCodeForHosts,
   createLogger,
 } from './output.mjs'
 import { parseCommand } from './args.mjs'
@@ -55,7 +55,7 @@ function usageDocument() {
     },
     commands: [
       'identity',
-      'hosts',
+      'hosts  (prints one entry per host, a failed host with its own error; exits 0 if at least one host answered, else the code every host failed with (3 if all refused, 6 if all timed out), else 1)',
       'host describe <host>',
       'pods list <host>',
       'pods spawn <host|auto> --name <n> --lane <l> --kind skill|module|rootfs|command --ref <r> '
@@ -261,7 +261,8 @@ export async function main(argv, io = {}) {
       stdout, log, signal: io.signal, WebSocketCtor: io.WebSocketCtor, session: io.session, env: io.env,
     })
     stdout.write(`${formatDocument(okEnvelope(result), format)}\n`)
-    return EXIT_CODE.OK
+    // `hosts` prints every host's entry, a failed one with its own `error`; the exit code still says whether ANYTHING worked.
+    return parsed.group === 'hosts' ? exitCodeForHosts(result) : EXIT_CODE.OK
   } catch (err) {
     stderr.write(`${formatDocument(errorEnvelope(err), format)}\n`)
     return exitCodeForError(err && err.code)

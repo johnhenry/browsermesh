@@ -22,6 +22,13 @@ describe('meshctl usage errors', () => {
     assert.deepEqual(doc.result.exitCodes, EXIT_CODE)
   })
 
+  it('--help says what `hosts` exits with when every host failed (#432)', async () => {
+    const { stdout } = await runCli(['--help'])
+    const line = JSON.parse(stdout).result.commands.find((c) => c.startsWith('hosts'))
+    assert.match(line, /exits 0 if at least one host answered/)
+    assert.match(line, /3 if all refused/)
+  })
+
   it('-h is a synonym for --help', async () => {
     const { code, stdout } = await runCli(['-h'])
     assert.equal(code, EXIT_CODE.OK)

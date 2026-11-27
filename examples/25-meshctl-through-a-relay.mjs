@@ -11,7 +11,8 @@
  *     `send` and `drain` each print one JSON document, and the host's registry decides:
  *     the identity is allowed to link (`mesh:link:connect`) and holds the eight verbs;
  *   - a second identity the host has NOT allowed is refused by name: `meshctl` exits 3 and
- *     prints `WSH_REFUSED`, before any pod-host verb is asked.
+ *     prints `WSH_REFUSED`, before any pod-host verb is asked; `meshctl hosts` still prints that host's entry with the
+ *     error but also exits 3, because every listed host failed.
  *
  * The child is always killed and the listeners are always closed, even on failure.
  * Needs the optional peers `@johnhenry/wsh` and `@johnhenry/browsermesh-transport`.
@@ -122,7 +123,8 @@ try {
   console.log(`4. REFUSED: an identity the host has not allowed: meshctl host describe exits ${describeRefused.code} with ${document(describeRefused).error.code}, before any verb is asked`)
   const listed = document(hostsRefused).result[0]
   assert.equal(listed.error.code, 'WSH_REFUSED')
-  console.log(`   REFUSED: meshctl hosts (which lists every host and reports each failure in its entry) shows ${listed.error.code} for it, exit ${hostsRefused.code}`)
+  assert.equal(hostsRefused.code, 3)
+  console.log(`   REFUSED: meshctl hosts (which lists every host and reports each failure in its entry) shows ${listed.error.code} for it, and exits ${hostsRefused.code} because every listed host failed`)
   assert.equal(links.isConnected(stranger.podId), false)
   console.log('   the host holds no link for it')
   console.log('ok: meshctl drove a host through a real relay over a sealed wsh link, and an identity the host had not allowed was refused')
