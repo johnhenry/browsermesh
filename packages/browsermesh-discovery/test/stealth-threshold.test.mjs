@@ -224,8 +224,13 @@ describe('recombination', () => {
   it('a dealer that signs shares of different secrets is caught by the key check, not silently accepted', async () => {
     const { dealer, shares, opts } = await deal()
     const other = await deal({ identity: dealer })
+    // The library gives every share a random x-coordinate (its `index`), so two dealings can reuse one. Take a share of the
+    // other dealing whose index is not already among the two real shares kept, or it is refused as a duplicate instead of
+    // reaching the key check (about 2 runs in 255).
+    const kept = new Set([shares[1].index, shares[2].index])
+    const stray = other.shares.find((s) => !kept.has(s.index))
     // The dealer (the test, with its key) signs a share of another secret under this share set's fields.
-    const forged = { ...other.shares[0], keyCheck: shares[0].keyCheck }
+    const forged = { ...stray, keyCheck: shares[0].keyCheck }
     forged.sig = b64u(new Uint8Array(await dealer.sign(stealthShareSigningBytes(forged))))
     assert.deepEqual(await verifyStealthShare(forged, opts), { ok: true }, 'the signature is the dealer\'s own')
     await assert.rejects(reconstructStealthSecret([forged, shares[1], shares[2]], opts), (e) => e instanceof StealthError && e.code === 'key-check-failed')
