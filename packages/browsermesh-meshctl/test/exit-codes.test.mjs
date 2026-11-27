@@ -60,6 +60,35 @@ describe('exit code mapping', () => {
     assert.equal(JSON.parse(stderr).error.code, 'ETIMEDOUT')
   })
 
+  describe('`hosts`: every entry is printed, the exit code says whether anything worked (#432)', () => {
+    /** The entries `hosts` printed on stdout, whatever the exit code. */
+    const entries = (stdout) => JSON.parse(stdout).result
+
+    it('exits 0 when at least one host answered, and still prints the failed one with its error', async () => {
+      const fixture = await buildLoopbackFixture({
+        timeoutMs: 150,
+        hosts: [{ label: 'ok', lane: 'node' }, { label: 'deaf', lane: 'isolate', attach: false }],
+      })
+      cleanups.push(fixture.cleanup)
+      const { code, stdout } = await runCli(['hosts'], { session: fixture.session })
+      assert.equal(code, 0)
+      const list = entries(stdout)
+      assert.deepEqual(list.filter((e) => e.error).map((e) => e.error.code), ['ETIMEDOUT'])
+      assert.equal(list.filter((e) => e.lane).length, 1)
+    })
+
+    it('exits with the shared code when every host failed the same way (timeouts: 6)', async () => {
+      const fixture = await buildLoopbackFixture({
+        timeoutMs: 100,
+        hosts: [{ label: 'deaf1', lane: 'node', attach: false }, { label: 'deaf2', lane: 'isolate', attach: false }],
+      })
+      cleanups.push(fixture.cleanup)
+      const { code, stdout } = await runCli(['hosts'], { session: fixture.session })
+      assert.equal(code, 6)
+      assert.deepEqual(entries(stdout).map((e) => e.error?.code), ['ETIMEDOUT', 'ETIMEDOUT'])
+    })
+  })
+
   it('a generic/unknown error code maps to exit 1', async () => {
     const fixture = await buildLoopbackFixture({ timeoutMs: 2000 })
     cleanups.push(fixture.cleanup)

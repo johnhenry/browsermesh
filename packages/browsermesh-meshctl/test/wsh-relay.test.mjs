@@ -135,6 +135,35 @@ describe('--wsh-relay: a sealed link through a relay', () => {
     assert.equal(JSON.parse(stderr).error.code, 'WSH_REFUSED')
   })
 
+  it('`hosts` over --wsh-relay with an identity the only listed host refused: the entry carries WSH_REFUSED and the exit code is 3 (#432)', async () => {
+    const { env, host, identityPath } = await setup({ allowLink: false })
+    const { code, stdout } = await runCli(
+      ['hosts', '--wsh-relay', RELAY, '--host', host.podId, '--identity', identityPath, '--timeout', '3000', '--quiet'],
+      { WebSocketCtor: env.WebSocket },
+    )
+    assert.equal(JSON.parse(stdout).result[0].error.code, 'WSH_REFUSED')
+    assert.equal(code, 3)
+  })
+
+  it('`hosts` over several hosts: all refused exits 3, one served exits 0, refused plus unreachable exits 1 (#432)', async () => {
+    const { env, host, cliIdentity, identityPath } = await setup()
+    const refusing = await startHost(env, { clientPodId: cliIdentity.podId, allowLink: false, label: 'refusing' })
+    cleanups.push(() => refusing.close())
+    const absent = await buildTestIdentity()
+    cleanups.push(absent.cleanup)
+    const hosts = (...ids) => ['hosts', '--wsh-relay', RELAY, ...ids.flatMap((id) => ['--host', id]), '--identity', identityPath, '--timeout', '1500', '--quiet']
+    const run = (...ids) => runCli(hosts(...ids), { WebSocketCtor: env.WebSocket })
+
+    const allRefused = await run(refusing.podId)
+    assert.equal(allRefused.code, 3)
+    const oneServed = await run(host.podId, refusing.podId)
+    assert.equal(oneServed.code, 0)
+    assert.deepEqual(JSON.parse(oneServed.stdout).result.map((e) => e.error?.code), [undefined, 'WSH_REFUSED'])
+    const mixed = await run(refusing.podId, absent.cliIdentity.podId)
+    assert.equal(mixed.code, 1)
+    assert.deepEqual(JSON.parse(mixed.stdout).result.map((e) => e.error?.code), ['WSH_REFUSED', 'WSH_UNREACHABLE'])
+  })
+
   it('a link that cannot be made is an error, never a session with no transport behind it', async () => {
     const env = await createInProcessPipeRelay()
     cleanups.push(() => env.close())
