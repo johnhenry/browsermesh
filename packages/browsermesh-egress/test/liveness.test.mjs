@@ -16,6 +16,9 @@ const cleanups = []
 afterEach(async () => { for (const c of cleanups.splice(0).reverse()) await c() })
 const code = (c) => (e) => e instanceof EgressError && e.code === c
 const FAST = { intervalMs: 20, misses: 3 }
+// For a test that waits on the live link before the bus goes dark: a stall of the event loop longer than the whole FAST window (60 ms)
+// declares the provider gone while it is still answering. 750 ms still ends the test in about a second.
+const PATIENT = { intervalMs: 250, misses: 3 }
 
 /** A fake channel and a manual clock: `tick()` is the timer firing, `advance(ms)` moves time. */
 function manual() {
@@ -196,9 +199,10 @@ describe('a provider that is killed outright', () => {
       names: { 'pkg.test': [PUBLIC] }, origins: { [`${PUBLIC}:443`]: origin.port, [`${PUBLIC}:80`]: origin.port },
       deliver: bus.deliver, grants: [EGRESS_SCOPES.tcp('pkg.test', 443), EGRESS_SCOPES.dns('pkg.test'), EGRESS_SCOPES.http('pkg.test', 80)],
       egress: { dial: async (request) => { await hang.promise; return net.dial(request) } },
-      link: { keepAlive: FAST },
+      link: { keepAlive: PATIENT },
     })
     const waiting = r.link.connect('pkg.test', 443)
+    waiting.catch(() => {}) // asserted below; never an unhandled rejection while the test waits
     const fetching = r.link.fetch('http://pkg.test/').catch((e) => e)
     await until(() => r.provider.stats().requests >= 2, 'the provider to have the requests')
     // the lookup is sent as the bus goes dark: it can only fail with the link's own end

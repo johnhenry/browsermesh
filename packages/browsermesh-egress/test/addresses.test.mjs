@@ -67,7 +67,8 @@ describe('the memory: bounded in time and in count, newest first', () => {
   it('refuses nonsense it is given', () => {
     assert.throws(() => createAddressMemory({ ttlMs: 0, maxEntries: 1 }), TypeError)
     assert.throws(() => createAddressMemory({ ttlMs: 1, maxEntries: 0 }), TypeError)
-    const memory = createAddressMemory({ ttlMs: 10, maxEntries: 2 })
+    // A clock the test holds: with the real clock and a 10 ms ttl, a scheduler stall between remember() and namesFor() expires the entry.
+    const memory = createAddressMemory({ ttlMs: 10, maxEntries: 2, now: () => 0 })
     memory.remember('a.test', ['not an address', 5, '1.1.1.1'])
     assert.deepEqual(memory.namesFor('1.1.1.1'), ['a.test'])
     assert.equal(memory.size, 1)
