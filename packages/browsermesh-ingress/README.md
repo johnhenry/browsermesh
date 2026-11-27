@@ -187,7 +187,7 @@ With both ends new, every request carries its method and its whole body to the p
   anything that is not a token. **`OPTIONS`, a CORS preflight included, is passed to the pod like any other method**; the ingress
   answers nothing itself, so the pod (or the operator's `response.addHeaders` / `exposeHeaders`) decides what a preflight gets. The
   Node listener can only parse the methods Node's HTTP parser knows (`http.METHODS`: the standard ones, WebDAV, `PURGE`, `M-SEARCH`,
-  `SUBSCRIBE` and about thirty more); a token outside that list is answered `501 Not Implemented` by the listener. The web-standard
+  `SUBSCRIBE` and about thirty more); a token outside that list is answered `501 Not Implemented` (`method-not-implemented`) by the listener, with a body that lists the methods it carries and says `handle()` carries any token. The owner's decision (#471) is that the standard set is enough for the listener. The web-standard
   `handle(request)` carries any token (a Workers or Deno handler, or your own listener).
 - **The body** is read from the visitor only as fast as the pod takes it: `Content-Length` and chunked both, no read-ahead beyond one
   stream window (256 KiB) per request, so a slow origin slows the visitor through TCP, and a slow visitor slows the origin. The pod's
@@ -648,6 +648,7 @@ fails it until the table says so.
 | 500 | `internal-error` | an unexpected failure inside the ingress |
 | 500 | `resolve-error` | `resolve` threw |
 | 500 | `sign-error` | `signRequest` threw or returned no text |
+| 501 | `method-not-implemented` | (Node listener only) a method token Node's HTTP parser does not know (not in `http.METHODS`); the body lists what the listener carries and says `handle()` carries any RFC 9110 token |
 | 502 | `bad-content-encoding` | the provider sent a content coding that is not `identity` |
 | 502 | `bad-response-head` | the provider's answer is not a well-formed head |
 | 502 | `bad-response-length` | the body is not the length the provider declared |
@@ -759,7 +760,7 @@ what is on (`methods: every method (not CONNECT, TRACE or TRACK); body cap 33554
 - TLS passthrough (the pod terminates TLS itself and the operator relays bytes it cannot read): needs a byte-stream protocol to a
   pod, selected by SNI, with the same pin, caps and grants as `http`. See "What the operator can see and change".
 - A method token the Node HTTP parser does not know through the Node listener (501): the listener rides `node:http`, which parses
-  `http.METHODS` only. `handle(request)` has no such limit; a listener of your own can carry any token.
+  `http.METHODS` only, by decision (#471). The 501 body says so. `handle(request)` has no such limit; a listener of your own can carry any token.
 - HTTP/2 and HTTP/3 listeners, and request trailers (dropped).
 - A bytes-per-second bound per link (there is none for responses either; the bounds are bytes, time and concurrency).
 - TLS, caching, compression, per-root authorisation on the provider (`http:<root>:<action>`).
