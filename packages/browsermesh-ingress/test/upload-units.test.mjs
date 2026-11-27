@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import { INGRESS_LIMIT_DEFAULTS, createProgressMonitor, createUploadSlots, resolveLimits } from '../src/limits.mjs'
 
 afterEach(() => mock.timers.reset())
-const fake = () => mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 })
+const fake = () => { mock.timers.reset(); mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 }) }
 
 describe('defaults and validation', () => {
   it('queue and maximum-rate options exist with their documented defaults', () => {

@@ -29,9 +29,13 @@ async function holdingRig({ ingress = {}, provider = {} } = {}) {
   }, { allowFrom: [pods.ingress.podId], ...provider })
   cleanups.push(() => served.stop())
   grantHttp(pods)
-  const mesh = createMeshIngress({ service: pods.i, resolve: () => ({ peer: pods.provider.podId }), ...ingress, limits: { maxUploadsPerClient: 20, ...ingress.limits } })
+  const mesh = createMeshIngress({ service: pods.i, resolve: () => ({ peer: pods.provider.podId }), forwardHeaders: ['x-tag'], ...ingress, limits: { maxUploadsPerClient: 20, ...ingress.limits } })
   cleanups.push(() => mesh.close())
-  const send = (tag, client = '198.51.100.1', init = {}) => mesh.handle(new Request('http://app.example.test/', upload(closing(), { headers: { 'x-tag': tag }, ...init })), { clientAddress: client })
+  // The response is read to its end: an upload slot is held until the answer is over.
+  const send = async (tag, client = '198.51.100.1', init = {}) => {
+    const r = await mesh.handle(new Request('http://app.example.test/', upload(closing(), { headers: { 'x-tag': tag }, ...init })), { clientAddress: client })
+    return { status: r.status, headers: r.headers, text: await r.text() }
+  }
   return { ...pods, served, mesh, gate, order, send }
 }
 
@@ -47,7 +51,7 @@ describe('the ingress queues an upload that finds no slot (#472)', () => {
     assert.equal((await a).status, 200)
     const rb = await b
     assert.equal(rb.status, 200)
-    assert.equal(await rb.text(), 'done b')
+    assert.equal(rb.text, 'done b')
   })
 
   it('waits at most uploadQueueMs, then the 503 provider-uploads as before', async () => {
