@@ -50,7 +50,7 @@ describe('allowFrom as a function', () => {
     assert.equal(calls[0].podId, pods.ingress.podId)
     assert.equal(calls[0].context.peer, pods.ingress.podId)
     assert.equal(calls[0].context.protocol, 'http')
-    assert.equal(calls[0].context.version, 1)
+    assert.equal(calls[0].context.version, 2)
   })
 
   for (const [name, allowFrom] of Object.entries({

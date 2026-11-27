@@ -4,7 +4,10 @@ import { INGRESS_LIMIT_DEFAULTS, createInflight, createRateLimiter, parseBytes, 
 
 describe('defaults', () => {
   it('are the documented ones', () => {
-    assert.equal(INGRESS_LIMIT_DEFAULTS.maxRequestBodyBytes, 64 * 1024)
+    assert.equal(INGRESS_LIMIT_DEFAULTS.maxRequestBodyBytes, 32 * 1024 * 1024)
+    assert.equal(INGRESS_LIMIT_DEFAULTS.maxBufferedBodyBytes, 1024 * 1024)
+    assert.equal(INGRESS_LIMIT_DEFAULTS.uploadTimeoutMs, 300_000)
+    assert.equal(INGRESS_LIMIT_DEFAULTS.maxUploadsPerProvider, 4)
     assert.equal(INGRESS_LIMIT_DEFAULTS.timeoutMs, 30_000)
     assert.equal(INGRESS_LIMIT_DEFAULTS.maxInflight, 64)
     assert.equal(INGRESS_LIMIT_DEFAULTS.maxInflightPerClient, 8)

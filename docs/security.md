@@ -865,8 +865,11 @@ Threat model, by what an attacker is and wants:
 
 Package: `browsermesh-ingress` (`createMeshIngress`, `serveHttpOnMesh`, `listenNode`, the `browsermesh-ingress`
 CLI). Design: [`design/http-ingress.md`](design/http-ingress.md). A real HTTP request reaches a listener; a mapping the
-operator wrote names ONE pod; that pod answers over the protocol `http` (version 1) on the protocol seam, bodies on the
-protocol streams.
+operator wrote names ONE pod; that pod answers over the protocol `http` (version 2 with a pod that has upgraded, else 1) on the protocol seam, bodies on the
+protocol streams. **Since 0.8 every method and a streamed request body are on by default** (both ends narrow it with `methods`):
+a public address exposes whatever the origin accepts for writing methods, with cookies and `Authorization` passed exactly as for a
+`GET` (only the headers the operator names), so an origin that accepts writes needs its own cross-site request protection; bodies are bounded in
+bytes (32 MiB at the ingress and at the pod), idle and total time, and concurrent uploads per pod link, by both ends.
 
 **The operator serves content they do not control.** The provider can answer anything; the HTTP client is anyone; the
 ingress is a translating and limiting hop. One origin per provider is the operator's responsibility (two providers behind
@@ -921,10 +924,12 @@ Threat model, by what an attacker is and wants:
   never a forced header unless that header's own opt-out is set). A redirect is never followed, and a `Location` that is not a path on the same
   origin makes the response 502 `provider-redirect-refused`. A malformed head, a status outside 200-599, a body the head did
   not announce, a stream for a request that was never made, and a body of the wrong length are each a named 502.
-- **A hostile HTTP client.** GET and HEAD only until `methods` allows more; CONNECT and TRACE never; a body on GET/HEAD,
+- **A hostile HTTP client.** Every method token by default (`methods` narrows it, at the ingress and at the pod, neither able to
+  widen the other); CONNECT, TRACE and TRACK never; a body on GET/HEAD,
   `Transfer-Encoding` with `Content-Length`, a repeated or signed `Content-Length`, an obfuscated `Transfer-Encoding`, an
   absolute-form target, a `Host` with userinfo, a path, spaces or a second `Host`, and `Upgrade` (426, WebSocket is not
-  bridged) are refused before the provider is asked; request body 64 KiB (413), slow body (408), a global in-flight cap
+  bridged) are refused before the provider is asked; request body 32 MiB, streamed (413, refused unread when its length is
+declared), slow body (408), whole upload 5 min (504), 4 uploads in flight per pod link (503), a global in-flight cap
   (64), per client (8) and per provider (16) in flight, per client and per provider rates, a connection cap and header
   timeouts on the listener. The client address is the socket's; `trustProxy` takes the entry the trusted proxy appended
   (the last `X-Forwarded-For` entry for one proxy), never one the client wrote.

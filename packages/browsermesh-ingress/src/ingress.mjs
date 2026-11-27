@@ -13,11 +13,11 @@ import {
   NO_BODY_STATUS, applyForcedHeaders, checkAddHeaders, checkClientRequestShape, checkHost, checkMappedPath, checkTarget, isPodId,
   requestHeadersForProvider, responseHeadersForClient,
 } from './headers.mjs'
-import { createInflight, createRateLimiter, resolveLimits } from './limits.mjs'
+import { createCollector, createInflight, createProgressMonitor, createRateLimiter, resolveLimits } from './limits.mjs'
 import { nodeLinkIdentity, resolvePeer } from './peer-identity.mjs'
 import {
-  FETCH_METHOD, HTTP_PROTOCOL, HTTP_VERSIONS, KIND_RESPONSE, KIND_REQUEST, SERVICES_METHOD, SERVICE_NAME_RE, WIRE_METHODS, signedBytes, signedRequestBytes,
-  sha256Hex, validateResponseHead, validateStreamMeta,
+  CAPABILITIES_METHOD, FETCH_METHOD, HTTP_PROTOCOL, HTTP_VERSIONS, KIND_RESPONSE, KIND_REQUEST, SERVICES_METHOD, SERVICE_NAME_RE, STANDARD_ALLOW, STREAMING_VERSION, WIRE_METHODS,
+  isMethodToken, normalizeMethod, parseMethodPolicy, signedBytes, signedRequestBytes, sha256Hex, validateCapabilities, validateResponseHead, validateStreamMeta,
 } from './wire.mjs'
 
 const unref = (t) => { t?.unref?.(); return t }
@@ -37,7 +37,25 @@ function within(promise, ms, make) {
   return Promise.race([promise, guard]).finally(() => clearTimeout(timer))
 }
 
-const reasonOf = (e) => (e instanceof IngressError ? e.reason : e?.name === 'AbortError' ? 'client-aborted' : 'error')
+const EMPTY = new Uint8Array(0)
+/** An upload's chunks are joined to about this size (and for at most this long) before a frame is sent. */
+const UPLOAD_FRAME_BYTES = 16 * 1024
+const UPLOAD_COALESCE_MS = 5
+
+/** `promise`'s result, or null if it has not settled within `ms` (the promise is not cancelled: the caller keeps it). */
+function raceTick(promise, ms) {
+  let timer
+  const tick = new Promise((resolve) => { timer = setTimeout(() => resolve(null), ms); timer.unref?.() })
+  return Promise.race([promise, tick]).finally(() => clearTimeout(timer))
+}
+
+function joinChunks(chunks, size) {
+  const out = new Uint8Array(size)
+  let at = 0
+  for (const c of chunks) { out.set(c, at); at += c.byteLength }
+  return out
+}
+const reasonOf =(e) => (e instanceof IngressError ? e.reason : e?.name === 'AbortError' ? 'client-aborted' : 'error')
 
 /** The failures in which the provider did no work, so a retry cannot repeat anything it did. Nothing else is ever retried. */
 export const RETRYABLE_REASONS = Object.freeze(['provider-unreachable', 'provider-pin-mismatch', 'provider-declined'])
@@ -78,7 +96,10 @@ function resolveRetry(retry) {
  * @param {(request: Request, target: object) => (boolean|Promise<boolean>)} [opts.authorize] - falsy: 403
  * @param {(request: Request) => (Response|boolean|null|Promise<Response|boolean|null>)} [opts.deny] - a Response is sent as it is; `true` is a 451
  * @param {object} [opts.limits] - see `INGRESS_LIMIT_DEFAULTS`
- * @param {string[]} [opts.methods=['GET','HEAD']]
+ * @param {string[]|'*'} [opts.methods='*']
+ *   The methods this process carries: every RFC 9110 token by default (never CONNECT, TRACE or TRACK); a list narrows it. A pod
+ *   that speaks an older protocol version is sent GET and HEAD only, or, for a list you wrote, the standard methods in it.
+ * @param {number[]} [opts.versions=[2, 1]] - protocol `http` versions offered (`[1]` behaves as an ingress that predates streaming)
  * @param {string[]} [opts.forwardHeaders] - request headers (beyond the default list) a client may pass to the provider
  * @param {string[]} [opts.exposeHeaders] - response headers (beyond the default list) a provider may set
  * @param {boolean} [opts.forwardClientAddress=false] - tell the provider the client's address (`client` in the head)
@@ -91,8 +112,8 @@ function resolveRetry(retry) {
  * @param {{ now: () => number }} [opts.clock] - the rate limiters' clock (tests advance one)
  */
 export function createMeshIngress({
-  service, node, resolve, authorize, deny, limits: limitOptions, methods = ['GET', 'HEAD'], forwardHeaders = [], exposeHeaders = [],
-  forwardClientAddress = false, verifyResponse, signRequest, retry, rpc, onAudit, clock, protocol = HTTP_PROTOCOL, linkIdentity, names,
+  service, node, resolve, authorize, deny, limits: limitOptions, methods, forwardHeaders = [], exposeHeaders = [],
+  forwardClientAddress = false, verifyResponse, signRequest, retry, rpc, onAudit, clock, protocol = HTTP_PROTOCOL, linkIdentity, names, versions = [...HTTP_VERSIONS].sort((a, b) => b - a),
 } = {}) {
   if (typeof resolve !== 'function' && !names) throw new TypeError('createMeshIngress: resolve(request) is required: nothing is served without a mapping')
   if (resolve !== undefined && typeof resolve !== 'function') throw new TypeError('createMeshIngress: resolve must be a function')
@@ -105,9 +126,18 @@ export function createMeshIngress({
   const linkSource = linkIdentity ?? (typeof node?.sessionsFor === 'function' ? nodeLinkIdentity(node) : null)
   const retrying = resolveRetry(retry)
   if (rpc !== undefined && typeof rpc?.request !== 'function') throw new TypeError('createMeshIngress: rpc must be a mesh-rpc api with request()')
-  const allowedMethods = new Set(methods.map((m) => String(m).toUpperCase()))
-  for (const m of allowedMethods) if (!WIRE_METHODS.has(m)) throw new TypeError(`createMeshIngress: method ${m} is never served (allowed: ${[...WIRE_METHODS].join(', ')})`)
-  if (!allowedMethods.size) throw new TypeError('createMeshIngress: methods is empty')
+  if (!Array.isArray(versions) || !versions.length || !versions.every((v) => HTTP_VERSIONS.includes(v))) throw new TypeError(`createMeshIngress: versions must be a non-empty list drawn from ${HTTP_VERSIONS.join(', ')}`)
+  // Every method by default; a list narrows. An older pod (version 1) is sent GET and HEAD only, plus, for a list the operator
+  // wrote, the standard methods in it (what an explicit `methods` always meant to such a pod): a body to it is buffered.
+  const methodPolicy = parseMethodPolicy(methods === undefined ? '*' : methods, 'createMeshIngress')
+  const ingressAllows = (m) => (methodPolicy.all ? isMethodToken(m) : methodPolicy.list.includes(m))
+  const legacyMethods = Array.isArray(methods) ? methodPolicy.list.filter((m) => WIRE_METHODS.has(m)) : ['GET', 'HEAD']
+  /** The `Allow` header for a 405: what this process and (when known) the pod both carry. */
+  const allowHeader = (podMethods) => {
+    const mine = methodPolicy.all ? null : methodPolicy.list
+    const theirs = podMethods === '*' || !podMethods ? null : podMethods
+    return (mine && theirs ? mine.filter((m) => theirs.includes(m)) : (mine ?? theirs ?? STANDARD_ALLOW)).join(', ')
+  }
   const limits = resolveLimits(limitOptions)
   const now = clock?.now ?? Date.now
 
@@ -268,16 +298,35 @@ export function createMeshIngress({
     try { return await state.services } catch (e) { throw e instanceof IngressError ? e : new IngressError(502, 'provider-failed', 'The provider failed to answer.') }
   }
 
+  /**
+   * What a version 2 pod accepts (methods and body cap per service, uploads per link), asked once per link and only when a request
+   * needs it (a body, or a method other than GET and HEAD). `null`: the pod does not answer, and is treated as version 1.
+   */
+  async function capabilitiesOf(state) {
+    if (!state.caps) {
+      state.caps = (async () => {
+        let result
+        try { result = await state.channel.request(CAPABILITIES_METHOD, {}, { timeoutMs: limits.openTimeoutMs }) } catch (e) {
+          if (e?.code === -32601 || e?.reason === 'unsupported') return null
+          throw e
+        }
+        return validateCapabilities(result)
+      })()
+      state.caps.catch(() => { state.caps = null }) // a failure is not remembered
+    }
+    try { return await state.caps } catch (e) { throw e instanceof IngressError ? e : new IngressError(502, 'provider-failed', 'The provider failed to answer.') }
+  }
+
   async function openProvider(peer) {
     let state
     let channel
     try {
       channel = await api.openProtocol(peer, protocol, {
-        versions: [...HTTP_VERSIONS],
+        versions: [...versions],
         timeoutMs: limits.openTimeoutMs,
         setup(ch) {
-          const streams = createStreamLayer(ch, { maxStreams: limits.maxInflightPerProvider * 2, maxStreamBytes: Math.max(limits.maxResponseBytes, limits.maxRequestBodyBytes) })
-          state = { peer, channel: ch, streams, pending: new Map(), nextRid: 1 }
+          const streams = createStreamLayer(ch, { maxStreams: limits.maxInflightPerProvider * 2, maxStreamBytes: Math.min(Number.MAX_SAFE_INTEGER, Math.max(limits.maxResponseBytes, limits.maxRequestBodyBytes)) })
+          state = { peer, channel: ch, streams, pending: new Map(), nextRid: 1, uploads: 0 }
           // The only streams a provider may open are response bodies for a request this end made on this channel.
           streams.onStream((reader, { meta }) => {
             validateStreamMeta(meta, KIND_RESPONSE)
@@ -297,7 +346,7 @@ export function createMeshIngress({
       state.streams.close()
       throw new IngressError(502, 'provider-pin-mismatch', 'The channel is bound to a different pod than the one the mapping names; refused.')
     }
-    if (!HTTP_VERSIONS.includes(channel.version)) {
+    if (!versions.includes(channel.version)) {
       channel.close('unsupported version')
       throw new IngressError(502, 'provider-version', 'The provider speaks no version of the http protocol this ingress does.')
     }
@@ -334,25 +383,20 @@ export function createMeshIngress({
     if (!request.body) return new Uint8Array(0)
     if (declared !== null && declared > cap) throw new IngressError(413, 'body-too-large', `The request body is larger than ${cap} bytes.`)
     const reader = request.body.getReader()
-    const parts = []
-    let size = 0
+    const collected = createCollector() // (tiny chunks are joined as they come: memory is bytes, not chunks)
     try {
       for (;;) {
         const { done, value } = await within(reader.read(), limits.bodyIdleMs, () => new IngressError(408, 'body-timeout', 'The request body was too slow.'))
         if (done) break
-        size += value.byteLength
-        if (size > cap) throw new IngressError(413, 'body-too-large', `The request body is larger than ${cap} bytes.`)
-        parts.push(value)
+        if (collected.size + value.byteLength > cap) throw new IngressError(413, 'body-too-large', `The request body is larger than ${cap} bytes.`)
+        collected.add(value)
       }
     } catch (e) {
       reader.cancel(e).catch(() => {})
       throw e
     }
-    if (declared !== null && declared !== size) throw new IngressError(400, 'bad-framing', 'The body is not the length Content-Length declared.')
-    const out = new Uint8Array(size)
-    let at = 0
-    for (const p of parts) { out.set(p, at); at += p.byteLength }
-    return out
+    if (declared !== null && declared !== collected.size) throw new IngressError(400, 'bad-framing', 'The body is not the length Content-Length declared.')
+    return collected.finish()
   }
 
   async function handle(request, info = {}) {
@@ -394,12 +438,12 @@ export function createMeshIngress({
       if (url.username || url.password) throw new IngressError(400, 'bad-host', 'A request URL with credentials is refused.')
       const host = checkHost(url.host)
       record.host = host
-      const method = request.method.toUpperCase()
+      const method = normalizeMethod(request.method)
 
       if (request.headers.has('upgrade') || /\bupgrade\b/i.test(request.headers.get('connection') ?? '')) {
         throw new IngressError(426, 'upgrade-unsupported', 'WebSocket and other protocol upgrades are not supported by this ingress (v1).')
       }
-      if (!allowedMethods.has(method)) throw new IngressError(405, 'method-not-allowed', `${method} is not served here.`, { headers: { allow: [...allowedMethods].join(', ') } })
+      if (!ingressAllows(method)) throw new IngressError(405, 'method-not-allowed', `${method.slice(0, 40)} is not served here.`, { headers: { allow: allowHeader(null) } })
       const shape = checkClientRequestShape(request.headers, method, { maxCount: limits.maxHeaderCount, maxBytes: limits.maxHeaderBytes })
       const target = checkTarget(url.pathname + url.search, limits.maxTargetLength)
 
@@ -426,7 +470,7 @@ export function createMeshIngress({
       const tried = []
       let attempt = 0
       let lastFailure = null
-      let bodyBytes = null
+      let bodyState = null
       let theirs = null
       for (;;) {
         let mapping
@@ -469,21 +513,29 @@ export function createMeshIngress({
         releases.push(theirs)
 
         if (attempt === 0) {
-          // The whole request is bounded from here: the client's body, the provider's head and its body.
-          deadline = unref(setTimeout(() => ac.abort(new IngressError(504, 'provider-timeout', 'The provider did not answer in time.')), limits.timeoutMs))
+          // The whole request is bounded from here: the client's body, the provider's head and its body. A request with a body
+          // has the longer upload deadline.
+          const hasBody = !!request.body && shape.contentLength !== 0
+          deadline = unref(setTimeout(() => ac.abort(new IngressError(504, 'provider-timeout', 'The provider did not answer in time.')), hasBody ? limits.uploadTimeoutMs : limits.timeoutMs))
           request.signal?.addEventListener('abort', () => ac.abort(new IngressError(499, 'client-aborted', 'The client went away.')), { once: true })
-          bodyBytes = await readBody(request, shape.contentLength, limits.maxRequestBodyBytes)
-          record.requestBytes = bodyBytes.byteLength
+          // A declared length over the cap is refused before a byte of the body is read.
+          if (hasBody && shape.contentLength !== null && shape.contentLength > limits.maxRequestBodyBytes) throw new IngressError(413, 'body-too-large', `The request body is larger than ${limits.maxRequestBodyBytes} bytes.`)
+          // The body is read when the provider is known (streamed to a provider that takes streams, buffered for any other).
+          bodyState = { request, hasBody, declared: shape.contentLength, bytes: null, source: null, started: false }
+          // (a request with no body takes the same turn of the event loop it always did before the provider is asked: a link that is
+          // ending is noticed in that turn, and a request is not sent down it)
+          if (!hasBody) await readBody(request, shape.contentLength, 0)
         }
-        const forward = { method, target: outTarget, host, headers: outHeaders, body: bodyBytes, client: forwardClientAddress ? client.slice(0, 64) : undefined, peer, service: mapping.service }
+        const forward = { method, target: outTarget, host, headers: outHeaders, bodyState, clientKey: client, client: forwardClientAddress ? client.slice(0, 64) : undefined, peer, service: mapping.service }
         try {
           // A streamed response keeps the deadline and the slots until its body ends; a buffered one is finished here.
           const response = await forwardToProvider(forward, policy, ac, record, (status, reason) => { clearTimeout(deadline); audit(status, reason); done() })
           if (response.finished) { clearTimeout(deadline); audit(response.status, undefined); done() }
           return response.response
         } catch (e) {
+          // (a body that has begun to stream cannot be sent again)
           const retryable = retrying && e instanceof IngressError && retrying.on.has(e.reason) && attempt < retrying.attempts && !ac.signal.aborted
-            && (retrying.nonIdempotent || IDEMPOTENT.has(method))
+            && (retrying.nonIdempotent || IDEMPOTENT.has(method)) && !(bodyState.started && bodyState.bytes === null)
           if (!retryable) throw e
           auditAttempt(record, e)
           lastFailure = e
@@ -506,16 +558,33 @@ export function createMeshIngress({
    * nothing is left running (a buffered response); a streamed one calls `finish(status, reason)` when its body ends.
    */
   async function forwardToProvider(forward, policy, ac, record, finish) {
-    const { peer } = forward
+    const { peer, bodyState } = forward
     let state
+    // The whole body, in memory, for the paths that need it (an older provider, a signed request, the mesh-rpc fallback): bounded
+    // by the lower of the buffered and the overall cap, and by what the provider takes when it said so.
+    const buffer = async (podCap = Infinity) => {
+      if (!bodyState.hasBody) return EMPTY
+      if (bodyState.bytes === null) {
+        bodyState.started = true
+        bodyState.bytes = await readBody(bodyState.request, bodyState.declared, Math.min(limits.maxRequestBodyBytes, limits.maxBufferedBodyBytes, podCap))
+        record.requestBytes = bodyState.bytes.byteLength
+      }
+      if (bodyState.bytes.byteLength > podCap) throw new IngressError(413, 'body-too-large', 'The request body is larger than the provider takes.')
+      return bodyState.bytes
+    }
+    const refuseMethod = (podMethods) => new IngressError(405, 'method-not-allowed', `${forward.method.slice(0, 40)} is not served here.`, { headers: { allow: allowHeader(podMethods) } })
     // A provider found not to serve `http` (it said so, or never answered the open: a pod that runs only the older
     // site service) is asked through mesh-rpc for a while, if the operator opted in with `rpc`.
-    if (rpc && (legacy.get(peer) ?? 0) > now()) return fallbackViaRpc(forward, policy, ac, record)
+    const viaRpc = async () => {
+      if (!legacyMethods.includes(forward.method)) throw refuseMethod(legacyMethods)
+      return fallbackViaRpc({ ...forward, body: await buffer() }, policy, ac, record)
+    }
+    if (rpc && (legacy.get(peer) ?? 0) > now()) return viaRpc()
     try {
       state = await openWithGrace(peer, ac.signal)
     } catch (e) {
       const err = e instanceof IngressError ? e : openFailure(e)
-      if (err.fallbackable && rpc) { legacy.set(peer, now() + LEGACY_MEMORY_MS); return fallbackViaRpc(forward, policy, ac, record) }
+      if (err.fallbackable && rpc) { legacy.set(peer, now() + LEGACY_MEMORY_MS); return viaRpc() }
       throw err
     }
     if (ac.signal.aborted) throw ac.signal.reason
@@ -525,15 +594,54 @@ export function createMeshIngress({
       const declared = await declaredServices(state)
       if (!declared.names.has(forward.service)) throw new IngressError(502, 'provider-no-service', 'The provider does not serve that service.')
     }
+    // What this pod carries. Version 1 (an older pod): GET and HEAD, or the standard methods an operator's own list names, with a
+    // body held whole. Version 2: the pod says, once per link, per service, and a request it would refuse is not sent. GET and HEAD
+    // need no question: a pod that narrows them refuses them itself.
+    let podPolicy = null
+    let podCaps = null
+    const plain = (forward.method === 'GET' || forward.method === 'HEAD') && !bodyState.hasBody
+    if (state.channel.version >= STREAMING_VERSION && !plain) {
+      podCaps = await capabilitiesOf(state)
+      if (podCaps) {
+        podPolicy = forward.service === undefined ? podCaps.default : podCaps.services.get(forward.service)
+        if (!podPolicy) throw new IngressError(502, 'provider-no-service', 'The provider does not serve that service.')
+        if (podPolicy.methods !== '*' && !podPolicy.methods.includes(forward.method)) throw refuseMethod(podPolicy.methods)
+      }
+    }
+    // A pod on version 1, and a version 2 pod that did not say what it accepts, are held to what version 1 carries.
+    if (!podPolicy && (state.channel.version < STREAMING_VERSION || !plain) && !legacyMethods.includes(forward.method)) throw refuseMethod(legacyMethods)
+    // A body streams to a pod that takes streams, unless the request is signed (the signature covers the body, so it is held) or
+    // may be retried and is small enough to be held for it (a body that is streaming cannot be sent again, so it is never retried).
+    const podCap = podPolicy ? podPolicy.maxBodyBytes : Infinity
+    const replayable = !!retrying && bodyState.declared !== null && bodyState.declared <= limits.maxBufferedBodyBytes
+    // A body of unknown length that may be retried is read up to the held limit first: if it ends there it is held (and can be
+    // sent again), otherwise it streams, what was read first, and is never retried.
+    if (retrying && bodyState.hasBody && !!podPolicy && !signRequest && bodyState.declared === null) await holdForRetry(bodyState, Math.min(limits.maxBufferedBodyBytes, limits.maxRequestBodyBytes, podCap), record)
+    const streamBody = bodyState.hasBody && !!podPolicy && !signRequest && !replayable && bodyState.bytes === null
+    if (bodyState.hasBody && bodyState.declared !== null && bodyState.declared > Math.min(podCap, limits.maxRequestBodyBytes, streamBody ? Infinity : limits.maxBufferedBodyBytes)) {
+      throw new IngressError(413, 'body-too-large', 'The request body is larger than the provider takes.')
+    }
+    // One address cannot hold every upload slot: it has a few of its own, fewer than the pod's link has.
+    let clientSlot = null
+    if (streamBody) {
+      clientSlot = inflight.enter(`u:${forward.clientKey}`, limits.maxUploadsPerClient)
+      if (!clientSlot) throw new IngressError(429, 'client-uploads', 'Too many uploads from this client are in flight.', { headers: { 'retry-after': '1' } })
+    }
+    if (streamBody && state.uploads >= Math.min(limits.maxUploadsPerProvider, podCaps.maxUploads)) {
+      clientSlot?.()
+      throw new IngressError(503, 'provider-uploads', 'This provider is taking as many uploads as it may.', { headers: { 'retry-after': '1' } })
+    }
+    // (no await when there is no body: the link can end between awaits, and a request with nothing to read has no reason to wait)
+    const bytes = streamBody ? null : bodyState.hasBody ? await buffer(podCap) : EMPTY
     const rid = state.nextRid++
     const nonce = randomHex(16)
-    const hasBody = forward.body.byteLength > 0
+    const hasBody = streamBody || bytes.byteLength > 0
     // A signed request: the provider's `verifyRequest` is given exactly these bytes, rebuilt from what arrives.
     let sig
     if (signRequest) {
       try {
-        const bytes = signedRequestBytes({ rid, nonce, host: forward.host, method: forward.method, target: forward.target, headers: forward.headers, client: forward.client, digest: await sha256Hex(forward.body), service: forward.service })
-        sig = await signRequest(bytes, { peer }, await resolvePeer(linkSource, peer))
+        const bytes2 = signedRequestBytes({ rid, nonce, host: forward.host, method: forward.method, target: forward.target, headers: forward.headers, client: forward.client, digest: await sha256Hex(bytes), service: forward.service })
+        sig = await signRequest(bytes2, { peer }, await resolvePeer(linkSource, peer))
       } catch { sig = undefined }
       if (typeof sig !== 'string' || !sig || sig.length > 2048) throw new IngressError(500, 'sign-error', 'The ingress could not sign the request.')
     }
@@ -541,18 +649,22 @@ export function createMeshIngress({
     state.pending.set(rid, entry)
     const cleanup = () => state.pending.delete(rid)
     const cancelReader = (why) => { entry.reader?.cancel(why).catch(() => {}); entry.readerReady.promise.then((r) => r.cancel(why).catch(() => {}), () => {}) }
-    const onAbort = () => cancelReader('request ended')
+    let upload = null // the visitor's body on its way to the provider (version 2)
+    const stopUpload = (why) => upload?.stop(why)
+    const onAbort = () => { cancelReader('request ended'); stopUpload('request ended') }
     ac.signal.addEventListener('abort', onAbort, { once: true })
 
     let head
     try {
       const fetchP = state.channel.request(FETCH_METHOD, {
         rid, nonce, method: forward.method, target: forward.target, host: forward.host,
-        headers: forward.headers, body: hasBody, ...(forward.client ? { client: forward.client } : {}), ...(sig ? { sig } : {}),
+        headers: forward.headers, body: hasBody, ...(streamBody && bodyState.declared !== null ? { length: bodyState.declared } : {}),
+        ...(forward.client ? { client: forward.client } : {}), ...(sig ? { sig } : {}),
         ...(forward.service === undefined ? {} : { service: forward.service }),
-      }, { signal: ac.signal, timeoutMs: limits.timeoutMs })
-      // The body travels as a stream. A provider may answer before it has read all of it: the head decides.
-      if (hasBody) state.streams.sendBody(forward.body, { rid, kind: KIND_REQUEST }, { signal: ac.signal, timeoutMs: limits.openTimeoutMs }).catch(() => {})
+      }, { signal: ac.signal, timeoutMs: streamBody ? limits.uploadTimeoutMs : limits.timeoutMs })
+      // The body travels as a stream. A provider may answer before it has read all of it: the head decides, and an answer ends the upload.
+      if (streamBody) upload = startUpload(state, rid, bodyState, { cap: Math.min(podCap, limits.maxRequestBodyBytes), ac, record, onStop: clientSlot })
+      else if (hasBody) state.streams.sendBody(bytes, { rid, kind: KIND_REQUEST }, { signal: ac.signal, timeoutMs: limits.openTimeoutMs }).catch(() => {})
       head = validateResponseHead(await fetchP, limits)
       // "Not me, try another": never the provider's own answer, and nothing of it reaches the client.
       if (head.declined === true) throw new IngressError(502, 'provider-declined', 'The provider declined this request.')
@@ -560,6 +672,8 @@ export function createMeshIngress({
       cleanup()
       ac.signal.removeEventListener('abort', onAbort)
       cancelReader('request failed')
+      stopUpload('request failed')
+      clientSlot?.()
       if (ac.signal.aborted && ac.signal.reason instanceof IngressError) throw ac.signal.reason
       if (e instanceof IngressError) throw e
       if (e?.reason === 'timeout') throw new IngressError(504, 'provider-timeout', 'The provider did not answer in time.')
@@ -567,11 +681,16 @@ export function createMeshIngress({
       if (e?.reason === 'unknown-service') throw new IngressError(502, 'provider-no-service', 'The provider does not serve that service.')
       if (e?.reason === 'stopping') throw new IngressError(503, 'provider-stopping', 'The provider is shutting down.', { headers: { 'retry-after': '1' } })
       if (e?.reason === 'request-unverified') throw new IngressError(502, 'provider-refused-request', 'The provider did not accept the request\'s signature.')
+      if (e?.reason === 'method-not-allowed') throw refuseMethod(podPolicy?.methods ?? null)
+      if (e?.reason === 'body-too-large') throw new IngressError(413, 'body-too-large', 'The request body is larger than the provider takes.')
+      if (e?.reason === 'body-timeout') throw new IngressError(408, 'body-timeout', 'The request body was too slow.')
+      if (e?.reason === 'bad-framing') throw new IngressError(400, 'bad-framing', 'The body is not the length Content-Length declared.')
+      if (e?.reason === 'uploads-busy') throw new IngressError(503, 'provider-uploads', 'This provider is taking as many uploads as it may.', { headers: { 'retry-after': '1' } })
       if (e?.reason === 'too-large' || e?.reason === 'stream-too-large') throw new IngressError(502, 'provider-refused-body', 'The provider would not take the request body.')
       throw new IngressError(502, e?.code === -32603 ? 'provider-error' : 'provider-failed', 'The provider failed to answer.')
     }
 
-    const lateFail = (e) => { cleanup(); ac.signal.removeEventListener('abort', onAbort); cancelReader('refused'); throw e }
+    const lateFail = (e) => { cleanup(); ac.signal.removeEventListener('abort', onAbort); cancelReader('refused'); stopUpload('refused'); throw e }
     let headers
     try {
       headers = responseHeadersForClient(head.headers, { response: policy, forward: forwardHeaders, expose: exposeHeaders })
@@ -609,16 +728,19 @@ export function createMeshIngress({
         } catch { ok = false }
         if (!ok) throw new IngressError(502, 'response-signature-invalid', 'The provider\'s signature was not accepted.')
         ac.signal.removeEventListener('abort', onAbort)
+        stopUpload('response finished')
         record.responseBytes = bytes.byteLength
         return { finished: true, status: head.status, response: new Response(noBody ? null : bytes, { status: head.status, headers }) }
       } catch (e) {
         ac.signal.removeEventListener('abort', onAbort)
+        stopUpload('refused')
         reader?.cancel('refused').catch(() => {})
         throw e instanceof IngressError ? e : new IngressError(502, e?.reason === 'stream-too-large' ? 'response-too-large' : 'provider-failed', 'The provider failed to answer.')
       }
     }
     if (!reader) {
       ac.signal.removeEventListener('abort', onAbort)
+      stopUpload('response finished') // answered without a body: the rest of the upload is not wanted
       return { finished: true, status: head.status, response: new Response(null, { status: head.status, headers }) }
     }
 
@@ -629,6 +751,7 @@ export function createMeshIngress({
       if (ended) return
       ended = true
       ac.signal.removeEventListener('abort', onAbort)
+      stopUpload('response finished') // the answer is over: whatever of the upload is still coming is not wanted
       record.responseBytes = count
       finish(status, reason)
     }
@@ -670,6 +793,116 @@ export function createMeshIngress({
     return { finished: false, status: head.status, response: new Response(body, { status: head.status, headers }) }
   }
 
+  /**
+   * A body of unknown length on a request that `retry` may send again: read it up to `cap`. If it ends within the cap it is held
+   * whole (`bodyState.bytes`) and can be sent to another provider. If it outgrows the cap, what was read is put back in front of
+   * the rest as a stream (`bodyState.source`): it is sent on as it comes and, having begun, is never retried.
+   */
+  async function holdForRetry(bodyState, cap, record) {
+    if (bodyState.bytes !== null || bodyState.source) return
+    const reader = bodyState.request.body.getReader()
+    const held = createCollector()
+    try {
+      for (;;) {
+        const { done, value } = await within(reader.read(), limits.bodyIdleMs, () => new IngressError(408, 'body-timeout', 'The request body was too slow.'))
+        if (done) {
+          bodyState.bytes = held.finish()
+          bodyState.started = true
+          record.requestBytes = held.size
+          return
+        }
+        held.add(value)
+        if (held.size > cap) break
+      }
+    } catch (e) { reader.cancel(e).catch(() => {}); throw e }
+    const prefix = held.finish()
+    bodyState.source = new ReadableStream({
+      start(controller) { controller.enqueue(prefix) },
+      async pull(controller) { try { const { done, value } = await reader.read(); if (done) controller.close(); else controller.enqueue(value) } catch (e) { controller.error(e) } },
+      cancel(reason) { return reader.cancel(reason) },
+    }, { highWaterMark: 0 })
+  }
+
+  /**
+   * Send the visitor's body to the provider as it is read: one chunk at a time, each waiting for the provider's credit (so a slow
+   * origin slows the visitor), the visitor read only as fast as it is wanted. It counts as an upload on the link until the request
+   * is over (`stop` is called on every way out). Stops, and cancels the visitor's body, when the
+   * provider cancels the stream (it has answered, or will not take more), when the response is over, or when the request ends. A
+   * bound the visitor breaks (too many bytes, too slow, not the declared length) or a visitor that goes away ends the whole
+   * request with that answer.
+   */
+  function startUpload(state, rid, bodyState, { cap, ac, record, onStop }) {
+    const reader = (bodyState.source ?? bodyState.request.body).getReader()
+    bodyState.started = true
+    state.uploads += 1
+    let writer = null
+    let stopped = false
+    let released = false
+    const release = () => { if (!released) { released = true; state.uploads -= 1; monitor.stop(); onStop?.() } }
+    const stop = (why) => {
+      if (stopped) return
+      stopped = true
+      reader.cancel(why).catch(() => {})
+      writer?.abort(why)
+      release()
+    }
+    // An upload that keeps going must keep moving: a trickle (a byte now and then) is cut, so one client cannot hold a slot for the whole deadline.
+    const monitor = createProgressMonitor({
+      graceMs: limits.uploadGraceMs, windowMs: limits.uploadProgressMs, minBytesPerSec: limits.uploadMinBytesPerSec,
+      onStall: () => { if (stopped || ac.signal.aborted) return; stop('too slow'); ac.abort(new IngressError(408, 'body-timeout', 'The request body was too slow.')) },
+    })
+    const run = (async () => {
+      try {
+        writer = await state.streams.open({ rid, kind: KIND_REQUEST }, { signal: ac.signal, timeoutMs: limits.openTimeoutMs })
+        if (stopped) { writer.abort('stopped'); return }
+        writer.signal.addEventListener('abort', () => stop('the provider stopped the upload'), { once: true })
+        let total = 0
+        let pending = null
+        let ended = false
+        while (!ended) {
+          monitor.waiting()
+          const first = await within(pending ?? reader.read(), limits.bodyIdleMs, () => new IngressError(408, 'body-timeout', 'The request body was too slow.'))
+          pending = null
+          monitor.got(first.done ? 0 : first.value.byteLength)
+          if (stopped) return
+          if (first.done) break
+          // Small chunks are joined (for a few ms, up to one frame) before they are sent: a frame costs a message, so a million one-byte
+          // chunks are a few dozen frames, not a million.
+          const batch = [first.value]
+          let size = first.value.byteLength
+          while (size < UPLOAD_FRAME_BYTES) {
+            const next = pending ?? reader.read()
+            pending = null
+            monitor.waiting()
+            const got = await raceTick(next, UPLOAD_COALESCE_MS)
+            if (got === null) { pending = next; break }
+            monitor.got(got.done ? 0 : got.value.byteLength)
+            if (got.done) { ended = true; break }
+            batch.push(got.value)
+            size += got.value.byteLength
+          }
+          if (stopped) return
+          const value = batch.length === 1 ? batch[0] : joinChunks(batch, size)
+          total += value.byteLength
+          if (total > cap) throw new IngressError(413, 'body-too-large', 'The request body is larger than this ingress or the provider takes.')
+          record.requestBytes = total
+          await writer.write(value, { signal: ac.signal })
+        }
+        if (bodyState.declared !== null && total !== bodyState.declared) throw new IngressError(400, 'bad-framing', 'The body is not the length Content-Length declared.')
+        monitor.stop() // all of it is sent: nothing left to keep moving
+        await writer.end()
+      } catch (e) {
+        if (stopped) return // the provider cancelled, or the request ended: nothing to add
+        stop(e instanceof IngressError ? e.reason : 'upload failed')
+        if (ac.signal.aborted) return
+        // The visitor's side broke (a bound, or it went away): that is the request's answer.
+        ac.abort(e instanceof IngressError ? e : bodyState.request.signal?.aborted ? new IngressError(499, 'client-aborted', 'The client went away.') : new IngressError(400, 'bad-request', 'The request body could not be read.'))
+      }
+    })()
+    run.catch(() => {})
+    return { stop }
+  }
+
   /** The buffered fallback: one mesh-rpc request to a provider that does not serve `http` (opt-in, see the design doc). */
   async function fallbackViaRpc(forward, policy, ac, record) {
     // The older buffered service has no named services: a route that names one is refused rather than sent to its one site.
@@ -705,6 +938,10 @@ export function createMeshIngress({
 
   return {
     handle,
+    /** The `Allow` header this ingress sends with a 405 of its own (the listener uses it for the 405s it makes). */
+    allowHeader: () => allowHeader(null),
+    /** The bounds in force (a listener follows `uploadTimeoutMs`). */
+    limits,
     expect,
     readiness,
     whenReady,

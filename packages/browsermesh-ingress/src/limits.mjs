@@ -3,8 +3,22 @@
  */
 
 export const INGRESS_LIMIT_DEFAULTS = Object.freeze({
-  /** Request body, bytes. */
-  maxRequestBodyBytes: 64 * 1024,
+  /** Request body, bytes: what the ingress will carry for one request (streamed, never held whole). `Infinity` only by choice. */
+  maxRequestBodyBytes: 32 * 1024 * 1024,
+  /** A request body the ingress must hold whole (an older provider, a signed request, the mesh-rpc fallback), bytes. The lower of this and `maxRequestBodyBytes` applies. */
+  maxBufferedBodyBytes: 1024 * 1024,
+  /** Whole request carrying a body, ms: from `handle()` to the last response byte (a request with no body has `timeoutMs`). */
+  uploadTimeoutMs: 300_000,
+  /** Requests with a body being sent to one provider at once. */
+  maxUploadsPerProvider: 4,
+  /** Requests with a body one client address may have in flight at once (below the per-provider cap, so one address cannot hold every slot). */
+  maxUploadsPerClient: 2,
+  /** An upload that keeps going longer than this must keep moving: after this grace, ms ... */
+  uploadGraceMs: 30_000,
+  /** ... in each window of this many ms (when the ingress waited on the client for most of it) ... */
+  uploadProgressMs: 10_000,
+  /** ... it must have sent at least this many bytes per second (1 KiB/s), or it is cut with a 408. */
+  uploadMinBytesPerSec: 1024,
   /** Response body, bytes. */
   maxResponseBytes: 8 * 1024 * 1024,
   /** Whole request, ms: from `handle()` to the last response byte. */
@@ -30,13 +44,16 @@ export const INGRESS_LIMIT_DEFAULTS = Object.freeze({
   maxTracked: 10_000,
 })
 
-const POSITIVE = ['maxRequestBodyBytes', 'maxResponseBytes', 'timeoutMs', 'bodyIdleMs', 'responseIdleMs', 'openTimeoutMs', 'linkWaitMs', 'maxHeaderCount',
-  'maxHeaderBytes', 'maxTargetLength', 'maxInflight', 'maxInflightPerClient', 'maxInflightPerProvider', 'maxTracked']
+const POSITIVE = ['maxBufferedBodyBytes', 'maxResponseBytes', 'timeoutMs', 'uploadTimeoutMs', 'bodyIdleMs', 'responseIdleMs', 'openTimeoutMs', 'linkWaitMs', 'maxHeaderCount',
+  'maxHeaderBytes', 'maxTargetLength', 'maxInflight', 'maxInflightPerClient', 'maxInflightPerProvider', 'maxUploadsPerProvider', 'maxUploadsPerClient', 'uploadGraceMs', 'uploadProgressMs', 'uploadMinBytesPerSec', 'maxTracked']
+/** Bounds that may be lifted, and only by saying `Infinity`. */
+const MAY_BE_INFINITE = ['maxRequestBodyBytes']
 
 /** @returns {typeof INGRESS_LIMIT_DEFAULTS} defaults overlaid with `given`, each value checked */
 export function resolveLimits(given = {}) {
   const out = { ...INGRESS_LIMIT_DEFAULTS, ...given }
   for (const name of POSITIVE) if (!Number.isSafeInteger(out[name]) || out[name] <= 0) throw new TypeError(`ingress limits: ${name} must be a positive integer`)
+  for (const name of MAY_BE_INFINITE) if (out[name] !== Infinity && (!Number.isSafeInteger(out[name]) || out[name] <= 0)) throw new TypeError(`ingress limits: ${name} must be a positive integer (or Infinity, to lift it)`)
   for (const name of ['clientRate', 'providerRate']) {
     const r = out[name]
     if (!r || !Number.isSafeInteger(r.limit) || r.limit <= 0 || !Number.isSafeInteger(r.windowMs) || r.windowMs <= 0) throw new TypeError(`ingress limits: ${name} must be { limit, windowMs } of positive integers`)
@@ -89,6 +106,68 @@ export function createInflight({ maxTracked = 10_000 } = {}) {
         else per.set(key, m)
       }
     },
+  }
+}
+
+const COLLECT_BLOCK = 64 * 1024
+
+/**
+ * Collect chunks of any size into a few large blocks: a body of a million one-byte chunks is held as `bytes / 64 KiB` buffers, not a
+ * million. `parts` is what is held now; `finish()` joins it into one array.
+ */
+export function createCollector() {
+  const parts = []
+  let block = null
+  let used = 0
+  let size = 0
+  const seal = () => { if (block && used) parts.push(block.subarray(0, used)); block = null; used = 0 }
+  return {
+    parts,
+    get size() { return size },
+    add(chunk) {
+      size += chunk.byteLength
+      if (chunk.byteLength >= COLLECT_BLOCK / 4) { seal(); parts.push(chunk); return }
+      if (block && used + chunk.byteLength > COLLECT_BLOCK) seal()
+      if (!block) block = new Uint8Array(COLLECT_BLOCK)
+      block.set(chunk, used)
+      used += chunk.byteLength
+    },
+    finish() {
+      seal()
+      const out = new Uint8Array(size)
+      let at = 0
+      for (const p of parts) { out.set(p, at); at += p.byteLength }
+      return out
+    },
+  }
+}
+
+/**
+ * The minimum-progress rule for an upload. After `graceMs`, in every window of `windowMs` in which the caller spent most of the
+ * time waiting for the sender (`waiting()` before a read, `got(n)` after it), at least `minBytesPerSec` must have arrived, or
+ * `onStall()` is called once. Time spent waiting for the receiver of the bytes (a slow origin) is never counted against the sender.
+ */
+export function createProgressMonitor({ graceMs, windowMs, minBytesPerSec, onStall, now = Date.now }) {
+  const need = Math.ceil((minBytesPerSec * windowMs) / 1000)
+  let bytes = 0
+  let waited = 0
+  let waitFrom = null
+  let timer = null
+  const reset = () => { bytes = 0; waited = 0; if (waitFrom !== null) waitFrom = now() }
+  const tick = () => {
+    const t = now()
+    const spent = waited + (waitFrom === null ? 0 : t - waitFrom)
+    if (spent >= windowMs * 0.8 && bytes < need) { timer = null; onStall(); return }
+    reset()
+    timer = setTimeout(tick, windowMs)
+    timer.unref?.()
+  }
+  timer = setTimeout(() => { reset(); timer = setTimeout(tick, windowMs); timer.unref?.() }, graceMs)
+  timer.unref?.()
+  return {
+    waiting() { if (waitFrom === null) waitFrom = now() },
+    got(n) { if (waitFrom !== null) { waited += now() - waitFrom; waitFrom = null } bytes += n },
+    stop() { clearTimeout(timer); timer = null },
   }
 }
 

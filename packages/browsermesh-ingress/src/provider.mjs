@@ -8,14 +8,19 @@
 import { createStreamLayer } from '@johnhenry/browsermesh-apps/protocol-stream'
 import { ChannelErrorCode, MeshChannelError } from '@johnhenry/browsermesh-apps/mesh-channel'
 import { IngressError } from './errors.mjs'
+import { createProgressMonitor } from './limits.mjs'
 import { NO_BODY_STATUS, isPodId } from './headers.mjs'
 import { LINK_KEY_REFUSALS, LinkKeyRefusal, nodeLinkIdentity, resolvePeer, unverifiedPeer } from './peer-identity.mjs'
 import {
-  FETCH_METHOD, HTTP_PROTOCOL, HTTP_VERSIONS, KIND_REQUEST, KIND_RESPONSE, SERVICES_METHOD, SERVICE_NAME_RE, sha256Hex, signedBytes, signedRequestBytes,
-  validateRequestHead, validateStreamMeta,
+  CAPABILITIES_METHOD, FETCH_METHOD, HTTP_PROTOCOL, HTTP_VERSIONS, KIND_REQUEST, KIND_RESPONSE, SERVICES_METHOD, SERVICE_NAME_RE, STREAMING_VERSION, parseMethodPolicy, sha256Hex,
+  signedBytes, signedRequestBytes, validateRequestHead, validateStreamMeta,
 } from './wire.mjs'
 
 const MAX_SERVICES = 32
+/** Uploads held whole at once on one link (a streamed upload costs no memory; a held one costs up to twice its size). */
+const MAX_HELD_UPLOADS = 2
+/** What a pod takes as a request body unless it says otherwise (`maxBodyBytes`): streamed, so this is a bound, not a buffer. */
+export const DEFAULT_MAX_BODY_BYTES = 32 * 1024 * 1024
 const asHandler = (h) => (typeof h === 'function' ? h : typeof h?.fetch === 'function' ? (req, ctx) => h.fetch(req, ctx) : null)
 
 export const PROVIDER_LIMIT_DEFAULTS = Object.freeze({
@@ -24,6 +29,18 @@ export const PROVIDER_LIMIT_DEFAULTS = Object.freeze({
   maxResponseBytes: 8 * 1024 * 1024,
   handlerTimeoutMs: 30_000,
   bodyWaitMs: 10_000,
+  /** Longest wait for the next chunk of a request body, ms (the handler is not being waited for: a slow origin is backpressure, not idleness). */
+  bodyIdleMs: 10_000,
+  /** Whole request that carries a body, ms: the handler's deadline is the longer of this and `handlerTimeoutMs`. */
+  uploadTimeoutMs: 300_000,
+  /** Requests with a body being taken on one link at once. */
+  maxUploads: 4,
+  /** A body held whole where the runtime cannot stream one to the handler (some browsers), bytes: 8 MiB (the cap is lower than the streamed 32 MiB because it costs memory; 1 MiB would refuse ordinary uploads). */
+  maxHeldBodyBytes: 8 * 1024 * 1024,
+  /** An upload that keeps going must keep moving: after this grace ms, in each window of this many ms spent waiting on the link, at least this many bytes per second. */
+  uploadGraceMs: 30_000,
+  uploadProgressMs: 10_000,
+  uploadMinBytesPerSec: 1024,
   maxHeaderCount: 64,
   maxHeaderBytes: 16 * 1024,
   maxTargetLength: 2048,
@@ -73,10 +90,19 @@ function deferred() {
  * @param {string} [opts.protocol='http']
  * @returns {{ stop(): void, stats(): object }}
  */
-export function serveHttpOnMesh(service, handler, { allowFrom, limits: limitOptions, sign, verifyRequest, node, linkIdentity, protocol = HTTP_PROTOCOL, onLog, services } = {}) {
+export function serveHttpOnMesh(service, handler, { allowFrom, limits: limitOptions, sign, verifyRequest, node, linkIdentity, protocol = HTTP_PROTOCOL, onLog, services, methods, maxBodyBytes, versions = HTTP_VERSIONS } = {}) {
   const api = service && typeof service === 'object' ? (service.api ?? service) : null
   if (typeof api?.serveProtocol !== 'function') throw new TypeError('serveHttpOnMesh: the first argument is a mesh service with serveProtocol (createMeshProtocolService)')
+  if (!Array.isArray(versions) || !versions.length || !versions.every((v) => HTTP_VERSIONS.includes(v))) throw new TypeError(`serveHttpOnMesh: versions must be a non-empty list drawn from ${HTTP_VERSIONS.join(', ')}`)
+  // What each handler accepts: methods (every method by default; `methods` narrows) and a body cap (finite by default; `Infinity` only by choice).
+  const policyOf = (m, max, who, inherit) => {
+    const bytes = max === undefined ? (inherit?.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES) : max
+    if (bytes !== Infinity && (!Number.isSafeInteger(bytes) || bytes <= 0)) throw new TypeError(`${who}: maxBodyBytes must be a positive integer (or Infinity, to lift the cap)`)
+    return m === undefined && inherit ? { ...inherit, maxBodyBytes: bytes } : { methods: parseMethodPolicy(m === undefined ? '*' : m, who), explicit: m !== undefined, maxBodyBytes: bytes }
+  }
+  const defaultPolicy = policyOf(methods, maxBodyBytes, 'serveHttpOnMesh')
   let named = null // name -> handler; null when this pod declares no services
+  const policies = new Map() // service name -> policy
   if (services !== undefined) {
     if (!services || typeof services !== 'object' || Array.isArray(services)) throw new TypeError('serveHttpOnMesh: services must be an object of name to handler')
     const entries = Object.entries(services)
@@ -87,6 +113,7 @@ export function serveHttpOnMesh(service, handler, { allowFrom, limits: limitOpti
       const f = asHandler(h)
       if (!f) throw new TypeError(`serveHttpOnMesh: the service ${name} needs a function or { fetch }`)
       named.set(name, f)
+      policies.set(name, typeof h === 'object' && h ? policyOf(h.methods, h.maxBodyBytes, `serveHttpOnMesh: service ${name}`, defaultPolicy) : defaultPolicy)
     }
   }
   const fn = handler === null && named ? null : asHandler(handler)
@@ -132,9 +159,19 @@ export function serveHttpOnMesh(service, handler, { allowFrom, limits: limitOpti
     channels.add(channel)
     if (open === null) first.then((ok) => { if (ok) open = true; else refuse() })
     // One cap per layer, for both directions: the larger of the two. The request body's own cap is enforced where it is read.
-    const streams = createStreamLayer(channel, { maxStreams: limits.maxInflight * 2, maxStreamBytes: Math.max(limits.maxRequestBodyBytes, limits.maxResponseBytes) })
+    const streaming = version >= STREAMING_VERSION
+    // A body is held whole (not streamed to the handler) for a signed request, and where the runtime cannot build a Request from a stream.
+    const holdsBody = () => streaming && (!!verifyRequest || !streamBodiesWork())
+    const heldCapOf = (p) => Math.min(p.maxBodyBytes, verifyRequest ? limits.maxRequestBodyBytes : limits.maxHeldBodyBytes)
+    const uploadsAllowed = () => (holdsBody() ? Math.min(limits.maxUploads, MAX_HELD_UPLOADS) : limits.maxUploads)
+    const largestBody = Math.max(...[defaultPolicy, ...policies.values()].map((p) => p.maxBodyBytes))
+    const streams = createStreamLayer(channel, {
+      maxStreams: limits.maxInflight * 2,
+      maxStreamBytes: Math.min(Number.MAX_SAFE_INTEGER, Math.max(streaming ? largestBody : limits.maxRequestBodyBytes, limits.maxResponseBytes)),
+    })
     const bodies = new Map() // rid -> { reader } | { waiter }
     let inflight = 0
+    let uploads = 0 // requests with a body being taken on this link
 
     streams.onStream((reader, { meta }) => {
       if (open === false) throw new IngressError(403, 'forbidden', 'not served')
@@ -169,6 +206,18 @@ export function serveHttpOnMesh(service, handler, { allowFrom, limits: limitOpti
       })
     }
 
+    // Version 2 only: what this pod accepts, per service. An ingress that did not offer version 2 never asks, and a pod that
+    // negotiated version 1 does not answer it (an older pod answers "unknown method", which an ingress reads as version 1).
+    if (streaming) {
+      // What is held whole (a signed request, a runtime that cannot build a Request from a stream) has its own, lower cap and fewer
+      // concurrent uploads: a held body costs memory a streamed one does not.
+      const capsOf = (p) => { const n = holdsBody() ? heldCapOf(p) : p.maxBodyBytes; return { methods: p.methods.all ? '*' : p.methods.list, maxBodyBytes: n === Infinity ? null : n } }
+      channel.onRequest(CAPABILITIES_METHOD, async () => {
+        if (open === false || (await decide(peer, context)) !== true) { counters.refused += 1; throw new MeshChannelError(ChannelErrorCode.UNAUTHORIZED, 'not-authorized', 'not served') }
+        return { default: fn ? capsOf(defaultPolicy) : null, services: Object.fromEntries([...policies].map(([name, p]) => [name, capsOf(p)])), maxUploads: uploadsAllowed() }
+      })
+    }
+
     channel.onRequest(FETCH_METHOD, async (params, ctx) => {
       if (open === false) { counters.refused += 1; throw new MeshChannelError(ChannelErrorCode.UNAUTHORIZED, 'not-authorized', 'not served') }
       // Told before anything is read or run: the ingress answers the visitor 503 `provider-stopping` and the handler never sees it.
@@ -182,29 +231,51 @@ export function serveHttpOnMesh(service, handler, { allowFrom, limits: limitOpti
       }
       if (inflight >= limits.maxInflight) throw new MeshChannelError(ChannelErrorCode.BUSY, 'busy', 'too many requests in flight')
       let head
-      try { head = validateRequestHead(params, limits) } catch (e) { counters.errors += 1; throw asChannelError(e) }
+      try { head = validateRequestHead(params, limits, { version }) } catch (e) { counters.errors += 1; throw asChannelError(e) }
       // A service the pod did not declare is never served, whatever the ingress says; with none named, the default handler.
       const target = head.service === undefined ? fn : named?.get(head.service)
       if (!target) { counters.refused += 1; throw new MeshChannelError(ChannelErrorCode.INVALID, 'unknown-service', 'this pod serves no such service') }
+      // This pod's own word on methods and bodies, whatever the ingress was told: checked before a byte of the body is read.
+      const policy = head.service === undefined ? defaultPolicy : policies.get(head.service) ?? defaultPolicy
+      if (streaming ? !(policy.methods.all || policy.methods.list.includes(head.method)) : policy.explicit && !(policy.methods.all || policy.methods.list.includes(head.method))) {
+        counters.refused += 1
+        throw new MeshChannelError(ChannelErrorCode.UNSUPPORTED, 'method-not-allowed', 'this pod does not serve that method')
+      }
+      // Version 2 streams the body (a signed request is the exception: its digest needs the whole body, so it is buffered, bounded
+      // by the same cap the older version has). Version 1 reads it whole, as it always did.
+      const buffered = !streaming || holdsBody()
+      const bodyCap = !streaming ? limits.maxRequestBodyBytes : buffered ? heldCapOf(policy) : policy.maxBodyBytes
+      if (head.body && streaming && head.length !== undefined && head.length > bodyCap) {
+        counters.refused += 1
+        throw new MeshChannelError(ChannelErrorCode.INVALID, 'body-too-large', 'the request body is larger than this pod takes')
+      }
+      const counted = head.body && streaming
+      if (counted && uploads >= uploadsAllowed()) { counters.refused += 1; throw new MeshChannelError(ChannelErrorCode.BUSY, 'uploads-busy', 'too many uploads on this link') }
+      if (counted) uploads += 1
       inflight += 1
       counters.requests += 1
       counters.inflight += 1
       const ac = new AbortController()
       const onCancel = () => ac.abort(ctx.signal.reason)
       ctx.signal?.addEventListener('abort', onCancel, { once: true })
-      const timer = unref(setTimeout(() => ac.abort(new Error('handler deadline exceeded')), limits.handlerTimeoutMs))
+      const timer = unref(setTimeout(() => ac.abort(new Error('handler deadline exceeded')), counted ? Math.max(limits.handlerTimeoutMs, limits.uploadTimeoutMs) : limits.handlerTimeoutMs))
       let handedOff = false
+      const guard = { failure: null, reader: null } // a request body that broke a bound, and the reader to stop when the request is over
       const finish = () => {
         clearTimeout(timer)
         ctx.signal?.removeEventListener('abort', onCancel)
         const had = bodies.get(head.rid)
         if (had) { clearTimeout(had.timer); bodies.delete(head.rid) }
+        // The answer is over: whatever of the upload the handler did not read is not wanted, and the sender is told to stop.
+        guard.stopMonitor?.()
+        guard.reader?.cancel('request finished').catch(() => {})
+        if (counted) uploads -= 1
         inflight -= 1
         counters.inflight -= 1
         for (const listener of [...idleListeners]) listener()
       }
       try {
-        const { request, body: bodyBytes } = await buildRequest(head, ac, claimBody, limits.maxRequestBodyBytes, counters)
+        const { request, body: bodyBytes } = await buildRequest(head, ac, claimBody, { cap: bodyCap, streaming: streaming && !buffered, buffered: streaming && buffered, idleMs: limits.bodyIdleMs, counters, guard, progress: { graceMs: limits.uploadGraceMs, windowMs: limits.uploadProgressMs, minBytesPerSec: limits.uploadMinBytesPerSec } })
         if (verifyRequest) {
           const bytes = signedRequestBytes({
             rid: head.rid, nonce: head.nonce, host: head.host, method: head.method, target: head.target, headers: head.headers, client: head.client,
@@ -225,6 +296,8 @@ export function serveHttpOnMesh(service, handler, { allowFrom, limits: limitOpti
           }
         }
         const response = await target(request, { peer, signal: ac.signal, client: head.client, ...(head.service === undefined ? {} : { service: head.service }) })
+        // A request body that broke a bound is the answer, whatever the handler made of it (413, 408, 400).
+        if (guard.failure) throw guard.failure
         if (response && typeof response === 'object' && DECLINED.has(response)) {
           // "Not me, try another": nothing of the response is sent, and no body was produced.
           counters.declined += 1
@@ -260,7 +333,7 @@ export function serveHttpOnMesh(service, handler, { allowFrom, limits: limitOpti
       } catch (e) {
         counters.errors += 1
         log('http:handler-failed', { peer, error: e?.message })
-        throw asChannelError(e)
+        throw asChannelError(guard.failure ?? e)
       } finally {
         if (!handedOff) finish()
       }
@@ -269,7 +342,7 @@ export function serveHttpOnMesh(service, handler, { allowFrom, limits: limitOpti
     channel.onClose(() => { streams.close(); channels.delete(channel); for (const b of bodies.values()) clearTimeout(b.timer) })
   }
 
-  const unserve = api.serveProtocol(protocol, accept, { versions: [...HTTP_VERSIONS] })
+  const unserve = api.serveProtocol(protocol, accept, { versions: [...versions] })
   /** Resolves when no request is in flight, or after `ms`. */
   const drained = (ms) => new Promise((resolve) => {
     let timer
@@ -309,23 +382,106 @@ export function serveHttpOnMesh(service, handler, { allowFrom, limits: limitOpti
   }
 }
 
-async function buildRequest(head, ac, claimBody, maxBytes, counters) {
+async function buildRequest(head, ac, claimBody, { cap, streaming, buffered, idleMs, counters, guard, progress }) {
   const headers = new Headers()
   for (const [name, value] of head.headers) headers.append(name, value)
   if (head.client) headers.set('x-forwarded-for', head.client)
+  const url = `http://${head.host}${head.target}`
+  const init = { method: head.method, headers, signal: ac.signal, redirect: 'manual' }
   let body
   if (head.body) {
     if (head.method === 'GET' || head.method === 'HEAD') throw new IngressError(400, 'body-on-get', 'a body on a method that has none')
     const reader = await claimBody(head.rid, ac.signal)
-    // Read whole, bounded: a handler gets an ordinary Request body. (A ReadableStream as a Request body is not
-    // supported by every browser, and a page is the usual provider.) One that outgrows the cap stops the sender.
-    try { body = await reader.bytes({ maxBytes }) } catch (e) {
-      if (e?.reason === 'stream-too-large') throw new IngressError(413, 'body-too-large', 'the request body is larger than this provider takes')
-      throw e
+    guard.reader = reader
+    if (!streaming && !buffered) {
+      // Version 1: read whole, bounded; a handler gets an ordinary Request body. One that outgrows the cap stops the sender.
+      try { body = await reader.bytes({ maxBytes: cap }) } catch (e) {
+        if (e?.reason === 'stream-too-large') throw new IngressError(413, 'body-too-large', 'the request body is larger than this provider takes')
+        throw e
+      }
+      counters.requestBytes += body.byteLength
+    } else {
+      const stream = guardedBody(reader, { cap, idleMs, length: head.length, counters, guard, progress })
+      if (head.length !== undefined) headers.set('content-length', String(head.length))
+      if (streaming && streamBodiesWork()) {
+        // The handler's Request body is the stream itself, read as the handler asks for it. A runtime that cannot build a Request
+        // from a stream (some browsers) gets the same bytes whole, bounded by the same cap.
+        try { return { request: new Request(url, { ...init, body: stream, duplex: 'half' }), body: undefined } } catch (e) { if (!(e instanceof TypeError)) throw e }
+      }
+      try { body = new Uint8Array(await new Response(stream).arrayBuffer()) } catch (e) { throw guard.failure ?? e }
     }
-    counters.requestBytes += body.byteLength
   }
-  return { request: new Request(`http://${head.host}${head.target}`, { method: head.method, headers, body, signal: ac.signal, redirect: 'manual' }), body }
+  return { request: new Request(url, { ...init, body }), body }
+}
+
+let streamBodies
+/**
+ * Can this runtime build a `Request` whose body is a `ReadableStream`? Some browsers throw; some quietly turn the stream into the
+ * text "[object ReadableStream]" (and add a `Content-Type: text/plain`), which is worse. The standard probe: a runtime that really
+ * takes the stream reads `duplex` and adds no content type. Asked once.
+ */
+export function streamBodiesWork() {
+  if (streamBodies === undefined) {
+    try {
+      let duplexRead = false
+      const probe = new Request('http://probe.invalid/', { method: 'POST', body: new ReadableStream(), get duplex() { duplexRead = true; return 'half' } })
+      streamBodies = duplexRead && !probe.headers.has('content-type')
+    } catch { streamBodies = false }
+  }
+  return streamBodies
+}
+
+/** `promise`, or `make()` if it has not settled within `ms`. */
+function within(promise, ms, make) {
+  let timer
+  const guarded = new Promise((_, reject) => { timer = unref(setTimeout(() => reject(make()), ms)) })
+  return Promise.race([promise, guarded]).finally(() => clearTimeout(timer))
+}
+
+/**
+ * The request body as a web stream, pulled only when the handler reads: a slow origin slows the sender (no read-ahead beyond
+ * the stream layer's window). Bounded in bytes, in idle time between chunks (waiting on the link, never on the handler) and in
+ * length against what the head declared. A bound that breaks is recorded in `guard.failure` (it becomes the answer) and stops
+ * the sender.
+ */
+function guardedBody(reader, { cap, idleMs, length, counters, guard, progress }) {
+  let total = 0
+  let ctl = null
+  const fail = (controller, e) => {
+    monitor.stop()
+    guard.failure ??= e
+    reader.cancel(e.reason).catch(() => {})
+    try { controller.error(e) } catch { /* already closed */ }
+  }
+  // The sender must keep moving (a trickle is cut); only the time spent waiting on the link counts, never a slow handler.
+  const monitor = createProgressMonitor({ ...progress, onStall: () => { if (ctl && !guard.failure) fail(ctl, new IngressError(408, 'body-timeout', 'the request body is arriving too slowly')) } })
+  guard.stopMonitor = monitor.stop
+  return new ReadableStream({
+    start(controller) { ctl = controller },
+    async pull(controller) {
+      let chunk
+      monitor.waiting()
+      try { chunk = await within(reader.read(), idleMs, () => new IngressError(408, 'body-timeout', 'the request body stalled')) } catch (e) {
+        if (e instanceof IngressError) return fail(controller, e)
+        if (e?.reason === 'stream-too-large') return fail(controller, new IngressError(413, 'body-too-large', 'the request body is larger than this provider takes'))
+        try { controller.error(e) } catch { /* already closed */ }
+        return
+      }
+      monitor.got(chunk.done ? 0 : chunk.value.byteLength)
+      if (guard.failure) return
+      if (chunk.done) {
+        monitor.stop()
+        if (length !== undefined && total !== length) return fail(controller, new IngressError(400, 'bad-framing', 'the body is not the length that was declared'))
+        controller.close()
+        return
+      }
+      total += chunk.value.byteLength
+      if (total > cap || (length !== undefined && total > length)) return fail(controller, total > cap ? new IngressError(413, 'body-too-large', 'the request body is larger than this provider takes') : new IngressError(400, 'bad-framing', 'the body is longer than was declared'))
+      counters.requestBytes += chunk.value.byteLength
+      controller.enqueue(chunk.value)
+    },
+    cancel(reason) { monitor.stop(); reader.cancel(reason).catch(() => {}) },
+  }, { highWaterMark: 0 })
 }
 
 const DECLINED = new WeakSet()

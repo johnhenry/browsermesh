@@ -9,7 +9,7 @@
  * This entry imports no `node:` module (a test asserts it).
  */
 export { createMeshIngress } from './ingress.mjs'
-export { serveHttpOnMesh, fromSiteHandler, declineRequest, PROVIDER_LIMIT_DEFAULTS } from './provider.mjs'
+export { serveHttpOnMesh, fromSiteHandler, declineRequest, PROVIDER_LIMIT_DEFAULTS, DEFAULT_MAX_BODY_BYTES } from './provider.mjs'
 export { requireLinkKey, nodeLinkIdentity, LinkKeyRefusal, LINK_KEY_REFUSALS, PEER_VERIFIED } from './peer-identity.mjs'
 export {
   NAME_DENY_DEFAULTS, NAMES_PROTOCOL, NAMES_VERSIONS, NameRefusal, checkLabel, checkService, createNameTable, openNameClient, registryAllow, serveIngressNames,

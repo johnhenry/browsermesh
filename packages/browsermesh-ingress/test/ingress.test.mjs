@@ -115,8 +115,8 @@ describe('what the ingress refuses before any provider is involved', () => {
     assert.throws(() => createMeshIngress({ service: pods.i, resolve: () => null, methods: ['CONNECT'] }), /never served/)
   })
 
-  it('serves GET and HEAD only by default: others are 405 with Allow', async () => {
-    const t = await rig()
+  it('serves GET and HEAD only when narrowed to them: others are 405 with Allow', async () => {
+    const t = await rig({ ingress: { methods: ['GET', 'HEAD'] } })
     for (const method of ['POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS']) {
       const res = await t.get('/', { method, body: method === 'OPTIONS' ? undefined : 'x' })
       assert.equal(res.status, 405, method)
@@ -197,8 +197,8 @@ describe('what the ingress refuses before any provider is involved', () => {
     if (res instanceof Response) assert.equal(res.status, 400)
   })
 
-  it('the request body cap is 64 KiB by default: a declared length over it is refused unread, a longer stream is cut', async () => {
-    const t = await rig({ ingress: { methods: ['GET', 'POST'] } })
+  it('the request body cap: a declared length over it is refused unread, a longer stream is cut', async () => {
+    const t = await rig({ ingress: { methods: ['GET', 'POST'], limits: { maxRequestBodyBytes: 64 * 1024 } }, handler: async (request) => { await request.arrayBuffer(); return new Response('ok') } })
     assert.equal((await t.get('/', { method: 'POST', body: new Uint8Array(64 * 1024) })).status, 200)
     const over = await t.get('/', { method: 'POST', body: new Uint8Array(64 * 1024 + 1) })
     assert.equal(over.status, 413)
@@ -210,13 +210,13 @@ describe('what the ingress refuses before any provider is involved', () => {
   })
 
   it('limits.maxRequestBodyBytes moves the cap', async () => {
-    const t = await rig({ ingress: { methods: ['GET', 'POST'], limits: { maxRequestBodyBytes: 10 } } })
+    const t = await rig({ ingress: { methods: ['GET', 'POST'], limits: { maxRequestBodyBytes: 10 } }, handler: async (request) => { await request.arrayBuffer(); return new Response('ok') } })
     assert.equal((await t.get('/', { method: 'POST', body: 'x'.repeat(10) })).status, 200)
     assert.equal((await t.get('/', { method: 'POST', body: 'x'.repeat(11) })).status, 413)
   })
 
   it('a slow request body is a 408 once it stalls', async () => {
-    const t = await rig({ ingress: { methods: ['GET', 'POST'], limits: { bodyIdleMs: 30 } } })
+    const t = await rig({ ingress: { methods: ['GET', 'POST'], limits: { bodyIdleMs: 30 } }, handler: async (request) => { await request.arrayBuffer(); return new Response('ok') } })
     const stalls = new ReadableStream({ start(c) { c.enqueue(new Uint8Array(4)) } /* then nothing */ })
     const res = await t.get('/', { method: 'POST', body: stalls, duplex: 'half' })
     assert.equal(res.status, 408)
@@ -485,7 +485,7 @@ describe('audit and stats', () => {
   })
 
   it('stats count what happened', async () => {
-    const t = await rig()
+    const t = await rig({ ingress: { methods: ['GET', 'HEAD'] } })
     await (await t.get('/')).text()
     await t.get('/', { method: 'DELETE' })
     const s = t.mesh.stats()

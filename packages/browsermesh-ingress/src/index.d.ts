@@ -86,21 +86,50 @@ export interface ProviderOptions {
    * which finds the name in `context.service`. A pod that declares nothing is never sent a service name. With `services`, the
    * handler argument may be `null` (no default: a route with no service is refused).
    */
-  services?: Record<string, Handler | { fetch: Handler }>
+  services?: Record<string, Handler | { fetch: Handler; methods?: MethodPolicy; maxBodyBytes?: number }>
+  /**
+   * The methods this pod serves: `'*'` (the default: every RFC 9110 method token, never CONNECT, TRACE or TRACK) or a list that
+   * NARROWS it, for example `['GET', 'HEAD']`. This pod's own word: an ingress cannot widen it. For a service it overrides this.
+   */
+  methods?: MethodPolicy
+  /** The request body this pod takes, in bytes, streamed to the handler (default 32 MiB; `Infinity` lifts it). For a service it overrides this. */
+  maxBodyBytes?: number
+  /** Protocol `http` versions this pod speaks (default `[1, 2]`; `[1]` behaves as a pod that predates streaming: GET and HEAD, bodies held whole). */
+  versions?: number[]
   protocol?: string
   onLog?: (event: string, data: object) => void
 }
 
+/** `'*'` is every method token this package carries; a list names the ones it does. */
+export type MethodPolicy = '*' | string[]
+
 export const PROVIDER_LIMIT_DEFAULTS: Readonly<{
   maxInflight: number
+  /** A request body this pod must hold whole (a signed request, a link that negotiated version 1), bytes. */
   maxRequestBodyBytes: number
   maxResponseBytes: number
   handlerTimeoutMs: number
   bodyWaitMs: number
+  /** Longest wait for the next chunk of a request body, ms. */
+  bodyIdleMs: number
+  /** Whole request that carries a body, ms (the handler's deadline is the longer of this and `handlerTimeoutMs`). */
+  uploadTimeoutMs: number
+  /** A body held whole where the runtime cannot stream one to the handler (some browsers), bytes (8 MiB); such a pod takes at most 2 uploads at once. */
+  maxHeldBodyBytes: number
+  /** The minimum-progress rule for an upload: after this grace (30 s) ... */
+  uploadGraceMs: number
+  /** ... in each window of this many ms (10 s) spent waiting on the sender ... */
+  uploadProgressMs: number
+  /** ... at least this many bytes per second (1024) must arrive, or the request ends 408. */
+  uploadMinBytesPerSec: number
+  /** Requests with a body being taken on one link at once. */
+  maxUploads: number
   maxHeaderCount: number
   maxHeaderBytes: number
   maxTargetLength: number
 }>
+/** What a pod takes as a request body unless it says otherwise: 32 MiB. */
+export const DEFAULT_MAX_BODY_BYTES: number
 
 export type Handler = (request: Request, context: { peer: string; signal: AbortSignal; client: string | undefined; service?: string }) => Response | Promise<Response>
 
@@ -147,7 +176,14 @@ export interface IngressOptions {
   authorize?: (request: Request, target: IngressMapping) => boolean | Promise<boolean>
   deny?: (request: Request) => Response | boolean | null | Promise<Response | boolean | null>
   limits?: Partial<typeof INGRESS_LIMIT_DEFAULTS>
-  methods?: string[]
+  /**
+   * The methods this process carries: `'*'` (the default: every method token, never CONNECT, TRACE or TRACK) or a list that
+   * NARROWS it. A pod that has not upgraded (protocol version 1) is sent GET and HEAD only (or, for a list written here, the
+   * standard methods in it, with the body held whole).
+   */
+  methods?: MethodPolicy
+  /** Protocol `http` versions offered (default `[2, 1]`; `[1]` behaves as an ingress that predates streaming). */
+  versions?: number[]
   forwardHeaders?: string[]
   exposeHeaders?: string[]
   forwardClientAddress?: boolean
@@ -159,6 +195,10 @@ export interface IngressOptions {
 
 export interface MeshIngress {
   handle(request: Request, info?: { clientAddress?: string }): Promise<Response>
+  /** The `Allow` header of this ingress's own 405 (what it carries). */
+  allowHeader(): string
+  /** The bounds in force. */
+  readonly limits: Readonly<Record<string, number | { limit: number; windowMs: number }>>
   /**
    * Tell the ingress a pod is about to be wanted: it is dialled now and, with `persist` (the default), kept dialled; a request for it
    * that arrives while the link is not up waits up to `graceMs` (default `limits.linkWaitMs`, 5 s) and never past its own deadline.
@@ -229,6 +269,14 @@ export function openNameClient(service: object, ingressPodId: string, options?: 
 
 export function createMeshIngress(options: IngressOptions): MeshIngress
 
+/**
+ * Every bound, with its default. `maxRequestBodyBytes` (32 MiB, `Infinity` only by choice) is what is streamed for one request;
+ * `maxBufferedBodyBytes` (1 MiB) is what is held whole for an older provider, a signed request or a request that `retry` may repeat;
+ * `uploadTimeoutMs` (5 min) is the whole-request deadline of a request with a body (`timeoutMs`, 30 s, is for one without);
+ * `bodyIdleMs` (10 s) is the longest wait for the next chunk from the client; `maxUploadsPerProvider` (4) caps requests with a body
+ * in flight to one pod and `maxUploadsPerClient` (2) those of one client address; `uploadGraceMs` (30 s), `uploadProgressMs` (10 s)
+ * and `uploadMinBytesPerSec` (1024) are the minimum-progress rule that cuts a trickle.
+ */
 export const INGRESS_LIMIT_DEFAULTS: Readonly<Record<string, number | Readonly<{ limit: number; windowMs: number }>>>
 export function parseBytes(text: string): number
 export function parseDuration(text: string): number
@@ -245,6 +293,7 @@ export const DEFAULT_CSP: string
 export const DEFAULT_FORWARD_REQUEST_HEADERS: readonly string[]
 export const DEFAULT_PASS_RESPONSE_HEADERS: readonly string[]
 export const HTTP_PROTOCOL: 'http'
+/** `[1, 2]`: version 1 is the seven standard methods with a body held whole; version 2 is any method token with a body streamed, and `capabilities`. */
 export const HTTP_VERSIONS: readonly number[]
 export function signedBytes(parts: { rid: number; nonce: string; host: string; method: string; target: string; status: number; headers: Array<[string, string]>; digest: string }): Uint8Array
 export function signedRequestBytes(parts: { rid: number; nonce: string; host: string; method: string; target: string; headers: Array<[string, string]>; client?: string; digest: string; service?: string }): Uint8Array
