@@ -4,7 +4,8 @@
 //
 //   verifier                                   peer
 //   hello (serial, epoch)       ------>
-//                               <------        hello
+//                               <------        hello   (sent again in answer to the peer's: the first can be lost on a link the
+//                                                        peer has not finished adopting)
 //   [peer's serial is higher]   need-descriptor ------>        (verify it, adopt it, never trust it)
 //                               <------        descriptor
 //                               <------        credential (or null, for the open-mode guest role)
@@ -174,6 +175,9 @@ export function createRealmVerifier({ pinnedId, store, registry, now, skew, trac
           if (st.peer) return refuse("unexpected-frame");
           if (f.id !== pinnedId) return refuse("wrong-realm");
           st.peer = f;
+          // Said again, in answer: the first hello can be sent before the peer's side of the link has a session to receive it
+          // (a WebRTC data channel the dialler has not finished adopting), and a prover waits for it. The prover ignores a repeat.
+          await send({ t: "realm:hello", id: pinnedId, serial: cur?.serial ?? 0, epoch: cur?.epoch ?? 0 });
           if (f.serial > (cur?.serial ?? 0)) {
             st.awaiting = true;
             await send({ t: "realm:need-descriptor", have: cur?.serial ?? 0 });

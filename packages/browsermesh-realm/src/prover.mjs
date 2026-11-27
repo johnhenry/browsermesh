@@ -77,8 +77,9 @@ export function createRealmProver({ pinnedId, store, credential = null, channel,
       const mine = cur?.serial ?? 0;
       switch (f.t) {
         case "realm:hello":
-          if (st.hello) return finish({ ok: false, reason: "unexpected-frame" });
           if (f.id !== pinnedId) return finish({ ok: false, reason: "wrong-realm" });
+          // The verifier says hello again in answer to ours (its first may have been lost): a repeat is ignored.
+          if (st.hello) return;
           st.hello = f;
           if (f.serial > mine) {
             st.asked = true;

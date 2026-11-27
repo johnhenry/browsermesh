@@ -411,6 +411,32 @@ describe("realm exchange: frames and abuse", () => {
     assert.deepEqual(p.got[0], { t: "realm:hello", id: w.r.id, serial: 4, epoch: 2 });
   });
 
+  it("the verifier answers the peer's hello with its own again (a first hello can be lost before the peer's session exists)", async () => {
+    const w = await world({ realm: { serial: 4, epoch: 2 } });
+    const p = w.raw(w.r.aliceKey);
+    await until(() => p.got.length >= 1);
+    p.hello({ serial: 4, epoch: 2 });
+    await until(() => p.got.filter((f) => f.t === "realm:hello").length >= 2);
+    assert.deepEqual(p.got.filter((f) => f.t === "realm:hello"), [
+      { t: "realm:hello", id: w.r.id, serial: 4, epoch: 2 }, { t: "realm:hello", id: w.r.id, serial: 4, epoch: 2 },
+    ]);
+  });
+
+  it("a prover that never saw the verifier's first hello still completes (the answer to its own hello carries it)", async () => {
+    const w = await world();
+    const wr = wire({ peerKey: w.r.aliceKey, log: w.log });
+    const send = wr.link.send;
+    let dropped = 0;
+    wr.link.send = (frame) => { if (frame.t === "realm:hello" && dropped++ === 0) return Promise.resolve(); return send(frame); };
+    const done = w.verifier.handler(wr.link);
+    const result = await createRealmProver({
+      pinnedId: w.r.id, store: await w.proverStore(), credential: await w.cred(), channel: wr.channel, now: () => w.clock.now, timeoutMs: 3000,
+    });
+    await done?.catch?.(() => {});
+    assert.equal(dropped >= 2, true);
+    assert.equal(result.ok, true, JSON.stringify(result));
+  });
+
   it("a hello for another realm ends the exchange (wrong-realm)", async () => {
     const w = await world();
     const p = w.raw(w.r.aliceKey);
