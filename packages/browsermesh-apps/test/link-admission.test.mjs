@@ -405,3 +405,77 @@ describe('createWshAdmissionAuthorize: fail closed against a transport that cann
     assert.equal(await oldTransportGrants({ podId: 'stranger' }), false)
   })
 })
+
+describe('link.send: the promise never rejects', () => {
+  const rejecting = (ch, err = new Error('the link closed')) => { ch.send = (f) => { ch.sent.push(f); return Promise.reject(err) } }
+
+  it('a handler that fires and forgets a send whose link then closes causes no unhandled rejection', async () => {
+    const unhandled = []
+    const onUnhandled = (reason) => unhandled.push(reason)
+    process.on('unhandledRejection', onUnhandled)
+    try {
+      const { admission, handled } = seam()
+      const ch = fakeChannel()
+      rejecting(ch)
+      await admission.admit(info(ch))
+      handled[0].send({ type: 'x:ack' })      // not awaited, not caught
+      ch.peerLeaves()
+      await tick(30)
+      assert.deepEqual(unhandled, [])
+    } finally { process.off('unhandledRejection', onUnhandled) }
+  })
+
+  it('resolves false when the transport rejects, or throws, at close time', async () => {
+    const { admission, handled } = seam()
+    const ch = fakeChannel()
+    rejecting(ch)
+    await admission.admit(info(ch))
+    assert.equal(await handled[0].send({ a: 1 }), false)
+    const ch2 = fakeChannel()
+    ch2.send = () => { throw new Error('closed under us') }
+    await admission.admit(info(ch2, 'peer-b'))
+    assert.equal(await handled[1].send({ a: 1 }), false)
+  })
+
+  it('resolves true when the transport accepted the frame, whether it returns a promise or not', async () => {
+    const { admission, handled } = seam()
+    const ch = fakeChannel()
+    await admission.admit(info(ch))
+    assert.equal(await handled[0].send({ a: 1 }), true, 'a non-promise channel.send')
+    const ch2 = fakeChannel()
+    ch2.send = async (f) => { ch2.sent.push(f) }
+    await admission.admit(info(ch2, 'peer-b'))
+    assert.equal(await handled[1].send({ a: 1 }), true)
+    assert.deepEqual(ch2.sent, [{ a: 1 }])
+  })
+
+  it('still throws synchronously for a programmer error: an oversize frame, or a send after promote()', async () => {
+    const { admission, handled } = seam({ maxFrameBytes: 64 })
+    const ch = fakeChannel()
+    await admission.admit(info(ch))
+    assert.throws(() => handled[0].send({ pad: 'x'.repeat(100) }), RangeError)
+    assert.equal(handled[0].promote(), true)
+    assert.throws(() => handled[0].send({ a: 1 }), /not restricted/)
+  })
+
+  it('a send after the deadline closed the link resolves false and throws nothing', async () => {
+    const { admission, handled } = seam({ deadlineMs: 20 })
+    const ch = fakeChannel()
+    await admission.admit(info(ch))
+    await waitFor(() => admission.stats().deadlines === 1, 2000, 'the deadline')
+    assert.equal(await handled[0].send({ a: 1 }), false)
+    assert.deepEqual(ch.sent, [])
+  })
+
+  it('a send after the peer closed, or after the handler closed it, resolves false', async () => {
+    const { admission, handled } = seam()
+    const ch = fakeChannel()
+    await admission.admit(info(ch))
+    ch.peerLeaves()
+    assert.equal(await handled[0].send({ a: 1 }), false)
+    const ch2 = fakeChannel()
+    await admission.admit(info(ch2, 'peer-b'))
+    handled[1].close('done')
+    assert.equal(await handled[1].send({ a: 1 }), false)
+  })
+})
