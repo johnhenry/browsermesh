@@ -21,7 +21,7 @@ program can notice, and how to adopt it.
   link layer authenticates with the pod's own key and has no key store to sync.
 - `@johnhenry/wsh` is an **optional peer dependency** of
   `browsermesh-transport` (declared as `*`; links need 0.45 or later, the services 0.50 or later; the link tests were run on
-  0.45.0 to 0.48.0 when the link was added, and the repository's suites since on up to 0.59.0; see
+  0.45.0 to 0.48.0 when the link was added, and the repository's suites since on up to 0.62.1; see
   [the version table](wsh-and-browsermesh.md#versions)). Nothing installs or loads it for you unless you use a wsh link.
 - The shared pod `TransportAdapter` conformance helper
   (`browsermesh-pod/test/helpers/transport-conformance.mjs`, not published) has
