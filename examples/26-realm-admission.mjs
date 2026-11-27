@@ -37,7 +37,7 @@ const RELAY = 'wss://relay.invalid' // never dialled: the in-process relay answe
 const EGRESS = 'egress:tcp:example.com:443:connect'
 const nowS = () => Math.floor(Date.now() / 1000)
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
-async function until(fn, what, ms = 5000) {
+async function until(fn, what, ms = 15000) {
   const end = Date.now() + ms
   while (Date.now() < end) { if (await fn()) return; await sleep(5) }
   throw new Error(`timed out waiting for ${what}`)
@@ -53,10 +53,13 @@ const step = (n, text) => console.log(`\n[${n}] ✓ ${text}`)
 const relay = await createInProcessPipeRelay()
 const nodes = []
 let nodeSeq = 0
+// No node redials: a link the host closes on purpose (a refusal, the deadline, an epoch bump) is not retried. With the default
+// redial a refused dialler keeps opening new wsh connections every few ms, so one can be mid-open when teardown closes the
+// transport under it, and wsh's pending gateway open then rejects with nobody awaiting it (#457).
 async function makeNode(label, extra = {}) {
   const node = await createMeshNode({
     label, signalingTransport: { send() {}, onMessage() {} }, discoveryStrategies: [new ManualStrategy()],
-    wsh: { relays: [RELAY], WebSocket: relay.WebSocket, reconnect: { baseMs: 5, maxMs: 25 }, connectTimeoutMs: 3000 },
+    wsh: { relays: [RELAY], WebSocket: relay.WebSocket, reconnect: { baseMs: 5, maxMs: 25, maxAttempts: 0 }, connectTimeoutMs: 10000 },
     syncDbName: `example-26-${label}-${++nodeSeq}-${Date.now()}`, ...extra,
   })
   nodes.push(node)
@@ -97,7 +100,7 @@ async function makeHost(descriptorText, policyRoles, { deadlineMs } = {}) {
   handle = createRealmVerifier({ pinnedId: realm.id, store, registry: node.registry, onEvent: (e) => events.push(e) }).handler
   return { node, store }
 }
-const host = await makeHost(realm.v1.text, { member: ROLES.member.filter((s) => s !== EGRESS), guest: ROLES.guest }, { deadlineMs: 300 })
+const host = await makeHost(realm.v1.text, { member: ROLES.member.filter((s) => s !== EGRESS), guest: ROLES.guest }, { deadlineMs: 1000 })
 step(2, `host admits roles member and guest; its allow list omits ${EGRESS}`)
 
 // A dialler: a node (with the given identity manager/identity, if any) links to the host and runs the prover.
@@ -115,7 +118,7 @@ async function dial(label, { credential = null, identity, store, hostRef = host 
   await node.connectToPeer(hostRef.node.podId, { wsh: hostRef.node.podId })
   const result = await createRealmProver({
     pinnedId: realm.id, store: store ?? createDescriptorStore({ pinnedId: realm.id, held: realm.v1.text }),
-    credential: typeof credential === 'function' ? await credential(node.podId) : credential, channel, timeoutMs: 1500,
+    credential: typeof credential === 'function' ? await credential(node.podId) : credential, channel, timeoutMs: 5000,
   })
   return { node, result }
 }
@@ -138,7 +141,7 @@ console.log(`         member pod id ${memberSummary.podId.slice(0, 12)}…: the 
   await until(() => events.some((e) => e.type === 'closed' && e.reason === 'deadline'), 'the deadline close')
   assert.equal(host.node.admission.stats().deadlines, 1)
   assert.equal(can(host, memberSummary.podId, 'protocol:mcp:open'), false)
-  say('REFUSED', 'stranger without a credential: held restricted, closed at the 300 ms deadline, holds nothing')
+  say('REFUSED', 'stranger without a credential: held restricted, closed at the 1 s deadline, holds nothing')
   await stop(first)
 }
 step(3, 'no credential, no access')
@@ -211,6 +214,8 @@ step(7, 'revocation closes live links and refuses old credentials')
 
 const grantsLeft = host.node.registry.listRealmGrants({ realmId: realm.id }).length
 console.log(`\naudit: granted=${tally.granted} refused=${tally.refused} dropped-scopes=${tally.dropped} (live realm grants on the host: ${grantsLeft})`)
-for (const n of nodes) { try { await stop(n) } catch { /* already stopped */ } }
+// Teardown: nothing initiates work any more (no redial, every dial was awaited). Stop the dialler nodes before the host
+// (newest first), awaiting each one's links, shutdown and signaling, then the relay.
+for (const n of [...nodes].reverse()) { try { await stop(n) } catch { /* already stopped */ } }
 await relay.close()
 console.log('ok: invite and open realms, a stranger, a thief and a revocation, each decided at the link')

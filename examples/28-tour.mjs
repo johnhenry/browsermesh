@@ -69,10 +69,11 @@ try {
   const relay = await createInProcessPipeRelay()
   cleanups.push(() => relay.close())
   let seq = 0
+  // No node redials (see example 26): a refused stranger would keep opening wsh connections that teardown can catch mid-open (#457).
   const makeNode = async (label, extra = {}) => {
     const node = await createMeshNode({
       label, signalingTransport: { send() {}, onMessage() {} }, discoveryStrategies: [new ManualStrategy()],
-      wsh: { relays: [RELAY], WebSocket: relay.WebSocket, reconnect: { baseMs: 5, maxMs: 25 }, connectTimeoutMs: 3000 },
+      wsh: { relays: [RELAY], WebSocket: relay.WebSocket, reconnect: { baseMs: 5, maxMs: 25, maxAttempts: 0 }, connectTimeoutMs: 3000 },
       syncDbName: `tour-${label}-${++seq}-${Date.now()}`, ...extra,
     })
     cleanups.push(async () => { await node.wsh.links.close(); await node.shutdown(); await node.signaling.close() })
