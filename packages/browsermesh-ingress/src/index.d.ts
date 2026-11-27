@@ -122,6 +122,12 @@ export const PROVIDER_LIMIT_DEFAULTS: Readonly<{
   uploadProgressMs: number
   /** ... at least this many bytes per second (1024) must arrive, or the request ends 408. */
   uploadMinBytesPerSec: number
+  /** The fastest rate an upload is assumed able to go, bytes per second (256 MiB/s): a declared length that cannot be sent in the whole upload deadline at this rate is a 413 `upload-exceeds-deadline`. */
+  uploadMaxBytesPerSec: number
+  /** How long a request with a body waits for a free upload slot on the link before the 503, ms (2000; 0 turns the wait off). */
+  uploadQueueMs: number
+  /** How many may wait for an upload slot on one link (8; 0 turns the wait off). */
+  uploadQueueMax: number
   /** Requests with a body being taken on one link at once. */
   maxUploads: number
   maxHeaderCount: number
@@ -275,7 +281,9 @@ export function createMeshIngress(options: IngressOptions): MeshIngress
  * `uploadTimeoutMs` (5 min) is the whole-request deadline of a request with a body (`timeoutMs`, 30 s, is for one without);
  * `bodyIdleMs` (10 s) is the longest wait for the next chunk from the client; `maxUploadsPerProvider` (4) caps requests with a body
  * in flight to one pod and `maxUploadsPerClient` (2) those of one client address; `uploadGraceMs` (30 s), `uploadProgressMs` (10 s)
- * and `uploadMinBytesPerSec` (1024) are the minimum-progress rule that cuts a trickle.
+ * and `uploadMinBytesPerSec` (1024) are the minimum-progress rule that cuts a trickle (after the grace, an upload whose rest cannot arrive
+ * before the deadline at the observed rate is cut as well, 408 `upload-too-slow`); `uploadMaxBytesPerSec` (256 MiB/s) bounds a declared length
+ * against the deadline at the start; `uploadQueueMs` (2000) and `uploadQueueMax` (8) are the FIFO wait for an upload slot.
  */
 export const INGRESS_LIMIT_DEFAULTS: Readonly<Record<string, number | Readonly<{ limit: number; windowMs: number }>>>
 export function parseBytes(text: string): number

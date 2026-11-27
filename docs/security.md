@@ -929,7 +929,10 @@ Threat model, by what an attacker is and wants:
   `Transfer-Encoding` with `Content-Length`, a repeated or signed `Content-Length`, an obfuscated `Transfer-Encoding`, an
   absolute-form target, a `Host` with userinfo, a path, spaces or a second `Host`, and `Upgrade` (426, WebSocket is not
   bridged) are refused before the provider is asked; request body 32 MiB, streamed (413, refused unread when its length is
-declared), slow body (408), whole upload 5 min (504), 4 uploads in flight per pod link (503), a global in-flight cap
+declared), slow body (408), whole upload 5 min (504), an upload whose rest cannot arrive before that deadline at the rate it is arriving cut early (408
+  `upload-too-slow`, after a 30 s grace) and a declared length that cannot be sent in it even at 256 MiB/s refused unread (413
+  `upload-exceeds-deadline`), 4 uploads in flight per pod link with a FIFO wait of up to 8 requests for up to 2 s before the 503 (`provider-uploads`;
+  a client's queued uploads count against its cap of 2; each end applies all of this on its own), a global in-flight cap
   (64), per client (8) and per provider (16) in flight, per client and per provider rates, a connection cap and header
   timeouts on the listener. The client address is the socket's; `trustProxy` takes the entry the trusted proxy appended
   (the last `X-Forwarded-For` entry for one proxy), never one the client wrote. The Node listener parses only Node's `http.METHODS`: any other
