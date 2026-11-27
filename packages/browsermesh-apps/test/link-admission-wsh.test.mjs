@@ -88,7 +88,7 @@ describe('createMeshNode({ admission }) over wsh', () => {
     assert.equal(bob.admission.stats().restricted, 1)
   })
 
-  it('a handler\'s send that is still queued when the link ends rejects with WSH_CLOSED: the handler owns that rejection', async () => {
+  it('a handler\'s send that is still queued when the link ends resolves false: the seam owns the rejection, the handler never sees one', async () => {
     const env = await createInProcessPipeRelay()
     cleanups.push(() => env.close())
     const { admission, seen } = bobAdmission()
@@ -99,7 +99,9 @@ describe('createMeshNode({ admission }) over wsh', () => {
     await waitFor(() => seen.frames.length === 1, 4000, 'the handler gets the frame')
     const late = seen.links[0].send({ type: 'x:late' }) // the write is queued, not yet done
     seen.links[0].close('test')
-    await assert.rejects(late, (e) => e.code === 'WSH_CLOSED' && /closed \(test\)/.test(e.message))
+    // The transport rejects the queued write with WSH_CLOSED, but the seam's send() never rejects (#441): it resolves false. A
+    // handler that fires and forgets it cannot crash the host with an unhandled rejection.
+    assert.equal(await late, false)
   })
 
   it('promote() adopts it like any inbound wsh link: a session, data both ways', async () => {
