@@ -124,13 +124,19 @@ into one would mean buffering indefinitely.
 
 | Code | Meaning |
 | --- | --- |
-| 0 | ok |
+| 0 | ok (for `hosts`: at least one listed host answered; see below) |
 | 1 | generic failure (anything not listed below -- e.g. `EEXIST`, `EINVAL`, `EBUSY`) |
 | 2 | usage error (bad flags/args, caught before anything touches the mesh) |
 | 3 | `EACCES` -- not authorized for that verb on that host (or, over `--wsh-relay`, the host did not allow this identity to link: `WSH_REFUSED`) |
 | 4 | `ENOENT` -- no such pod (or, for `--spec`, no such file) |
 | 5 | `ELANE` / `ENOTSUP` -- the lane structurally can't do this verb, or this driver doesn't implement it |
 | 6 | `ETIMEDOUT` -- the host never answered within `--timeout` |
+
+`meshctl hosts` prints one entry per host and reports a failed host in its own entry (`error: { code, message }`), so a
+single refused or silent host does not hide the others. Its exit code says whether anything worked: **0 if at least one
+host answered; if every listed host failed, the exit code they share (3 if all were refusals such as `WSH_REFUSED`, 6 if
+all timed out, and so on), or 1 when they failed in different ways.** The document is printed either way. Before this
+rule `hosts` exited 0 even when every host refused, so a script that checked only the exit code missed "nothing worked".
 
 Every `POD_HOST_ERROR` code from `host-protocol.mjs` round-trips as
 `error.code` in the JSON document regardless of which exit code it maps

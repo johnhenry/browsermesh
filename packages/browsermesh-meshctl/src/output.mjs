@@ -63,6 +63,21 @@ export function exitCodeForError(code) {
   return ERROR_CODE_TO_EXIT[code] ?? EXIT_CODE.GENERIC
 }
 
+/**
+ * The exit code of `meshctl hosts`, which prints one entry per host (a failed host carries its own `error`) and so always
+ * prints an `ok` document. Exit 0 when at least one host answered; when EVERY listed host failed, the code they share
+ * (3 if all were refusals, 6 if all timed out, ...), or `GENERIC` when they failed in different ways. No hosts at all is
+ * not a failure here (the command is a usage error before it gets this far).
+ * @param {unknown} entries - `cmdHosts`'s result.
+ * @returns {number} An `EXIT_CODE` value.
+ */
+export function exitCodeForHosts(entries) {
+  if (!Array.isArray(entries) || entries.length === 0) return EXIT_CODE.OK
+  if (!entries.every((entry) => entry && entry.error)) return EXIT_CODE.OK
+  const codes = new Set(entries.map((entry) => exitCodeForError(entry.error.code)))
+  return codes.size === 1 ? [...codes][0] : EXIT_CODE.GENERIC
+}
+
 /** Thrown for bad argv -- caught by `cli.mjs` and reported as exit 2. */
 export class UsageError extends Error {
   /** @param {string} message */
