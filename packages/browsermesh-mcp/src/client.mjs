@@ -3,7 +3,7 @@
  * Transport an MCP client library can be pointed at.
  *
  *   const client = await connectMcpOnMesh(service, bobPodId)       // opens the protocol
- *   await client.initialize()
+ *   await client.initialize()                                       // modern first (server/discover), legacy initialize as the fallback
  *   const tools = await client.listTools()
  *   const result = await client.callTool('search', { q: 'x' }, { signal })   // result.untrusted === true
  *
@@ -17,8 +17,13 @@
  */
 import { assertProtocolChannel, MeshChannelError, ChannelErrorCode } from '@johnhenry/browsermesh-apps'
 import { MCP_PROTOCOL } from './scopes.mjs'
+import { MODERN_PROTOCOL_VERSION, META_VERSION, META_CLIENT_INFO, META_CLIENT_CAPABILITIES, META_SERVER_INFO, UNSUPPORTED_PROTOCOL_VERSION } from './modern.mjs'
 
-const PROTOCOL_VERSION = '2025-06-18'
+/** The legacy revision `initialize` asks for (any of wsh's is answered; this one is what earlier releases spoke). The modern revision is `MODERN_PROTOCOL_VERSION`. */
+const LEGACY_PROTOCOL_VERSION = '2025-06-18'
+const CLIENT_INFO = { name: '@johnhenry/browsermesh-mcp', version: '0' }
+/** A server that answers neither way is not waited for for long: the probe is a question with a known cheap answer. */
+const DEFAULT_PROBE_TIMEOUT_MS = 10_000
 export const MCP_ERROR_REASON = 'mcp-error'
 /** Same as the channel's own default for a request. */
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000
@@ -90,6 +95,12 @@ export function openMcpOnMesh(channel) {
   let nextId = 1
   let closed = false
   let transport = null
+  /** `'unknown'` until `initialize()` has decided; then `'modern'` (2026-07-28: stateless, `_meta` on every request) or `'legacy'`. */
+  let era = 'unknown'
+  let discovered = null
+  let listening = false
+  /** Resolves the wait of `initialize()` for the stream's acknowledgement. */
+  let acknowledged = null
 
   const send = (message) => channel.send(message)
   const endPending = (reason, message) => { for (const entry of [...pending.values()]) entry.reject(cancelled(reason, message)) }
@@ -99,9 +110,10 @@ export function openMcpOnMesh(channel) {
     if (typeof message.method === 'string') {
       // A request of the far side: this client answers none.
       if (Object.hasOwn(message, 'id')) { void send({ jsonrpc: '2.0', id: message.id, error: { code: ChannelErrorCode.METHOD_NOT_FOUND, message: `method not found: ${message.method}` } }).catch(() => {}); return }
-      // The only notifications an MCP tool server sends. Nothing else is listened for.
+      // The only notifications an MCP tool server sends (a tagged one comes from our `subscriptions/listen`). Nothing else is listened for.
       if (message.method === 'notifications/tools/list_changed') fire(hubs.changed)
       else if (message.method === 'notifications/message') fire(hubs.log, message.params)
+      else if (message.method === 'notifications/subscriptions/acknowledged') { acknowledged?.(); return }
       else return
       fire(hubs.message, message)
       return
@@ -113,6 +125,13 @@ export function openMcpOnMesh(channel) {
     } else fire(hubs.message, message) // an answer to something the transport sent
   })
   channel.onClose(() => { closed = true; endPending('channel-closed', 'the channel closed'); fire(hubs.close) })
+
+  /** Modern requests carry the version, who asks and what the client offers (nothing: this client answers no request of the server). Ours never override the caller's own `_meta` keys. */
+  const withMeta = (params) => {
+    const base = params ?? {}
+    if (era !== 'modern') return base
+    return { ...base, _meta: { [META_VERSION]: MODERN_PROTOCOL_VERSION, [META_CLIENT_INFO]: CLIENT_INFO, [META_CLIENT_CAPABILITIES]: {}, ...(base._meta ?? {}) } }
+  }
 
   // Every request is ended when the channel closes (by either side); the caller's signal cancels just that request.
   const request = (method, params, { signal, timeoutMs = method === 'tools/call' ? DEFAULT_CALL_TIMEOUT_MS : DEFAULT_REQUEST_TIMEOUT_MS } = {}) => {
@@ -127,15 +146,24 @@ export function openMcpOnMesh(channel) {
         done()
         reject(e)
         // The far side is told, so the tool's own signal fires.
-        if (tellFar && !closed) void send({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: id } }).catch(() => {})
+        if (tellFar && !closed) void send({ jsonrpc: '2.0', method: 'notifications/cancelled', params: withMeta({ requestId: id }) }).catch(() => {})
       }
       const onAbort = () => fail(cancelled('cancelled', 'request aborted'), true)
       pending.set(id, { resolve: (value) => { done(); resolve(value) }, reject: fail })
       signal?.addEventListener('abort', onAbort, { once: true })
       timer = setTimeout(() => fail(cancelled('timeout', `request ${method} timed out after ${timeoutMs}ms`), true), timeoutMs)
       timer.unref?.()
-      send({ jsonrpc: '2.0', id, method, params: params ?? {} }).catch((e) => fail(e))
+      send({ jsonrpc: '2.0', id, method, params: withMeta(params) }).catch((e) => fail(e))
     })
+  }
+
+  /** The modern change stream: `subscriptions/listen` for the tool list, open until the channel closes. Its answer is the server ending it. */
+  async function listen() {
+    if (listening || closed) return
+    listening = true
+    // A long-lived request: no timeout, ended with the channel.
+    await request('subscriptions/listen', { notifications: { toolsListChanged: true } }, { timeoutMs: 2 ** 31 - 1 }).catch(() => {})
+    listening = false
   }
 
   const client = {
@@ -146,9 +174,48 @@ export function openMcpOnMesh(channel) {
     notify: (method, params) => send({ jsonrpc: '2.0', method, ...(params !== undefined ? { params } : {}) }),
     _subscribe: subscribe,
     _send: send,
-    /** `initialize`, then `notifications/initialized` (which is what starts list-changed). */
-    async initialize({ signal } = {}) {
-      const result = await request('initialize', { protocolVersion: PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: '@johnhenry/browsermesh-mcp', version: '0' } }, { signal })
+    /** The era this client settled on (`'unknown'` before `initialize()`; a client that never calls it sends plain requests, which both eras' servers of this package accept). */
+    get era() { return era },
+    /**
+     * Settle the era, modern first. Asks `server/discover` (MCP 2026-07-28); a server that answers it is modern and the
+     * result, shaped like an `initialize` result (`protocolVersion`, `capabilities`, `serverInfo`, `instructions`) plus
+     * `supportedVersions`, is returned; every request after carries the per-request `_meta`, and tool changes are
+     * heard on a `subscriptions/listen` stream. A server that does not (any other error, or no answer in `probeTimeoutMs`)
+     * is legacy: `initialize`, then `notifications/initialized` (which is what starts list-changed there). `era` may be
+     * `'legacy'` to skip the probe or `'modern'` to refuse the fallback. Calling it again returns the settled answer.
+     * @param {{ signal?: AbortSignal, era?: 'auto' | 'modern' | 'legacy', probeTimeoutMs?: number }} [options]
+     */
+    async initialize({ signal, era: want = 'auto', probeTimeoutMs = DEFAULT_PROBE_TIMEOUT_MS } = {}) {
+      if (!['auto', 'modern', 'legacy'].includes(want)) throw new TypeError("era must be 'auto', 'modern' or 'legacy'")
+      if (era === 'modern' && discovered) return discovered
+      if (want !== 'legacy') {
+        try {
+          const found = await request('server/discover', { _meta: { [META_VERSION]: MODERN_PROTOCOL_VERSION, [META_CLIENT_INFO]: CLIENT_INFO, [META_CLIENT_CAPABILITIES]: {} } }, { signal, timeoutMs: probeTimeoutMs })
+          if (!Array.isArray(found?.supportedVersions) || !found.supportedVersions.includes(MODERN_PROTOCOL_VERSION)) throw mcpError({ code: UNSUPPORTED_PROTOCOL_VERSION, message: 'the peer does not speak MCP 2026-07-28', data: { supported: found?.supportedVersions } })
+          era = 'modern'
+          discovered = {
+            protocolVersion: MODERN_PROTOCOL_VERSION,
+            supportedVersions: found.supportedVersions,
+            capabilities: found.capabilities ?? {},
+            serverInfo: found._meta?.[META_SERVER_INFO] ?? null,
+            ...(typeof found.instructions === 'string' ? { instructions: found.instructions } : {}),
+          }
+          // Subscribed before `initialize()` returns, as the legacy handshake is: a tool registered right after it is heard. A server that never acknowledges is not waited for for long.
+          if (found.capabilities?.tools?.listChanged) {
+            const ack = new Promise((resolve) => { acknowledged = resolve })
+            void listen().catch(() => {})
+            await Promise.race([ack, new Promise((resolve) => { const t = setTimeout(resolve, 2000); t.unref?.() })])
+          }
+          return discovered
+        } catch (e) {
+          // The caller's own abort, and a closed channel, are not an answer about the peer's era.
+          if (signal?.aborted || closed) throw e
+          // A modern server that does not speak this version names the ones it does: that is not a legacy server, and this client has no other modern version.
+          if (want === 'modern' || e?.code === UNSUPPORTED_PROTOCOL_VERSION) throw e
+        }
+      }
+      era = 'legacy'
+      const result = await request('initialize', { protocolVersion: LEGACY_PROTOCOL_VERSION, capabilities: {}, clientInfo: CLIENT_INFO }, { signal })
       await client.notify('notifications/initialized')
       return result
     },

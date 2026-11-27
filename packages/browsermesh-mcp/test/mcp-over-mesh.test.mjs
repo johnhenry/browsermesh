@@ -388,7 +388,7 @@ test('closing the channel from the caller aborts what is running on the page', a
 test('closeSessions tells the caller why and ends its session', async () => {
   const w = await world()
   const client = await connectMcpOnMesh(w.aliceSvc, w.bob.podId)
-  await client.initialize()
+  await client.initialize({ era: 'legacy' }) // the teardown notice is a log message: only a legacy peer is sent one (see mcp-modern.test.mjs)
   const logs = []
   client.onLog((m) => logs.push(m))
   let closed = false

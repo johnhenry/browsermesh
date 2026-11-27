@@ -835,10 +835,17 @@ Threat model, by what an attacker is and wants:
   session, a call timeout (120 s) after which the tool's `signal` aborts; below
   them the channel's own message, window and in-flight bounds. Cancelling a call, or
   closing the channel, aborts the tool's `signal`.
+- **A caller that lies in the request's `_meta`.** MCP 2026-07-28 has every request declare a protocol version, its
+  client's name and its capabilities. Those are fields of a message written by the peer: nothing reads them for
+  authorization (the caller is the channel's verified peer; `permits`, the prompt and `onCall` never see them), and a
+  declared capability cannot turn on a feature, because there is none to turn on (see "Not offered" in the design note).
+  `server/discover` names no tool and needs only `protocol:mcp:open`. A stream opened with `subscriptions/listen` is
+  announced only the changes this peer may list, at most 4 per channel. A version this side does not speak gets the spec's
+  -32022; nothing mesh-specific uses the spec's reserved codes (-32020 to -32099).
 - **A caller that wants the page to act as a client.** Not possible: the server
   never sends a request, and the client registers no request handler, so sampling,
-  roots and elicitation are answered -32601. No resources and no prompts are
-  offered; `initialize` advertises `tools` only.
+  roots and elicitation are answered -32601. No resources, prompts, tasks, skills, events or uploads are
+  offered; `initialize` and `server/discover` advertise `tools` only.
 - **Not protected.** A tool does what its `execute` does with the serving user's
   session: the allow-list, the grants and the prompt narrow who can start it and when,
   not what it does. A grant is per tool, not per argument. The label does not stop a
@@ -850,7 +857,8 @@ Threat model, by what an attacker is and wants:
   (`packages/browsermesh-mcp/test/real-peer`); two real browser contexts over a real
   data channel in Chromium, Firefox and WebKit (`tests/browser/mcp-over-mesh.spec.mjs`:
   default deny and per-tool grants, revocation, the page's prompt, a hostile result as
-  inert text, cancel reaching the tool, list-changed). The default DOM prompt of wsh's
+  inert text, cancel reaching the tool, list-changed). Both MCP eras and a `@modelcontextprotocol/client` 2.x `Client`
+  are tested in `packages/browsermesh-mcp/test/mcp-modern.test.mjs`. The default DOM prompt of wsh's
   bridge is not exercised there (the harness answers with its own `prompt`).
 
 ## HTTP ingress
