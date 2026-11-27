@@ -16,8 +16,11 @@
  *      checksum + Reed-Solomon parity). Each shard lives on its own holder;
  *      lose two holders and the state is rebuilt, lose a third and recovery
  *      fails with `StealthError` `unavailable` rather than returning junk.
- *   4. Swarm membership: three pods run `SwimMembership` over an in-process
- *      wire, feed a `SwarmCoordinator`, and all see the same members.
+ *   4. Swarm membership: four pods, seeded as a chain (each knows only the
+ *      next), run `SwimMembership` over an in-process wire and feed a
+ *      `SwarmCoordinator`. SWIM spreads every update along the chain, so all
+ *      see the same members; a pod that is let go (`leave`) and a pod that
+ *      goes silent both drop out of every other coordinator.
  *
  * Not shown: signed shards (`identity`) and `ownedStores: true` on the
  * agent, on-demand share release and threshold (Shamir) key shares. They
@@ -27,7 +30,7 @@
  * agent reads its own node's store (`dhtNode.get`), so step 3 fetches each
  * shard from its holder with a plain DHT_FIND_VALUE and stores it locally.
  * `SwarmCoordinator` has no wire of its own (README: its `SWARM_*` types are
- * unused), so step 4 gets membership from SWIM.
+ * unused), so step 4 gets membership from SWIM and passes it in as `swim`.
  */
 
 import assert from 'node:assert/strict'
@@ -140,33 +143,45 @@ console.log(`   REFUSED  recovery with 3 of 5 holders lost: ${err.code}`)
 
 // ── 4. Swarm membership ──────────────────────────────────────────────
 // Each pod runs SWIM (failure-detecting membership) and a coordinator fed by
-// it (SWIM's join callback calls the coordinator's join()). Departures are not
-// shown: a pod that goes silent is dropped by the pod that notices, but SWIM's
-// `left` gossip does not reach the other coordinators (see the PR notes).
+// it: SWIM's `alive` joins the coordinator, `left` and `dead` drop the member.
+// The seeds are a chain (a knows b, b knows c, c knows d); SWIM spreads each
+// update along it, so every pod ends up with every other.
 const wire = new Map()
-const names = ['pod-a', 'pod-b', 'pod-c']
+const names = ['pod-a', 'pod-b', 'pod-c', 'pod-d']
 for (const name of names) {
   const swim = new SwimMembership({
     localId: name, pingIntervalMs: 10, pingTimeoutMs: 30, suspectTimeoutMs: 30,
-    sendFn: (to, msg) => queueMicrotask(() => wire.get(to)?.swim.handleMessage(name, msg)),
+    sendFn: (to, msg) => queueMicrotask(() => wire.get(to)?.swim.handleMessage(name, structuredClone(msg))),
   })
   wire.set(name, { swim, swarm: new SwarmCoordinator(name, { swim }) })
 }
-// Every pod is seeded with the others. (SWIM here piggybacks each update on
-// one message and then forgets it, so a chain of seeds does not spread.)
-for (const a of names) for (const b of names) if (a !== b) wire.get(a).swarm.join(b)
+names.slice(0, -1).forEach((name, i) => wire.get(name).swarm.join(names[i + 1]))
 for (const { swim } of wire.values()) swim.start()
-const until = async (ok) => {
+const until = async (what, ok) => {
   const deadline = Date.now() + 2000
   while (!ok() && Date.now() < deadline) await new Promise((res) => setTimeout(res, 10))
-  assert.ok(ok(), 'timed out')
+  assert.ok(ok(), `timed out: ${what}`)
 }
 const membersOf = (name) => wire.get(name).swarm.listMembers().sort().join(', ')
-await until(() => names.every((n) => wire.get(n).swim.aliveCount === 3))
-console.log(`4. ✓ members see each other: pod-a [${membersOf('pod-a')}], pod-c [${membersOf('pod-c')}]`)
-const leader = wire.get('pod-c').swarm.election.elect()
-console.log(`   pod-c elects the lowest id: ${leader}`)
+await until('everyone sees all four', () => names.every((n) => wire.get(n).swarm.listMembers().length === 4))
+console.log(`4. ✓ a chain of seeds still gives every pod the full view: pod-a [${membersOf('pod-a')}]`)
 
-for (const { swim } of wire.values()) swim.stop()
+// A pod that leaves: pod-a lets pod-d go. SWIM gossips `left`, so pod-b and
+// pod-c drop pod-d too, though neither was told directly.
+wire.get('pod-a').swarm.leave('pod-d')
+await until('pod-d dropped everywhere', () => ['pod-a', 'pod-b', 'pod-c'].every((n) => !wire.get(n).swarm.listMembers().includes('pod-d')))
+console.log(`   ✓ pod-a let pod-d leave; pod-b's view follows: [${membersOf('pod-b')}]`)
+
+// A pod that goes silent: pod-c stops answering. The others suspect it, then
+// declare it dead, and drop it from their coordinators.
+wire.get('pod-c').swim.stop()
+wire.delete('pod-c')
+await until('pod-c dropped', () => ['pod-a', 'pod-b'].every((n) => !wire.get(n).swarm.listMembers().includes('pod-c')))
+console.log(`   ✓ pod-c went silent and was dropped: pod-a [${membersOf('pod-a')}], pod-b [${membersOf('pod-b')}]`)
+const leader = wire.get('pod-b').swarm.election.elect()
+console.log(`   the survivors elect the lowest id: ${leader}`)
+assert.equal(leader, 'pod-a')
+
+for (const { swim, swarm } of wire.values()) { swim.stop(); swarm.stop() }
 
 console.log('ok: DHT lookups, owned stores, parity-protected shards and swarm membership behaved as designed')

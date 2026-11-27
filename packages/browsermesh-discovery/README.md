@@ -45,6 +45,52 @@ npm install @johnhenry/browsermesh-discovery @johnhenry/browsermesh-primitives
 import { DhtNode, DiscoveryManager, SwarmCoordinator } from '@johnhenry/browsermesh-discovery';
 ```
 
+## Swarm membership: `SwimMembership` feeds `SwarmCoordinator`
+
+`SwarmCoordinator` has **no wire of its own**: the `SWARM_*` message types are
+unused re-exports, so there is no swarm protocol to speak. Membership comes
+from `SwimMembership`, which you run over your own transport (`sendFn` out,
+`handleMessage(fromId, msg)` in) and hand to the coordinator:
+
+```js
+const swim = new SwimMembership({ localId, sendFn: (to, msg) => send(to, msg) });
+const swarm = new SwarmCoordinator(localId, { swim });
+swarm.join(seedPodId);   // a seed is enough: SWIM spreads the rest
+swim.start();            // you start and stop SWIM; swarm.stop() only unhooks the coordinator
+```
+
+What SWIM guarantees:
+
+- **Updates spread along a chain.** Each membership update (join, suspect,
+  dead, left) rides up to `ceil(retransmitMultiplier * ceil(log2(n + 1)))`
+  messages (SWIM's infection-style dissemination; `n` is the members known
+  here), least-transmitted updates first, then is retired. A pod that learns
+  an update passes it on, and a pod that hears from a peer it has never met
+  learns it. Seeds `a -> b -> c` therefore give `c` a view of `a` within a few
+  rounds; you do not have to seed everyone with everyone.
+- **The coordinator follows SWIM.** A member that SWIM reports `alive` joins
+  the `'local'` swarm; one reported `left` or `dead` is dropped, on every pod
+  that hears about it, not only the pod that noticed (`dead` is declared by a
+  pod's own silence timeout; `left` is `swarm.leave(podId)` gossiped on). A
+  higher-incarnation `alive` brings a member back; an equal-or-lower one does
+  not (precedence: higher incarnation wins, then `left` > `dead` > `suspect`
+  > `alive`). `SwarmCoordinator` chains any `onJoin`/`onDead`/`onLeave` you set
+  on the SWIM instance first, and `swarm.stop()` restores them.
+- **Wire format is unchanged.** Updates are still `{ podId, state, incarnation }`
+  on `updates` of ping/ack messages, so older peers interoperate; the transmit
+  counters are local state and never sent.
+
+Options on `SwimMembership`:
+
+| Option | Default | Meaning |
+|---|---|---|
+| `retransmitMultiplier` | `3` | SWIM's lambda: an update rides `ceil(lambda * ceil(log2(n + 1)))` messages (about 3 log n), then is retired |
+| `maxPiggyback` | `8` | Most updates carried by one message (the message size bound) |
+| `maxQueuedUpdates` | `128` | Cap on pending updates; at the cap the most-transmitted entry is dropped |
+
+Membership and leader election are unauthenticated (see `docs/security.md`).
+Runnable: `examples/27-dht-and-stealth-records.mjs`, step 4.
+
 ## `StealthAgent` is sharding; encryption is opt-in
 
 For secrecy, derive a per-group key and use the async encrypted path:
