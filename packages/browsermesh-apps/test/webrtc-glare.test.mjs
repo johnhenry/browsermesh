@@ -77,6 +77,7 @@ function world() {
     const handlers = { offer: [], answer: new Set(), ice: [] }
     const conns = new Map()
     const incoming = []
+    const order = [] // what happened to the node, in order: hand-outs, and what a test adds
     const meshManager = {
       async connectToPeer(p) { if (!conns.has(p)) conns.set(p, fakeConn(w, id, p)); return conns.get(p) },
       getConnection(p) { return conns.get(p) ?? null },
@@ -96,7 +97,7 @@ function world() {
       onAnswer(cb) { handlers.answer.add(cb); return () => handlers.answer.delete(cb) },
       onIce() {},
     }
-    const peer = { id, handlers, conns, incoming, meshManager, signaling }
+    const peer = { id, handlers, conns, incoming, order, meshManager, signaling }
     if (legacy) {
       // What every release before the rule does: an inbound offer is answered whatever this side has out (the connection
       // replaces its own offer), and a dial sends an offer with no marker and waits for an answer to it.
@@ -111,7 +112,7 @@ function world() {
         await new Promise(() => {}) // never answered in glare: the older release times out after answerTimeoutMs
       }
     } else {
-      peer.factory = createWebRTCTransportFactory({ localPodId: id, meshManager, signaling, onIncomingConnection: (from, adapter, connectionId, info) => incoming.push({ from, adapter, connectionId, info }) })
+      peer.factory = createWebRTCTransportFactory({ localPodId: id, meshManager, signaling, onIncomingConnection: (from, adapter, connectionId, info) => { order.push(`handed-out${info?.restarted ? ' (restarted)' : ''}`); incoming.push({ from, adapter, connectionId, info }) } })
     }
     w.peers.set(id, peer)
     return peer
@@ -346,6 +347,38 @@ describe('a peer that starts over on a connection this side still holds', () => 
     assert.deepEqual(second, [], 'a later listener is not given what was already delivered')
     conn.deliver('four')
     assert.deepEqual([first.at(-1), second], ['four', ['four']])
+  })
+
+  it('a frame of the new life that arrives before the node is told of the restart reaches the node after it, not before', async () => {
+    const w = world()
+    const a = w.add('aaa')
+    const b = w.add('bbb')
+    await guard(a.factory('bbb'), 'first dial')
+    await settle()
+    const conn = b.conns.get('aaa')
+    b.incoming[0].adapter.onMessage((d) => b.order.push(`frame ${d}`)) // the node's session listener, from the first connection
+    b.order.length = 0
+    const answering = b.handlers.offer[0]('aaa', { type: 'offer', sdp: 'offer:aaa:restart' }, 'default')
+    await settle() // answered; the new connection is not open yet
+    conn.deliver('hello of the new life')
+    conn.setOpen()
+    await guard(answering, 'the answer to the restart')
+    await settle()
+    assert.deepEqual(b.order, ['handed-out (restarted)', 'frame hello of the new life'])
+  })
+
+  it('a frame that arrives the moment the connection opens, before it is handed to the node, is held for the node', async () => {
+    const w = world()
+    const b = w.add('bbb')
+    const answering = b.handlers.offer[0]('aaa', { type: 'offer', sdp: 'offer:aaa:first' }, 'default')
+    await settle() // answered; not open yet
+    const conn = b.conns.get('aaa')
+    conn.setOpen()
+    conn.deliver('first words') // in the same turn the connection opened, before anything was handed out
+    await guard(answering, 'the answer')
+    const got = []
+    b.incoming[0].adapter.onMessage((d) => got.push(d))
+    assert.deepEqual(got, ['first words'])
   })
 
   it('what is held for the node is bounded: the oldest are kept, in order', async () => {

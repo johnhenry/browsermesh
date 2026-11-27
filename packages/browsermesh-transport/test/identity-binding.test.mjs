@@ -61,6 +61,8 @@ class FakePC {
     this.cert = new Uint8Array(40).fill(fpSeq)
     const hex = createHash('sha256').update(this.cert).digest('hex').toUpperCase()
     this.fingerprint = `sha-256 ${hex.match(/../g).join(':')}`
+    // A promise the stats wait for (set by a test for the one connection it wants kept busy checking the certificate).
+    this.gate = FakePC.gateNext ?? null
   }
   // What the browser exposes about the certificate the connection really uses: FakePC.exposure is
   // 'none' (nothing, like a browser without it), 'dtls' (RTCDtlsTransport.getRemoteCertificates),
@@ -114,6 +116,7 @@ class FakePC {
   addIceCandidate() { FakePC.candidatesAdded++ }
   async getStats() {
     if (FakePC.exposure !== 'stats') return new Map()
+    if (this.gate) await this.gate
     const hex = createHash('sha256').update(this.peerPc.cert).digest('hex').toUpperCase()
     return new Map([
       ['T', { type: 'transport', remoteCertificateId: 'C' }],
@@ -349,6 +352,42 @@ describe('identity binding: WebRTCPeerConnection', () => {
       assert.equal(b.state, 'closed')
     } finally {
       mock.timers.reset()
+    }
+  })
+
+  it('what a peer sends right after its proof, while that proof is still being checked, is held and delivered in order once it verified', async () => {
+    const ida = await PodIdentity.generate()
+    const idb = await PodIdentity.generate()
+    let release
+    const gate = new Promise((resolve) => { release = resolve })
+    FakePC.exposure = 'stats'
+    try {
+      const a = new WebRTCPeerConnection({ localPodId: ida.podId, remotePodId: idb.podId, iceServers: [], identity: ida })
+      const b = new WebRTCPeerConnection({ localPodId: idb.podId, remotePodId: ida.podId, iceServers: [], identity: idb })
+      const got = []
+      b.onMessage((m) => got.push(m))
+      const aUp = new Promise((resolve) => a.onStateChange((s) => s === 'connected' && resolve()))
+      const bUp = new Promise((resolve) => b.onStateChange((s) => s === 'connected' && resolve()))
+      const offer = await a.createOffer()
+      FakePC.gateNext = gate // b's connection is kept busy checking the certificate in use
+      const answer = await b.handleOffer(offer)
+      FakePC.gateNext = null
+      await a.handleAnswer(answer)
+      await aUp // a verified b's proof, and is connected; b has a's proof and is not done with it
+      a.send({ app: 'one' })
+      a.send({ app: 'two' })
+      for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r))
+      assert.equal(b.bound, false)
+      assert.deepEqual(got, [], 'nothing is delivered before the peer is verified')
+      release()
+      await bUp
+      assert.deepEqual(got, [{ app: 'one' }, { app: 'two' }])
+      assert.equal(b.droppedUnbound, 0, 'what was held is not counted as dropped')
+      a.close(); b.close()
+    } finally {
+      FakePC.exposure = 'none'
+      FakePC.gateNext = null
+      release()
     }
   })
 

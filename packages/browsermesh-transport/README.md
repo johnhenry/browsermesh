@@ -155,7 +155,9 @@ key, which must hash to `remotePodId`, the pod id claimed in signalling.
 
 - The connection becomes `connected` (and `send()` works) only after the peer's
   proof verified; before that only the proof frame is accepted, and anything
-  else is dropped and counted (`droppedUnbound`). `bound` is true afterwards.
+  else is dropped and counted (`droppedUnbound`), except what the peer sends after its proof while that proof is still
+  being checked: up to 64 messages are held and delivered in order once it verified, and discarded if it does not.
+  `bound` is true afterwards.
 - A proof that does not verify (swapped description, key that is not the claimed
   pod, reflected or replayed proof) closes the connection and reports an
   `identity binding failed: <reason>` error through `onError()`;
