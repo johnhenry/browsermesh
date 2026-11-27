@@ -172,6 +172,17 @@ function mapDialError(err, podId) {
   return new WshLinkError('WSH_UNREACHABLE', `could not reach ${podId}: ${msg}`, { cause: err, podId });
 }
 
+/**
+ * Backoff between dials that found no partner (the pipe relay closes an operator at once when every host half at the
+ * rendezvous id is taken). Jittered x0.5..1.5; bounded by the dial's own `connectTimeoutMs`.
+ */
+const NO_PARTNER_BACKOFF = { baseMs: 40, maxMs: 400 };
+
+/** Did the relay close this dial before any handshake, the answer to "no host half is waiting for you"? */
+function isNoPartner(err) {
+  return err?.code === 'WSH_UNREACHABLE' && /^transport closed\b/i.test(String(err.cause?.message ?? ''));
+}
+
 // ---------------------------------------------------------------------------
 // WshPeerLinks
 // ---------------------------------------------------------------------------
@@ -667,21 +678,34 @@ export class WshPeerLinks {
   async #doDial(podId) {
     if (this.#beforeDial) await this.#beforeDial({ podId });
     if (!this.#relays.length) throw new WshLinkError('WSH_UNREACHABLE', 'no relay configured', { podId });
+    // One budget for the whole dial. A relay that closes this dialler at once because no host half is waiting for it (every
+    // half at the host's rendezvous id is taken, and the host is refilling) is retried inside that budget with jittered
+    // backoff; the dial never runs past `connectTimeoutMs` however often it retries.
+    const deadline = Date.now() + this.#connectTimeoutMs;
     let last = null;
-    for (const relay of this.#relays) {
-      try {
-        const conn = await this.#dialRelay(relay, podId);
-        this.#register(conn);
-        return;
-      } catch (err) {
-        last = err;
-        if (FATAL.has(err.code)) throw err;
+    for (let round = 0; ; round++) {
+      let retry = false;
+      for (const relay of this.#relays) {
+        const left = deadline - Date.now();
+        if (left <= 0) break;
+        try {
+          const conn = await this.#dialRelay(relay, podId, left);
+          this.#register(conn);
+          return;
+        } catch (err) {
+          last = err;
+          if (FATAL.has(err.code)) throw err;
+          if (isNoPartner(err)) retry = true;
+        }
       }
+      const wait = Math.min(NO_PARTNER_BACKOFF.baseMs * 2 ** round, NO_PARTNER_BACKOFF.maxMs) * (0.5 + Math.random());
+      if (!retry || deadline - Date.now() <= wait || this.#closed) break;
+      await new Promise((resolve) => setTimeout(resolve, wait));
     }
-    throw last;
+    throw last ?? new WshLinkError('WSH_UNREACHABLE', `${podId} did not answer within ${this.#connectTimeoutMs} ms`, { podId });
   }
 
-  async #dialRelay(relay, podId) {
+  async #dialRelay(relay, podId, budgetMs = this.#connectTimeoutMs) {
     const cred = await this.#credReady;
     const rid = await rendezvousId(podId);
     const { WshClient, WebSocketTransport } = await loadClient();
@@ -715,7 +739,7 @@ export class WshPeerLinks {
         expectHostKey: podIdToFingerprint(podId),
         sealSession: true,
         requireChannelBinding: true,
-        timeout: this.#connectTimeoutMs,
+        timeout: budgetMs,
       });
       if (!client.sessionSealed) throw new WshLinkError('WSH_NOT_SEALED', `the session with ${podId} is not sealed`, { podId, reason: 'not-sealed' });
       try {
@@ -729,7 +753,7 @@ export class WshPeerLinks {
     })();
     let timer;
     const timeout = new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new WshLinkError('WSH_UNREACHABLE', `${podId} did not answer within ${this.#connectTimeoutMs} ms`, { podId })), this.#connectTimeoutMs);
+      timer = setTimeout(() => reject(new WshLinkError('WSH_UNREACHABLE', `${podId} did not answer within ${this.#connectTimeoutMs} ms`, { podId })), budgetMs);
     });
     try {
       await Promise.race([attempt, timeout]);

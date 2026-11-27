@@ -185,6 +185,9 @@ export async function createRealMeshSession({
       relays: wshRelays,
       WebSocket: WebSocketCtor,
       authorize: () => false,
+      // `--timeout` bounds the dial as well as each request: without it the link layer's own 15 s default applied, so a
+      // dialler held at the relay (no host half waiting) outlived `--timeout` (#431).
+      ...(Number.isFinite(timeoutMs) && timeoutMs > 0 ? { connectTimeoutMs: timeoutMs } : {}),
       onLog: (line) => onLog(`[meshctl] wsh: ${line}`),
       ...wsh,
     })
