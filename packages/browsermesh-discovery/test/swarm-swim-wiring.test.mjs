@@ -78,7 +78,7 @@ describe('SwarmCoordinator wired to SwimMembership', () => {
     const coord = new SwarmCoordinator('me', { swim })
     gossip(swim, [{ podId: 'x', state: 'alive', incarnation: 0 }])
     gossip(swim, [{ podId: 'x', state: 'left', incarnation: 0 }], 2)
-    assert.deepEqual(seen, ['join:x', 'left:x'])
+    assert.deepEqual(seen.filter((e) => e.endsWith(':x')), ['join:x', 'left:x'])
     assert.ok(!coord.listMembers().includes('x'))
   })
 

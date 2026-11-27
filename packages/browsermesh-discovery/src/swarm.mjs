@@ -558,6 +558,9 @@ export class SwarmCoordinator {
   /** @type {SwimMembership|null} */
   #swim = null;
 
+  /** @type {{onJoin: function|null, onDead: function|null, onLeave: function|null, mine: object}|null} Callbacks to restore on stop() */
+  #swimWiring = null;
+
   /**
    * @param {string} localPodId
    * @param {object} [opts]
@@ -573,11 +576,63 @@ export class SwarmCoordinator {
     // Wire up SWIM membership protocol if provided. SWIM tracks failure
     // detection for the local pod's default swarm only — join/leave here
     // default to 'local', matching pre-multi-swarm behavior.
+    //
+    // The coordinator follows SWIM for every transition: `alive` (a new
+    // member, or a higher-incarnation rejoin) joins; `dead` and `left` drop
+    // the member. `left` is the one that arrives by gossip alone on a pod
+    // that never noticed the silence itself, so it needs its own hook.
+    // SWIM's callbacks are single-slot properties, so any callback already
+    // installed is chained, and stop() puts the previous ones back.
     this.#swim = opts.swim ?? null;
     if (this.#swim) {
-      this.#swim.onJoin = (podId) => this.join(podId);
-      this.#swim.onDead = (podId) => this.leave(podId);
+      const swim = this.#swim;
+      const prev = { onJoin: swim.onJoin, onDead: swim.onDead, onLeave: swim.onLeave };
+      const wiring = { ...prev, mine: {} };
+      const chain = (before, ours) => (podId) => {
+        if (this.#swimWiring === wiring) ours(podId);
+        if (before) before(podId);
+      };
+      wiring.mine.onJoin = chain(prev.onJoin, (podId) => this.join(podId));
+      // Dead is final for this pod, so `leave()` also marks it `left` in SWIM
+      // (the long-standing behaviour mesh-swarm relies on).
+      wiring.mine.onDead = chain(prev.onDead, (podId) => this.leave(podId));
+      // Left: drop the member from this coordinator only. Calling leave()
+      // here would call swim.removeMember(), which fires onLeave again.
+      wiring.mine.onLeave = chain(prev.onLeave, (podId) => this.#dropLocalMember(podId));
+      swim.onJoin = wiring.mine.onJoin;
+      swim.onDead = wiring.mine.onDead;
+      swim.onLeave = wiring.mine.onLeave;
+      this.#swimWiring = wiring;
     }
+  }
+
+  /**
+   * Stop following SWIM: restore the callbacks that were on the membership
+   * object before this coordinator wired itself in (a callback somebody
+   * installed on top since is left alone), and ignore any further events.
+   * Idempotent; a no-op without a `swim` option. Does not stop the SWIM
+   * instance itself (its owner started it).
+   */
+  stop() {
+    const wiring = this.#swimWiring;
+    if (!wiring) return;
+    this.#swimWiring = null;
+    const swim = this.#swim;
+    for (const key of ['onJoin', 'onDead', 'onLeave']) {
+      if (swim[key] === wiring.mine[key]) swim[key] = wiring[key];
+    }
+  }
+
+  /**
+   * Remove a member from the local swarm without touching SWIM.
+   * @param {string} podId
+   * @returns {boolean}
+   */
+  #dropLocalMember(podId) {
+    const swarm = this.#swarms.get('local');
+    if (!swarm) return false;
+    swarm.election.removeCandidate(podId);
+    return swarm.distributor.removeMember(podId);
   }
 
   /**
@@ -706,10 +761,11 @@ export class SwarmCoordinator {
     const swarm = this.#swarms.get(swarmId);
     if (!swarm) return false;
     swarm.election.removeCandidate(podId);
+    const removed = swarm.distributor.removeMember(podId);
     if (swarmId === 'local' && this.#swim) {
-      this.#swim.removeMember(podId);
+      this.#swim.removeMember(podId); // fires onLeave, which finds nothing left to drop
     }
-    return swarm.distributor.removeMember(podId);
+    return removed;
   }
 
   /**
