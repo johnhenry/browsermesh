@@ -13,7 +13,7 @@
  *   meshctl ══sealed wsh via a real pipe relay══► pod host H ──spawn──► a hosted pod
  *
  * Packages: ingress, egress, mcp, objects, meshctl, apps (createMeshNode with `wsh` and `realm`, the PeerRegistry,
- * the protocol seam), realm (PREVIEW: private and unpublished, run from this branch), transport (wsh links), pod.
+ * the protocol seam), realm (published, 0.1.x preview; run from this repository's workspace copy), transport (wsh links), pod.
  * Each leg prints at least one ALLOWED and one REFUSED line, and the script ends with what was recorded.
  *
  * Real: the HTTP request (node:http client to a loopback listener), the ingress, the egress (a loopback server stands
@@ -48,7 +48,7 @@ import { serveMcpOnMesh, connectMcpOnMesh, mcpScopes } from '@johnhenry/browserm
 import { exposeObjectsOnMesh, openObjectsOnMesh } from '@johnhenry/browsermesh-objects'
 import {
   createDescriptor, signDescriptor, issueCredential, publicKeyOf,
-} from '@johnhenry/browsermesh-realm' // PREVIEW: private, unpublished
+} from '@johnhenry/browsermesh-realm'
 
 const meshctl = fileURLToPath(new URL('../packages/browsermesh-meshctl/bin/meshctl.mjs', import.meta.url))
 const RELAY = 'wss://relay.invalid' // never dialled: the in-process relay answers
@@ -80,7 +80,7 @@ try {
   }
   const protocolsOf = (node) => node.services.get('mesh-protocols') ?? attachService(node, undefined, createMeshProtocolService())
 
-  // ── 0. the realm the app admits strangers with (PREVIEW realm package, root + one issuer, invite mode) ────
+  // ── 0. the realm the app admits strangers with (realm package, root + one issuer, invite mode) ────
   const ROLE_SCOPES = [
     'mesh:link:connect', 'protocol:mcp:open', 'mcp:search:list', 'mcp:search:call', 'mcp:buy:list', 'mcp:buy:call',
     'protocol:objects:open', 'objects:app:get', 'objects:app:set',

@@ -1,7 +1,7 @@
 import { UsageError } from '../output.mjs'
 
 /**
- * Load `@johnhenry/browsermesh-realm`, an OPTIONAL peer (it is unpublished while the realm commands are new), so every
+ * Load `@johnhenry/browsermesh-realm`, an OPTIONAL peer (a separate package, so installing meshctl does not pull it in), so every
  * command other than `realm ...` works without it. A missing package is a usage error that says what to install.
  */
 export async function loadRealmPackage() {

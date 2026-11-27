@@ -11,12 +11,13 @@ stands, section 12 what the review changed and section 13 what the implementatio
   `browsermesh-realm`, the pure-logic core (#420; published to npm as 0.1.0 by its first-release PR); the realm exchange (frames,
   descriptor store, verifier, prover; #426); the fix that makes the seam's `send` never reject on a closed link (#441); and
   stage 4, `createMeshNode({ realm })`, `node.realm` and renewal over a `realm` protocol (#445).
-- **In open pull requests:** the `meshctl realm` commands in PR #424 and example 26 in PR #442.
+- **Also merged:** the `meshctl realm` commands (#424), example 26 (#442) and the tour, example 28 (#455); the realm package
+  is on npm as 0.1.0 (#454).
 - **Not built:** tickets and admitters; live peer listing in `meshctl realm inspect`; seed management in meshctl (it makes
   one independent random key per realm); synchronising one realm across several nodes of the same operator; federation; an
   issuer add, renew or replace command.
 
-Claims about #424 (meshctl) below were checked against that branch, not `main`, and change if it does.
+Claims about #424 (meshctl) below were checked against that branch before it merged (it is on `main` now).
 
 ## 1. The problem
 
@@ -411,7 +412,7 @@ Ed25519 key. The review checked this in Node 26: it works, the public key must b
   (core's own is internal, not exported and left alone), and the registry is taken duck-typed. Depending on
   `browsermesh-apps` would create a second circular pair beside core and apps. The peer range on primitives is `>=0.7.0` on
   `main` and must be `>=0.8.0`, the first release that exports `canonicalJson`; that change merged with #426. The package is
-  published as a preview from 0.1.0 (the first-release changeset flipped `private`).
+  published to npm as 0.1.0, a preview (the first-release changeset flipped `private`).
 - **meshctl** (section 8) is the operator and member front end. It does not use `createMeshNode`, so stage 3 does not cover it.
 
 ## 8. CLI sketch (meshctl)

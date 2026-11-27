@@ -48,7 +48,7 @@ describe('the manifest', () => {
     assert.equal(pkg.peerDependenciesMeta['@johnhenry/wsh'].optional, true)
   })
 
-  it('keeps the realm package an optional peer (it is unpublished) and depends on keyvault for key custody', () => {
+  it('keeps the realm package an optional peer (a separate published package) and depends on keyvault for key custody', () => {
     assert.ok(pkg.peerDependencies['@johnhenry/browsermesh-realm'])
     assert.equal(pkg.peerDependenciesMeta['@johnhenry/browsermesh-realm'].optional, true)
     assert.ok(pkg.devDependencies['@johnhenry/browsermesh-realm'], 'a workspace devDependency so the tests run')

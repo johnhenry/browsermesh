@@ -1,10 +1,11 @@
 /**
  * Realm admission: who may link to a host, and with what, decided by a signed realm and the host's own policy.
  *
- * PREVIEW: `@johnhenry/browsermesh-realm` is PRIVATE and unpublished (design: docs/design/realms.md, link-admission.md).
- * This example runs the real exchange from the branch it is built on, not an API you can install yet.
+ * `@johnhenry/browsermesh-realm` is published on npm (0.1.x, a preview: the API may change before 1.0; design:
+ * docs/design/realms.md, link-admission.md). This example runs the real exchange with the lower-level pieces, from this
+ * repository's workspace copy.
  *
- * Packages: `-realm` (preview: descriptor, credential, verifier, prover), `-apps` (the real `PeerRegistry` with
+ * Packages: `-realm` (descriptor, credential, verifier, prover), `-apps` (the real `PeerRegistry` with
  * `setRealmPolicy`, the link-admission seam, `createMeshNode`), `-primitives` (`PodIdentity`), `-core`
  * (`MeshIdentityManager.deriveRealmIdentity`), `-discovery`, `-transport` (the in-process wsh pipe relay: no network).
  *

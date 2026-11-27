@@ -448,9 +448,9 @@ membership domain: a signed descriptor names the roles, and an issuer-signed cre
 joins ONE realm (one node per realm). Design: [`docs/design/realms.md`](../../docs/design/realms.md); what is and is not
 protected: [`docs/security.md`](../../docs/security.md#realms).
 
-`@johnhenry/browsermesh-realm` is private and unpublished, so apps does not depend on it: it is an optional peer dependency,
+`@johnhenry/browsermesh-realm` is published on npm (0.1.x, a preview: the API may change before 1.0), but apps does not depend on it: it is an optional peer dependency,
 `import()`ed lazily when `realm` is given (a missing package fails with "the realm option needs
-@johnhenry/browsermesh-realm"), the same as the other optional peers. The realm package never imports apps.
+@johnhenry/browsermesh-realm ... install @johnhenry/browsermesh-realm"), the same as the other optional peers. The realm package never imports apps.
 
 ```js
 const node = await createMeshNode({
@@ -497,8 +497,19 @@ and `renew(podId, credentialText, { timeoutMs? })`, both resolving `{ ok: true, 
   a higher `descriptor` than the persisted one is adopted over it) and the sealed seed export itself. Realm grants are never
   persisted: after a restart peers present again.
 
-Built and tested: all of the above over a real wsh link (in-process pipe relay) and over real WebRTC. Not built: tickets,
-several realms on one node, `meshctl` and tour/example coverage, publishing the realm package.
+Built and tested: all of the above over a real wsh link (in-process pipe relay) and over real WebRTC, `meshctl realm` (in
+`browsermesh-meshctl`), and runnable coverage in [`examples/26-realm-admission.mjs`](../../examples/26-realm-admission.mjs)
+(the exchange step by step, with the lower-level pieces) and [`examples/28-tour.mjs`](../../examples/28-tour.mjs) (a realm in
+one app with ingress, egress, mcp, objects and meshctl; guide: [`examples/TOUR.md`](../../examples/TOUR.md)). Not built:
+tickets and admitters, federation, several realms on one node, live peer listing.
+
+Two things that are easy to miss:
+
+- **A role that grants MCP tools needs both scopes.** List `mcp:<tool>:list` AND `mcp:<tool>:call`; a role with only `call`
+  leaves the tool unlisted: `roles: { member: ['mesh:link:connect', 'protocol:mcp:open', 'mcp:search:list', 'mcp:search:call'] }`.
+- **A node without the `realm` option does not get the `mesh-protocols` service attached for it** (only a node with `realm`
+  does, to serve renewal). An ingress node, or an egress provider that peers with a realm host, attaches it itself:
+  `node.services.get('mesh-protocols') ?? attachService(node, undefined, createMeshProtocolService())`.
 
 ## Sharing a `VirtualNetwork` with specific peers: mesh relay
 
