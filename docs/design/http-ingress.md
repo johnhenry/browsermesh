@@ -281,7 +281,7 @@ a change to this one.
 
 ## CLI
 
-`browsermesh-ingress --listen 127.0.0.1:8080 --signaling wss://... --map host=podId [--map ...]`, with
+`browsermesh-ingress --listen 127.0.0.1:8080 --signaling wss://... --map=host=podId [--map=...]`, with
 `--allow-methods`, `--max-body`, `--timeout`, `--auth bearer:<file>`, `--identity <file>`, `--config file.json`,
 `--public --tls-terminated-in-front`, `--help`. Each request is printed as one line naming the host and the pod, and the
 service after the pod (`-> <podId>#web`) when the route has one. The mesh node uses `node-datachannel` when it is installed (an
