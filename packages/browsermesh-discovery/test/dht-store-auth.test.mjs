@@ -366,7 +366,10 @@ describe('StealthAgent writes owned stores under the agent-anonymous keys', () =
     const dhtNode = new DhtNode({ localId: 'n' })
     assert.throws(() => new StealthAgent({ agentId: 'a', dhtNode, ownedStores: true }), (e) => e instanceof StealthError && e.code === 'bad-argument')
     const real = await PodIdentity.generate()
-    const flaky = { podId: real.podId, rawPublicKey: () => real.rawPublicKey(), sign: async (b) => { const s = new Uint8Array(await real.sign(b)); s[0] ^= Math.floor(Math.random() * 255) + 1; return s } }
+    // Each call flips a different, non-zero amount of the first byte, so no two signatures of the same bytes are equal
+    // (a random amount collided in 1 run of 255, and the check then rightly saw a deterministic signer).
+    let calls = 0
+    const flaky = { podId: real.podId, rawPublicKey: () => real.rawPublicKey(), sign: async (b) => { const s = new Uint8Array(await real.sign(b)); s[0] ^= (calls++ % 255) + 1; return s } }
     await assert.rejects(deriveWriteSigner({ identity: flaky, lookupNonce: NONCE, index: 0 }), (e) => e.code === 'identity-not-deterministic')
   })
 })
