@@ -152,6 +152,21 @@ describe('--wsh-relay: a sealed link through a relay', () => {
     assert.equal(session.peerNode.hasActiveSession(absent.cliIdentity.podId), false)
   })
 
+  it('--timeout bounds the dial too: a host nobody is listening for fails with WSH_UNREACHABLE within it, not after the link layer\'s 15 s default (#431)', async () => {
+    const env = await createInProcessPipeRelay()
+    cleanups.push(() => env.close())
+    const { cliIdentity, cleanup } = await buildTestIdentity()
+    cleanups.push(cleanup)
+    // No `wsh: { connectTimeoutMs }` override: only the session's own timeout.
+    const session = await createRealMeshSession({ cliIdentity, wshRelays: [RELAY], WebSocketCtor: env.WebSocket, timeoutMs: 700 })
+    cleanups.push(session.close)
+    const absent = await buildTestIdentity()
+    cleanups.push(absent.cleanup)
+    const t0 = Date.now()
+    await assert.rejects(session.ensureConnected(absent.cliIdentity.podId), (e) => e.code === 'WSH_UNREACHABLE')
+    assert.ok(Date.now() - t0 < 700 + 800, `gave up after ${Date.now() - t0} ms, --timeout was 700`)
+  })
+
   it('when every transport fails the connect fails with the reason, not a session with no transport (also without --wsh-relay)', async () => {
     const net = createDoubleNetwork()
     net.add('ws://signal.test', new SignalingDouble({ mode: 'open' }))
