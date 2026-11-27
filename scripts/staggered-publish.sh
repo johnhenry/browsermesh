@@ -130,7 +130,8 @@ publish_batch "Primitives Consumers" \
   "@johnhenry/browsermesh-transport" \
   "@johnhenry/browsermesh-sync" \
   "@johnhenry/browsermesh-discovery" \
-  "@johnhenry/browsermesh-pod"
+  "@johnhenry/browsermesh-pod" \
+  "@johnhenry/browsermesh-realm"
 
 wait_between "$DELAY_BETWEEN_BATCHES"
 

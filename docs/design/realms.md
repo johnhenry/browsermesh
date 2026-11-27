@@ -8,7 +8,7 @@ stands, section 12 what the review changed and section 13 what the implementatio
 - **Merged on `main`:** strict canonical JSON in primitives (#414); the wallet seed and per-realm identity derivation in
   core (#415), with the browser derivation spec (#407); `createMeshNode({ identity })` (#416); the realm grant source in
   `PeerRegistry` (#417); link admission, the restricted-link seam (#419, made fail-closed with an older transport in #427);
-  `browsermesh-realm`, the pure-logic core (#420; private, version 0.0.0, unpublished); the realm exchange (frames,
+  `browsermesh-realm`, the pure-logic core (#420; published to npm as 0.1.0 by its first-release PR); the realm exchange (frames,
   descriptor store, verifier, prover; #426); the fix that makes the seam's `send` never reject on a closed link (#441); and
   stage 4, `createMeshNode({ realm })`, `node.realm` and renewal over a `realm` protocol (#445).
 - **In open pull requests:** the `meshctl realm` commands in PR #424 and example 26 in PR #442.
@@ -411,7 +411,7 @@ Ed25519 key. The review checked this in Node 26: it works, the public key must b
   (core's own is internal, not exported and left alone), and the registry is taken duck-typed. Depending on
   `browsermesh-apps` would create a second circular pair beside core and apps. The peer range on primitives is `>=0.7.0` on
   `main` and must be `>=0.8.0`, the first release that exports `canonicalJson`; that change merged with #426. The package is
-  private at 0.0.0 with no changeset; the maintainer adds one when flipping `private`.
+  published as a preview from 0.1.0 (the first-release changeset flipped `private`).
 - **meshctl** (section 8) is the operator and member front end. It does not use `createMeshNode`, so stage 3 does not cover it.
 
 ## 8. CLI sketch (meshctl)
@@ -527,7 +527,7 @@ Still open:
    - **Done (merged, #441):** the seam's `send` never rejects on a closed link.
    - **Done (merged, #445):** the `realm` option of `createMeshNode` (stage 4 below).
 3. **`browsermesh-realm`:** descriptor, rotation, roles, credential, ledger, with test vectors: **done (merged, #420;
-   private, unpublished)**. The realm exchange: **done (merged, #426)**.
+   published as 0.1.0 after the first-release PR)**. The realm exchange: **done (merged, #426)**.
 4. **The wiring and the meshctl commands.** `createMeshNode({ realm })`, a realm policy API on the node, an automatic prover
    after `connectToPeer`, and renewal over a `realm` protocol on the protocol seam: **done (merged, #445)**. It builds the store and
    verifier inside `createMeshNode` with the node's registry and persists the descriptor through `store.export()`. API as
