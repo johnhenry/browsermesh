@@ -23,6 +23,7 @@
 import { webmcpTools, serveMcpOverDuplex } from '@johnhenry/wsh/page'
 import { podIdToFingerprint } from '@johnhenry/wsh/identity'
 import { MCP_PROTOCOL, MCP_ACTIONS, TOOL_SCOPE_NAME } from './scopes.mjs'
+import { createModernLayer } from './modern.mjs'
 
 const realmTimers = () => ({
   setTimeout: (fn, ms) => globalThis.setTimeout(fn, ms),
@@ -122,16 +123,27 @@ export function serveMcpOnMesh(service, options = {}) {
   const unserve = api.serveProtocol(protocol, (channel) => {
     const peer = channel.peer
     const entry = { peer, since: now(), session: null, channel }
-    entry.session = serveMcpOverDuplex(handler, {
+    // The MCP 2026-07-28 surface around wsh's handler (see modern.mjs). It reads `_meta` for the version check only: authorization is the verified peer's, below.
+    const modern = createModernLayer({ server, startWatching: () => entry.session.receive({ jsonrpc: '2.0', method: 'notifications/initialized' }) })
+    const write = async (message) => {
+      for (const out of modern.outgoing(message)) {
+        await channel.send(labelled(out)).catch((e) => { try { channel.close('send failed') } catch { /* already closed */ } throw e })
+      }
+    }
+    entry.session = serveMcpOverDuplex(modern.wrap(handler), {
       // The channel's own message queue is the duplex: reliable, in order, with the channel's credit as backpressure.
-      send: (message) => channel.send(labelled(message)).catch((e) => { try { channel.close('send failed') } catch { /* already closed */ } throw e }),
+      send: write,
       who: { podId: peer },
       permits: permitsFor(peer),
       maxMessageBytes: Math.min(channel.maxMessageBytes, MAX_MESSAGE_BYTES),
     })
     sessions.add(entry)
     try { onSession?.({ peer, state: 'open' }) } catch { /* the embedder's callback */ }
-    channel.onMessage((message) => { entry.session.receive(message) })
+    channel.onMessage((message) => {
+      const answer = modern.incoming(message)
+      if (answer) { void channel.send(answer).catch(() => {}); return }
+      entry.session.receive(message)
+    })
     channel.onClose(() => {
       entry.session.close('channel closed')
       sessions.delete(entry)
@@ -144,7 +156,7 @@ export function serveMcpOnMesh(service, options = {}) {
     /** Who is connected now. */
     sessions: () => [...sessions].map(({ peer, since }) => ({ peer, since })),
     /** The tools (as `tools/list` states them) that any peer could be granted now. */
-    async list() { return (await handler.list()).filter((t) => TOOL_SCOPE_NAME.test(t.name)) },
+    async list() { return (await handler.list()).filter((t) => TOOL_SCOPE_NAME.test(t.name)).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)) },
     /** Tell every session (or those of one peer) why, then end it. Resolves with how many were ended. */
     async closeSessions(reason, peer) {
       let fingerprint

@@ -85,7 +85,14 @@ export interface McpMeshClient {
   readonly closed: boolean
   request(method: string, params?: unknown, options?: { signal?: AbortSignal; timeoutMs?: number }): Promise<any>
   notify(method: string, params?: unknown): Promise<void>
-  initialize(options?: { signal?: AbortSignal }): Promise<any>
+  /** The protocol era this client settled on; `'unknown'` until `initialize()` has returned. */
+  readonly era: 'unknown' | 'modern' | 'legacy'
+  /**
+   * Settle the era, modern first: `server/discover` (MCP 2026-07-28), else `initialize` + `notifications/initialized`.
+   * `era: 'legacy'` skips the probe; `era: 'modern'` refuses the fallback. The result has the shape of an `initialize`
+   * result (`protocolVersion`, `capabilities`, `serverInfo`, `instructions`); a modern peer's adds `supportedVersions`.
+   */
+  initialize(options?: { signal?: AbortSignal; era?: 'auto' | 'modern' | 'legacy'; probeTimeoutMs?: number }): Promise<any>
   listTools(options?: { signal?: AbortSignal }): Promise<any[]>
   callTool(name: string, args?: Record<string, unknown>, options?: { signal?: AbortSignal; timeoutMs?: number }): Promise<McpToolResult>
   onToolsChanged(cb: () => void): () => void

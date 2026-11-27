@@ -41,6 +41,31 @@ with -32601; one that has it but does not serve `mcp` answers -32003 (the same
 as for a peer that may not open it, so nothing is learned). Nothing is sent to a
 peer that did not ask: the serving side only ever answers.
 
+### Two MCP eras on one channel
+
+MCP 2026-07-28 removed `initialize` and sessions: a client probes `server/discover`, and every request carries
+`_meta` (protocol version, client info, client capabilities). The channel is already an authenticated, bound session,
+so nothing is lost by it. The serving side answers both eras on the same channel and picks per request: a request with
+modern `_meta` is served statelessly, `initialize` selects legacy. It is added around wsh's handler in
+`packages/browsermesh-mcp/src/modern.mjs` (wsh's handler was already stateless in practice), so it needs no wsh release.
+
+- `server/discover` answers the versions and `tools` capability, with no tool names (what a peer may see is
+  `tools/list`, scoped per request), `ttlMs: 0`, `cacheScope: 'private'`.
+- An unknown `_meta` version is `UnsupportedProtocolVersionError` (-32022). The mesh's own codes (-32000 to -32003, from
+  wsh) are in the part of the server-error range the spec leaves to implementations (-32000 to -32019); the range
+  -32020 to -32099 is the spec's, and no mesh-specific meaning uses it.
+- `_meta` is read for the version check and for nothing else. `clientInfo` and `clientCapabilities` are self-reported
+  by an unauthenticated field of a message; they reach no grant check, no prompt, no `onCall`, and cannot switch on a
+  feature (there is none to switch on).
+- `tools/list` is sorted by name after the scope filter (the spec's deterministic-order SHOULD).
+- List-changed: legacy as before. Modern: `subscriptions/listen` with `toolsListChanged`, acknowledged first, each
+  notification tagged with the subscription id; cancelled by `notifications/cancelled`; at most 4 per channel. Only a
+  change the peer may list is announced (wsh compares the peer's own filtered list). Watching starts when the stream
+  opens; a change before the acknowledgement is held and sent right after it. The typed client waits for the
+  acknowledgement before `initialize()` returns, as the legacy handshake is complete when it returns.
+- The typed client probes modern first and falls back to legacy; an SDK 2.x client may use either mode (README,
+  Compatibility).
+
 ## Who is the caller
 
 The channel's verified peer pod id: the key the session is bound to
@@ -156,6 +181,16 @@ promise rejects as cancelled.
   answered -32601.
 - No resources and no prompts: `initialize` advertises `tools` only.
 - No tool the page did not list in `allow`, no tool a peer was not granted.
+
+### Not offered, and why
+
+Beyond tools: resources, prompts, sampling, roots, elicitation, tasks, skills, events and file uploads are not
+offered, in either era, and nothing a client declares in its capabilities turns one on. Each would widen what a remote
+peer can make a page do (read what the page holds, push text into the page's model, start work that outlives a
+request, put bytes into the page) and would need its own scope family next to `mcp:<tool>:list|call` and its own entry
+in the threat model of [`docs/security.md`](../security.md#mcp-across-the-mesh) before it could be added. The page's own
+approval prompt for a tool that is not read-only already does what elicitation-before-a-destructive-action does, at the
+serving page, where the person is. Those methods answer -32601.
 - No `tools/call` result streaming beyond what MCP's progress does (not used).
 
 ## Where it lives
