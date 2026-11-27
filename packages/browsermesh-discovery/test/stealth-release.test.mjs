@@ -179,7 +179,7 @@ describe('what a holder checks, and the refusals it names', () => {
     const fake = await dealStealthShares({ identity: await PodIdentity.generate(), agentId: AGENT, groupId: GROUP, holders: w.names, threshold: 2 })
     assert.deepEqual(await w.holders[0].addShare(fake.shares[0].share), { ok: false, reason: 'untrusted-dealer' })
     assert.deepEqual(await w.holders[0].addShare(w.dealt.shares[1].share), { ok: false, reason: 'unknown-holder' }, 'a share dealt to another holder')
-    const bent = { ...w.dealt.shares[0].share, index: 77 }
+    const bent = { ...w.dealt.shares[0].share, index: w.dealt.shares[0].share.index === 77 ? 78 : 77 }
     assert.deepEqual(await w.holders[0].addShare(bent), { ok: false, reason: 'bad-signature' })
   })
 })
@@ -222,7 +222,7 @@ describe('the reader', () => {
     )
     // a hostile holder returns a properly sealed share whose index it changed: the dealer's signature catches it
     const hostile = w.peers(w.pods[0], (send, i) => (i === 0
-      ? async (request) => createReleaseResponse({ request, share: { ...w.dealt.shares[0].share, index: 99 }, identity: w.pods[0], holder: w.names[0] })
+      ? async (request) => createReleaseResponse({ request, share: { ...w.dealt.shares[0].share, index: w.dealt.shares[0].share.index === 99 ? 100 : 99 }, identity: w.pods[0], holder: w.names[0] })
       : send))
     await assert.rejects(
       requestShareRelease({ identity: w.pods[0], agentId: AGENT, groupId: GROUP, peers: hostile,...w.opts }),
