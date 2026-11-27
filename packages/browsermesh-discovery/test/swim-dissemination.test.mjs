@@ -115,7 +115,7 @@ describe('SwimMembership update dissemination', () => {
   })
 
   it('prefers the least-transmitted updates', () => {
-    const net = makeNet(['a', 'b'], { maxPiggyback: 1, retransmitMultiplier: 3 })
+    const net = makeNet(['a', 'b', 'old', 'fresh'], { maxPiggyback: 1, retransmitMultiplier: 3 })
     const a = net.nodes.get('a')
     a.addMember('b')
     a.addMember('old')
