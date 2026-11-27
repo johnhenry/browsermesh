@@ -1,13 +1,16 @@
 # @johnhenry/browsermesh-realm
 
+[![npm version](https://img.shields.io/npm/v/%40johnhenry%2Fbrowsermesh-realm.svg)](https://www.npmjs.com/package/@johnhenry/browsermesh-realm)
+[![license](https://img.shields.io/npm/l/%40johnhenry%2Fbrowsermesh-realm.svg)](LICENSE)
+
 The pure-logic core of **realms** (design: [docs/design/realms.md](../../docs/design/realms.md)): signed realm descriptors,
 root rotation, roles, issuer-signed credentials, and the issuer ledger.
 
-**Status: private, not yet published.** The pure logic has no I/O, no network and no clock
+**Status: a preview, published to npm as 0.1.x.** The API may still change before 1.0; tickets, admitters, federation and live peer listing are not built (see "Not here"). The pure logic has no I/O, no network and no clock
 of its own: every function takes plain objects and an injectable `now`. The realm exchange (below) talks to a duck-typed
 channel and a duck-typed registry, so it needs no transport either. `createMeshNode({ realm })` in `browsermesh-apps` now wires
 it in (the admission seam, the dialler, and renewal over the `realm` protocol of the protocol seam; see that README's "Realms"
-section); `meshctl realm` is in PR #424. It depends on `@johnhenry/browsermesh-primitives` only (peer dependency, `>=0.8.0`,
+section); `meshctl realm` (in `browsermesh-meshctl`) drives it from the command line. It depends on `@johnhenry/browsermesh-primitives` only (peer dependency, `>=0.8.0`,
 the first release that exports `canonicalJson`), never on
 `browsermesh-apps` or `browsermesh-core`; the integration tests that use the real `PeerRegistry`, the real admission seam
 and a real wsh link live in `browsermesh-apps` (`test/realm-exchange-wsh.test.mjs`), which has this package as a devDependency.
@@ -28,6 +31,14 @@ Keys and signatures are base64url strings (raw 32-byte key, 64-byte signature, s
 are **whole seconds** (the registry takes milliseconds; the caller multiplies). `now` is seconds, or a function returning
 them. Verifiers never throw on hostile input: they return `{ ok: false, reason, detail }`. Builders throw a typed
 `RealmError` with a stable `code`.
+
+## Install
+
+```bash
+npm install @johnhenry/browsermesh-realm @johnhenry/browsermesh-primitives
+```
+
+`@johnhenry/browsermesh-primitives` (`>=0.8.0 <1.0.0`) is a peer dependency. Node >= 26 or a current browser.
 
 ## Usage
 
@@ -156,6 +167,15 @@ accepts a shorter chain (`chain-regressed`).
 but the genesis key (a fresh page) cannot tell the fork from the real chain and will accept whichever it meets first.
 Rotation limits the damage of key aging and planned changes, not of compromise. A compromised current root ends the
 realm.
+
+## Security stance and limits
+
+- Nothing here enforces a realm by itself: a host must opt in (`createMeshNode({ realm })`) and list the realm id and, per role,
+  the scopes it will honour in its `realmPolicy`. See [docs/security.md](../../docs/security.md), "Realms".
+- Every verifier takes hostile input and returns `{ ok: false, reason }` rather than throwing; sizes, chain length, frame counts
+  and adoption rate are capped (options: `now`, `skew` (max 300 s), `tracker`, `limits` on the descriptor store, `timeoutMs` on the prover).
+- Grants are in memory and lost on restart; revocation is by serial in the descriptor, expiry or an epoch bump; one realm per node.
+- Not built: tickets, admitters, federation between realms, live peer listing. The rotation limit below is inherent.
 
 ## Test vectors
 

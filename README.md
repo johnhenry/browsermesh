@@ -37,7 +37,7 @@ runtime — that sit on top of them.
 | [`@johnhenry/browsermesh-mcp`](packages/browsermesh-mcp) | A page's WebMCP tools served over a protocol channel to another pod, with per-tool grants and the approval kept with the page |
 | [`@johnhenry/browsermesh-ingress`](packages/browsermesh-ingress) | Real HTTP in, a mesh pod answers: a bounded request forwarder (library and `browsermesh-ingress` CLI) from an HTTP listener to the one pod a mapping names |
 | [`@johnhenry/browsermesh-egress`](packages/browsermesh-egress) | A pod lends its network access to peers that hold a grant: TCP connections, UDP flows, fetches (the provider is the HTTP client) and name lookups to destinations the operator allows, with budgets, audit and revocation; a netway backend for the consumer and a `browsermesh-egress` command |
-| [`@johnhenry/browsermesh-realm`](packages/browsermesh-realm) | **Private, in progress, not published.** Realms: signed realm descriptors, root rotation, roles, issuer-signed credentials and the issuer ledger, as pure functions (design: [`docs/design/realms.md`](docs/design/realms.md)) |
+| [`@johnhenry/browsermesh-realm`](packages/browsermesh-realm) | **Published (0.1.x preview).** Realms: signed realm descriptors, root rotation, roles, issuer-signed credentials and the issuer ledger, as pure functions (design: [`docs/design/realms.md`](docs/design/realms.md)) |
 
 ## Transports
 

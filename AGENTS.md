@@ -35,7 +35,7 @@ Higher-level packages that sit on top of those:
 | [`@johnhenry/browsermesh-mcp`](packages/browsermesh-mcp) | A page's WebMCP tools over a protocol channel (peer-depends on wsh and apps) |
 | [`@johnhenry/browsermesh-ingress`](packages/browsermesh-ingress) | Real HTTP in, a mesh pod answers: request forwarder and CLI (peer-depends on apps) |
 | [`@johnhenry/browsermesh-egress`](packages/browsermesh-egress) | A pod lends its network to peers under per-destination grants: TCP, UDP, a fetch form (the provider is the HTTP client and sees it) and name lookup, consumer with a netway backend, a `browsermesh-egress` CLI (peer-depends on apps and netway; the Node dialer on wsh's address guard) |
-| [`@johnhenry/browsermesh-realm`](packages/browsermesh-realm) | **Private, in progress, not published.** Realms: signed realm descriptors, root rotation, roles, issuer-signed credentials and the issuer ledger, as pure functions (design: [`docs/design/realms.md`](docs/design/realms.md)); peer-depends on primitives only |
+| [`@johnhenry/browsermesh-realm`](packages/browsermesh-realm) | **Published (0.1.x preview).** Realms: signed realm descriptors, root rotation, roles, issuer-signed credentials and the issuer ledger, as pure functions (design: [`docs/design/realms.md`](docs/design/realms.md)); peer-depends on primitives only |
 
 Packages version independently (see `RELEASING.md`); the root
 `package.json` version is only the release marker.
