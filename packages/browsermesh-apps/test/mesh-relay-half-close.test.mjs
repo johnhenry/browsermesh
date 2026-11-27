@@ -25,7 +25,10 @@ const ALICE = 'alice-pod'
 const BOB = 'bob-pod'
 const enc = new TextEncoder()
 const dec = new TextDecoder()
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+// Every wait is cancelled when its test ends: a service handler that waits a minute (to stand for one that never answers) must not
+// keep the test process alive for that minute after the tests have passed.
+const sleeping = new Set()
+const sleep = (ms) => new Promise((r) => { const t = setTimeout(() => { sleeping.delete(t); r() }, ms); sleeping.add(t) })
 
 /** Two duck-typed nodes joined by an async bus. `tapAtoB(data)` / `tapBtoA(data)` may record, change (return a new envelope) or drop (return null) what crosses. */
 function nodePair({ tapAtoB = (d) => d, tapBtoA = (d) => d } = {}) {
@@ -51,7 +54,11 @@ function registry() {
 }
 
 const cleanups = []
-afterEach(async () => { for (const c of cleanups.splice(0).reverse()) await c() })
+afterEach(async () => {
+  for (const c of cleanups.splice(0).reverse()) await c()
+  for (const t of sleeping) clearTimeout(t)
+  sleeping.clear()
+})
 
 /**
  * Alice exposes `svc`, served by `serve(socket)` on a real netway VirtualNetwork; Bob has a backend to it.
