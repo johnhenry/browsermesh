@@ -119,6 +119,25 @@ describe('the rules the CLI enforces', () => {
     refuses([...base, '--upload-timeout', 'later'], /--upload-timeout/)
   })
 
+  it('--upload-queue (a wait, 0 turns it off) and --upload-queue-max (a length, 0 turns it off) are checked (#472)', () => {
+    const o = resolve([...base, '--upload-queue', '500ms', '--upload-queue-max', '3'])
+    assert.equal(o.uploadQueueMs, 500)
+    assert.equal(o.uploadQueueMax, 3)
+    assert.equal(resolve([...base, '--upload-queue', '0']).uploadQueueMs, 0)
+    assert.equal(resolve([...base, '--upload-queue-max', '0']).uploadQueueMax, 0)
+    assert.equal(resolve(base).uploadQueueMs, undefined)
+    refuses([...base, '--upload-queue', 'soon'], /--upload-queue /)
+    refuses([...base, '--upload-queue-max', '-1'], /--upload-queue-max/)
+    // the "value is the next argument whatever it starts with" rule: a -- or negative value is taken as the value and then refused as a bad number; a known option is a missing value
+    assert.equal(parseArgv(['--upload-queue-max', '--5'])['upload-queue-max'], '--5')
+    refuses([...base, '--upload-queue-max', '--5'], /--upload-queue-max "--5"/)
+    refuses([...base, '--upload-queue', '-2s'], /--upload-queue "-2s"/)
+    assert.throws(() => parseArgv(['--upload-queue', '--public']), /--upload-queue needs a value/)
+    assert.match(USAGE, /--upload-queue /)
+    assert.match(USAGE, /--upload-queue-max /)
+    assert.equal(fromConfig({ uploadQueue: '1s', uploadQueueMax: 2 })['upload-queue-max'], '2')
+  })
+
   it('methods must be tokens the ingress may carry; sizes and durations must parse; --auth is bearer:FILE', () => {
     refuses([...base, '--allow-methods', 'GET,TRACE'], /--allow-methods/)
     refuses([...base, '--allow-methods', 'CONNECT'], /--allow-methods/)

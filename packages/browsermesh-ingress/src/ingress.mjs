@@ -13,7 +13,7 @@ import {
   NO_BODY_STATUS, applyForcedHeaders, checkAddHeaders, checkClientRequestShape, checkHost, checkMappedPath, checkTarget, isPodId,
   requestHeadersForProvider, responseHeadersForClient,
 } from './headers.mjs'
-import { createCollector, createInflight, createProgressMonitor, createRateLimiter, resolveLimits } from './limits.mjs'
+import { SlotRefused, createCollector, createInflight, createProgressMonitor, createRateLimiter, createUploadSlots, resolveLimits } from './limits.mjs'
 import { nodeLinkIdentity, resolvePeer } from './peer-identity.mjs'
 import {
   CAPABILITIES_METHOD, FETCH_METHOD, HTTP_PROTOCOL, HTTP_VERSIONS, KIND_RESPONSE, KIND_REQUEST, SERVICES_METHOD, SERVICE_NAME_RE, STANDARD_ALLOW, STREAMING_VERSION, WIRE_METHODS,
@@ -327,7 +327,9 @@ export function createMeshIngress({
         timeoutMs: limits.openTimeoutMs,
         setup(ch) {
           const streams = createStreamLayer(ch, { maxStreams: limits.maxInflightPerProvider * 2, maxStreamBytes: Math.min(Number.MAX_SAFE_INTEGER, Math.max(limits.maxResponseBytes, limits.maxRequestBodyBytes)) })
-          state = { peer, channel: ch, streams, pending: new Map(), nextRid: 1, uploads: 0 }
+          state = { peer, channel: ch, streams, pending: new Map(), nextRid: 1, maxUploads: Infinity }
+          // Upload slots on this link, with a bounded FIFO wait; the pod's own cap (learned with its capabilities) lowers the limit.
+          state.slots = createUploadSlots({ limit: () => Math.min(limits.maxUploadsPerProvider, state.maxUploads), queueMax: limits.uploadQueueMax, queueMs: limits.uploadQueueMs })
           // The only streams a provider may open are response bodies for a request this end made on this channel.
           streams.onStream((reader, { meta }) => {
             validateStreamMeta(meta, KIND_RESPONSE)
@@ -531,7 +533,7 @@ export function createMeshIngress({
           // A declared length over the cap is refused before a byte of the body is read.
           if (hasBody && shape.contentLength !== null && shape.contentLength > limits.maxRequestBodyBytes) throw new IngressError(413, 'body-too-large', `The request body is larger than ${limits.maxRequestBodyBytes} bytes.`)
           // The body is read when the provider is known (streamed to a provider that takes streams, buffered for any other).
-          bodyState = { request, hasBody, declared: shape.contentLength, bytes: null, source: null, started: false }
+          bodyState = { request, hasBody, declared: shape.contentLength, bytes: null, source: null, started: false, deadlineAt: now() + limits.uploadTimeoutMs }
           // (a request with no body takes the same turn of the event loop it always did before the provider is asked: a link that is
           // ending is noticed in that turn, and a request is not sent down it)
           if (!hasBody) await readBody(request, shape.contentLength, 0)
@@ -657,15 +659,31 @@ export function createMeshIngress({
     if (bodyState.hasBody && bodyState.declared !== null && bodyState.declared > Math.min(podCap, limits.maxRequestBodyBytes, streamBody ? Infinity : limits.maxBufferedBodyBytes)) {
       throw new IngressError(413, 'body-too-large', 'The request body is larger than the provider takes.')
     }
+    // A declared length that cannot be sent in the whole upload deadline, even at the fastest rate an upload is assumed to go, is refused
+    // before anything is read or any slot is held.
+    if (bodyState.hasBody && bodyState.declared !== null && bodyState.declared > Math.floor((limits.uploadMaxBytesPerSec * limits.uploadTimeoutMs) / 1000)) {
+      throw new IngressError(413, 'upload-exceeds-deadline', 'The request body cannot be sent within the upload deadline.')
+    }
     // One address cannot hold every upload slot: it has a few of its own, fewer than the pod's link has.
     let clientSlot = null
     if (streamBody) {
       clientSlot = inflight.enter(`u:${forward.clientKey}`, limits.maxUploadsPerClient)
       if (!clientSlot) throw new IngressError(429, 'client-uploads', 'Too many uploads from this client are in flight.', { headers: { 'retry-after': '1' } })
     }
-    if (streamBody && state.uploads >= Math.min(limits.maxUploadsPerProvider, podCaps.maxUploads)) {
-      clientSlot?.()
-      throw new IngressError(503, 'provider-uploads', 'This provider is taking as many uploads as it may.', { headers: { 'retry-after': '1' } })
+    // A slot on the link: at once when one is free, otherwise a wait in a bounded FIFO queue (a client's queued uploads count against its
+    // own cap, since its slot is already held). Waiting is not the sender's time: the upload has not started.
+    let uploadSlot = null
+    if (streamBody) {
+      state.maxUploads = podCaps.maxUploads
+      try {
+        const got = state.slots.acquire(ac.signal)
+        uploadSlot = typeof got === 'function' ? got : await got
+      } catch (e) {
+        clientSlot?.()
+        if (e instanceof SlotRefused) throw new IngressError(503, 'provider-uploads', 'This provider is taking as many uploads as it may.', { headers: { 'retry-after': '1' } })
+        if (ac.signal.aborted && ac.signal.reason instanceof IngressError) throw ac.signal.reason
+        throw e
+      }
     }
     // (no await when there is no body: the link can end between awaits, and a request with nothing to read has no reason to wait)
     const bytes = streamBody ? null : bodyState.hasBody ? await buffer(podCap) : EMPTY
@@ -700,7 +718,7 @@ export function createMeshIngress({
         ...(forward.service === undefined ? {} : { service: forward.service }),
       }, { signal: ac.signal, timeoutMs: streamBody ? limits.uploadTimeoutMs : limits.timeoutMs, onSent: () => { entry.sent = true } })
       // The body travels as a stream. A provider may answer before it has read all of it: the head decides, and an answer ends the upload.
-      if (streamBody) upload = startUpload(state, rid, bodyState, { cap: Math.min(podCap, limits.maxRequestBodyBytes), ac, record, onStop: clientSlot })
+      if (streamBody) upload = startUpload(state, rid, bodyState, { cap: Math.min(podCap, limits.maxRequestBodyBytes), ac, record, onStop: () => { uploadSlot?.(); clientSlot?.() } })
       else if (hasBody) state.streams.sendBody(bytes, { rid, kind: KIND_REQUEST }, { signal: ac.signal, timeoutMs: limits.openTimeoutMs }).catch(() => {})
       head = validateResponseHead(await fetchP, limits)
       // "Not me, try another": never the provider's own answer, and nothing of it reaches the client.
@@ -710,6 +728,7 @@ export function createMeshIngress({
       ac.signal.removeEventListener('abort', onAbort)
       cancelReader('request failed')
       stopUpload('request failed')
+      uploadSlot?.()
       clientSlot?.()
       if (ac.signal.aborted && ac.signal.reason instanceof IngressError) throw ac.signal.reason
       if (e instanceof IngressError) throw e
@@ -721,6 +740,8 @@ export function createMeshIngress({
       if (e?.reason === 'method-not-allowed') throw refuseMethod(podPolicy?.methods ?? null)
       if (e?.reason === 'body-too-large') throw new IngressError(413, 'body-too-large', 'The request body is larger than the provider takes.')
       if (e?.reason === 'body-timeout') throw new IngressError(408, 'body-timeout', 'The request body was too slow.')
+      if (e?.reason === 'upload-too-slow') throw new IngressError(408, 'upload-too-slow', 'The request body cannot arrive within the upload deadline at the rate it is arriving.')
+      if (e?.reason === 'upload-exceeds-deadline') throw new IngressError(413, 'upload-exceeds-deadline', 'The request body cannot be sent within the upload deadline.')
       if (e?.reason === 'bad-framing') throw new IngressError(400, 'bad-framing', 'The body is not the length Content-Length declared.')
       if (e?.reason === 'uploads-busy') throw new IngressError(503, 'provider-uploads', 'This provider is taking as many uploads as it may.', { headers: { 'retry-after': '1' } })
       if (e?.reason === 'too-large' || e?.reason === 'stream-too-large') throw new IngressError(502, 'provider-refused-body', 'The provider would not take the request body.')
@@ -871,11 +892,10 @@ export function createMeshIngress({
   function startUpload(state, rid, bodyState, { cap, ac, record, onStop }) {
     const reader = (bodyState.source ?? bodyState.request.body).getReader()
     bodyState.started = true
-    state.uploads += 1
     let writer = null
     let stopped = false
     let released = false
-    const release = () => { if (!released) { released = true; state.uploads -= 1; monitor.stop(); onStop?.() } }
+    const release = () => { if (!released) { released = true; monitor.stop(); onStop?.() } }
     const stop = (why) => {
       if (stopped) return
       stopped = true
@@ -887,6 +907,9 @@ export function createMeshIngress({
     const monitor = createProgressMonitor({
       graceMs: limits.uploadGraceMs, windowMs: limits.uploadProgressMs, minBytesPerSec: limits.uploadMinBytesPerSec,
       onStall: () => { if (stopped || ac.signal.aborted) return; stop('too slow'); ac.abort(new IngressError(408, 'body-timeout', 'The request body was too slow.')) },
+      // Cut as soon as it is known that the rest cannot arrive before the deadline at the rate it is arriving (a declared length only).
+      now, declared: bodyState.declared ?? undefined, deadlineAt: bodyState.deadlineAt,
+      onCannotFinish: () => { if (stopped || ac.signal.aborted) return; stop('cannot finish'); ac.abort(new IngressError(408, 'upload-too-slow', 'The request body cannot arrive within the upload deadline at the rate it is arriving.')) },
     })
     const run = (async () => {
       try {

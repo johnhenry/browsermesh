@@ -8,7 +8,7 @@
 import { createStreamLayer } from '@johnhenry/browsermesh-apps/protocol-stream'
 import { ChannelErrorCode, MeshChannelError } from '@johnhenry/browsermesh-apps/mesh-channel'
 import { IngressError } from './errors.mjs'
-import { createProgressMonitor } from './limits.mjs'
+import { SlotRefused, createProgressMonitor, createUploadSlots } from './limits.mjs'
 import { NO_BODY_STATUS, isPodId } from './headers.mjs'
 import { LINK_KEY_REFUSALS, LinkKeyRefusal, nodeLinkIdentity, resolvePeer, unverifiedPeer } from './peer-identity.mjs'
 import {
@@ -41,6 +41,12 @@ export const PROVIDER_LIMIT_DEFAULTS = Object.freeze({
   uploadGraceMs: 30_000,
   uploadProgressMs: 10_000,
   uploadMinBytesPerSec: 1024,
+  /** The fastest rate an upload is assumed able to go, bytes per second: a declared length that cannot be sent in the whole upload deadline even at this rate is refused at once (`upload-exceeds-deadline`). */
+  uploadMaxBytesPerSec: 256 * 1024 * 1024,
+  /** A request with a body that finds every upload slot on the link busy waits in a FIFO queue at most this long, ms (0 turns the queue off), then is refused `uploads-busy` (the ingress answers 503 `provider-uploads`). */
+  uploadQueueMs: 2000,
+  /** How many may wait for an upload slot on one link (0 turns the queue off). */
+  uploadQueueMax: 8,
   maxHeaderCount: 64,
   maxHeaderBytes: 16 * 1024,
   maxTargetLength: 2048,
@@ -171,7 +177,8 @@ export function serveHttpOnMesh(service, handler, { allowFrom, limits: limitOpti
     })
     const bodies = new Map() // rid -> { reader } | { waiter }
     let inflight = 0
-    let uploads = 0 // requests with a body being taken on this link
+    // Requests with a body being taken on this link, and the bounded FIFO of those waiting for a slot.
+    const slots = createUploadSlots({ limit: uploadsAllowed, queueMax: limits.uploadQueueMax, queueMs: limits.uploadQueueMs })
 
     streams.onStream((reader, { meta }) => {
       if (open === false) throw new IngressError(403, 'forbidden', 'not served')
@@ -250,15 +257,32 @@ export function serveHttpOnMesh(service, handler, { allowFrom, limits: limitOpti
         throw new MeshChannelError(ChannelErrorCode.INVALID, 'body-too-large', 'the request body is larger than this pod takes')
       }
       const counted = head.body && streaming
-      if (counted && uploads >= uploadsAllowed()) { counters.refused += 1; throw new MeshChannelError(ChannelErrorCode.BUSY, 'uploads-busy', 'too many uploads on this link') }
-      if (counted) uploads += 1
+      const deadlineMs = counted ? Math.max(limits.handlerTimeoutMs, limits.uploadTimeoutMs) : limits.handlerTimeoutMs
+      // A declared length that cannot be sent in the whole deadline even at the fastest rate an upload is assumed to go: refused before a slot or a byte.
+      if (counted && head.length !== undefined && head.length > Math.floor((limits.uploadMaxBytesPerSec * deadlineMs) / 1000)) {
+        counters.refused += 1
+        throw new MeshChannelError(ChannelErrorCode.INVALID, 'upload-exceeds-deadline', 'the request body cannot be sent within the upload deadline')
+      }
+      // A slot: at once, or after a bounded FIFO wait (the wait ends if the ingress cancels the request). Waiting is not the sender's time.
+      let releaseSlot = null
+      if (counted) {
+        try {
+          const got = slots.acquire(ctx.signal)
+          releaseSlot = typeof got === 'function' ? got : await got
+        } catch (e) {
+          counters.refused += 1
+          if (e instanceof SlotRefused) throw new MeshChannelError(ChannelErrorCode.BUSY, 'uploads-busy', 'too many uploads on this link')
+          throw e
+        }
+      }
       inflight += 1
       counters.requests += 1
       counters.inflight += 1
       const ac = new AbortController()
       const onCancel = () => ac.abort(ctx.signal.reason)
       ctx.signal?.addEventListener('abort', onCancel, { once: true })
-      const timer = unref(setTimeout(() => ac.abort(new Error('handler deadline exceeded')), counted ? Math.max(limits.handlerTimeoutMs, limits.uploadTimeoutMs) : limits.handlerTimeoutMs))
+      const timer = unref(setTimeout(() => ac.abort(new Error('handler deadline exceeded')), deadlineMs))
+      const startedAt = Date.now()
       let handedOff = false
       const guard = { failure: null, reader: null } // a request body that broke a bound, and the reader to stop when the request is over
       const finish = () => {
@@ -269,13 +293,13 @@ export function serveHttpOnMesh(service, handler, { allowFrom, limits: limitOpti
         // The answer is over: whatever of the upload the handler did not read is not wanted, and the sender is told to stop.
         guard.stopMonitor?.()
         guard.reader?.cancel('request finished').catch(() => {})
-        if (counted) uploads -= 1
+        releaseSlot?.()
         inflight -= 1
         counters.inflight -= 1
         for (const listener of [...idleListeners]) listener()
       }
       try {
-        const { request, body: bodyBytes } = await buildRequest(head, ac, claimBody, { cap: bodyCap, streaming: streaming && !buffered, buffered: streaming && buffered, idleMs: limits.bodyIdleMs, counters, guard, progress: { graceMs: limits.uploadGraceMs, windowMs: limits.uploadProgressMs, minBytesPerSec: limits.uploadMinBytesPerSec } })
+        const { request, body: bodyBytes } = await buildRequest(head, ac, claimBody, { cap: bodyCap, streaming: streaming && !buffered, buffered: streaming && buffered, idleMs: limits.bodyIdleMs, counters, guard, progress: { graceMs: limits.uploadGraceMs, windowMs: limits.uploadProgressMs, minBytesPerSec: limits.uploadMinBytesPerSec, declared: head.length, deadlineAt: startedAt + deadlineMs } })
         if (verifyRequest) {
           const bytes = signedRequestBytes({
             rid: head.rid, nonce: head.nonce, host: head.host, method: head.method, target: head.target, headers: head.headers, client: head.client,
@@ -454,7 +478,11 @@ function guardedBody(reader, { cap, idleMs, length, counters, guard, progress })
     try { controller.error(e) } catch { /* already closed */ }
   }
   // The sender must keep moving (a trickle is cut); only the time spent waiting on the link counts, never a slow handler.
-  const monitor = createProgressMonitor({ ...progress, onStall: () => { if (ctl && !guard.failure) fail(ctl, new IngressError(408, 'body-timeout', 'the request body is arriving too slowly')) } })
+  const monitor = createProgressMonitor({
+    ...progress,
+    onStall: () => { if (ctl && !guard.failure) fail(ctl, new IngressError(408, 'body-timeout', 'the request body is arriving too slowly')) },
+    onCannotFinish: () => { if (ctl && !guard.failure) fail(ctl, new IngressError(408, 'upload-too-slow', 'the request body cannot arrive within the upload deadline at the rate it is arriving')) },
+  })
   guard.stopMonitor = monitor.stop
   return new ReadableStream({
     start(controller) { ctl = controller },

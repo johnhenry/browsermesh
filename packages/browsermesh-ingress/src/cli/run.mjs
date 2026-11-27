@@ -73,6 +73,8 @@ export async function main(argv, { stdout, stderr, startNode = startMeshNode, pr
   if (options.timeoutMs) limits.timeoutMs = options.timeoutMs
   if (options.uploadTimeoutMs) limits.uploadTimeoutMs = options.uploadTimeoutMs
   if (options.maxUploads) limits.maxUploadsPerProvider = options.maxUploads
+  if (options.uploadQueueMs !== undefined) limits.uploadQueueMs = options.uploadQueueMs
+  if (options.uploadQueueMax !== undefined) limits.uploadQueueMax = options.uploadQueueMax
   const waiting = options.linkWaitMs !== 0
   if (options.linkWaitMs) limits.linkWaitMs = options.linkWaitMs
 

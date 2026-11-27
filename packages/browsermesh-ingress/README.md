@@ -224,8 +224,27 @@ With both ends new, every request carries its method and its whole body to the p
   (`uploadGraceMs`), in every 10 s window (`uploadProgressMs`) in which the ingress was waiting for the client, at least 1 KiB per second
   (`uploadMinBytesPerSec`) must arrive, or the request ends with a 408 `body-timeout`. The pod applies the same rule to what arrives on the
   link (a slow origin is never blamed on the sender). One address also has at most 2 uploads in flight (`maxUploadsPerClient`; the next is
-  a 429 `client-uploads`) of the 4 a pod's link takes. **What stays possible:** a client at 1 KiB/s for the whole 5 minutes still holds
-  its 2 slots; many addresses can still fill a pod's 4 slots (that is what `authorize`, `deny` and `--max-uploads` are for).
+  a 429 `client-uploads`) of the 4 a pod's link takes.
+- **An upload that cannot finish is cut early (#472).** Two rules, each applied by the ingress and by the pod on its own:
+  1. *At the start*, a declared `Content-Length` that cannot be sent in the whole upload deadline even at `uploadMaxBytesPerSec` (default
+     256 MiB/s, so about 75 GiB at the default 5 min: it matters when `--max-body unlimited` or a long deadline lifts the other caps) is a
+     413 `upload-exceeds-deadline`, before a byte is read or a slot is held. The pod's deadline for this is `max(handlerTimeoutMs, uploadTimeoutMs)`.
+  2. *After the grace* (`uploadGraceMs`, 30 s) and at the end of every progress window after it, the sender's observed rate is the bytes
+     received divided by the time spent waiting on the sender since the upload started (so a slow origin is never counted against it). If
+     `remaining bytes / rate` is more than the time left to the deadline, the upload is cut now with a 408 `upload-too-slow`, not at the
+     deadline. The test is `remaining x waited > received x time left`, so an upload that can finish exactly is not cut, one second
+     short is; nothing is decided on less than half a window (5 s) of waiting on the sender; an upload with no declared length (chunked)
+     has no projection and keeps only the floor above. The deadline is the request's (the ingress's from when `handle()` began).
+- **A bounded wait for a slot instead of an immediate 503 (#472).** A request with a body that finds every upload slot on the pod's link busy
+  waits in a FIFO queue, per link and at each end separately (the ingress's and the pod's): at most `uploadQueueMs` (default 2000) and with at
+  most `uploadQueueMax` (default 8) waiting. Beyond either bound it is the 503 `provider-uploads` with `Retry-After`, as before (`0` for
+  either turns the wait off). The oldest waiter gets a freed slot (it is reserved for it as it is granted, so a newcomer cannot pass it); a
+  client's queued uploads count with its active ones against `maxUploadsPerClient` (the next is a 429 `client-uploads`); a waiter whose client
+  disconnects leaves the queue at once (499 `client-aborted`); a waiter that times out leaves it and does not block the ones behind. A queued
+  request has sent nothing yet (a held `Expect: 100-continue` is not answered), and the time in the queue is nobody's upload time.
+  **What stays possible:** a client at about the break-even rate (fast enough not to be cut early) can still hold its 2 slots for most of
+  the 5 minutes, and many addresses can still fill a pod's 4 slots and fill the queue (that is what `authorize`, `deny` and
+  `--max-uploads` are for); what changed is that a short burst is absorbed, and a body that could never finish is cut when that is known.
 
 ### The provider
 
@@ -634,7 +653,9 @@ fails it until the table says so.
 | 404 | `no-mapping` | `resolve` returned `null` |
 | 405 | `method-not-allowed` | a method this ingress or this pod does not carry: `CONNECT`, `TRACE`, `TRACK`, a non-token, one outside `methods` on either end, or anything but `GET` and `HEAD` for a pod that has not upgraded (with `Allow`) |
 | 408 | `body-timeout` | the client's body stalled (either end's idle bound) |
+| 408 | `upload-too-slow` | after the grace, the rest of the body cannot arrive before the upload deadline at the rate it is arriving (either end) |
 | 413 | `body-too-large` | the request body is over the cap of this ingress or of the pod: refused unread when its length was declared, cut at the cap when it was not |
+| 413 | `upload-exceeds-deadline` | a declared length that cannot be sent in the whole upload deadline even at `uploadMaxBytesPerSec` (either end), refused unread |
 | 414 | `target-too-long` | the target is over 2048 characters |
 | 426 | `upgrade-unsupported` | a WebSocket or other upgrade |
 | 429 | `client-inflight` | too many requests from this client in flight (with `Retry-After`) |
@@ -675,7 +696,7 @@ fails it until the table says so.
 | 503 | `provider-inflight` | this provider is at its in-flight cap (with `Retry-After`) |
 | 503 | `provider-rate` | this provider is over its rate (with `Retry-After`) |
 | 503 | `provider-stopping` | the provider is being stopped (`served.stop()`) and takes no new request (with `Retry-After`) |
-| 503 | `provider-uploads` | this pod's link is carrying as many requests with a body as the ingress or the pod allows (with `Retry-After`) |
+| 503 | `provider-uploads` | this pod's link is carrying as many requests with a body as the ingress or the pod allows, and the wait queue is full or the wait (`uploadQueueMs`) ran out (with `Retry-After`) |
 | 504 | `provider-idle` | the provider announced a body and did not send it, or stalled |
 | 504 | `provider-timeout` | the whole request ran past `timeoutMs`, or the provider did not answer the open |
 <!-- failures-table:end -->
@@ -704,8 +725,8 @@ A provider's own answer, including its own 4xx and 5xx and a plain 421, passes t
 | Request body | streamed, never held whole; **32 MiB** at the ingress (`maxRequestBodyBytes`, `--max-body`) and **32 MiB** at the pod (`maxBodyBytes`); over it is a 413 (refused unread when the length was declared, cut at the cap when it was not); `Infinity` / `--max-body unlimited` only by choice |
 | Body held whole | 1 MiB (`maxBufferedBodyBytes`; a pod that has not upgraded, a signed request, a request `retry` may repeat); over it is a 413 |
 | Whole request with a body | 5 min (`uploadTimeoutMs`, `--upload-timeout`) at the ingress, `max(handlerTimeoutMs, uploadTimeoutMs)` = 5 min at the pod; 504 `provider-timeout` |
-| Uploads in flight | 4 requests with a body per pod link at the ingress (`maxUploadsPerProvider`, `--max-uploads`) and 4 at the pod (`limits.maxUploads`; 2 where the pod holds bodies whole); the next is a 503 `provider-uploads` with `Retry-After`. 2 per client address (`maxUploadsPerClient`): the next is a 429 `client-uploads` |
-| Upload progress | after 30 s (`uploadGraceMs`), 1 KiB/s (`uploadMinBytesPerSec`) in each 10 s window (`uploadProgressMs`) spent waiting on the sender, at both ends; under it, 408 `body-timeout` |
+| Uploads in flight | 4 requests with a body per pod link at the ingress (`maxUploadsPerProvider`, `--max-uploads`) and 4 at the pod (`limits.maxUploads`; 2 where the pod holds bodies whole); the next waits in a queue of up to 8 for up to 2 s (`uploadQueueMax`, `uploadQueueMs`, `--upload-queue-max`, `--upload-queue`; at each end), then is a 503 `provider-uploads` with `Retry-After`. 2 per client address (`maxUploadsPerClient`): the next is a 429 `client-uploads` |
+| Upload progress | after 30 s (`uploadGraceMs`), 1 KiB/s (`uploadMinBytesPerSec`) in each 10 s window (`uploadProgressMs`) spent waiting on the sender, at both ends; under it, 408 `body-timeout`; after the grace, a body whose rest cannot arrive before the deadline at the observed rate is cut, 408 `upload-too-slow`; a declared length that cannot be sent in the deadline at 256 MiB/s (`uploadMaxBytesPerSec`) is a 413 `upload-exceeds-deadline` |
 | Held body at a pod that cannot stream | 8 MiB (`limits.maxHeldBodyBytes`), 2 uploads at a time |
 | Bytes per second | no bound: the response has none either (the bounds are bytes, time, concurrency and one 256 KiB stream window); the Node listener's `requestTimeoutMs` is 300 s |
 | Response | 8 MiB (`maxResponseBytes`); a declared length over it is refused before anything is sent |
@@ -730,7 +751,7 @@ A provider's own answer, including its own 4xx and 5xx and a plain 421, passes t
 ```
 browsermesh-ingress --listen 127.0.0.1:8080 --signaling wss://signal.example \
   --map=app.example.test=<podId> [--map=...] [--allow-methods GET,HEAD,POST] [--max-body 8m] [--max-uploads 4] \
-  [--timeout 30s] [--upload-timeout 5m] \
+  [--timeout 30s] [--upload-timeout 5m] [--upload-queue 2s] [--upload-queue-max 8] \
   [--auth bearer:<file>] [--identity <file>] [--config file.json] \
   [--link-wait 5s] [--ready-path /_ready] \
   [--names-zone pods.example.test --names-allow=<podId>=app,blog ...]
@@ -753,7 +774,7 @@ protocol service to.
 
 **Narrowing from the command line** (every method and 32 MiB bodies are the default, so these only take away): `--allow-methods
 GET,HEAD` (a comma separated list of method names; `*` says every one), `--max-body 64k` (or `unlimited`), `--max-uploads 1`,
-`--upload-timeout 1m`. They are config keys too (`allowMethods`, `maxBody`, `maxUploads`, `uploadTimeout`). The start-up line says
+`--upload-timeout 1m`, `--upload-queue 500ms` and `--upload-queue-max 4` (`0` for either turns the wait for an upload slot off). They are config keys too (`allowMethods`, `maxBody`, `maxUploads`, `uploadTimeout`, `uploadQueue`, `uploadQueueMax`). The start-up line says
 what is on (`methods: every method (not CONNECT, TRACE or TRACK); body cap 33554432 bytes`).
 
 ## What is not built
@@ -790,7 +811,7 @@ offering `[2, 1]`, a pod serves `[1, 2]`, and the channel runs at the highest bo
   for none). That is how a pod states what it accepts, per service. The ingress asks once per link, and only when a request needs it (a
   body, or a method other than `GET` and `HEAD`); a plain `GET` asks nothing, so a pod that narrows `GET` refuses it itself;
 - channel errors the ingress understands: `method-not-allowed` (405), `body-too-large` (413), `body-timeout` (408), `bad-framing`
-  (400) and `uploads-busy` (503 `provider-uploads`).
+  (400), `upload-too-slow` (408), `upload-exceeds-deadline` (413) and `uploads-busy` (503 `provider-uploads`).
 
 **What each pairing does** (each is tested; "older" is simulated by not stating version 2):
 

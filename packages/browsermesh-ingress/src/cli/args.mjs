@@ -45,6 +45,8 @@ Options:
   --max-uploads N             requests with a body in flight to one pod at a time (default 4)
   --timeout DURATION          whole-request deadline, e.g. 30s (default 30s)
   --upload-timeout DURATION   whole-request deadline for a request with a body (default 5m)
+  --upload-queue DURATION     how long a request with a body waits for a free upload slot before the 503 (default 2s; 0 turns the wait off)
+  --upload-queue-max N        how many requests may wait for an upload slot on one pod link (default 8; 0 turns the wait off)
   --auth bearer:FILE          require "Authorization: Bearer <the token in FILE>" on every request
   --identity FILE             the ingress's identity file (created on first run)
   --config FILE               a JSON file with the same options (flags win)
@@ -64,7 +66,7 @@ Exit status: 0 after --help, 2 on bad input, 1 if the node cannot start.
 
 const FLAGS = new Map([
   ['listen', 'value'], ['signaling', 'value'], ['map', 'list'], ['allow-methods', 'value'], ['max-body', 'value'], ['timeout', 'value'],
-  ['upload-timeout', 'value'], ['max-uploads', 'value'],
+  ['upload-timeout', 'value'], ['max-uploads', 'value'], ['upload-queue', 'value'], ['upload-queue-max', 'value'],
   ['auth', 'value'], ['identity', 'value'], ['config', 'value'], ['public', 'bool'], ['tls-terminated-in-front', 'bool'],
   ['allow-shared-origin', 'bool'], ['help', 'bool'],
   ['link-wait', 'value'], ['ready-path', 'value'],
@@ -270,6 +272,16 @@ export function resolveOptions(raw) {
     maxUploads = Number(raw['max-uploads'])
   }
 
+  let uploadQueueMs, uploadQueueMax
+  if (raw['upload-queue'] !== undefined) {
+    if (/^0(?:ms|s|m)?$/.test(String(raw['upload-queue']).trim())) uploadQueueMs = 0
+    else try { uploadQueueMs = parseDuration(raw['upload-queue']) } catch { throw new UsageError(`--upload-queue "${raw['upload-queue']}" is not a duration (for example 2s, or 0).`) }
+  }
+  if (raw['upload-queue-max'] !== undefined) {
+    if (!/^\d{1,4}$/.test(String(raw['upload-queue-max']))) throw new UsageError(`--upload-queue-max "${raw['upload-queue-max']}" is not a number (0 turns the wait off).`)
+    uploadQueueMax = Number(raw['upload-queue-max'])
+  }
+
   let auth = null
   if (raw.auth !== undefined) {
     const am = /^bearer:(.+)$/.exec(raw.auth)
@@ -289,7 +301,7 @@ export function resolveOptions(raw) {
   if (names && mappings.some((mp) => hostName(mp.host).endsWith(`.${names.zone}`))) {
     warnings.push(`warning: a --map host is under the names zone ${names.zone}; pods cannot claim that name (the mapping wins).`)
   }
-  return { host, port, signaling: raw.signaling, mappings, methods, maxBody, timeoutMs, uploadTimeoutMs, maxUploads, auth, identity: raw.identity, public: isPublic, warnings, names, linkWaitMs, readyPath }
+  return { host, port, signaling: raw.signaling, mappings, methods, maxBody, timeoutMs, uploadTimeoutMs, maxUploads, uploadQueueMs, uploadQueueMax, auth, identity: raw.identity, public: isPublic, warnings, names, linkWaitMs, readyPath }
 }
 
 /**
