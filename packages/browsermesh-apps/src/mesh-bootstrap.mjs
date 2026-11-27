@@ -393,7 +393,7 @@ import { registerOrchestratorTools } from './mesh-orchestrator-tools.mjs'
  *   whether the identity binding verified the peer's key. With `wsh` also given, a peer the wsh authorizer refuses is put to the
  *   same `decide` (`transport: 'wsh'`), and `restrict` admits it to a restricted wsh link. Off unless given: nothing changes. The
  *   seam is `node.admission`.
- * @param {object} [options.realm] - Opt in to a realm (`docs/design/realms.md`; needs the private workspace package
+ * @param {object} [options.realm] - Opt in to a realm (`docs/design/realms.md`; needs the optional peer package
  *   `@johnhenry/browsermesh-realm`, `import()`ed lazily, so a node without this option never loads it): this node hosts and joins
  *   ONE realm (one node per realm). `{ pinnedId, descriptor?, credential?, policy, guestTtl?, limits?, persist?, autoRenew?,
  *   onEvent?, timeoutMs? }`. Builds the descriptor store and verifier, sets the registry's realm policy, and gives the link-admission

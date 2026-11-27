@@ -37,7 +37,7 @@ pipe relay. The pod host H and `meshctl` use a real loopback pipe relay, as in e
 |---|---|---|---|---|
 | ingress | `-ingress`, `-apps` | a GET reaches Pod A once the ingress pod holds `protocol:http:open`; the client gets the ingress's policy | before that grant: 502 `provider-not-authorized`; a method the operator did not serve: 405 | [21](./21-http-ingress.mjs) |
 | egress | `-egress`, `-apps` | Pod A dials `upstream.test:<port>` through Pod B under `egress:tcp:<host>:<port>:connect` | another port of the same host: `no-grant`; a second live connection: `budget-exceeded` | [22](./22-mesh-egress.mjs) |
-| realm | `-realm` (preview), `-apps` (`createMeshNode({ realm })`, `node.realm.present`), `-transport` | a stranger whose credential names its own key is promoted and holds the role's scopes | no credential: `no-credential`; another key's credential: `subject-mismatch`; the role's scopes Pod A's policy omits are dropped | [26](./26-realm-admission.mjs) (lower-level pieces) |
+| realm | `-realm` (0.1.x preview), `-apps` (`createMeshNode({ realm })`, `node.realm.present`), `-transport` | a stranger whose credential names its own key is promoted and holds the role's scopes | no credential: `no-credential`; another key's credential: `subject-mismatch`; the role's scopes Pod A's policy omits are dropped | [26](./26-realm-admission.mjs) (lower-level pieces) |
 | mcp | `-mcp`, `-apps` | the stranger lists and calls `search` (the result is labelled untrusted) | `buy`: its scopes were dropped, so it answers like a tool that does not exist | [23](./23-mcp-tools-over-mesh.mjs) |
 | objects | `-objects`, `-apps`, wsh | the stranger reads `app.title` | `app.secret` (not on the allow-list); `set` (its scope was dropped) | [19](./19-wsh-objects-over-protocol-channel.mjs) |
 | meshctl | `-meshctl`, `-transport`, `-pod`, wsh | `meshctl pods spawn` through the relay, as an identity the host allowed | `meshctl host describe` as an identity it did not: `WSH_REFUSED`, exit 3 | [25](./25-meshctl-through-a-relay.mjs), and [24](./24-wsh-services-and-relaying-pod.mjs) for a relaying pod |
@@ -62,8 +62,8 @@ Node >= 26. Listeners are on `127.0.0.1`, port 0, and are closed before exit.
 - **`meshctl --signaling`** (WebRTC): the tour uses `--wsh-relay` only. VMM-backed hosts: H is the in-memory driver.
 - **Discovery**: pods are linked by pod id; no DHT, no stealth records (see [27](./27-dht-and-stealth-records.mjs)).
 - **A browser**: everything is Node; see [`tests/browser/README.md`](../tests/browser/README.md) for what runs in one.
-- **The realm package is a preview**: `@johnhenry/browsermesh-realm` is private and unpublished, so the tour runs it from
-  this repository and its API may change. `createMeshNode({ realm })` itself is in `-apps` (>= 0.30).
+- **The realm package is a preview**: `@johnhenry/browsermesh-realm` is published on npm as 0.1.x, but its API may change
+  before 1.0; the tour runs the workspace copy from this repository. `createMeshNode({ realm })` itself is in `-apps` (>= 0.30).
 
 ## Where each claim is documented
 

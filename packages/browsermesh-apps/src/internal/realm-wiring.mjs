@@ -4,7 +4,7 @@
  *   const prepared = await prepareRealm({ realm, registry, onLog })     // before the node: gives the admission seam
  *   const api = attachRealm(node, prepared, { servicesNetwork, onLog }) // after the node: node.realm
  *
- * `@johnhenry/browsermesh-realm` is private and unpublished, so apps never imports it statically: `prepareRealm` `import()`s it
+ * `@johnhenry/browsermesh-realm` is an optional peer (a separate published package), so apps never imports it statically: `prepareRealm` `import()`s it
  * lazily and fails with a clear error when it is absent (the same convention as the other optional peers).
  *
  * One realm per node ("one node per realm"). What this module owns:
@@ -56,7 +56,7 @@ export async function prepareRealm({ realm, registry, onLog = () => {} }) {
   try {
     pkg = await (loadRealmPackage ? loadRealmPackage() : import('@johnhenry/browsermesh-realm'))
   } catch (cause) {
-    throw new Error('createMeshNode: the realm option needs @johnhenry/browsermesh-realm (it is a private, unpublished workspace package: add it as a dependency of your app)', { cause })
+    throw new Error('createMeshNode: the realm option needs @johnhenry/browsermesh-realm (an optional peer dependency: install @johnhenry/browsermesh-realm)', { cause })
   }
 
   registry.setRealmPolicy(policy)

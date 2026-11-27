@@ -176,6 +176,12 @@ realm.
   and adoption rate are capped (options: `now`, `skew` (max 300 s), `tracker`, `limits` on the descriptor store, `timeoutMs` on the prover).
 - Grants are in memory and lost on restart; revocation is by serial in the descriptor, expiry or an epoch bump; one realm per node.
 - Not built: tickets, admitters, federation between realms, live peer listing. The rotation limit below is inherent.
+- A role that grants MCP tools must list BOTH `mcp:<tool>:list` and `mcp:<tool>:call` in the host's policy; a role with only
+  `call` leaves the tool unlisted: `member: ['mesh:link:connect', 'protocol:mcp:open', 'mcp:search:list', 'mcp:search:call']`.
+- Only a node created with the `realm` option gets the `mesh-protocols` service attached for it. A node without it (an ingress
+  node, an egress provider that peers with a realm host) attaches it itself:
+  `node.services.get('mesh-protocols') ?? attachService(node, undefined, createMeshProtocolService())` (both from
+  `@johnhenry/browsermesh-apps`; see `examples/28-tour.mjs`).
 
 ## Test vectors
 

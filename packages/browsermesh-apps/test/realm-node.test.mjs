@@ -121,7 +121,7 @@ describe('createMeshNode({ realm }): boot', () => {
         realm: realmOption(realm, { loadRealmPackage: async () => { throw Object.assign(new Error('Cannot find package'), { code: 'ERR_MODULE_NOT_FOUND' }) } }),
         syncDbName: `realm-node-x-${++runId}`,
       }),
-      /the realm option needs @johnhenry\/browsermesh-realm/,
+      (e) => /the realm option needs @johnhenry\/browsermesh-realm/.test(e.message) && /install @johnhenry\/browsermesh-realm/.test(e.message) && !/unpublished|private/i.test(e.message),
     )
     const ok = await makeNode(env, 'plain2')
     assert.equal(ok.realm, undefined)
