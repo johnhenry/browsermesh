@@ -38,8 +38,12 @@
   "scripts": {
     "test": "node --test test/*.test.mjs"
   },
+  "dependencies": {
+    "@johnhenry/keyvault": "^0.1.0"
+  },
   "peerDependencies": {
     "@johnhenry/browsermesh-primitives": ">=0.2.0 <1.0.0",
+    "@johnhenry/browsermesh-realm": ">=0.1.0 <1.0.0",
     "@johnhenry/browsermesh-pod": ">=0.1.0 <1.0.0",
     "@johnhenry/browsermesh-core": ">=0.5.0 <1.0.0",
     "@johnhenry/browsermesh-apps": ">=0.18.0 <1.0.0",
@@ -47,6 +51,9 @@
     "@johnhenry/wsh": ">=0.55.0 <1.0.0"
   },
   "peerDependenciesMeta": {
+    "@johnhenry/browsermesh-realm": {
+      "optional": true
+    },
     "@johnhenry/browsermesh-transport": {
       "optional": true
     },
@@ -56,6 +63,7 @@
   },
   "devDependencies": {
     "@johnhenry/browsermesh-primitives": ">=0.0.1 <1.0.0",
+    "@johnhenry/browsermesh-realm": ">=0.0.0 <1.0.0",
     "@johnhenry/browsermesh-pod": ">=0.6.0",
     "@johnhenry/browsermesh-core": ">=0.1.0 <1.0.0",
     "@johnhenry/browsermesh-apps": ">=0.24.0",

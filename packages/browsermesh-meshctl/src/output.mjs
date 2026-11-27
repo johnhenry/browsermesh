@@ -44,6 +44,15 @@ const ERROR_CODE_TO_EXIT = Object.freeze({
   ELANE: EXIT_CODE.ELANE,
   ENOTSUP: EXIT_CODE.ELANE,
   ETIMEDOUT: EXIT_CODE.ETIMEDOUT,
+  // `meshctl realm ...` (see `realm/errors.mjs`): stable codes, mapped onto the same table.
+  EREALM_NOT_IMPLEMENTED: EXIT_CODE.USAGE,
+  EREALM_AMBIGUOUS: EXIT_CODE.USAGE,
+  // A passphrase that does not open the key, a passphrase file others can read, a key this machine does not hold.
+  EREALM_BAD_PASSPHRASE: EXIT_CODE.EACCES,
+  EREALM_PASSPHRASE_FILE_MODE: EXIT_CODE.EACCES,
+  EREALM_NO_KEY: EXIT_CODE.EACCES,
+  EREALM_NOT_FOUND: EXIT_CODE.ENOENT,
+  // EREALM_VERIFY, EREALM_EXISTS and EREALM_CORRUPT fall through to GENERIC.
 })
 
 /**
