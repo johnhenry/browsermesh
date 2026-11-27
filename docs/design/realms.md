@@ -9,14 +9,14 @@ stands, section 12 what the review changed and section 13 what the implementatio
   core (#415), with the browser derivation spec (#407); `createMeshNode({ identity })` (#416); the realm grant source in
   `PeerRegistry` (#417); link admission, the restricted-link seam (#419, made fail-closed with an older transport in #427);
   `browsermesh-realm`, the pure-logic core (#420; private, version 0.0.0, unpublished); the realm exchange (frames,
-  descriptor store, verifier, prover; #426); and the fix that makes the seam's `send` never reject on a closed link (#441).
-- **In open pull requests:** the `meshctl realm` commands in PR #424; example 26 in PR #442; and stage 4,
-  `createMeshNode({ realm })` and renewal over a `realm` protocol, in PR #445.
+  descriptor store, verifier, prover; #426); the fix that makes the seam's `send` never reject on a closed link (#441); and
+  stage 4, `createMeshNode({ realm })`, `node.realm` and renewal over a `realm` protocol (#445).
+- **In open pull requests:** the `meshctl realm` commands in PR #424 and example 26 in PR #442.
 - **Not built:** tickets and admitters; live peer listing in `meshctl realm inspect`; seed management in meshctl (it makes
   one independent random key per realm); synchronising one realm across several nodes of the same operator; federation; an
   issuer add, renew or replace command.
 
-Claims about #424 and #445 below were checked against those branches, not `main`, and change if the branches do.
+Claims about #424 (meshctl) below were checked against that branch, not `main`, and change if it does.
 
 ## 1. The problem
 
@@ -273,8 +273,7 @@ before `notAfter`; the verifier replaces the old grant. The registry's grant sou
 credential presented later would replace a newer one, so the realm layer's tracker keeps (realm, issuer, subject, role) to
 refuse an older serial or epoch (`stale-serial`, `epoch-too-old`). **Built limit:** renewal by re-linking happens only after
 the grant has expired, because `createWshAdmissionAuthorize` asks the registry first and a peer holding a live grant is
-admitted as an ordinary link and never put to the exchange. Renewal before expiry has to go over the protocol seam (stage 4,
-PR #445) or through a hook that sends granted peers through the exchange.
+admitted as an ordinary link and never put to the exchange. Renewal before expiry therefore goes over the `realm` protocol on the protocol seam (stage 4, merged in #445).
 
 Two more built facts. A newly listed revoked serial is revoked in the registry when the descriptor that lists it is adopted,
 and a higher epoch revokes everything below it (`revokeRealmGrants({ realmId, belowEpoch })`). **Removing an issuer does not
@@ -400,7 +399,7 @@ Ed25519 key. The review checked this in Node 26: it works, the public key must b
 - **Link admission** (5.5) needed a hook in `browsermesh-transport` for wsh, and a new admission gate for WebRTC links,
   which had none. Built (#419, #427): a change to existing packages, not only a new one.
 - **`createMeshNode`** gains a `realm` option (descriptor, credential) and an `identity` option (5.10). `identity` is built
-  (#416); `realm` is stage 4, in PR #445. Note it currently requires an already-built signalling transport, not a URL.
+  (#416); `realm` is stage 4, merged in #445. Note it currently requires an already-built signalling transport, not a URL.
 - **Signalling server.** Checked in `browsermesh-servers/signaling`: its authenticated mode proves only that a pod id is the
   hash of the key that signed a per-connection nonce bound to the server's own origin. It has no rooms, realms or
   membership, so it cannot carry or enforce realm membership; the design never assumes it can.
@@ -490,7 +489,7 @@ non-extractable and refuses export. The repository's CI ran it in Chromium, Fire
 takes derivation, not the fallback, and the fallback stays only as a guard if a later browser release regresses. Caveat: the
 check ran against the browser builds CI uses on that day, and not on mobile Safari or any other engine.
 
-Settled by building (2026-11-26, PRs #414 to #420 and #426 merged, #424 and #445 in open PRs):
+Settled by building (2026-11-26, PRs #414 to #420, #426 and #445 merged, #424 in an open PR):
 
 - The exact strings and record shape of 5.10 are fixed in code, with the first vector pinned in the wallet's tests (#415);
   the seed header is `{ fmt: 1, label, createdAt }`.
@@ -510,8 +509,9 @@ Still open:
 4. **A wsh change for a pre-authentication realm hint** (5.5). Deferred, and tracked as johnhenry/wsh#274 with a trigger
    (slot exhaustion by strangers seen in tests or real use), not part of this plan. The built cost of a held stranger is a
    login and a socket, bounded by `maxRestricted`, which lowers the urgency.
-5. **Renewal by re-link only works after a grant expires** (5.7). Renewal before expiry is stage 4's protocol, or an
-   optional hook that sends granted peers through the exchange.
+5. **Renewal by re-link only works after a grant expires** (5.7). Renewal before expiry is the `realm` protocol (merged in
+   #445); an epoch bump cannot renew in place (the peer re-links and presents again). Open: whether a granted peer should
+   ever be sent through the exchange on re-link.
 6. **Removing an issuer does not revoke the grants it issued** (5.7). Open: record the issuer on the grant, or accept
    `notAfter` as the bound.
 7. **Seed management in meshctl** (today one random key per realm), tickets and admitters, live peer listing, passphrase
@@ -525,13 +525,13 @@ Still open:
      Firefox and WebKit first (#407, #415); `createMeshNode({ identity })` (#416); the realm grant source in `PeerRegistry`
      (#417); link admission hooks for wsh and WebRTC (#419), fail-closed with an older transport (#427).
    - **Done (merged, #441):** the seam's `send` never rejects on a closed link.
-   - **In PR #445:** the `realm` option of `createMeshNode` (stage 4 below).
+   - **Done (merged, #445):** the `realm` option of `createMeshNode` (stage 4 below).
 3. **`browsermesh-realm`:** descriptor, rotation, roles, credential, ledger, with test vectors: **done (merged, #420;
    private, unpublished)**. The realm exchange: **done (merged, #426)**.
 4. **The wiring and the meshctl commands.** `createMeshNode({ realm })`, a realm policy API on the node, an automatic prover
-   after `connectToPeer`, and renewal over a `realm` protocol on the protocol seam: **in PR #445**. It builds the store and
+   after `connectToPeer`, and renewal over a `realm` protocol on the protocol seam: **done (merged, #445)**. It builds the store and
    verifier inside `createMeshNode` with the node's registry and persists the descriptor through `store.export()`. API as
-   found on that branch: `createMeshNode({ realm: { pinnedId, descriptor?, credential?, policy, guestTtl?, limits?,
+   merged: `createMeshNode({ realm: { pinnedId, descriptor?, credential?, policy, guestTtl?, limits?,
    persist?: { load, save }, autoRenew?: { credentialProvider, beforeSeconds = 300 }, onEvent?, timeoutMs = 5000, admission?,
    loadRealmPackage? } })`. `realm` together with `admission` throws; the realm's `decide` is `restrict`, except `allow` for
    a peer the registry already lets link (`mesh:link:connect`). `node.realm` is `{ store, verifier, policy, status(),
@@ -571,7 +571,7 @@ owner decision in section 2; where a built detail narrows a decision, it says so
 - **Held strangers cost a login and a socket, not a listening slot** (5.5). The design said slots would be exhausted.
 - **`realm:credential` may carry `null`**, which asks for the open-mode guest role with no credential.
 - **The `realm` protocol for renewal.** The exchange only runs on a restricted link, and a peer with a live grant never
-  reaches it, so renewal before expiry goes over a protocol on the protocol seam (stage 4, PR #445).
+  reaches it, so renewal before expiry goes over a protocol on the protocol seam (stage 4, merged in #445).
 - **A role must include `mesh:link:connect`**, or the default access watcher closes a promoted link at the next access change.
 - **The seam's `send` never rejects on a closed link** (PR #441, merged); it resolves
   `false`, so a handler needs no catch for that case.
@@ -584,7 +584,7 @@ owner decision in section 2; where a built detail narrows a decision, it says so
 - **The lifetime is clamped, not `notBefore`** (5.4); the seed header uses `fmt`, not `v` (5.10); derived identities are not
   persisted by `save()` (5.10).
 - **Descriptors are root-signed only.** Serial revocation and epoch bumps need the root; only `issue` is issuer-only (8).
-- **A hello can be lost over WebRTC** (PR #445). A data channel drops frames sent before the peer has a session or has wired
+- **A hello can be lost over WebRTC** (#445). A data channel drops frames sent before the peer has a session or has wired
   its handler (about one run in fifteen stalled). The verifier now answers a peer's hello with its own again, and the prover
   says hello again on seeing the verifier's; identical repeats are ignored and a different second hello is still refused. This
   touches #426's exchange code.
