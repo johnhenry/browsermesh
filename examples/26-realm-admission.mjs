@@ -17,7 +17,7 @@
  *   7. The operator bumps the epoch; the host adopts the new descriptor from a peer; the member's link closes at the next
  *      re-check and its old credential is refused.
  *
- * Not shown: `createMeshNode({ realm })` (a later stage, not merged), credential renewal, `meshctl`. The host here wires
+ * Not shown: credential renewal, `meshctl`. `createMeshNode({ realm })` (stage 4) now exists; this example uses the lower-level pieces on purpose, to show each step. The host here wires
  * the verifier to the seam by hand, as realm-exchange-wsh.test.mjs does. The subject of a credential is the POD ID the
  * link proved; the member's pod id comes from a per-realm identity derived from a seed.
  */
