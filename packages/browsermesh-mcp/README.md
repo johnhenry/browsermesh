@@ -86,7 +86,7 @@ the channel, aborts the tool's `signal`.
 Nothing new on the link: the protocol name is `mcp` (version 1) on the existing protocol seam, and its messages are
 plain MCP JSON-RPC 2.0 objects in the channel's own messages (wsh's `serveMcpOverDuplex`). A peer without
 protocol support answers `mesh.protocol.open` with -32601; one that does not serve `mcp` answers -32003. Peer
-dependencies: `@johnhenry/wsh` >=0.49.0 (tested at 0.49.0, 0.59.0 and 0.61.0) and `@johnhenry/browsermesh-apps`.
+dependencies: `@johnhenry/wsh` >=0.49.0 (tested at 0.49.0 to 0.62.1) and `@johnhenry/browsermesh-apps`.
 
 **MCP revisions.** The serving side speaks both eras on one channel, with any of those wsh releases (the 2026-07-28
 surface is added in this package, around wsh's handler, so no wsh release is needed):
