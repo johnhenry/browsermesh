@@ -60,6 +60,7 @@ const reasonOf =(e) => (e instanceof IngressError ? e.reason : e?.name === 'Abor
 /** The failures in which the provider did no work, so a retry cannot repeat anything it did. Nothing else is ever retried. */
 export const RETRYABLE_REASONS = Object.freeze(['provider-unreachable', 'provider-pin-mismatch', 'provider-declined'])
 const MAX_RETRY_ATTEMPTS = 5
+const MAX_LINK_REPLAYS = 1 // a request the end of its link cut before it could be answered is sent again once, never in a loop
 const IDEMPOTENT = new Set(['GET', 'HEAD', 'OPTIONS', 'PUT', 'DELETE'])
 
 function resolveRetry(retry) {
@@ -350,12 +351,20 @@ export function createMeshIngress({
       channel.close('unsupported version')
       throw new IngressError(502, 'provider-version', 'The provider speaks no version of the http protocol this ingress does.')
     }
-    channel.onClose(() => {
+    channel.onClose((why) => {
       if (providers.get(peer) === state) providers.delete(peer)
+      // The link ended because the pod started over on the connection (what was sent on it never reached the new life), or
+      // because the transport under it ended or refused a frame (an error that is not the channel's own, or `transport-closed`).
+      // A close the pod chose, or any other close, is neither.
+      state.restarted = why?.reason === 'transport-restart'
+      state.lost = state.restarted || why?.reason === 'transport-closed' || (why instanceof Error && typeof why.reason !== 'string')
       for (const entry of [...state.pending.values()]) {
         const e = new IngressError(502, 'provider-closed', 'The channel to the provider closed.')
         entry.readerReady.reject(e)
-        entry.fail?.(e)
+        // A request that has had no answer byte, because the pod started over or because it never left (the transport under the
+        // link failed), is not ended here: it fails by its own channel's end and `handle` decides whether it is sent again
+        // (`replay`). Every other request ends as it always did.
+        if (!state.restarted && !(state.lost && entry.sent === false)) entry.fail?.(e)
       }
       state.streams.close()
       // A link that was expected and went away is dialled again, and requests wait for it for a moment.
@@ -471,6 +480,7 @@ export function createMeshIngress({
       let attempt = 0
       let lastFailure = null
       let bodyState = null
+      let linkReplays = 0
       let theirs = null
       for (;;) {
         let mapping
@@ -512,7 +522,7 @@ export function createMeshIngress({
         if (!theirs) throw new IngressError(503, 'provider-inflight', 'This provider is busy.', { headers: { 'retry-after': '1' } })
         releases.push(theirs)
 
-        if (attempt === 0) {
+        if (bodyState === null) {
           // The whole request is bounded from here: the client's body, the provider's head and its body. A request with a body
           // has the longer upload deadline.
           const hasBody = !!request.body && shape.contentLength !== 0
@@ -533,6 +543,17 @@ export function createMeshIngress({
           if (response.finished) { clearTimeout(deadline); audit(response.status, undefined); done() }
           return response.response
         } catch (e) {
+          // A request whose link ended before it had an answer byte, either because the pod started over on the connection (`cut`:
+          // what the old link carried was never seen by the new life) or because the request never left (`unsent`: the link could
+          // not send it): sent once more, to the same pod, on the link it has by then. A method that may be repeated, with a body
+          // that is held or absent; a method that may not (POST, PATCH) only when it never left and has no body at all. Not a
+          // `retry` (nothing is asked of `resolve`, and it is on without one; `nonIdempotent` does not reach it).
+          if (e?.replay && linkReplays < MAX_LINK_REPLAYS && !ac.signal.aborted && !(bodyState.started && bodyState.bytes === null)
+            && (IDEMPOTENT.has(method) || (e.replay === 'unsent' && !bodyState.hasBody))) {
+            linkReplays += 1
+            auditAttempt(record, e)
+            continue
+          }
           // (a body that has begun to stream cannot be sent again)
           const retryable = retrying && e instanceof IngressError && retrying.on.has(e.reason) && attempt < retrying.attempts && !ac.signal.aborted
             && (retrying.nonIdempotent || IDEMPOTENT.has(method)) && !(bodyState.started && bodyState.bytes === null)
@@ -558,6 +579,20 @@ export function createMeshIngress({
    * nothing is left running (a buffered response); a streamed one calls `finish(status, reason)` when its body ends.
    */
   async function forwardToProvider(forward, policy, ac, record, finish) {
+    try { return await forwardOnce(forward, policy, ac, record, finish) } catch (e) {
+      // The provider's link ended before the request had an answer byte: because the pod started over on the connection (what
+      // the old link carried was never seen by the new life), or because the request never left (the link failed to send it).
+      // It stays the same 502 `provider-closed` unless `handle` sends it again.
+      const state = forward.state
+      if (e instanceof IngressError && state && !ac.signal.aborted && (e.reason === 'provider-closed' || e.reason === 'provider-failed')) {
+        const unsent = state.lost === true && forward.entry?.sent !== true
+        if (unsent || state.restarted === true) throw Object.assign(new IngressError(502, 'provider-closed', 'The channel to the provider closed.'), { replay: unsent ? 'unsent' : 'cut' })
+      }
+      throw e
+    }
+  }
+
+  async function forwardOnce(forward, policy, ac, record, finish) {
     const { peer, bodyState } = forward
     let state
     // The whole body, in memory, for the paths that need it (an older provider, a signed request, the mesh-rpc fallback): bounded
@@ -582,6 +617,7 @@ export function createMeshIngress({
     if (rpc && (legacy.get(peer) ?? 0) > now()) return viaRpc()
     try {
       state = await openWithGrace(peer, ac.signal)
+      forward.state = state
     } catch (e) {
       const err = e instanceof IngressError ? e : openFailure(e)
       if (err.fallbackable && rpc) { legacy.set(peer, now() + LEGACY_MEMORY_MS); return viaRpc() }
@@ -645,7 +681,8 @@ export function createMeshIngress({
       } catch { sig = undefined }
       if (typeof sig !== 'string' || !sig || sig.length > 2048) throw new IngressError(500, 'sign-error', 'The ingress could not sign the request.')
     }
-    const entry = { reader: null, readerReady: deferred(), fail: (e) => ac.abort(e) }
+    const entry = { reader: null, readerReady: deferred(), fail: (e) => ac.abort(e), sent: false } // (`sent`: the link took the request)
+    forward.entry = entry
     state.pending.set(rid, entry)
     const cleanup = () => state.pending.delete(rid)
     const cancelReader = (why) => { entry.reader?.cancel(why).catch(() => {}); entry.readerReady.promise.then((r) => r.cancel(why).catch(() => {}), () => {}) }
@@ -661,7 +698,7 @@ export function createMeshIngress({
         headers: forward.headers, body: hasBody, ...(streamBody && bodyState.declared !== null ? { length: bodyState.declared } : {}),
         ...(forward.client ? { client: forward.client } : {}), ...(sig ? { sig } : {}),
         ...(forward.service === undefined ? {} : { service: forward.service }),
-      }, { signal: ac.signal, timeoutMs: streamBody ? limits.uploadTimeoutMs : limits.timeoutMs })
+      }, { signal: ac.signal, timeoutMs: streamBody ? limits.uploadTimeoutMs : limits.timeoutMs, onSent: () => { entry.sent = true } })
       // The body travels as a stream. A provider may answer before it has read all of it: the head decides, and an answer ends the upload.
       if (streamBody) upload = startUpload(state, rid, bodyState, { cap: Math.min(podCap, limits.maxRequestBodyBytes), ac, record, onStop: clientSlot })
       else if (hasBody) state.streams.sendBody(bytes, { rid, kind: KIND_REQUEST }, { signal: ac.signal, timeoutMs: limits.openTimeoutMs }).catch(() => {})
