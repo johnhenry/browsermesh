@@ -17,16 +17,42 @@ const DEBUG_KEY = 'browsermesh_debug';
 /** Deprecated alias, kept for compatibility. */
 const LEGACY_DEBUG_KEY = 'clawser_debug';
 
+/**
+ * Find `localStorage` without tripping Node's getter.
+ *
+ * Since Node 25 the global `localStorage` is an accessor that prints
+ * "ExperimentalWarning: localStorage is not available because
+ * --localstorage-file was not provided" the moment it is read (even by
+ * `typeof localStorage`). So the descriptor is inspected first:
+ *   - no property: nothing to read;
+ *   - a data property (a test polyfill, a plain value): use it;
+ *   - an accessor in Node: read it only when `--localstorage-file` was given
+ *     (execArgv or NODE_OPTIONS), where the getter returns a real Storage;
+ *   - an accessor anywhere else (browsers, Deno): call it, as before.
+ */
+function getStorage() {
+  const desc = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  if (!desc) return undefined;
+  if ('value' in desc) return desc.value;
+  const proc = globalThis.process;
+  if (proc?.versions?.node && typeof document === 'undefined') {
+    const hasFile = (proc.execArgv ?? []).some((a) => a === '--localstorage-file' || a.startsWith('--localstorage-file='))
+      || /(^|\s)--localstorage-file(\s|=|$)/.test(proc.env?.NODE_OPTIONS ?? '');
+    if (!hasFile) return undefined;
+  }
+  return desc.get ? desc.get.call(globalThis) : undefined;
+}
+
 function readFlag() {
-  return localStorage.getItem(DEBUG_KEY) === 'true' ||
-    localStorage.getItem(LEGACY_DEBUG_KEY) === 'true';
+  const storage = getStorage();
+  if (!storage) return false;
+  return storage.getItem(DEBUG_KEY) === 'true'
+    || storage.getItem(LEGACY_DEBUG_KEY) === 'true';
 }
 
 let enabled = false;
 try {
-  if (typeof localStorage !== 'undefined') {
-    enabled = readFlag();
-  }
+  enabled = readFlag();
 } catch {
   // localStorage may throw in privacy / sandbox contexts — treat as disabled
 }
@@ -34,9 +60,7 @@ try {
 /** Re-check the localStorage flag; called by browsermeshDebug.enable/disable. */
 export function refreshSilentCatchState() {
   try {
-    if (typeof localStorage !== 'undefined') {
-      enabled = readFlag();
-    }
+    enabled = readFlag();
   } catch {
     enabled = false;
   }
@@ -44,13 +68,14 @@ export function refreshSilentCatchState() {
 
 const debugApi = {
   enable() {
-    try { localStorage.setItem(DEBUG_KEY, 'true'); } catch { /* ignore */ }
+    try { getStorage()?.setItem(DEBUG_KEY, 'true'); } catch { /* ignore */ }
     refreshSilentCatchState();
   },
   disable() {
     try {
-      localStorage.removeItem(DEBUG_KEY);
-      localStorage.removeItem(LEGACY_DEBUG_KEY);
+      const storage = getStorage();
+      storage?.removeItem(DEBUG_KEY);
+      storage?.removeItem(LEGACY_DEBUG_KEY);
     } catch { /* ignore */ }
     refreshSilentCatchState();
   },
