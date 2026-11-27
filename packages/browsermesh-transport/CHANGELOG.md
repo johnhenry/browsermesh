@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.13.2
+
+### Patch Changes
+
+- f9045d5: A peer that speaks the moment its connection is up is no longer unheard. With identity binding on (the default), a peer that has sent its proof and then sends a frame at once (the opening frame of a channel it opens, as a pod does when it starts again against a running ingress) was dropped and counted in `droppedUnbound` whenever this side had not finished verifying that proof: the other side verifies this side's proof first, so it is up and talking before this side is. In transport, `WebRTCPeerConnection` now holds what a peer sends after its proof and before the proof verified (up to 64 messages), delivers it in order once the proof verified, and discards it if the proof does not verify; a message that arrives before any proof is still dropped and counted, as before. In apps, the negotiator makes the transport adapter before the connection can carry a frame (for an answered offer and for a dial), so the held messages have a listener to reach, and for a peer that starts over on a connection this node still holds, what the new connection carries is held until the node has been told of the restart, so the restart can never end the link the new connection has just opened. Nothing is added to the wire and no option or default changes. An older peer is served as before; an older transport under this apps still drops what arrives before the proof verified.
+
 ## 0.13.1
 
 ### Patch Changes
