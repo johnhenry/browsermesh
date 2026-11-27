@@ -389,7 +389,7 @@ describe('bounds, on both sides', () => {
 
   it('caps concurrent uploads per pod link at the ingress: 503 with Retry-After', async () => {
     const release = deferred()
-    const t = await rig({ handler: async (request) => { if (request.body) { await release.promise; await request.arrayBuffer() } return new Response('ok') }, ingress: { limits: { maxUploadsPerProvider: 2 } } })
+    const t = await rig({ handler: async (request) => { if (request.body) { await release.promise; await request.arrayBuffer() } return new Response('ok') }, ingress: { limits: { maxUploadsPerProvider: 2, maxUploadsPerClient: 10 } } })
     const hang = () => new ReadableStream({ start(c) { c.enqueue(new Uint8Array(10)) }, pull() { return release.promise.then(() => {}) } }, { highWaterMark: 0 })
     const closing = () => new ReadableStream({ start(c) { c.enqueue(new Uint8Array(10)); c.close() } })
     const a = t.ask('/', upload(closing()))

@@ -15,6 +15,9 @@ const IPV6_HOST_RE = /^\[[0-9a-f:.]{2,45}\](?::\d{1,5})?$/
 /** Request headers a client may pass to the provider unless the operator widens the list. */
 export const DEFAULT_FORWARD_REQUEST_HEADERS = Object.freeze([
   'accept', 'accept-language', 'content-type', 'if-match', 'if-modified-since', 'if-none-match', 'if-unmodified-since', 'range',
+  // Set by the visitor's browser, never credentials: what a pod needs to tell a cross-site write from a same-site one (a client
+  // that is not a browser can set them to anything, so they defend a pod against browsers only).
+  'origin', 'referer', 'sec-fetch-site', 'sec-fetch-mode', 'sec-fetch-dest', 'sec-fetch-user',
 ])
 
 /** Request headers that are never taken from a client and never sent to a provider, whatever the operator allows. */

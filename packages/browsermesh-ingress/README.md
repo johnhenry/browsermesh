@@ -80,7 +80,24 @@ The listener speaks plain HTTP: put TLS in front of it. Nothing public is on by 
 the pod exactly as they are for a `GET` today (only the names the operator lists in `forwardHeaders`; `Host`, `Forwarded` and
 `X-Forwarded-*` are never passed, and the pod sees the ingress's own `X-Forwarded-For` when asked), the pod sees the verified ingress
 pod id, and the response is filtered as ever. What a pod's handler does with a body it is sent is the pod owner's decision, and the
-pod owner opts out per mapping with `methods`. An origin that accepts writes needs its own cross-site request protection, exactly as if it were served directly.
+pod owner opts out per mapping with `methods`.
+
+What a pod receives by default, and what that means for a write:
+
+- **The request is not "as if served directly".** The pod gets the method, the target, the body, the allow-listed headers and the
+  ingress's pod id. It does not get the visitor's `Host`, `Cookie` or `Authorization` (unless the operator forwards them), and it does
+  not see the visitor's address (unless `forwardClientAddress`).
+- **Cross-site writes.** A page on another site can make a visitor's browser send a write to a public address, and the browser adds the
+  visitor's cookies for that address. Behind the ingress a pod can still tell: `Origin`, `Referer` and `Sec-Fetch-Site`, `Sec-Fetch-Mode`,
+  `Sec-Fetch-Dest` and `Sec-Fetch-User` are forwarded by default (they are set by the visitor's browser and are not credentials). A pod that
+  guards writes refuses one whose `Sec-Fetch-Site` is not `same-origin` (or `none`), or whose `Origin` is not its own address. **A client
+  that is not a browser can set these headers to anything**: they defend a pod against other sites' pages, not against a client that
+  talks to the address itself, which is what `authorize`, `deny` and the pod's own checks are for. Do the check in the pod's handler (or
+  in the operator's `authorize` hook, which sees the same request); an origin that accepts writes needs its own cross-site protection.
+- **Method override.** If you forward a header that makes an origin treat a request as another method (`X-HTTP-Method-Override` and its
+  kin, through `forwardHeaders`), a visitor can reach a method the operator narrowed away: the ingress checks the method on the wire, not the one
+  an origin reads from a header. Do not forward such headers to an origin behind a narrowed ingress.
+
 An operator who wants today's behaviour on a public ingress sets `--allow-methods GET,HEAD` (or `methods: ['GET', 'HEAD']`).
 
 ### What the operator can see and change
@@ -196,7 +213,19 @@ With both ends new, every request carries its method and its whole body to the p
 - **What is held whole.** A body is held in memory (up to `maxBufferedBodyBytes`, 1 MiB; over that is a 413) only where something needs all
   of it: a pod that has not upgraded, a request you sign with `signRequest` (the signature covers the body's digest, so the pod also
   holds it when it has a `verifyRequest`), a request `retry` may repeat (a body of declared length up to 1 MiB, or unknown length that
-  ends within 1 MiB; a larger one streams and is never retried), and the `rpc` fallback.
+  ends within 1 MiB; a larger one streams and is never retried), and the `rpc` fallback. **A pod in a runtime that cannot build a
+  `Request` from a stream (some browsers, which would otherwise turn the stream into text) holds the body whole too**: up to
+  `limits.maxHeldBodyBytes` (8 MiB; 1 MiB would refuse ordinary uploads, and the full 32 MiB would hold about twice that in memory) and on
+  at most 2 uploads at a time per link. It says so in `capabilities` (a smaller `maxBodyBytes` and `maxUploads`), so the ingress refuses an
+  over-size body with a 413 before it sends it.
+- **Tiny chunks cost bytes, not objects.** The ingress joins what it reads (to one 64 KiB block for a body it holds, to about 16 KiB, for at
+  most 5 ms, for a frame it sends), so a client that writes one byte at a time makes a few frames, and a held body is a few blocks.
+- **A trickle is cut.** One address cannot keep an upload slot by sending a byte now and then. After a grace of 30 s
+  (`uploadGraceMs`), in every 10 s window (`uploadProgressMs`) in which the ingress was waiting for the client, at least 1 KiB per second
+  (`uploadMinBytesPerSec`) must arrive, or the request ends with a 408 `body-timeout`. The pod applies the same rule to what arrives on the
+  link (a slow origin is never blamed on the sender). One address also has at most 2 uploads in flight (`maxUploadsPerClient`; the next is
+  a 429 `client-uploads`) of the 4 a pod's link takes. **What stays possible:** a client at 1 KiB/s for the whole 5 minutes still holds
+  its 2 slots; many addresses can still fill a pod's 4 slots (that is what `authorize`, `deny` and `--max-uploads` are for).
 
 ### The provider
 
@@ -550,7 +579,7 @@ What crosses, with no option set (a test pins both lists to the code):
 <!-- headers-table:begin -->
 | Direction | Passed by default | Never, whatever you set |
 | --- | --- | --- |
-| Request, client to provider | `accept`, `accept-language`, `content-type`, `if-match`, `if-modified-since`, `if-none-match`, `if-unmodified-since`, `range` | `host`, `connection`, `keep-alive`, `proxy-*`, `te`, `trailer`, `transfer-encoding`, `upgrade`, `content-length`, `expect`, `forwarded`, `x-real-ip`, `via`, `x-forwarded-*`, `x-original-url`, `x-rewrite-url` |
+| Request, client to provider | `accept`, `accept-language`, `content-type`, `if-match`, `if-modified-since`, `if-none-match`, `if-unmodified-since`, `range`, `origin`, `referer`, `sec-fetch-site`, `sec-fetch-mode`, `sec-fetch-dest`, `sec-fetch-user` | `host`, `connection`, `keep-alive`, `proxy-*`, `te`, `trailer`, `transfer-encoding`, `upgrade`, `content-length`, `expect`, `forwarded`, `x-real-ip`, `via`, `x-forwarded-*`, `x-original-url`, `x-rewrite-url` |
 | Response, provider to client | `content-type`, `content-length`, `content-language`, `content-disposition`, `content-range`, `accept-ranges`, `etag`, `last-modified`, `location` (a path on this origin only), `vary`, `retry-after`, `allow` | `content-encoding` other than `identity` (a 502), and everything not listed, including `set-cookie`, CORS, HSTS, `refresh`, `link` |
 <!-- headers-table:end -->
 
@@ -598,6 +627,7 @@ fails it until the table says so.
 | 414 | `target-too-long` | the target is over 2048 characters |
 | 426 | `upgrade-unsupported` | a WebSocket or other upgrade |
 | 429 | `client-inflight` | too many requests from this client in flight (with `Retry-After`) |
+| 429 | `client-uploads` | this client already has as many requests with a body in flight as one address may (with `Retry-After`) |
 | 429 | `client-rate` | too many requests from this client in the window (with `Retry-After`) |
 | 431 | `headers-too-large` | too many or too large request headers |
 | 451 | `denied` | `deny` returned `true` |
@@ -662,7 +692,9 @@ A provider's own answer, including its own 4xx and 5xx and a plain 421, passes t
 | Request body | streamed, never held whole; **32 MiB** at the ingress (`maxRequestBodyBytes`, `--max-body`) and **32 MiB** at the pod (`maxBodyBytes`); over it is a 413 (refused unread when the length was declared, cut at the cap when it was not); `Infinity` / `--max-body unlimited` only by choice |
 | Body held whole | 1 MiB (`maxBufferedBodyBytes`; a pod that has not upgraded, a signed request, a request `retry` may repeat); over it is a 413 |
 | Whole request with a body | 5 min (`uploadTimeoutMs`, `--upload-timeout`) at the ingress, `max(handlerTimeoutMs, uploadTimeoutMs)` = 5 min at the pod; 504 `provider-timeout` |
-| Uploads in flight | 4 requests with a body per pod link at the ingress (`maxUploadsPerProvider`, `--max-uploads`) and 4 at the pod (`limits.maxUploads`); the next is a 503 `provider-uploads` with `Retry-After` |
+| Uploads in flight | 4 requests with a body per pod link at the ingress (`maxUploadsPerProvider`, `--max-uploads`) and 4 at the pod (`limits.maxUploads`; 2 where the pod holds bodies whole); the next is a 503 `provider-uploads` with `Retry-After`. 2 per client address (`maxUploadsPerClient`): the next is a 429 `client-uploads` |
+| Upload progress | after 30 s (`uploadGraceMs`), 1 KiB/s (`uploadMinBytesPerSec`) in each 10 s window (`uploadProgressMs`) spent waiting on the sender, at both ends; under it, 408 `body-timeout` |
+| Held body at a pod that cannot stream | 8 MiB (`limits.maxHeldBodyBytes`), 2 uploads at a time |
 | Bytes per second | no bound: the response has none either (the bounds are bytes, time, concurrency and one 256 KiB stream window); the Node listener's `requestTimeoutMs` is 300 s |
 | Response | 8 MiB (`maxResponseBytes`); a declared length over it is refused before anything is sent |
 | Whole request | 30 s (`timeoutMs`), 504 `provider-timeout` |
@@ -672,7 +704,7 @@ A provider's own answer, including its own 4xx and 5xx and a plain 421, passes t
 | Headers / target | 64 headers, 16 KiB, 2048 characters |
 | In flight | 64 total, 8 per client, 16 per provider (429 / 503, `Retry-After`) |
 | Rate | 120 per client and 600 per provider, per minute |
-| Request headers to the provider | `accept`, `accept-language`, `content-type`, conditional and `range` headers; `forwardHeaders` adds names. Never: hop-by-hop, `Host`, `Forwarded`, `X-Forwarded-*`, `Upgrade`, `Proxy-*`, `Expect`, `Content-Length` |
+| Request headers to the provider | `accept`, `accept-language`, `content-type`, conditional and `range` headers, and the browser-set `origin`, `referer` and `sec-fetch-*` headers; `forwardHeaders` adds names (never cookies or `authorization` unless named). Never: hop-by-hop, `Host`, `Forwarded`, `X-Forwarded-*`, `Upgrade`, `Proxy-*`, `Expect`, `Content-Length` |
 | Client address | the socket's; `trustProxy` (off) takes the entry the trusted proxy appended |
 | Framing | `Transfer-Encoding` with `Content-Length`, a bad or repeated `Content-Length`, a body on GET/HEAD: 400 |
 | Upgrade | 426: WebSocket is not bridged |
@@ -751,6 +783,9 @@ offering `[2, 1]`, a pod serves `[1, 2]`, and the channel runs at the highest bo
 | new | older | version 1: the ingress sends `GET` and `HEAD` only and never a `capabilities` request, a head field or a body stream the pod does not know; a visitor's `POST` is a 405 with `Allow: GET, HEAD`. (An operator's own explicit `methods` list keeps working for the standard methods in it, the body held whole up to 1 MiB, exactly as `methods: [...]` always did.) |
 | older | new | version 1 (the older ingress offers only 1): the pod says nothing new on the wire, answers what the older ingress sends as before, and keeps any `methods` narrowing it was given |
 | older | older | as before |
+
+A pod that negotiated version 2 but does not answer `capabilities` is treated exactly as a pod on version 1 (GET and HEAD, or the
+standard methods in an operator's own list, bodies held whole): the ingress never sends a method or a body stream it was not told is taken.
 
 A signed request (`signRequest`) is sent held whole on any version, because the signature covers the body's digest; the pod's
 `verifyRequest` holds it too. Design: [`docs/design/http-ingress.md`](../../docs/design/http-ingress.md);

@@ -114,6 +114,14 @@ export const PROVIDER_LIMIT_DEFAULTS: Readonly<{
   bodyIdleMs: number
   /** Whole request that carries a body, ms (the handler's deadline is the longer of this and `handlerTimeoutMs`). */
   uploadTimeoutMs: number
+  /** A body held whole where the runtime cannot stream one to the handler (some browsers), bytes (8 MiB); such a pod takes at most 2 uploads at once. */
+  maxHeldBodyBytes: number
+  /** The minimum-progress rule for an upload: after this grace (30 s) ... */
+  uploadGraceMs: number
+  /** ... in each window of this many ms (10 s) spent waiting on the sender ... */
+  uploadProgressMs: number
+  /** ... at least this many bytes per second (1024) must arrive, or the request ends 408. */
+  uploadMinBytesPerSec: number
   /** Requests with a body being taken on one link at once. */
   maxUploads: number
   maxHeaderCount: number
@@ -187,6 +195,10 @@ export interface IngressOptions {
 
 export interface MeshIngress {
   handle(request: Request, info?: { clientAddress?: string }): Promise<Response>
+  /** The `Allow` header of this ingress's own 405 (what it carries). */
+  allowHeader(): string
+  /** The bounds in force. */
+  readonly limits: Readonly<Record<string, number | { limit: number; windowMs: number }>>
   /**
    * Tell the ingress a pod is about to be wanted: it is dialled now and, with `persist` (the default), kept dialled; a request for it
    * that arrives while the link is not up waits up to `graceMs` (default `limits.linkWaitMs`, 5 s) and never past its own deadline.
@@ -262,7 +274,8 @@ export function createMeshIngress(options: IngressOptions): MeshIngress
  * `maxBufferedBodyBytes` (1 MiB) is what is held whole for an older provider, a signed request or a request that `retry` may repeat;
  * `uploadTimeoutMs` (5 min) is the whole-request deadline of a request with a body (`timeoutMs`, 30 s, is for one without);
  * `bodyIdleMs` (10 s) is the longest wait for the next chunk from the client; `maxUploadsPerProvider` (4) caps requests with a body
- * in flight to one pod.
+ * in flight to one pod and `maxUploadsPerClient` (2) those of one client address; `uploadGraceMs` (30 s), `uploadProgressMs` (10 s)
+ * and `uploadMinBytesPerSec` (1024) are the minimum-progress rule that cuts a trickle.
  */
 export const INGRESS_LIMIT_DEFAULTS: Readonly<Record<string, number | Readonly<{ limit: number; windowMs: number }>>>
 export function parseBytes(text: string): number

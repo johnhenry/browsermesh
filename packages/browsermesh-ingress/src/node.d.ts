@@ -12,7 +12,7 @@ export interface ListenOptions {
   maxConnections?: number
   maxHeaderBytes?: number
   headersTimeoutMs?: number
-  /** Node's bound on receiving a whole request, headers and body (default 300000: a streamed upload has to fit; it was 60000 when bodies were small). */
+  /** Node's bound on receiving a whole request, headers and body (default: 300000, or the ingress's `limits.uploadTimeoutMs` when that is longer; it was 60000 when bodies were small). */
   requestTimeoutMs?: number
   /**
    * Answer `GET` and `HEAD` for exactly this path (no query) with `{ ready, peers: { up, total } }`: 200 when the pods the ingress was told
@@ -27,6 +27,6 @@ export interface ListenOptions {
   halfClosedClients?: boolean
 }
 
-export function listenNode(ingress: Pick<MeshIngress, 'handle'>, options?: ListenOptions): Promise<{ port: number; host: string; close(): Promise<void> }>
+export function listenNode(ingress: Pick<MeshIngress, 'handle'> & Partial<Pick<MeshIngress, 'allowHeader' | 'limits' | 'readiness'>>, options?: ListenOptions): Promise<{ port: number; host: string; close(): Promise<void> }>
 export function isLoopbackHost(host: string): boolean
 export function clientAddressOf(socketAddress: string | undefined, xForwardedFor: string | undefined, trustProxy: boolean | number): string
