@@ -37,7 +37,7 @@ const ingress = createMeshIngress({
   authorize: async (request, target) => boolean,   // optional; false -> 403
   deny: (request) => Response | true | null,       // optional; true -> 451
   limits: { ... },                                 // see "Defaults"
-  methods: ['GET', 'HEAD'],
+  methods: '*',                  // every method by default (0.8); a list narrows it
   forwardHeaders: [],            // extra request headers a client may pass to the provider
   exposeHeaders: [],             // extra response headers a provider may set
   verifyResponse: undefined,     // optional signed responses
@@ -181,8 +181,8 @@ The answer is accepted only from the pod the mapping named:
 | Rule | Default |
 | --- | --- |
 | Bind (Node listener, CLI) | `127.0.0.1`; CLI refuses non-loopback without `--public` and a TLS statement |
-| Methods | `GET`, `HEAD`; others 405 with `Allow`; `CONNECT`/`TRACE` never |
-| Request body cap | 64 KiB (413; declared `Content-Length` over the cap is refused before reading) |
+| Methods | every method token since 0.8 (protocol `http` version 2); `methods` narrows it, at either end, with 405 and `Allow`; `CONNECT`/`TRACE`/`TRACK` never; an older pod: `GET`, `HEAD` |
+| Request body cap | 32 MiB, streamed since 0.8 (413; declared `Content-Length` over the cap is refused before reading); 64 KiB, read whole, before |
 | Body on GET/HEAD | 400 |
 | Response cap | 8 MiB (502 `response-too-large`, or the stream is cut) |
 | Total deadline | 30 s (504 `provider-timeout`) |

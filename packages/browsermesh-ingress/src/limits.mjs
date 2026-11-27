@@ -3,8 +3,14 @@
  */
 
 export const INGRESS_LIMIT_DEFAULTS = Object.freeze({
-  /** Request body, bytes. */
-  maxRequestBodyBytes: 64 * 1024,
+  /** Request body, bytes: what the ingress will carry for one request (streamed, never held whole). `Infinity` only by choice. */
+  maxRequestBodyBytes: 32 * 1024 * 1024,
+  /** A request body the ingress must hold whole (an older provider, a signed request, the mesh-rpc fallback), bytes. The lower of this and `maxRequestBodyBytes` applies. */
+  maxBufferedBodyBytes: 1024 * 1024,
+  /** Whole request carrying a body, ms: from `handle()` to the last response byte (a request with no body has `timeoutMs`). */
+  uploadTimeoutMs: 300_000,
+  /** Requests with a body being sent to one provider at once. */
+  maxUploadsPerProvider: 4,
   /** Response body, bytes. */
   maxResponseBytes: 8 * 1024 * 1024,
   /** Whole request, ms: from `handle()` to the last response byte. */
@@ -30,13 +36,16 @@ export const INGRESS_LIMIT_DEFAULTS = Object.freeze({
   maxTracked: 10_000,
 })
 
-const POSITIVE = ['maxRequestBodyBytes', 'maxResponseBytes', 'timeoutMs', 'bodyIdleMs', 'responseIdleMs', 'openTimeoutMs', 'linkWaitMs', 'maxHeaderCount',
-  'maxHeaderBytes', 'maxTargetLength', 'maxInflight', 'maxInflightPerClient', 'maxInflightPerProvider', 'maxTracked']
+const POSITIVE = ['maxBufferedBodyBytes', 'maxResponseBytes', 'timeoutMs', 'uploadTimeoutMs', 'bodyIdleMs', 'responseIdleMs', 'openTimeoutMs', 'linkWaitMs', 'maxHeaderCount',
+  'maxHeaderBytes', 'maxTargetLength', 'maxInflight', 'maxInflightPerClient', 'maxInflightPerProvider', 'maxUploadsPerProvider', 'maxTracked']
+/** Bounds that may be lifted, and only by saying `Infinity`. */
+const MAY_BE_INFINITE = ['maxRequestBodyBytes']
 
 /** @returns {typeof INGRESS_LIMIT_DEFAULTS} defaults overlaid with `given`, each value checked */
 export function resolveLimits(given = {}) {
   const out = { ...INGRESS_LIMIT_DEFAULTS, ...given }
   for (const name of POSITIVE) if (!Number.isSafeInteger(out[name]) || out[name] <= 0) throw new TypeError(`ingress limits: ${name} must be a positive integer`)
+  for (const name of MAY_BE_INFINITE) if (out[name] !== Infinity && (!Number.isSafeInteger(out[name]) || out[name] <= 0)) throw new TypeError(`ingress limits: ${name} must be a positive integer (or Infinity, to lift it)`)
   for (const name of ['clientRate', 'providerRate']) {
     const r = out[name]
     if (!r || !Number.isSafeInteger(r.limit) || r.limit <= 0 || !Number.isSafeInteger(r.windowMs) || r.windowMs <= 0) throw new TypeError(`ingress limits: ${name} must be { limit, windowMs } of positive integers`)

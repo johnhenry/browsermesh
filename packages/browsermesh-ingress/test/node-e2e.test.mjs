@@ -25,7 +25,7 @@ describe('over a real socket', () => {
   })
 
   it('HEAD, 404 for an unmapped host, 405 for a method not allowed', async () => {
-    const t = await rig()
+    const t = await rig({ ingress: { methods: ['GET', 'HEAD'] } })
     const head = await t.fetch('/', { method: 'HEAD' })
     assert.equal(head.status, 200)
     assert.equal(await head.text(), '')
@@ -37,7 +37,7 @@ describe('over a real socket', () => {
   })
 
   it('a POST body arrives at the provider byte for byte once the method is allowed', async () => {
-    const t = await rig({ ingress: { methods: ['GET', 'POST'] }, handler: async (request) => new Response(`${request.method} ${request.headers.get('content-type')} ${(await request.arrayBuffer()).byteLength}`) })
+    const t = await rig({ ingress: { methods: ['GET', 'POST'], limits: { maxRequestBodyBytes: 64 * 1024 } }, handler: async (request) => new Response(`${request.method} ${request.headers.get('content-type')} ${(await request.arrayBuffer()).byteLength}`) })
     const res = await t.fetch('/', { method: 'POST', body: new Uint8Array(30_000), headers: { 'content-type': 'application/octet-stream' } })
     assert.equal(await res.text(), 'POST application/octet-stream 30000')
     const big = await t.fetch('/', { method: 'POST', body: new Uint8Array(70_000) })

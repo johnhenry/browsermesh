@@ -56,6 +56,7 @@ const site = serveHttpOnMesh(siteSvc, async (request, { peer }) => {
   const url = new URL(request.url)
   seen.push({ method: request.method, path: url.pathname, peer })
   if (url.pathname === '/echo') return new Response(`you sent: ${await request.text()}`, { headers: { 'content-type': 'text/plain' } })
+  if (url.pathname === '/upload') { let n = 0; for await (const chunk of request.body) n += chunk.byteLength; return new Response(`took ${n} bytes`) } // the body, as it arrives
   // A pod can say anything it likes; the ingress decides what reaches the HTTP client.
   return new Response('<h1>hello from a pod</h1>', { headers: { 'content-type': 'text/html', 'set-cookie': 'sid=1', 'content-security-policy': 'default-src *' } })
 }, { allowFrom: [ingressNode.podId] })
@@ -70,7 +71,10 @@ const audits = []
 const ingress = createMeshIngress({
   service: ingressSvc,
   resolve: (request) => (new URL(request.url).host.startsWith('127.0.0.1:') ? { peer: siteNode.podId } : null),
+  // Every method and a streamed body are on by default (a body is read as the pod asks for it, never held whole, up to a cap of
+  // 32 MiB). This operator narrows both, to show how: three methods and 64 KiB.
   methods: ['GET', 'HEAD', 'POST'],
+  limits: { maxRequestBodyBytes: 64 * 1024 },
   onAudit: (record) => audits.push(record),
 })
 const listener = await listenNode(ingress, { port: 0 }) // 127.0.0.1, plain HTTP: terminate TLS in front of it
@@ -98,7 +102,8 @@ assert.equal(seen.at(-1).peer, ingressNode.podId)
 
 // Safe defaults: a method the operator did not allow, a body over the cap, an unmapped host, an upgrade.
 assert.equal((await fetch(`${base}/`, { method: 'DELETE' })).status, 405)
-assert.equal((await fetch(`${base}/echo`, { method: 'POST', body: new Uint8Array(70_000) })).status, 413)
+assert.equal((await fetch(`${base}/upload`, { method: 'POST', body: new Uint8Array(70_000) })).status, 413)
+assert.equal(await (await fetch(`${base}/upload`, { method: 'POST', body: new Uint8Array(60_000) })).text(), 'took 60000 bytes')
 assert.equal(strangerAsked, 0)
 await ingress.close()
 await listener.close()

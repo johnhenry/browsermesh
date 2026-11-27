@@ -157,7 +157,7 @@ describe('the readiness endpoint of the Node listener', () => {
     // Only that exact path: a longer one, a query and another method are ordinary requests for the pod.
     assert.equal((await fetchText(on.port, '/_ready/x')).body, 'up')
     assert.equal((await fetchText(on.port, '/_ready?x=1')).body, 'up')
-    assert.equal((await fetchText(on.port, '/_ready', 'POST')).status, 405)
+    assert.equal((await fetchText(on.port, '/_ready', 'POST')).body, 'up')
   })
 
   it('refuses a path that is not a plain absolute path', async () => {

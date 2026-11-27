@@ -21,10 +21,12 @@ const base = ['--signaling', 'wss://signal.example.test', '--map', `app.example.
 const refuses = (argv, pattern, config) => assert.throws(() => resolve(argv, config), (e) => e instanceof UsageError && pattern.test(e.message), argv.join(' '))
 
 describe('argument parsing', () => {
-  it('a plain command resolves to loopback:8080, GET and HEAD, the defaults of the library', () => {
+  it('a plain command resolves to loopback:8080, every method, the defaults of the library', () => {
     const o = resolve(base)
     assert.deepEqual([o.host, o.port, o.public], ['127.0.0.1', 8080, false])
-    assert.deepEqual(o.methods, ['GET', 'HEAD'])
+    assert.equal(o.methods, '*')
+    assert.equal(o.uploadTimeoutMs, undefined)
+    assert.equal(o.maxUploads, undefined)
     assert.deepEqual(o.mappings, [{ host: 'app.example.test', prefix: '', peer: POD_A }])
     assert.equal(o.maxBody, undefined)
     assert.equal(o.auth, null)
@@ -102,8 +104,25 @@ describe('the rules the CLI enforces', () => {
     assert.deepEqual(resolve(base).warnings, [])
   })
 
-  it('methods must be ones the wire has; sizes and durations must parse; --auth is bearer:FILE', () => {
+  it('--allow-methods narrows: a list of method tokens, or * for every one', () => {
+    assert.equal(resolve([...base, '--allow-methods', '*']).methods, '*')
+    assert.deepEqual(resolve([...base, '--allow-methods', 'GET,HEAD']).methods, ['GET', 'HEAD'])
+    assert.deepEqual(resolve([...base, '--allow-methods', 'get,Purge,M-SEARCH']).methods, ['GET', 'Purge', 'M-SEARCH'])
+  })
+
+  it('--max-body takes a size or "unlimited"; --max-uploads and --upload-timeout are checked', () => {
+    assert.equal(resolve([...base, '--max-body', 'unlimited']).maxBody, Infinity)
+    assert.equal(resolve([...base, '--max-body', '512m']).maxBody, 512 * 1024 * 1024)
+    assert.equal(resolve([...base, '--max-uploads', '9', '--upload-timeout', '10m']).maxUploads, 9)
+    assert.equal(resolve([...base, '--upload-timeout', '10m']).uploadTimeoutMs, 600_000)
+    refuses([...base, '--max-uploads', '0'], /--max-uploads/)
+    refuses([...base, '--upload-timeout', 'later'], /--upload-timeout/)
+  })
+
+  it('methods must be tokens the ingress may carry; sizes and durations must parse; --auth is bearer:FILE', () => {
     refuses([...base, '--allow-methods', 'GET,TRACE'], /--allow-methods/)
+    refuses([...base, '--allow-methods', 'CONNECT'], /--allow-methods/)
+    refuses([...base, '--allow-methods', 'GET,A B'], /--allow-methods/)
     refuses([...base, '--allow-methods', ','], /--allow-methods/)
     refuses([...base, '--max-body', 'lots'], /--max-body/)
     refuses([...base, '--timeout', 'soon'], /--timeout/)

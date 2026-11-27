@@ -7,7 +7,7 @@ import { checkHost, hostName, isPodId } from '../headers.mjs'
 import { isLoopbackHost } from '../node.mjs'
 import { parseBytes, parseDuration } from '../limits.mjs'
 import { NAME_DENY_DEFAULTS, NameRefusal, checkLabel } from '../names.mjs'
-import { SERVICE_NAME_RE } from '../wire.mjs'
+import { SERVICE_NAME_RE, parseMethodPolicy } from '../wire.mjs'
 
 const ZONE_RE = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/
 const PATH_RE = /^\/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*$/
@@ -37,9 +37,12 @@ Options:
   --names-max N               names held at once in the zone (default 64)
   --names-max-per-pod N       names one pod may hold (default 4)
   --names-hold DURATION       how long a name stays its pod's after its link drops (default 30s; 0 frees it at once)
-  --allow-methods LIST        methods served, comma separated (default GET,HEAD)
-  --max-body SIZE             request body cap, e.g. 64k (default 64k)
+  --allow-methods LIST        methods carried: * (every method, the default) or a comma separated list to narrow it, e.g. GET,HEAD.
+                              CONNECT, TRACE and TRACK are never carried. A pod that has not upgraded is sent GET and HEAD only
+  --max-body SIZE             request body cap, streamed (default 32m; "unlimited" lifts it)
+  --max-uploads N             requests with a body in flight to one pod at a time (default 4)
   --timeout DURATION          whole-request deadline, e.g. 30s (default 30s)
+  --upload-timeout DURATION   whole-request deadline for a request with a body (default 5m)
   --auth bearer:FILE          require "Authorization: Bearer <the token in FILE>" on every request
   --identity FILE             the ingress's identity file (created on first run)
   --config FILE               a JSON file with the same options (flags win)
@@ -59,6 +62,7 @@ Exit status: 0 after --help, 2 on bad input, 1 if the node cannot start.
 
 const FLAGS = new Map([
   ['listen', 'value'], ['signaling', 'value'], ['map', 'list'], ['allow-methods', 'value'], ['max-body', 'value'], ['timeout', 'value'],
+  ['upload-timeout', 'value'], ['max-uploads', 'value'],
   ['auth', 'value'], ['identity', 'value'], ['config', 'value'], ['public', 'bool'], ['tls-terminated-in-front', 'bool'],
   ['allow-shared-origin', 'bool'], ['help', 'bool'],
   ['link-wait', 'value'], ['ready-path', 'value'],
@@ -234,13 +238,24 @@ export function resolveOptions(raw) {
     if (list.some((o) => o.prefix)) warnings.push(`warning: ${hostName} is served from more than one path mapping, so those mappings share one origin. One origin per provider is your responsibility.`)
   }
 
-  const methods = (raw['allow-methods'] ?? 'GET,HEAD').split(',').map((s) => s.trim().toUpperCase()).filter(Boolean)
-  const known = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']
-  if (!methods.length || methods.some((x) => !known.includes(x))) throw new UsageError(`--allow-methods must be a list of ${known.join(', ')}.`)
+  // Every method by default (`*`); a list narrows it. Standard methods are upper-cased (`get` is GET); an extension method is a token, kept as written.
+  let methods = '*'
+  if (raw['allow-methods'] !== undefined) {
+    const text = String(raw['allow-methods']).trim()
+    if (text !== '*') {
+      const list = text.split(',').map((s) => s.trim()).filter(Boolean)
+      try { methods = parseMethodPolicy(list.length ? list : null, '--allow-methods').list } catch { throw new UsageError('--allow-methods must be * or a comma separated list of method names (an RFC 9110 token; CONNECT, TRACE and TRACK are never served).') }
+    }
+  }
 
-  let maxBody, timeoutMs
-  try { if (raw['max-body'] !== undefined) maxBody = parseBytes(raw['max-body']) } catch { throw new UsageError(`--max-body "${raw['max-body']}" is not a size (for example 64k).`) }
+  let maxBody, timeoutMs, uploadTimeoutMs, maxUploads
+  try { if (raw['max-body'] !== undefined) maxBody = /^unlimited$/i.test(String(raw['max-body']).trim()) ? Infinity : parseBytes(raw['max-body']) } catch { throw new UsageError(`--max-body "${raw['max-body']}" is not a size (for example 64k, or "unlimited").`) }
   try { if (raw.timeout !== undefined) timeoutMs = parseDuration(raw.timeout) } catch { throw new UsageError(`--timeout "${raw.timeout}" is not a duration (for example 30s).`) }
+  try { if (raw['upload-timeout'] !== undefined) uploadTimeoutMs = parseDuration(raw['upload-timeout']) } catch { throw new UsageError(`--upload-timeout "${raw['upload-timeout']}" is not a duration (for example 5m).`) }
+  if (raw['max-uploads'] !== undefined) {
+    if (!/^\d{1,4}$/.test(String(raw['max-uploads'])) || Number(raw['max-uploads']) < 1) throw new UsageError(`--max-uploads "${raw['max-uploads']}" is not a positive number.`)
+    maxUploads = Number(raw['max-uploads'])
+  }
 
   let auth = null
   if (raw.auth !== undefined) {
@@ -261,7 +276,7 @@ export function resolveOptions(raw) {
   if (names && mappings.some((mp) => hostName(mp.host).endsWith(`.${names.zone}`))) {
     warnings.push(`warning: a --map host is under the names zone ${names.zone}; pods cannot claim that name (the mapping wins).`)
   }
-  return { host, port, signaling: raw.signaling, mappings, methods, maxBody, timeoutMs, auth, identity: raw.identity, public: isPublic, warnings, names, linkWaitMs, readyPath }
+  return { host, port, signaling: raw.signaling, mappings, methods, maxBody, timeoutMs, uploadTimeoutMs, maxUploads, auth, identity: raw.identity, public: isPublic, warnings, names, linkWaitMs, readyPath }
 }
 
 /**

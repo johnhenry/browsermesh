@@ -6,20 +6,74 @@ import { IngressError } from './errors.mjs'
 import { checkHeaderList, checkHost, checkTarget, isToken } from './headers.mjs'
 
 export const HTTP_PROTOCOL = 'http'
-export const HTTP_VERSIONS = Object.freeze([1])
+/**
+ * Version 1 carries the seven standard methods and a request body the provider reads whole (bounded). Version 2 carries any
+ * method token and a request body streamed end to end, and adds the `capabilities` request (what the provider accepts). An
+ * ingress offers `[2, 1]`; a provider that speaks only 1 is answered 1 and is never sent anything version 2 adds.
+ */
+export const HTTP_VERSIONS = Object.freeze([1, 2])
+export const STREAMING_VERSION = 2
 export const FETCH_METHOD = 'fetch'
+export const CAPABILITIES_METHOD = 'capabilities'
 export const KIND_REQUEST = 'request'
 export const KIND_RESPONSE = 'response'
 
-/** Methods the provider will build a Request for. The ingress's `methods` option narrows this further. */
+/** Methods version 1 builds a Request for. */
 export const WIRE_METHODS = new Set(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'])
+/** Methods that are never carried: a web `Request` cannot be built for them, and a proxy has no business tunnelling or echoing. */
+export const FORBIDDEN_METHODS = new Set(['CONNECT', 'TRACE', 'TRACK'])
+const MAX_METHOD_LENGTH = 32
+
+/** Is `m` an RFC 9110 method token (a `token`, at most 32 characters) that this package may carry? */
+export const isMethodToken = (m) => typeof m === 'string' && m.length <= MAX_METHOD_LENGTH && isToken(m) && !FORBIDDEN_METHODS.has(m.toUpperCase())
+/** The standard methods are upper case on the wire; an extension token is carried as it was sent (methods are case-sensitive). */
+export const normalizeMethod = (m) => (WIRE_METHODS.has(String(m).toUpperCase()) ? String(m).toUpperCase() : String(m))
+
+/** The methods a policy names: `'*'` (every token) or a list of tokens; anything else is a TypeError. @returns {{ all: boolean, list: string[] }} */
+export function parseMethodPolicy(methods, who) {
+  if (methods === '*') return { all: true, list: [] }
+  if (!Array.isArray(methods) || !methods.length) throw new TypeError(`${who}: methods must be '*' or a non-empty list of method names`)
+  const list = []
+  for (const raw of methods) {
+    const m = normalizeMethod(raw)
+    if (!isMethodToken(m)) throw new TypeError(`${who}: method ${JSON.stringify(String(raw))} is never served (CONNECT, TRACE and TRACK are refused; a method is an RFC 9110 token)`)
+    if (!list.includes(m)) list.push(m)
+  }
+  return { all: false, list }
+}
+
+/** The methods that are always reported in `Allow` when a policy is `'*'`. */
+export const STANDARD_ALLOW = Object.freeze(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'])
+
+/** What a pod accepts, as it says so over the wire (`capabilities`): methods and body cap per service, and its upload cap. */
+export function validateCapabilities(result) {
+  const bad = () => new IngressError(502, 'provider-failed', 'The provider failed to answer.')
+  const policy = (p) => {
+    if (!p || typeof p !== 'object') throw bad()
+    const methods = p.methods === '*' ? '*' : p.methods
+    if (methods !== '*' && (!Array.isArray(methods) || methods.length > 64 || !methods.every(isMethodToken))) throw bad()
+    if (p.maxBodyBytes !== null && !(Number.isSafeInteger(p.maxBodyBytes) && p.maxBodyBytes >= 0)) throw bad()
+    return { methods, maxBodyBytes: p.maxBodyBytes === null ? Infinity : p.maxBodyBytes }
+  }
+  if (!result || typeof result !== 'object') throw bad()
+  const out = { default: result.default === null || result.default === undefined ? null : policy(result.default), services: new Map(), maxUploads: Infinity }
+  if (result.services !== undefined) {
+    if (!result.services || typeof result.services !== 'object' || Array.isArray(result.services)) throw bad()
+    const entries = Object.entries(result.services)
+    if (entries.length > 32) throw bad()
+    for (const [name, p] of entries) { if (!SERVICE_NAME_RE.test(name)) throw bad(); out.services.set(name, policy(p)) }
+  }
+  if (result.maxUploads !== undefined) { if (!Number.isSafeInteger(result.maxUploads) || result.maxUploads < 1) throw bad(); out.maxUploads = result.maxUploads }
+  return out
+}
 
 /** @param {object} head the params of `fetch` @returns {object} validated, or throws IngressError 400 */
-export function validateRequestHead(head, { maxHeaderCount, maxHeaderBytes, maxTargetLength }) {
+export function validateRequestHead(head, { maxHeaderCount, maxHeaderBytes, maxTargetLength }, { version = 1 } = {}) {
   if (!head || typeof head !== 'object') throw new IngressError(400, 'bad-request-head', 'The request head is not an object.')
   const { rid, method, target, host, headers, body } = head
   if (!Number.isSafeInteger(rid) || rid <= 0) throw new IngressError(400, 'bad-request-head', 'The request id is not a positive integer.')
-  if (typeof method !== 'string' || !WIRE_METHODS.has(method)) throw new IngressError(405, 'method-not-allowed', 'The method is not served.')
+  if (typeof method !== 'string' || !(version >= STREAMING_VERSION ? isMethodToken(method) : WIRE_METHODS.has(method))) throw new IngressError(405, 'method-not-allowed', 'The method is not served.')
+  if (head.length !== undefined && (version < STREAMING_VERSION || !Number.isSafeInteger(head.length) || head.length < 0)) throw new IngressError(400, 'bad-request-head', 'The body length is not a whole number.')
   checkTarget(target, maxTargetLength)
   checkHost(host)
   checkHeaderList(headers, { maxCount: maxHeaderCount, maxBytes: maxHeaderBytes, reason: 'bad-request-head' })

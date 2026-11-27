@@ -71,6 +71,8 @@ export async function main(argv, { stdout, stderr, startNode = startMeshNode, pr
   const limits = {}
   if (options.maxBody) limits.maxRequestBodyBytes = options.maxBody
   if (options.timeoutMs) limits.timeoutMs = options.timeoutMs
+  if (options.uploadTimeoutMs) limits.uploadTimeoutMs = options.uploadTimeoutMs
+  if (options.maxUploads) limits.maxUploadsPerProvider = options.maxUploads
   const waiting = options.linkWaitMs !== 0
   if (options.linkWaitMs) limits.linkWaitMs = options.linkWaitMs
 
@@ -114,7 +116,7 @@ export async function main(argv, { stdout, stderr, startNode = startMeshNode, pr
   if (waiting) for (const peer of new Set(options.mappings.map((m) => m.peer))) ingress.expect(peer, { retryMs: 250 })
   let listener
   try {
-    listener = await listenNode(ingress, { host: options.host, port: options.port, public: options.public, trustProxy: false, ...(options.readyPath ? { readyPath: options.readyPath } : {}) })
+    listener = await listenNode(ingress, { host: options.host, port: options.port, public: options.public, trustProxy: false, requestTimeoutMs: Math.max(300_000, limits.uploadTimeoutMs ?? 0), ...(options.readyPath ? { readyPath: options.readyPath } : {}) })
   } catch (e) {
     namesServed?.stop()
     await ingress.close()
@@ -127,7 +129,7 @@ export async function main(argv, { stdout, stderr, startNode = startMeshNode, pr
   for (const mp of options.mappings) say(`serving ${mp.host}${mp.prefix} -> ${mp.peer}${mp.service ? ` (service ${mp.service})` : ''}`)
   if (names) say(`names: claimable under *.${options.names.zone} by ${options.names.allow.length} pod${options.names.allow.length === 1 ? '' : 's'}`)
   if (options.readyPath) say(`readiness: GET ${options.readyPath}`)
-  say(`methods: ${options.methods.join(', ')}; body cap ${limits.maxRequestBodyBytes ?? 65536} bytes; auth: ${token ? 'bearer token required' : 'none'}`)
+  say(`methods: ${options.methods === '*' ? 'every method (not CONNECT, TRACE or TRACK)' : options.methods.join(', ')}; body cap ${(limits.maxRequestBodyBytes ?? 32 * 1024 * 1024) === Infinity ? 'none' : `${limits.maxRequestBodyBytes ?? 32 * 1024 * 1024} bytes`}; auth: ${token ? 'bearer token required' : 'none'}`)
   say(`listening on http://${options.host.includes(':') ? `[${options.host}]` : options.host}:${listener.port}`)
 
   let stopping = false

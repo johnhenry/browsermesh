@@ -10,6 +10,32 @@ Real HTTP in, a mesh pod answers. A request arrives at a listener you run; a map
 It is a library (a web-standard `(Request) => Promise<Response>`, plus a Node listener on its own entry) and a CLI
 (`browsermesh-ingress`).
 
+## What changes on upgrade (0.8)
+
+**Every method and a full, streamed request body are now on by default.** Before 0.8 a public address carried `GET` and `HEAD`
+only (and an operator could opt in to `POST` and friends with a 64 KiB body, read whole). Now, when **both ends are new** (the
+ingress, and the pod behind it, run this version):
+
+- a visitor's `POST`, `PUT`, `PATCH`, `DELETE`, `OPTIONS` and any other method (an RFC 9110 token such as `PURGE` or `PROPFIND`)
+  reaches the pod's handler, with its **whole body streamed** end to end (visitor, ingress, mesh channel, pod, the origin your
+  handler fetches), with backpressure in both directions and nothing held whole. `CONNECT`, `TRACE` and `TRACK` are never carried;
+- a pod that served `GET`/`HEAD`-only mappings **now accepts writing methods** (up to 32 MiB of body, both ends bounded, see
+  Defaults) once the ingress in front of it is also on this version. **Whatever your origin accepts for a writing method is now
+  reachable from the public address**, cookies and `Authorization` included when the operator forwards them (see "The security
+  model").
+
+**To keep `GET` and `HEAD` only**, narrow either end (both is fine; neither can widen the other):
+
+```js
+serveHttpOnMesh(service, handler, { allowFrom, methods: ['GET', 'HEAD'] })        // the pod: refuses the rest with 405 + Allow
+createMeshIngress({ service, resolve, methods: ['GET', 'HEAD'] })                  // the ingress process
+// CLI: browsermesh-ingress ... --allow-methods GET,HEAD
+```
+
+An older end is never sent what it cannot handle: an ingress in front of a pod that has not upgraded sends it `GET` and `HEAD` only
+(a visitor's `POST` is a 405 with `Allow: GET, HEAD`), and a pod behind an ingress that has not upgraded is spoken to exactly as
+before (see "Wire").
+
 Peer dependency: `@johnhenry/browsermesh-apps` `>=0.21.0` (the protocol channel and its streams). The CLI also needs
 `@johnhenry/browsermesh-core`, `-pod`, `-primitives`, `-transport` and `-discovery` (optional dependencies, installed by
 default) and `node-datachannel` (an optional dependency) to reach pods over WebRTC from Node.
@@ -24,8 +50,8 @@ Needs Node 26 or later. `@johnhenry/browsermesh-apps` is a peer dependency. The 
 
 ## What it is, and what it is not
 
-- **It is** a bounded request forwarder: one mapping, one pod, protocol `http` v1 on the existing protocol channel
-  (`openProtocol(peer, 'http', { versions: [1] })`), request and response bodies as protocol streams with
+- **It is** a bounded request forwarder: one mapping, one pod, protocol `http` (v2, or v1 with a pod that has not upgraded) on the
+  existing protocol channel (`openProtocol(peer, 'http', { versions: [2, 1] })`), request and response bodies as protocol streams with
   cancellation and backpressure.
 - **It is not a CDN**: nothing is cached (`Cache-Control: no-store`), nothing is replicated.
 - **It is not a file server**: it holds no content and serves none; the pod does.
@@ -48,6 +74,14 @@ reach in a browser; the response policy reduces that and must not be relied on. 
 refuses two different pods under one hostname, and warns when mappings share an origin by path.
 
 The listener speaks plain HTTP: put TLS in front of it. Nothing public is on by default.
+
+**Writing methods are on by default (0.8).** A public address now exposes **whatever the origin behind the pod accepts for
+`POST`, `PUT`, `PATCH`, `DELETE` and every other method**, with the same trust as a `GET` had: cookies and `Authorization` are passed to
+the pod exactly as they are for a `GET` today (only the names the operator lists in `forwardHeaders`; `Host`, `Forwarded` and
+`X-Forwarded-*` are never passed, and the pod sees the ingress's own `X-Forwarded-For` when asked), the pod sees the verified ingress
+pod id, and the response is filtered as ever. What a pod's handler does with a body it is sent is the pod owner's decision, and the
+pod owner opts out per mapping with `methods`. An origin that accepts writes needs its own cross-site request protection, exactly as if it were served directly.
+An operator who wants today's behaviour on a public ingress sets `--allow-methods GET,HEAD` (or `methods: ['GET', 'HEAD']`).
 
 ### What the operator can see and change
 
@@ -76,7 +110,7 @@ operator changing a response unnoticed but does not hide it; and an application 
 What would give the client TLS to the pod itself (the operator then sees only the server name and the byte counts) is
 **TLS passthrough**: the ingress reads the SNI from the first bytes of a connection, maps it to a pod, and relays the raw
 bytes both ways while the pod terminates TLS with its own certificate. That needs a raw byte stream to a pod, which
-protocol `http` v1 is not (it is request/response with a head, and the ingress reads the request before it asks the pod). A
+protocol `http` is not (it is request/response with a head, even with a streamed body). A
 byte-stream protocol with the same pin, caps and grants as `http` is the missing piece; it is **not built**, and is listed under
 "What is not built".
 
@@ -91,7 +125,7 @@ const service = attachService(node, undefined, createMeshProtocolService())
 const ingress = createMeshIngress({
   service,                                                   // or `node`, to have one attached
   resolve: (request) => new URL(request.url).host === 'app.example.test' ? { peer: appPodId } : null,
-  methods: ['GET', 'HEAD', 'POST'],                          // GET and HEAD by default
+  methods: ['GET', 'HEAD', 'POST'],                          // every method by default; a list NARROWS it
   onAudit: (record) => console.log(record),                  // { peer, host, method, status, reason?, requestBytes, responseBytes, durationMs }
 })
 const { port, close } = await listenNode(ingress, { port: 8080, host: '127.0.0.1', trustProxy: false })
@@ -100,7 +134,7 @@ const { port, close } = await listenNode(ingress, { port: 8080, host: '127.0.0.1
 //   export default { fetch: (request) => ingress.handle(request, { clientAddress }) }
 ```
 
-`createMeshIngress({ node | service, resolve, names?, authorize?, deny?, limits?, methods?, forwardHeaders?, exposeHeaders?,
+`createMeshIngress({ node | service, resolve, names?, authorize?, deny?, limits?, methods?, versions?, forwardHeaders?, exposeHeaders?,
 forwardClientAddress?, verifyResponse?, signRequest?, linkIdentity?, retry?, rpc?, onAudit?, clock? })` returns
 `{ handle(request, { clientAddress }), expect(podId), readiness(), whenReady(), stats(), close() }`. `resolve` may be left out
 when `names` is given.
@@ -127,6 +161,43 @@ when the client finishes is not served and is ended, as before; a client that fi
   asked this way.
 - A hook never has to read the body: `resolve`, `authorize` and `deny` get the `Request` before it is read.
 
+### Methods and request bodies
+
+With both ends new, every request carries its method and its whole body to the pod's handler, streamed.
+
+- **Methods.** Any RFC 9110 method token (`PURGE`, `PROPFIND`, `M-SEARCH`, a name of your own), case-sensitive as sent (the standard
+  ones are upper case). `CONNECT`, `TRACE` and `TRACK` are always refused (405 with `Allow`, whatever the options say), and so is
+  anything that is not a token. **`OPTIONS`, a CORS preflight included, is passed to the pod like any other method**; the ingress
+  answers nothing itself, so the pod (or the operator's `response.addHeaders` / `exposeHeaders`) decides what a preflight gets. The
+  Node listener can only parse the methods Node's HTTP parser knows (`http.METHODS`: the standard ones, WebDAV, `PURGE`, `M-SEARCH`,
+  `SUBSCRIBE` and about thirty more); a token outside that list is answered `501 Not Implemented` by the listener. The web-standard
+  `handle(request)` carries any token (a Workers or Deno handler, or your own listener).
+- **The body** is read from the visitor only as fast as the pod takes it: `Content-Length` and chunked both, no read-ahead beyond one
+  stream window (256 KiB) per request, so a slow origin slows the visitor through TCP, and a slow visitor slows the origin. The pod's
+  handler gets an ordinary `Request` whose `body` is that stream (and `Content-Length`, when the visitor declared one), so
+  `fetch(origin, { method: request.method, body: request.body, duplex: 'half', signal })` passes it on without holding it. A runtime that
+  cannot build a `Request` from a stream (some browsers) is given the same bytes whole, bounded by `maxBodyBytes`.
+- **Request trailers are dropped**: a web `Request` has none, and neither end passes them (`Trailer` and `TE` headers are never forwarded).
+- **`Expect: 100-continue`** is answered by the listener (not by Node's default, which says "continue" at once): `100 Continue` is sent
+  when the ingress is ready to read the first byte, that is after the method, the mapping, the limits and the provider's own
+  `capabilities` have said yes. A client that is going to be refused (405, 413, 404, 403...) gets its final status and no `100`, and
+  sends no body. A client that does not wait sends the body anyway, which is bounded like any other.
+- **An answer before the upload ends** (a handler that returns 401 or 413 without reading the body) is delivered, and the upload
+  is stopped: the pod cancels the stream, the ingress stops reading the visitor, the response says `Connection: close`, and the
+  listener reads and discards at most 1 MiB or 2 s of what the client still sends before it hangs up (so a client that is still
+  sending can read the answer). A handler that is reading the body while it answers (an echo) keeps the upload going until the answer
+  is over.
+- **A visitor that disconnects mid-upload** ends the request as `client-aborted` (499 in the audit record): the pod's `request.body`
+  errors (`stream-aborted`), the handler's `signal` aborts, and so does the origin `fetch` it passes that signal to.
+- **Limits that break during an upload** are the answer: the ingress's or the pod's byte cap is a 413 `body-too-large` (a declared
+  length over it is refused before a byte is read, a chunked body is cut at the cap), a stalled visitor is a 408 `body-timeout`, the
+  whole request running past `uploadTimeoutMs` is a 504 `provider-timeout`, and a body that is not the length `Content-Length`
+  declared is a 400 `bad-framing`.
+- **What is held whole.** A body is held in memory (up to `maxBufferedBodyBytes`, 1 MiB; over that is a 413) only where something needs all
+  of it: a pod that has not upgraded, a request you sign with `signRequest` (the signature covers the body's digest, so the pod also
+  holds it when it has a `verifyRequest`), a request `retry` may repeat (a body of declared length up to 1 MiB, or unknown length that
+  ends within 1 MiB; a larger one streams and is never retried), and the `rpc` fallback.
+
 ### The provider
 
 ```js
@@ -134,7 +205,9 @@ import { serveHttpOnMesh, fromSiteHandler } from '@johnhenry/browsermesh-ingress
 
 const served = serveHttpOnMesh(service, async (request, { peer, signal, client }) => new Response('hello'), {
   allowFrom: [ingressPodId],           // required: nothing is served to a pod that is not named
-  limits: { maxInflight: 16, maxRequestBodyBytes: 1024 * 1024, maxResponseBytes: 8 * 1024 * 1024, handlerTimeoutMs: 30_000 },
+  methods: ['GET', 'HEAD', 'POST'],    // optional: every method by default; a list NARROWS it ('*' says every one)
+  maxBodyBytes: 8 * 1024 * 1024,       // optional: 32 MiB by default; Infinity only by choice
+  limits: { maxInflight: 16, maxUploads: 4, maxRequestBodyBytes: 1024 * 1024, maxResponseBytes: 8 * 1024 * 1024, handlerTimeoutMs: 30_000, uploadTimeoutMs: 300_000, bodyIdleMs: 10_000 },
 })
 node.registry.grantCapabilities(ingressPodId, ['protocol:http:open'])   // the registry grant is required too
 // await served.stop(); served.stats()
@@ -152,7 +225,12 @@ With `@johnhenry/browsermesh-apps` 0.28 or older on the pod the close notice is 
 `handler` is a function or `{ fetch }`. `peer` is the ingress pod, the pod id the channel is addressed by (never a header);
 whether that id was proven on the link is a separate question, answered by the `peer` object the hooks get (next
 section). `signal` aborts when the client goes away or the deadline passes. `request.url` is `http://<the client's host><path>`.
-A request body is read whole (bounded) before the handler runs, so it works in every browser; response bodies stream.
+The request body is a stream the handler reads (see "Methods and request bodies"); the response body streams too. **`methods` and
+`maxBodyBytes` are the pod's own word**: the ingress cannot widen them, and a request the pod would refuse (405 with `Allow`, or 413) is
+refused before a byte of its body is read, whatever the ingress was told. They can differ per service:
+`services: { api: { fetch: handler, methods: ['GET', 'POST'], maxBodyBytes: 1_000_000 }, web: { fetch: handler, methods: ['GET', 'HEAD'] } }`
+(a service that names none inherits the pod-wide setting). A pod that has not upgraded (protocol version 1) treats an explicit
+`methods` the same way; with none given it serves what a v1 ingress sends, as it always did.
 
 **`allowFrom` is required, and is a list or a function.** A list names the ingress pod ids served. A function
 `(podId, context, peer) => boolean | Promise<boolean>` (`context` is `{ peer, protocol, version }`; `peer` is what is verified
@@ -384,7 +462,7 @@ CLI: `--names-zone pods.example.test --names-allow <podId>=app,blog [--names-all
   reason `done` all the same, which that ingress treats as any lost channel, so the names are held for `holdMs` as they always were.
   **An older pod** never opens it, or closes its channel with no `bye`: a new ingress reads the reason `done` of an older client's
   `close()` as the goodbye it was meant as (names released); any other close is a lost link (names held). The `http` protocol
-  is unchanged, so a claimed name is served over `http` v1 as any mapping is.
+  does not change, so a claimed name is served over `http` as any mapping is (with the pod's `methods` and `maxBodyBytes`).
 
 ### Closing a pod: the order
 
@@ -514,9 +592,9 @@ fails it until the table says so.
 | 400 | `body-on-get` | a body on `GET` or `HEAD` |
 | 403 | `forbidden` | `authorize` said no (or, provider side, `allowFrom`) |
 | 404 | `no-mapping` | `resolve` returned `null` |
-| 405 | `method-not-allowed` | a method not in `methods` (with `Allow`) |
-| 408 | `body-timeout` | the client's body stalled |
-| 413 | `body-too-large` | the request body is over the cap |
+| 405 | `method-not-allowed` | a method this ingress or this pod does not carry: `CONNECT`, `TRACE`, `TRACK`, a non-token, one outside `methods` on either end, or anything but `GET` and `HEAD` for a pod that has not upgraded (with `Allow`) |
+| 408 | `body-timeout` | the client's body stalled (either end's idle bound) |
+| 413 | `body-too-large` | the request body is over the cap of this ingress or of the pod: refused unread when its length was declared, cut at the cap when it was not |
 | 414 | `target-too-long` | the target is over 2048 characters |
 | 426 | `upgrade-unsupported` | a WebSocket or other upgrade |
 | 429 | `client-inflight` | too many requests from this client in flight (with `Retry-After`) |
@@ -555,6 +633,7 @@ fails it until the table says so.
 | 503 | `provider-inflight` | this provider is at its in-flight cap (with `Retry-After`) |
 | 503 | `provider-rate` | this provider is over its rate (with `Retry-After`) |
 | 503 | `provider-stopping` | the provider is being stopped (`served.stop()`) and takes no new request (with `Retry-After`) |
+| 503 | `provider-uploads` | this pod's link is carrying as many requests with a body as the ingress or the pod allows (with `Retry-After`) |
 | 504 | `provider-idle` | the provider announced a body and did not send it, or stalled |
 | 504 | `provider-timeout` | the whole request ran past `timeoutMs`, or the provider did not answer the open |
 <!-- failures-table:end -->
@@ -579,13 +658,17 @@ A provider's own answer, including its own 4xx and 5xx and a plain 421, passes t
 | Rule | Default |
 | --- | --- |
 | Listener bind | `127.0.0.1` (`public: true` for anything else) |
-| Methods | `GET`, `HEAD`; `methods` can add `POST PUT PATCH DELETE OPTIONS`; `CONNECT` and `TRACE` never |
-| Request body | 64 KiB (`maxRequestBodyBytes`); over it is a 413; read in full before the provider is asked |
+| Methods | every method token, at the ingress (`methods`, `--allow-methods`) and at the pod (`serveHttpOnMesh`'s `methods`); a list narrows it; `CONNECT`, `TRACE` and `TRACK` never. A pod that has not upgraded: `GET` and `HEAD` |
+| Request body | streamed, never held whole; **32 MiB** at the ingress (`maxRequestBodyBytes`, `--max-body`) and **32 MiB** at the pod (`maxBodyBytes`); over it is a 413 (refused unread when the length was declared, cut at the cap when it was not); `Infinity` / `--max-body unlimited` only by choice |
+| Body held whole | 1 MiB (`maxBufferedBodyBytes`; a pod that has not upgraded, a signed request, a request `retry` may repeat); over it is a 413 |
+| Whole request with a body | 5 min (`uploadTimeoutMs`, `--upload-timeout`) at the ingress, `max(handlerTimeoutMs, uploadTimeoutMs)` = 5 min at the pod; 504 `provider-timeout` |
+| Uploads in flight | 4 requests with a body per pod link at the ingress (`maxUploadsPerProvider`, `--max-uploads`) and 4 at the pod (`limits.maxUploads`); the next is a 503 `provider-uploads` with `Retry-After` |
+| Bytes per second | no bound: the response has none either (the bounds are bytes, time, concurrency and one 256 KiB stream window); the Node listener's `requestTimeoutMs` is 300 s |
 | Response | 8 MiB (`maxResponseBytes`); a declared length over it is refused before anything is sent |
 | Whole request | 30 s (`timeoutMs`), 504 `provider-timeout` |
 | Link wait | 5 s (`linkWaitMs`), only for a pod told to be expected (`expect`, the CLI's mapped pods, a held name); any other pod fails at once |
 | Names, readiness | off: nothing is claimable and no readiness path is answered until the operator turns them on |
-| Slow body / idle response | 10 s (`bodyIdleMs`, 408) / 15 s (`responseIdleMs`) between chunks |
+| Slow body / idle response | 10 s (`bodyIdleMs`, 408; the same bound at the pod, waiting on the link and never on the handler) / 15 s (`responseIdleMs`) between chunks |
 | Headers / target | 64 headers, 16 KiB, 2048 characters |
 | In flight | 64 total, 8 per client, 16 per provider (429 / 503, `Retry-After`) |
 | Rate | 120 per client and 600 per provider, per minute |
@@ -602,7 +685,8 @@ A provider's own answer, including its own 4xx and 5xx and a plain 421, passes t
 
 ```
 browsermesh-ingress --listen 127.0.0.1:8080 --signaling wss://signal.example \
-  --map app.example.test=<podId> [--map ...] [--allow-methods GET,HEAD,POST] [--max-body 64k] [--timeout 30s] \
+  --map app.example.test=<podId> [--map ...] [--allow-methods GET,HEAD,POST] [--max-body 8m] [--max-uploads 4] \
+  [--timeout 30s] [--upload-timeout 5m] \
   [--auth bearer:<file>] [--identity <file>] [--config file.json] \
   [--link-wait 5s] [--ready-path /_ready] \
   [--names-zone pods.example.test --names-allow <podId>=app,blog ...]
@@ -618,6 +702,11 @@ bearer:FILE` requires `Authorization: Bearer <token in FILE>` on every request. 
 Without `node-datachannel` the CLI cannot reach any pod and says so; the library works over any transport you attach a
 protocol service to.
 
+**Narrowing from the command line** (every method and 32 MiB bodies are the default, so these only take away): `--allow-methods
+GET,HEAD` (a comma separated list of method names; `*` says every one), `--max-body 64k` (or `unlimited`), `--max-uploads 1`,
+`--upload-timeout 1m`. They are config keys too (`allowMethods`, `maxBody`, `maxUploads`, `uploadTimeout`). The start-up line says
+what is on (`methods: every method (not CONNECT, TRACE or TRACK); body cap 33554432 bytes`).
+
 ## What is not built
 
 - WebSocket upgrades (426). A later bridge would map each upgrade onto `mesh-websocket` frames over a second protocol,
@@ -626,16 +715,45 @@ protocol service to.
   end and the verified originator of each sealed message compared with the mapped pod.
 - TLS passthrough (the pod terminates TLS itself and the operator relays bytes it cannot read): needs a byte-stream protocol to a
   pod, selected by SNI, with the same pin, caps and grants as `http`. See "What the operator can see and change".
-- Streaming the client's request body to the provider while the client is still sending (it is read first, bounded).
+- A method token the Node HTTP parser does not know through the Node listener (501): the listener rides `node:http`, which parses
+  `http.METHODS` only. `handle(request)` has no such limit; a listener of your own can carry any token.
+- HTTP/2 and HTTP/3 listeners, and request trailers (dropped).
+- A bytes-per-second bound per link (there is none for responses either; the bounds are bytes, time and concurrency).
 - TLS, caching, compression, per-root authorisation on the provider (`http:<root>:<action>`).
 
 ## Wire
 
-Protocol `http` v1 on a protocol channel: one channel request `fetch { rid, nonce, method, target, host, headers, body,
+Protocol `http` on a protocol channel: one channel request `fetch { rid, nonce, method, target, host, headers, body,
 client?, sig? } -> { status, headers, body, sig?, declined? }`; bodies are protocol streams (`{ rid, kind: 'request' }` ingress to
 provider, `{ rid, kind: 'response' }` opened by the provider before it answers). Additions since v1's first release, all optional: `service` in
 the head and the `services` request (above), and the separate `ingress-names` protocol. No new framing; a peer without the
-protocol answers the open with `unknown-protocol` and is sent nothing else. Design: [`docs/design/http-ingress.md`](../../docs/design/http-ingress.md);
+protocol answers the open with `unknown-protocol` and is sent nothing else.
+
+**Version 2 (0.8): any method, a streamed body.** Negotiated by the protocol's own version list: the ingress opens the channel
+offering `[2, 1]`, a pod serves `[1, 2]`, and the channel runs at the highest both have. What version 2 adds, and nothing else:
+
+- the `fetch` head's `method` may be any method token (version 1 knows the seven standard ones), and the head may carry `length` (the
+  `Content-Length` the visitor declared, when it did; the pod refuses a length over its cap before reading, and checks the body
+  against it);
+- the request body is read by the pod as the handler asks for it (version 1 reads it whole before the handler runs);
+- a new channel request, answered only on a version 2 channel, **`capabilities {} -> { default: { methods, maxBodyBytes } | null,
+  services: { [name]: { methods, maxBodyBytes } }, maxUploads }`** (`methods` is `"*"` or a list; `maxBodyBytes` is a number or `null`
+  for none). That is how a pod states what it accepts, per service. The ingress asks once per link, and only when a request needs it (a
+  body, or a method other than `GET` and `HEAD`); a plain `GET` asks nothing, so a pod that narrows `GET` refuses it itself;
+- channel errors the ingress understands: `method-not-allowed` (405), `body-too-large` (413), `body-timeout` (408), `bad-framing`
+  (400) and `uploads-busy` (503 `provider-uploads`).
+
+**What each pairing does** (each is tested; "older" is simulated by not stating version 2):
+
+| Ingress | Pod | What happens |
+| --- | --- | --- |
+| new | new | version 2: every method, bodies streamed, `capabilities` asked once per link |
+| new | older | version 1: the ingress sends `GET` and `HEAD` only and never a `capabilities` request, a head field or a body stream the pod does not know; a visitor's `POST` is a 405 with `Allow: GET, HEAD`. (An operator's own explicit `methods` list keeps working for the standard methods in it, the body held whole up to 1 MiB, exactly as `methods: [...]` always did.) |
+| older | new | version 1 (the older ingress offers only 1): the pod says nothing new on the wire, answers what the older ingress sends as before, and keeps any `methods` narrowing it was given |
+| older | older | as before |
+
+A signed request (`signRequest`) is sent held whole on any version, because the signature covers the body's digest; the pod's
+`verifyRequest` holds it too. Design: [`docs/design/http-ingress.md`](../../docs/design/http-ingress.md);
 threat model: [`docs/security.md`](../../docs/security.md#http-ingress).
 
 ## License

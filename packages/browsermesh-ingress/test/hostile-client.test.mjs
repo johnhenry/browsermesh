@@ -140,20 +140,21 @@ describe('huge and many', () => {
 })
 
 describe('slow bodies', () => {
-  it('a POST that sends part of its body and stops is a 408, and the provider is never asked', async () => {
-    const t = await rig({ ingress: { methods: ['GET', 'POST'], limits: { bodyIdleMs: 60 } } })
+  // The body is streamed, so the provider is asked while it is still coming: a provider that reads it is the one that sees it end badly.
+  const reads = async (request) => { await request.arrayBuffer(); return new Response('ok') }
+
+  it('a POST that sends part of its body and stops is a 408, and the provider\'s body read ends with it', async () => {
+    const t = await rig({ ingress: { methods: ['GET', 'POST'], limits: { bodyIdleMs: 60 } }, handler: reads })
     const { text } = await t.raw('', { parts: ['POST / HTTP/1.1\r\nHost: app.test\r\nContent-Length: 10\r\n\r\n', 'ab'], until: (b) => b.includes('\r\n\r\n') })
     assert.equal(statusOf(text), 408)
-    assert.equal(t.asked.length, 0)
     await until(() => t.mesh.stats().inflight === 0)
   })
 
   it('a chunked body that never ends is cut at the cap', async () => {
-    const t = await rig({ ingress: { methods: ['GET', 'POST'], limits: { maxRequestBodyBytes: 100 } } })
+    const t = await rig({ ingress: { methods: ['GET', 'POST'], limits: { maxRequestBodyBytes: 100 } }, handler: reads })
     const chunk = `${(50).toString(16)}\r\n${'a'.repeat(50)}\r\n`
     const { text } = await t.raw(`POST / HTTP/1.1\r\nHost: app.test\r\nTransfer-Encoding: chunked\r\n\r\n${chunk}${chunk}${chunk}${chunk}`, { until: (b) => b.includes('\r\n\r\n') })
     assert.equal(statusOf(text), 413)
-    assert.equal(t.asked.length, 0)
   })
 
   it('a client that never reads its response cannot hold the provider forever: the deadline releases the slot', async () => {
@@ -215,8 +216,8 @@ describe('Host tricks', () => {
 })
 
 describe('methods and upgrades', () => {
-  it('TRACE, PUT, DELETE, PATCH and OPTIONS are 405 by default; CONNECT and an unknown method never reach the provider', async () => {
-    const t = await rig()
+  it('TRACE and CONNECT are never served, PUT, DELETE, PATCH and OPTIONS are 405 once the ingress is narrowed; an unknown method never reaches the provider', async () => {
+    const t = await rig({ ingress: { methods: ['GET', 'HEAD'] } })
     for (const m of ['PUT', 'DELETE', 'PATCH', 'OPTIONS']) assert.equal(await status(t, `${m} / HTTP/1.1\r\nHost: app.test\r\nContent-Length: 0\r\n${close}\r\n`), 405, m)
     const trace = await status(t, `TRACE / HTTP/1.1\r\nHost: app.test\r\n${close}\r\n`)
     assert.ok(trace === 405 || trace === 400, 'TRACE is refused (by the parser or the ingress)')

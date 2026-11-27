@@ -12,6 +12,7 @@ export interface ListenOptions {
   maxConnections?: number
   maxHeaderBytes?: number
   headersTimeoutMs?: number
+  /** Node's bound on receiving a whole request, headers and body (default 300000: a streamed upload has to fit; it was 60000 when bodies were small). */
   requestTimeoutMs?: number
   /**
    * Answer `GET` and `HEAD` for exactly this path (no query) with `{ ready, peers: { up, total } }`: 200 when the pods the ingress was told
