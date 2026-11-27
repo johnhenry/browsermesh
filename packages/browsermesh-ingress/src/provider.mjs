@@ -387,7 +387,7 @@ async function buildRequest(head, ac, claimBody, { cap, streaming, buffered, idl
     } else {
       const stream = guardedBody(reader, { cap, idleMs, length: head.length, counters, guard })
       if (head.length !== undefined) headers.set('content-length', String(head.length))
-      if (streaming) {
+      if (streaming && streamBodiesWork()) {
         // The handler's Request body is the stream itself, read as the handler asks for it. A runtime that cannot build a Request
         // from a stream (some browsers) gets the same bytes whole, bounded by the same cap.
         try { return { request: new Request(url, { ...init, body: stream, duplex: 'half' }), body: undefined } } catch (e) { if (!(e instanceof TypeError)) throw e }
@@ -396,6 +396,23 @@ async function buildRequest(head, ac, claimBody, { cap, streaming, buffered, idl
     }
   }
   return { request: new Request(url, { ...init, body }), body }
+}
+
+let streamBodies
+/**
+ * Can this runtime build a `Request` whose body is a `ReadableStream`? Some browsers throw; some quietly turn the stream into the
+ * text "[object ReadableStream]" (and add a `Content-Type: text/plain`), which is worse. The standard probe: a runtime that really
+ * takes the stream reads `duplex` and adds no content type. Asked once.
+ */
+export function streamBodiesWork() {
+  if (streamBodies === undefined) {
+    try {
+      let duplexRead = false
+      const probe = new Request('http://probe.invalid/', { method: 'POST', body: new ReadableStream(), get duplex() { duplexRead = true; return 'half' } })
+      streamBodies = duplexRead && !probe.headers.has('content-type')
+    } catch { streamBodies = false }
+  }
+  return streamBodies
 }
 
 /** `promise`, or `make()` if it has not settled within `ms`. */

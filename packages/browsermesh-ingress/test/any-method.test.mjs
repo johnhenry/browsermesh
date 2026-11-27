@@ -451,6 +451,36 @@ describe('bounds, on both sides', () => {
   })
 })
 
+describe('a runtime that cannot build a Request from a stream', () => {
+  it('is given the same bytes whole, bounded by the cap (a browser that would turn the stream into text is detected)', async () => {
+    const RealRequest = globalThis.Request
+    // What an older Firefox does: a stream body is quietly made into the text "[object ReadableStream]".
+    class StringifyingRequest extends RealRequest {
+      static [Symbol.hasInstance](x) { return x instanceof RealRequest }
+      constructor(input, init = {}) {
+        if (init.body instanceof ReadableStream) { const { duplex, ...rest } = init; void duplex; super(input, { ...rest, body: String(init.body), headers: { ...Object.fromEntries(new Headers(init.headers)), 'content-type': 'text/plain;charset=UTF-8' } }) } else super(input, init)
+      }
+    }
+    const fresh = await import('../src/provider.mjs?no-stream-bodies')
+    globalThis.Request = StringifyingRequest
+    try {
+      assert.equal(fresh.streamBodiesWork(), false)
+      const pods = await threePods()
+      cleanups.push(() => pods.teardown())
+      const served = fresh.serveHttpOnMesh(pods.p, async (request) => new Response(`${request.method}:${await request.text()}`), { allowFrom: [pods.ingress.podId], maxBodyBytes: 1000 })
+      cleanups.push(() => served.stop())
+      grantHttp(pods)
+      const mesh = createMeshIngress({ service: pods.i, resolve: () => ({ peer: pods.provider.podId }) })
+      cleanups.push(() => mesh.close())
+      const res = await mesh.handle(new RealRequest('http://x.test/', { method: 'PUT', body: new Uint8Array(500).fill(97), duplex: 'half' }))
+      assert.equal(await res.text(), `PUT:${'a'.repeat(500)}`)
+      const big = await mesh.handle(new RealRequest('http://x.test/', upload(patterned(5000).stream)))
+      assert.equal(big.status, 413, 'the cap holds when the body is held')
+    } finally { globalThis.Request = RealRequest }
+    assert.equal((await import('../src/provider.mjs')).streamBodiesWork(), true)
+  })
+})
+
 describe('the pod does not trust the ingress', () => {
   /** A raw client on the pod's protocol, at the version asked for: what an ingress that does not follow the rules could send. */
   async function rawClient(pods, versions) {
