@@ -16,7 +16,7 @@ channel.peer                          verified identity of the other end (a publ
 channel.maxMessageBytes               payload budget for one message
 channel.send(obj, { signal })         structured message, Uint8Array included
 channel.onMessage(cb)                 cb(obj, { peer }); a returned promise slows the sender
-channel.request(method, params, { signal, onProgress, timeoutMs })  -> Promise<result>
+channel.request(method, params, { signal, onProgress, onSent, timeoutMs })  -> Promise<result>
 channel.notify(method, params)
 channel.onRequest(method, handler)    handler(params, { peer, signal, progress })
 channel.onNotification(method, handler)  handler(params, { peer })
@@ -28,6 +28,9 @@ channel.close()
 `onNotification` (a notify needs a receiver) and `close`. Notes:
 
 - `peer` is the key the session is bound to, never read from a message.
+- `onSent()` is called once, when the transport has taken the first frame of the request. A request that fails without it
+  never left this node (the transport refused the frame, or the link ended first); one that fails after it may have reached the
+  peer.
 - Bytes are native `Uint8Array` end to end; base64 is a carrier detail inside
   the JSON envelope on the mesh and does not appear here.
 - Errors are `MeshChannelError` with JSON-RPC style codes: -32000 unsupported,

@@ -263,6 +263,7 @@ export function createChannelCore({
           item.index += 1
           item.started = true
           await transmit(f)
+          if (item.index === 1 && item.onSent) { try { item.onSent() } catch { /* a caller's hook never breaks the link */ } }
           if (sendQueue[0] !== item) break // refused by the receiver while we were sending
         }
         if (sendQueue[0] === item) {
@@ -279,7 +280,7 @@ export function createChannelCore({
     }
   }
 
-  function enqueue(value, { signal } = {}) {
+  function enqueue(value, { signal, onSent } = {}) {
     if (closed) return Promise.reject(closeError)
     if (!remote) return Promise.reject(err(ChannelErrorCode.UNSUPPORTED, 'not-ready', 'channel is not open yet'))
     if (signal?.aborted) return Promise.reject(err(ChannelErrorCode.CANCELLED, 'cancelled', 'send aborted'))
@@ -290,7 +291,7 @@ export function createChannelCore({
       return Promise.reject(err(ChannelErrorCode.TOO_LARGE, 'message-too-large', `message of ${bytes.byteLength} bytes exceeds the negotiated maximum of ${effectiveMax()}`))
     }
     return new Promise((resolve, reject) => {
-      const item = { m: nextMsg++, bytes, offset: 0, index: 0, started: false, resolve, reject, signal }
+      const item = { m: nextMsg++, bytes, offset: 0, index: 0, started: false, resolve, reject, signal, onSent }
       item.onAbort = () => {
         if (item.started) return // part of it is already out; it completes
         const at = sendQueue.indexOf(item)
@@ -525,7 +526,7 @@ export function createChannelCore({
   }
 
   // -------------------------------------------------------------- public link
-  function request(method, params, { signal, onProgress, timeoutMs = requestTimeoutMs } = {}) {
+  function request(method, params, { signal, onProgress, onSent, timeoutMs = requestTimeoutMs } = {}) {
     if (closed) return Promise.reject(closeError)
     if (typeof method !== 'string' || !method || method.length > MAX_METHOD_LENGTH) return Promise.reject(new TypeError('mesh-channel: method must be a non-empty string'))
     if (!isPosInt(timeoutMs)) return Promise.reject(new TypeError('mesh-channel: timeoutMs must be a positive integer'))
@@ -549,7 +550,7 @@ export function createChannelCore({
       timer.unref?.()
       pending.set(id, { resolve, reject, onProgress, timer, signal, onAbort })
       signal?.addEventListener('abort', onAbort, { once: true })
-      enqueue({ t: 'q', id, m: method, p: params }).catch(e => {
+      enqueue({ t: 'q', id, m: method, p: params }, { onSent }).catch(e => {
         const p = pending.get(id)
         if (!p) return
         pending.delete(id)

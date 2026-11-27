@@ -562,6 +562,17 @@ is needed from the pod: serve, dial, and (for a pod that stops) `await served.st
 side and adds nothing to the wire: an older pod is served as well as a new one, and an older ingress is as it was (the stale link
 stays until something ends it).
 
+**The first request after a restart is answered, not cut.** A visitor's request can arrive in the moment between the pod's new
+connection being answered and the ingress being told the pod started over (or a send on the swapped connection fails, which
+ends the link). The request was then on the old link and ended as a 502 `provider-closed` within a few milliseconds. Now, once,
+without `retry` and without asking `resolve`, the ingress sends it again on the new link when it had no answer byte and either
+(a) the pod started over on the connection (what the old link carried was never seen by the new life) and the method is
+`GET`, `HEAD`, `OPTIONS`, `PUT` or `DELETE`, or (b) it never left (the transport under the link refused its first frame, or ended before it was taken) and the method is one of those,
+or any other method with no body at all. Never when the answer had begun, never when the body is streaming (it was read from the
+visitor and cannot be read again), never a `POST` or `PATCH` that has a body, and `retry.nonIdempotent` does not widen it. The
+audit sink sees the attempt that was sent again as one more record with `retried: true` and `reason: 'provider-closed'`
+(`stats().retries` counts it). An older pod is not told anything: it is sent the same request it would have been sent.
+
 **What an older peer does.** Both fixes are in `@johnhenry/browsermesh-apps` (0.28), which the ingress and the pod each run.
 - *A pod older than the fix, an ingress with it*: restarts are served (the duplicate connection was the ingress's), and a crossing
   dial is won by the ingress (an older pod's offers carry no marker, so it is assumed to give way, as every older pod does): the
