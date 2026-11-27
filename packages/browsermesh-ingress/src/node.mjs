@@ -81,7 +81,15 @@ export async function listenNode(ingress, { port = 0, host = '127.0.0.1', public
   server.httpAllowHalfOpen = halfClosedClients === true
   server.on('clientError', (err, socket) => {
     // A method Node's HTTP parser does not know (it parses `http.METHODS`) is "not implemented" (RFC 9110 15.6.2), not a bad request.
-    const line = err?.code === 'HPE_HEADER_OVERFLOW' ? '431 Request Header Fields Too Large' : err?.code === 'ERR_HTTP_REQUEST_TIMEOUT' ? '408 Request Timeout' : err?.code === 'HPE_INVALID_METHOD' ? '501 Not Implemented' : '400 Bad Request'
+    // The answer says which methods this listener carries and that the programmatic handler carries any token.
+    if (err?.code === 'HPE_INVALID_METHOD') {
+      const e = new IngressError(501, 'method-not-implemented', `This listener carries the methods Node's HTTP parser knows (http.METHODS: ${http.METHODS.join(', ')}), and not this one. The programmatic handle() carries any RFC 9110 method token.`)
+      const body = e.message
+      if (socket.writable) socket.end(`HTTP/1.1 501 Not Implemented\r\nContent-Type: text/plain; charset=utf-8\r\n${REASON_HEADER}: ${e.reason}\r\nConnection: close\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`)
+      else socket.destroy()
+      return
+    }
+    const line = err?.code === 'HPE_HEADER_OVERFLOW' ? '431 Request Header Fields Too Large' : err?.code === 'ERR_HTTP_REQUEST_TIMEOUT' ? '408 Request Timeout' : '400 Bad Request'
     if (socket.writable) socket.end(`HTTP/1.1 ${line}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`)
     else socket.destroy()
   })

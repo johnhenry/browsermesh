@@ -932,7 +932,8 @@ Threat model, by what an attacker is and wants:
 declared), slow body (408), whole upload 5 min (504), 4 uploads in flight per pod link (503), a global in-flight cap
   (64), per client (8) and per provider (16) in flight, per client and per provider rates, a connection cap and header
   timeouts on the listener. The client address is the socket's; `trustProxy` takes the entry the trusted proxy appended
-  (the last `X-Forwarded-For` entry for one proxy), never one the client wrote.
+  (the last `X-Forwarded-For` entry for one proxy), never one the client wrote. The Node listener parses only Node's `http.METHODS`: any other
+  method token is a 501 `method-not-implemented` whose body says so (`handle()` carries any token).
 - **What the audit shows.** `{ peer, host, method, status, reason?, requestBytes, responseBytes, durationMs }`: never a
   query string, a path or a body.
 - **Not protected.** The listener speaks plain HTTP: terminate TLS in front (the CLI refuses a non-loopback bind without
