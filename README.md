@@ -86,13 +86,14 @@ a partial publish, use "Run workflow" on `release.yml` (Actions tab) against
 
 ## Examples
 
-[`examples/`](examples/) has 27 self-contained, runnable demonstrations, in
+[`examples/`](examples/) has 28 self-contained, runnable demonstrations, in
 order of dependency: the five foundational packages first (real
 identity/signing, two Pods discovering and messaging each other, a
 virtual-network loopback stream, kernel capability enforcement, CRDT sync
 convergence), then the mesh services built on them (relay, fetch and
 WebSocket over a mesh, cloud storage, KV, agent tool calling), hosted pods,
-the protocol channel and wsh peer link, and HTTP ingress and network egress.
+the protocol channel and wsh peer link, and HTTP ingress and network egress, and a tour that wires the newer
+packages together in one app ([`examples/TOUR.md`](examples/TOUR.md)).
 Run one with `npm run example:01` (etc.), or all of them, in order, with
 `npm run examples`; `examples/README.md` says what each covers.
 

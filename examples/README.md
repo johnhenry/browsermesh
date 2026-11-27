@@ -5,10 +5,10 @@ Every example runs headless under plain Node (>= 26) with no browser and no
 external network or service. Peers and transports are simulated in-process
 (a shared bus, a fake relay, wsh's in-process pipe relay, `mem://` virtual
 sockets), but the actual protocol, CRDT, capability and sealed-link logic
-exercised is exactly what runs in production. Five examples do open a real
+exercised is exactly what runs in production. Six examples do open a real
 listener, always on the loopback interface (`127.0.0.1`, an ephemeral port)
 and closed before they exit: `14` (a `node:http` gateway), `21` (the HTTP
-ingress), `22` (a local echo server standing in for the network), `25` (a wsh pipe relay, with `meshctl` run as a child process against it) and
+ingress), `22` (a local echo server standing in for the network), `25` (a wsh pipe relay, with `meshctl` run as a child process against it), `28` (the tour: an HTTP listener, an upstream stand-in and a pipe relay) and
 `packages/browsermesh-egress/examples/local-listener.mjs` (a local TCP port
 and an echo origin). The simulated transports are not a browser check: what is
 verified over a real browser link (real WebRTC, WebSocket, BroadcastChannel,
@@ -49,6 +49,7 @@ non-zero exit stops it.
 | [`25-meshctl-through-a-relay.mjs`](./25-meshctl-through-a-relay.mjs) | The real `meshctl` binary, run as a child process with `--wsh-relay`, through a REAL pipe relay on a loopback port (the one socket in this example) to a pod-host service on `InMemoryPodHostDriver`: `hosts`, `pods spawn`, `status`, `send` and `drain` answer for the identity the host allowed, while an identity it has not allowed exits 3 with `WSH_REFUSED`. The child is always killed and the listeners always closed. Takes a few seconds: each command is a process of its own with a sealed link to make. |
 | [`26-realm-admission.mjs`](./26-realm-admission.mjs) | **Preview** of `@johnhenry/browsermesh-realm` (private, unpublished): who may link, decided by a signed realm plus the host's policy, over a real wsh link. An operator makes an invite realm; the host's `setRealmPolicy` admits `member` but omits an `egress:` scope the role lists (dropped, and reported). A stranger with no credential is closed at the deadline; the same pod id (derived per realm from a seed) with a credential is promoted; a credential for another pod id is refused (`subject-mismatch`); an `open` realm gives a proven peer only `guest`; an epoch bump adopted from a peer closes the live link and the old credential is refused (`epoch-too-old`). Uses the lower-level pieces on purpose, to show each step; `createMeshNode({ realm })` is not used. |
 | [`27-dht-and-stealth-records.mjs`](./27-dht-and-stealth-records.mjs) | `@johnhenry/browsermesh-discovery` beyond a handshake. A ring of in-process `DhtNode`s, where a stranger finds a stored value by walking the ring; owned stores (`storePolicy: { mode: 'owned' }`), where a store signed by the key's owner is allowed and a forged one is refused as `not-key-owner`; `StealthAgent` shard format 3, where any 3 of 5 shards rebuild the state, so losing two holders is survived and losing a third fails with `unavailable`; and `SwimMembership` feeding a `SwarmCoordinator` so three pods see each other. |
+| [`28-tour.mjs`](./28-tour.mjs) | The tour ([`TOUR.md`](./TOUR.md)): one small app wiring ingress, egress, mcp, objects, apps (`createMeshNode` with `wsh` and `realm`), the preview `-realm` package and `meshctl` together, each leg printing an ALLOWED and a REFUSED line, then the audit. |
 | [`packages/browsermesh-egress/examples/local-listener.mjs`](../packages/browsermesh-egress/examples/local-listener.mjs) | `@johnhenry/browsermesh-egress`: a local TCP port whose connections are carried through `connectEgress` to a destination a provider granted, with the grants file and the provider command (`npm run examples` runs this one too). A destination with no grant closes the local connection and says why. |
 
 What they cover, by package:
@@ -72,6 +73,7 @@ What they cover, by package:
 - `browsermesh-meshctl`: the real `meshctl` binary through a pipe relay (`25`).
 - `browsermesh-ingress` (`21`) and `browsermesh-egress` (`22` and
   `local-listener.mjs`): real HTTP in, and a pod lending its network.
+- The tour (`28`, [`TOUR.md`](./TOUR.md)) runs ingress, egress, mcp, objects, apps, meshctl and the preview `-realm` together.
 
 Not covered by an example: `browsermesh-core`, `-embed`,
 `-priority-mux`. They are
