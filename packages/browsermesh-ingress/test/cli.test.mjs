@@ -128,6 +128,11 @@ describe('the rules the CLI enforces', () => {
     assert.equal(resolve(base).uploadQueueMs, undefined)
     refuses([...base, '--upload-queue', 'soon'], /--upload-queue /)
     refuses([...base, '--upload-queue-max', '-1'], /--upload-queue-max/)
+    // the "value is the next argument whatever it starts with" rule: a -- or negative value is taken as the value and then refused as a bad number; a known option is a missing value
+    assert.equal(parseArgv(['--upload-queue-max', '--5'])['upload-queue-max'], '--5')
+    refuses([...base, '--upload-queue-max', '--5'], /--upload-queue-max "--5"/)
+    refuses([...base, '--upload-queue', '-2s'], /--upload-queue "-2s"/)
+    assert.throws(() => parseArgv(['--upload-queue', '--public']), /--upload-queue needs a value/)
     assert.match(USAGE, /--upload-queue /)
     assert.match(USAGE, /--upload-queue-max /)
     assert.equal(fromConfig({ uploadQueue: '1s', uploadQueueMax: 2 })['upload-queue-max'], '2')

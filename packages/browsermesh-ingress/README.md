@@ -751,7 +751,7 @@ A provider's own answer, including its own 4xx and 5xx and a plain 421, passes t
 ```
 browsermesh-ingress --listen 127.0.0.1:8080 --signaling wss://signal.example \
   --map=app.example.test=<podId> [--map=...] [--allow-methods GET,HEAD,POST] [--max-body 8m] [--max-uploads 4] \
-  --map app.example.test=<podId> [--map ...] [--allow-methods GET,HEAD,POST] [--max-body 8m] [--max-uploads 4] \
+  [--timeout 30s] [--upload-timeout 5m] [--upload-queue 2s] [--upload-queue-max 8] \
   [--auth bearer:<file>] [--identity <file>] [--config file.json] \
   [--link-wait 5s] [--ready-path /_ready] \
   [--names-zone pods.example.test --names-allow=<podId>=app,blog ...]
