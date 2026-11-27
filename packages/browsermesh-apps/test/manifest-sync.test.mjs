@@ -385,8 +385,9 @@ describe('manifest-sync: documented LWW tie-break limitation', () => {
    * @param {{podId: string}} writerHi
    * @param {number} sharedTimestamp
    * @param {[{podId: string}, {podId: string}]} order
+   * @param {number} [expectedWinningSize] marker of the documented winner (writerHi: 2)
    */
-  async function deliverTieInOrder(writerLo, writerHi, sharedTimestamp, order) {
+  async function deliverTieInOrder(writerLo, writerHi, sharedTimestamp, order, expectedWinningSize = 2) {
     const observer = await createPeer(`observer-${Math.random().toString(36).slice(2)}`)
     const backend = createBackendFor(observer)
     observer.registry.grantCapabilities(writerLo.podId, [`${RESOURCE}:write`])
@@ -425,10 +426,14 @@ describe('manifest-sync: documented LWW tie-break limitation', () => {
       const envelope = envelopeFrom(peer, sizeMarkers.get(peer.podId))
       for (const cb of listeners) cb(peer.podId, envelope)
     }
-    await new Promise((r) => setTimeout(r, 20))
-
-    const socket = await backend.connect()
-    return send(socket, { op: 'head', key: 'contested-key' })
+    // The service applies each envelope asynchronously, so a fixed wait can end before both were applied on a loaded machine
+    // (the test then read the first one alone). Wait until the documented winner is the visible one (up to 5 s), then give
+    // a loser that would wrongly overwrite it time to do so, then read.
+    const headOnce = async () => send(await backend.connect(), { op: 'head', key: 'contested-key' })
+    const deadline = Date.now() + 5000
+    while (Date.now() < deadline && (await headOnce()).size !== expectedWinningSize) await new Promise((r) => setTimeout(r, 5))
+    await new Promise((r) => setTimeout(r, 50))
+    return headOnce()
   }
 
   it('two authorized peers writing the same key at the identical timestamp resolve deterministically by nodeId, regardless of arrival order', async () => {
