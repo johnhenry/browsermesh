@@ -95,11 +95,19 @@ describeIfReal('a pod that stops and starts again against a running ingress, ove
       services: { web: (req) => (new URL(req.url).pathname === '/big' ? new Response(new Uint8Array(300_000).fill(7)) : new Response(`web answered ${new URL(req.url).pathname}`)) },
     })
     let client = null
-    if (claim) {
-      client = await ingressPkg.openNameClient(mesh.service, ingress, { timeoutMs: WEBRTC_TIMEOUT_MS })
-      await client.claim('app', { service: 'web' })
-    } else if (dial) {
-      await mesh.node.connectToPeer(ingress, { webrtc: ingress }, { answerTimeoutMs: WEBRTC_TIMEOUT_MS, openTimeoutMs: WEBRTC_TIMEOUT_MS }).catch(() => {})
+    try {
+      if (claim) {
+        client = await ingressPkg.openNameClient(mesh.service, ingress, { timeoutMs: WEBRTC_TIMEOUT_MS })
+        await client.claim('app', { service: 'web' })
+      } else if (dial) {
+        await mesh.node.connectToPeer(ingress, { webrtc: ingress }, { answerTimeoutMs: WEBRTC_TIMEOUT_MS, openTimeoutMs: WEBRTC_TIMEOUT_MS }).catch(() => {})
+      }
+    } catch (e) {
+      // A pod that did not come up is not in `pods` for `afterEach` to stop: its node, signalling socket and connections would
+      // keep the process alive after the test failed.
+      try { await served.stop() } catch { /* gone */ }
+      try { await mesh.close() } catch { /* gone */ }
+      throw e
     }
     let stopped = false
     const pod = {

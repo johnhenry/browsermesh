@@ -293,21 +293,31 @@ export function createWebRTCTransportFactory({
     // the session around it, a little later (an inbound connection is handed out, then adopted; a dial returns, then the node
     // goes on to record the session). A peer that speaks first (the opening frame of a channel it opens the moment the
     // connection is up) would be heard by nobody. The adapter holds what comes in until its first listener, and hands it over.
+    // `hold()` closes the gate again for a connection a peer starts over on (the node must hear of the restart before it hears
+    // the new life), and `release()` opens it once the node has been told.
     adapterClass ??= class HoldingAdapter extends WebRTCTransportAdapter {
       #early = []
-      #heard = false
+      #open = false // frames go straight to the listeners
+      #explicit = false // the gate is opened by `release()`, not by a listener appearing
       _fire(event, data) {
-        if (event !== 'message' || this.#heard) return super._fire(event, data)
+        if (event !== 'message' || this.#open) return super._fire(event, data)
         if (this.#early.length < MAX_EARLY_FRAMES) this.#early.push(data)
         return undefined
       }
+      #listeners = 0
       onMessage(cb) {
         super.onMessage(cb)
-        if (this.#heard) return
-        this.#heard = true
+        this.#listeners++
+        if (!this.#open && !this.#explicit) this.#flush()
+      }
+      hold() { this.#open = false; this.#explicit = true }
+      // With no listener yet the frames stay held for the first one.
+      release() { this.#explicit = false; if (!this.#open && this.#listeners > 0) this.#flush() }
+      #flush() {
+        this.#open = true
         const early = this.#early
         this.#early = []
-        for (const data of early) { try { cb(data) } catch { /* a listener's own error does not reach the connection */ } }
+        for (const data of early) super._fire('message', data)
       }
     }
     const adapter = new adapterClass(conn)
@@ -329,6 +339,7 @@ export function createWebRTCTransportFactory({
   signaling.onOffer(async (fromPodId, offer, connectionId = DEFAULT_CONNECTION_ID) => {
     const key = iceKey(fromPodId, connectionId)
     let entry = null
+    let early = null // the adapter made ahead of the connection opening (see below)
     // A fresh offer for a connection this side still holds is a peer that started over (a page loaded again, a node made
     // anew): the connection is swapped underneath and whatever link ran over the old one is over. The node is told when it is
     // handed out.
@@ -362,9 +373,17 @@ export function createWebRTCTransportFactory({
       const conn = await getWiredConnection(fromPodId, connectionId)
       if (entry?.evicted) { closeQuietly(conn); return }
       if (entry) watchHalfOpen(key, entry, conn, fromPodId, connectionId)
+      // The adapter, and with it the listener on the connection, exists before the connection can carry a frame: a peer that
+      // speaks the moment it is up is not heard by nobody. For a peer that is starting over the node must hear of the restart
+      // before it hears the new life, so what comes in is held until the node has been told (below).
+      if (typeof onIncomingConnection === 'function') {
+        early = await adapterFor(conn)
+        if (held) early.hold?.()
+      }
       const answer = await conn.handleOffer(offer)
       // A renegotiation (an ICE restart) keeps the channel and everything over it: the peer did not start over.
       restarted = held && answer?.renegotiation !== true
+      if (!restarted) early?.release?.()
       signaling.send('webrtc-answer', fromPodId, answer, connectionId)
       log('webrtc-negotiator:answered', { from: fromPodId, connectionId })
 
@@ -374,9 +393,11 @@ export function createWebRTCTransportFactory({
       // side gets from connectToPeer() -- see PeerNode.adoptIncomingSession().
       if (typeof onIncomingConnection === 'function') {
         await waitForOpen(conn, defaultOpenTimeoutMs ?? DEFAULT_OPEN_TIMEOUT_MS)
-        onIncomingConnection(fromPodId, await adapterFor(conn), connectionId, { restarted })
+        const adapter = await adapterFor(conn)
+        try { onIncomingConnection(fromPodId, adapter, connectionId, { restarted }) } finally { adapter.release?.() }
       }
     } catch (err) {
+      early?.release?.()
       if (entry) {
         // Still held: the offer failed before the connection opened, so do not leave it in the table. Already
         // released (opened, evicted, timed out): nothing more to close.
@@ -480,6 +501,7 @@ export function createWebRTCTransportFactory({
     }
 
     try {
+      await adapterFor(conn).catch(() => {}) // listening before the connection can carry a frame (the adapter holds it for the node)
       await waitForOpen(conn, openTimeoutMs)
     } catch (err) {
       if (err?.closedEarly) throw err // the connection was closed, with the reason (see waitForOpen)

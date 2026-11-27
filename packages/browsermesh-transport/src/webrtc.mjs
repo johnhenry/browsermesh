@@ -23,6 +23,8 @@ import {
 
 /** Default time to wait for the peer's identity proof once the control channel is open. */
 const DEFAULT_BINDING_TIMEOUT_MS = 10_000
+/** Messages held for a peer whose proof is being checked (past this they are dropped and counted). */
+const MAX_HELD_UNBOUND = 64
 
 // ---------------------------------------------------------------------------
 // Feature detection
@@ -295,6 +297,8 @@ export class WebRTCPeerConnection {
   #bound = false
   #bindingFailure = null
   #droppedUnbound = 0
+  #proofSeen = false        // the peer's proof frame has arrived (it may still be being verified)
+  #heldUntilBound = []      // [message, channel name] received after the proof, before it verified
   #requireSignedDescription = false
   #descriptionVerified = null   // null: no identity or nothing received yet; false: received unsigned; true: verified
   #descriptionFailure = null
@@ -1291,12 +1295,16 @@ export class WebRTCPeerConnection {
       try { parsed = JSON.parse(event.data) } catch { /* keep as string */ }
       if (this.#identity) {
         if (kind === 'control' && parsed && typeof parsed === 'object' && parsed.type === BINDING_FRAME_TYPE) {
+          this.#proofSeen = true
           this.#onBindingFrame(parsed)
           return
         }
         if (this.#bindingRequired && !this.#bound) {
-          // Nothing but the proof is accepted before the peer is verified.
-          this.#droppedUnbound++
+          // Nothing but the proof is accepted before the peer is verified. A peer that has sent its proof and speaks at once
+          // (it verified ours first, so it is up before this side has finished checking its own) is not dropped: what it sends
+          // while the proof is being checked is held, and delivered once it verified (or discarded if it does not).
+          if (this.#proofSeen && this.#heldUntilBound.length < MAX_HELD_UNBOUND) this.#heldUntilBound.push([parsed, name])
+          else this.#droppedUnbound++
           return
         }
       }
@@ -1381,6 +1389,8 @@ export class WebRTCPeerConnection {
     this.#offerSdp = offerSdp
     this.#answerSdp = answerSdp
     this.#bound = false
+    this.#proofSeen = false
+    this.#heldUntilBound = []
     this.#bindingFailure = null
     this.#bindingStarted = false
     this.#pendingProof = null
@@ -1484,11 +1494,19 @@ export class WebRTCPeerConnection {
     this.#bindingTimer = null
     this.#log(`Verified identity of ${this.#remotePodId}`)
     if (this.#state === 'connecting') this.#setState('connected')
+    const held = this.#heldUntilBound
+    this.#heldUntilBound = []
+    for (const [message, name] of held) {
+      for (const cb of this.#messageCbs) {
+        try { cb(message, name) } catch (e) { silentCatch('webrtc', 'swallow', e) }
+      }
+    }
   }
 
   /** A connection that fails the proof is closed and reported. */
   #failBinding(reason) {
     if (this.#state === 'closed') return
+    this.#heldUntilBound = []
     this.#bindingFailure = reason
     clearTimeout(this.#bindingTimer)
     this.#bindingTimer = null
