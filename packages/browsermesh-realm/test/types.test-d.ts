@@ -2,7 +2,8 @@
 import {
   createDescriptor, signDescriptor, verifyDescriptor, adoptDescriptor, issueCredential, verifyCredential,
   createLedger, createCredentialTracker, validateScope, checkSubject, publicKeyOf,
-  type DescriptorFields, type Verdict, type RealmDescriptor, type CredentialFields,
+  createDescriptorStore, createRealmVerifier, createRealmProver, parseFrame,
+  type DescriptorFields, type Verdict, type RealmDescriptor, type CredentialFields, type AdmissionLink, type RealmRegistry,
 } from "@johnhenry/browsermesh-realm";
 import type { PodIdentity } from "@johnhenry/browsermesh-primitives";
 
@@ -34,3 +35,25 @@ async function flow(): Promise<void> {
   void s;
 }
 void flow;
+
+declare const link: AdmissionLink;
+declare const registry: RealmRegistry;
+
+async function exchange(): Promise<void> {
+  const store = createDescriptorStore({ pinnedId: "id", held: "{}", now: 1, limits: { maxLinks: 4 }, onAdopt: (d, prev) => void [d.serial, prev?.serial] });
+  const off: () => boolean = store.onAdopt(() => {});
+  void off;
+  const offered = await store.offer("{}", { linkId: 1 });
+  if (offered.ok) void offered.descriptor.serial;
+  const verifier = createRealmVerifier({ pinnedId: "id", store, registry, now: () => 1, onEvent: (e) => void e.type });
+  await verifier.handler(link);
+  const result = await createRealmProver({ pinnedId: "id", store, credential: null, channel: link, timeoutMs: 100 });
+  if (result.ok) void result.role;
+  else {
+    const why: string = result.reason;
+    void why;
+  }
+  const parsed = parseFrame("{}");
+  if (parsed.ok) void parsed.frame.t;
+}
+void exchange;

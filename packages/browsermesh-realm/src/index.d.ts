@@ -174,3 +174,84 @@ export interface Ledger {
 }
 export function createLedger(opts?: { maxEntries?: number; serialStart?: number }): Ledger;
 export function importLedger(text: string, opts?: { maxBytes?: number; maxEntries?: number }): Ledger;
+
+// ---- realm exchange (frames, descriptor store, verifier, prover)
+export const FRAME_TYPES: readonly ["realm:hello", "realm:need-descriptor", "realm:descriptor", "realm:credential", "realm:result"];
+export const MAX_FRAME_BYTES: number;
+export const MIN_SEAM_FRAME_BYTES: number;
+export type RealmFrame =
+  | { t: "realm:hello"; id: string; serial: number; epoch: number }
+  | { t: "realm:need-descriptor"; have: number }
+  | { t: "realm:descriptor"; text: string }
+  | { t: "realm:credential"; text: string | null }
+  | { t: "realm:result"; ok: boolean; reason?: string; role?: string; notAfter?: number };
+export function parseFrame(raw: unknown): { ok: true; frame: RealmFrame } | { ok: false; reason: "bad-frame"; realm: boolean };
+
+export interface DescriptorStoreLimits {
+  maxBytes: number; maxOffersPerLink: number; maxVerifiesPerLink: number; maxVerifiesPerWindow: number; windowSeconds: number; maxLinks: number;
+}
+export interface DescriptorStore {
+  readonly ready: Promise<Verdict>;
+  current(): RealmDescriptor | null;
+  /** The exact canonical text of the held descriptor (persist it; feed it back as `held`). */
+  export(): string | null;
+  offer(text: unknown, opts?: { linkId?: unknown }): Promise<Verdict<{ adopted: true; descriptor: RealmDescriptor; text: string }>>;
+  onAdopt(fn: (descriptor: RealmDescriptor, previous: RealmDescriptor | null) => void): () => boolean;
+  forget(linkId: unknown): void;
+  stats(): { verifies: number; adopted: number; rejected: number; links: number };
+}
+export function createDescriptorStore(opts: {
+  pinnedId: string;
+  held?: string;
+  heldChain?: RotationStatement[];
+  now?: Clock;
+  limits?: Partial<DescriptorStoreLimits>;
+  onAdopt?: (descriptor: RealmDescriptor, previous: RealmDescriptor | null) => void;
+}): DescriptorStore;
+
+/** The channel shape of the admission seam's `handler` link, and of the prover's side. */
+export interface RealmChannel {
+  send(frame: RealmFrame | object): unknown;
+  onFrame(cb: (frame: unknown) => unknown): void;
+  onClose(cb: (reason?: string) => void): void;
+  close(reason?: string): unknown;
+}
+/** What `createLinkAdmission({ handler })` passes a handler. */
+export interface AdmissionLink extends RealmChannel {
+  peerKey: string;
+  transport: string;
+  proven: boolean;
+  promote(): boolean;
+}
+/** The two `PeerRegistry` methods the verifier uses (duck-typed: this package never imports browsermesh-apps). */
+export interface RealmRegistry {
+  grantRealmScopes(grant: {
+    realmId: string; serial: string | number; peerKey: string; role: string; scopes: string[]; notAfter: number; epoch: number;
+  }): { granted: string[]; dropped: { scope: string | null; reason: string }[] };
+  revokeRealmGrants(selector: { realmId: string; peerKey?: string; serial?: string | number; belowEpoch?: number }): number;
+}
+export interface RealmVerifierLimits { maxFrames: number; maxDescriptorReplies: number; guestTtl: number }
+export type RealmEvent =
+  | { type: "refused"; peerKey: string; reason: string; detail?: string }
+  | { type: "granted"; peerKey: string; role: string; serial: number; granted: string[]; dropped: { scope: string | null; reason: string }[] }
+  | { type: "promoted"; peerKey: string; role: string }
+  | { type: "descriptor-adopted"; serial: number; epoch: number };
+export function createRealmVerifier(opts: {
+  pinnedId: string;
+  store: DescriptorStore;
+  registry: RealmRegistry;
+  now?: Clock;
+  skew?: number;
+  tracker?: CredentialTracker;
+  limits?: Partial<RealmVerifierLimits>;
+  onEvent?: (event: RealmEvent) => void;
+}): { handler: (link: AdmissionLink) => Promise<void>; tracker: CredentialTracker };
+export type ProverResult = { ok: true; role?: string; notAfter?: number } | { ok: false; reason: string };
+export function createRealmProver(opts: {
+  pinnedId: string;
+  store: DescriptorStore;
+  credential?: string | null;
+  channel: RealmChannel;
+  now?: Clock;
+  timeoutMs?: number;
+}): Promise<ProverResult>;
