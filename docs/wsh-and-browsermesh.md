@@ -8,12 +8,27 @@ the version built and tested against. wsh's own view of the same boundary is
 [`spec/wsh-and-browsermesh.md`](https://github.com/johnhenry/wsh/blob/main/spec/wsh-and-browsermesh.md) in the wsh
 repository (written against wsh 0.52.0); the two pages describe one boundary and should agree.
 
-**Versions.** The repository installs `@johnhenry/wsh` `^0.57.0` as a dev dependency (the root and `browsermesh-mcp`,
+## Versions
+
+The repository installs `@johnhenry/wsh` `^0.59.0` as a dev dependency (the root and `browsermesh-mcp`,
 `browsermesh-netway`, `browsermesh-objects`, `browsermesh-primitives`, `browsermesh-transport`, `browsermesh-egress` and
-`browsermesh-meshctl`), so what its tests ran against is wsh **0.57.0**. The peer ranges are `>=0.49.0 <1.0.0` for `browsermesh-objects` and
-`browsermesh-mcp`, an optional `*` for `browsermesh-transport` (its floors are listed under "Not verified") and an optional
-`>=0.55.0 <1.0.0` for `browsermesh-egress` (its provider half takes wsh's address guard, `@johnhenry/wsh/address-guard`,
-which first shipped in 0.55.0); `browsermesh-netway` and `browsermesh-primitives` have no wsh dependency beyond the dev one.
+`browsermesh-meshctl`), so what its tests ran against is wsh **0.59.0**. This table is the one place that says, for every
+package, what range it accepts as a peer and why; other pages point here.
+
+| Package | wsh peer range | Floor, and why | Tested |
+| --- | --- | --- | --- |
+| `browsermesh-transport` | optional, `*` | Links (`WshPeerLinks`, `WshPodTransport`): 0.45, the release the link was built on (a named endpoint on a sealed session). `WshServices`, `WshRelay` and anything that serves a mesh channel: 0.50 (`onSealed`, `authorizesItself`, `@johnhenry/wsh/duplex`). The range is `*` on purpose: without `watchPairing` (an older wsh) hosts are created with `loginTimeoutMs: 0`, so an older wsh keeps behaving as before; see "Not verified" | links 0.45.0 to 0.48.0 when added, the whole suite on 0.45.0 and 0.49.0 (services excepted on 0.45), and the repository's installed releases 0.54.1 to 0.59.0 |
+| `browsermesh-objects` | required, `>=0.49.0 <1.0.0` | 0.49: wsh's transport-neutral caller identity (`who`) and the capability vectors the notation tests run against | 0.49.0 to 0.59.0 |
+| `browsermesh-mcp` | required, `>=0.49.0 <1.0.0` | 0.49: `serveMcpOverDuplex` with its `mcp-tool` / `mcp-call` hook, and the same `who` | 0.49.0 to 0.59.0 |
+| `browsermesh-egress` | optional, `>=0.55.0 <1.0.0` | 0.55: the address guard (`@johnhenry/wsh/address-guard`) that the provider's Node entry (`./node`) dials through; nothing else in the package loads wsh | 0.55.0 to 0.59.0 |
+| `browsermesh-meshctl` | optional, `>=0.55.0 <1.0.0` | Needed only for `--wsh-relay` and `--signaling`. The floor is the release the real-mesh path (and the transport's `/wsh` subpath it calls) was written and run against; it is not tested on older ones | 0.55.0 to 0.59.0 |
+| `browsermesh-netway` | none (dev only) | `GatewayBackend` takes a client you give it; nothing is imported | dev suite on 0.57.0 to 0.59.0 (the half-close rule is wsh 0.57's) |
+| `browsermesh-primitives` | none (dev only) | The key conversions are checked against `@johnhenry/wsh/identity` in tests only | dev suite on 0.59.0 |
+
+The other packages (`core`, `pod`, `apps`, `discovery`, `sync`, `kernel`, `embed`, `ingress`, `priority-mux`, `realm`) do
+not depend on wsh. "Tested" is what was run and passed, not a promise about the releases in between: 0.58.0 was never installed
+on its own (the repository went from 0.57.0 to 0.59.0). A range that admits a release is not a claim it was run; see "Not verified".
+
 No package here needs anything that is new in 0.56 (`client.forwardEndpoint`, the fixes to a local forward's `close()` and to a
 reverse forward, and a forward or the Node gateway's unix listener removing only the socket it made): none of them uses a wsh
 forward, so every peer range above is unchanged and still admits everything it did. Nor does any package need 0.57 (below): the
@@ -141,12 +156,13 @@ The grants are the same scopes as above. Design: [`design/wsh-services-on-a-pod.
 
 ## Not verified
 
-* Built and run against wsh 0.49.0, 0.50.0, 0.51.0, 0.52.0, 0.54.0, 0.54.1, 0.55.0, 0.56.1 and 0.57.0 (tested range of `browsermesh-objects` and
-  `browsermesh-mcp`: 0.49.0 to 0.57.0, the peer range starts at 0.49.0; the earlier ones were run when they were the newest,
-  the last is what the repository now installs; 0.53.0 and 0.56.0 were never installed on their own, the repository went from
-  0.52.0 to 0.54.0 and from 0.55.0 to 0.56.1, so what those changed was run only as part of the next one). The unit suites of every
+* Built and run against wsh 0.49.0, 0.50.0, 0.51.0, 0.52.0, 0.54.0, 0.54.1, 0.55.0, 0.56.1, 0.57.0 and 0.59.0 (tested range of `browsermesh-objects` and
+  `browsermesh-mcp`: 0.49.0 to 0.59.0, the peer range starts at 0.49.0; the earlier ones were run when they were the newest,
+  the last is what the repository now installs; 0.53.0, 0.56.0 and 0.58.0 were never installed on their own, the repository went from
+  0.52.0 to 0.54.0, from 0.55.0 to 0.56.1 and from 0.57.0 to 0.59.0, so what those changed was run only as part of the next one). The unit suites of every
   package, the real-peer suites (WebRTC), the examples and the browser specs were all run on 0.57.0 (see the pull request for which
-  browsers).
+  browsers); on 0.59.0 the unit suites of `primitives`, `netway`, `pod`, `transport`, `objects`, `mcp`, `egress`, `ingress`, `meshctl`
+  and `apps` were run and pass (the real-peer, browser and example runs were not repeated on 0.59.0 for that change).
 * The half-close rule against a host that predates it (wsh 0.56 and earlier) is covered at the message level only (the mock host
   of `gateway-backend.test.mjs` and `gateway-half-close.test.mjs`), not against a real older host: the repository installs one wsh.
 * wsh 0.53.0 and 0.54.0 put two deadlines on a wsh host: a connection that has not completed its login `loginTimeoutMs`

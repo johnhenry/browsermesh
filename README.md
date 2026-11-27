@@ -26,6 +26,7 @@ runtime — that sit on top of them.
 | [`@johnhenry/browsermesh-pod`](packages/browsermesh-pod) | Pod base class: identity, discovery, peer messaging for any execution context |
 | [`@johnhenry/browsermesh-core`](packages/browsermesh-core) | Identity, crypto, peer management, and trust primitives layer |
 | [`@johnhenry/browsermesh-transport`](packages/browsermesh-transport) | Stream multiplexing and transport adapters |
+| [`@johnhenry/browsermesh-priority-mux`](packages/browsermesh-priority-mux) | Application-level priority scheduling for single-stream transports |
 | [`@johnhenry/browsermesh-sync`](packages/browsermesh-sync) | State and file sync (delta sync, memory sync, transfer offers) |
 | [`@johnhenry/browsermesh-discovery`](packages/browsermesh-discovery) | Peer discovery |
 | [`@johnhenry/browsermesh-apps`](packages/browsermesh-apps) | App/agent runtime: marketplace, resources, consensus, payments, quotas, GPU, audit |
@@ -36,6 +37,7 @@ runtime — that sit on top of them.
 | [`@johnhenry/browsermesh-mcp`](packages/browsermesh-mcp) | A page's WebMCP tools served over a protocol channel to another pod, with per-tool grants and the approval kept with the page |
 | [`@johnhenry/browsermesh-ingress`](packages/browsermesh-ingress) | Real HTTP in, a mesh pod answers: a bounded request forwarder (library and `browsermesh-ingress` CLI) from an HTTP listener to the one pod a mapping names |
 | [`@johnhenry/browsermesh-egress`](packages/browsermesh-egress) | A pod lends its network access to peers that hold a grant: TCP connections, UDP flows, fetches (the provider is the HTTP client) and name lookups to destinations the operator allows, with budgets, audit and revocation; a netway backend for the consumer and a `browsermesh-egress` command |
+| [`@johnhenry/browsermesh-realm`](packages/browsermesh-realm) | **Private, in progress, not published.** Realms: signed realm descriptors, root rotation, roles, issuer-signed credentials and the issuer ledger, as pure functions (design: [`docs/design/realms.md`](docs/design/realms.md)) |
 
 ## Transports
 
@@ -47,7 +49,7 @@ written from the source, is [`docs/security.md`](docs/security.md).
 | `BroadcastChannelTransport` | `browsermesh-pod` | same-origin tabs | n/a (no relay) | no | yes (browsers) |
 | `WebSocketTransport` (relay protocol) | `browsermesh-pod` | any runtime with a WebSocket, through a relay | no (TLS only with `wss://`) | no | no |
 | `WebSocketTransport`, `WebTransportTransport` | `browsermesh-transport` | browsers, through a server | no (TLS only) | no | in the default preference order |
-| `WebRTCTransport` | `browsermesh-transport` | browser to browser, through a signaling relay | DTLS; signaling is not signed with the pod key | no | first in the default preference order |
+| `WebRTCTransport` | `browsermesh-transport` | browser to browser, through a signaling relay | DTLS; signaling is not signed with the pod key | no for the bare transport class; **yes in `createMeshNode()`**, which binds identity by default (each side proves its pod key over the DTLS fingerprints, and a peer that sends no proof is closed; `webrtcIdentityBinding: false` turns it off) | first in the default preference order |
 | **wsh link** (`WshPeerLinks`, `WshPodTransport`) | `browsermesh-transport` | browser to browser or Node, through a wsh pipe relay | **yes: sealed end to end** | **yes: both directions, bound to the pod id, host key pinned** | **no, opt in** (`createMeshNode({ wsh })`, `'wsh'` in a negotiator's `preferenceOrder`, or `require: 'wsh'` to never fall back) |
 
 The wsh link is a mesh link carried on a sealed, key-authenticated
@@ -84,11 +86,15 @@ a partial publish, use "Run workflow" on `release.yml` (Actions tab) against
 
 ## Examples
 
-[`examples/`](examples/) has 5 self-contained, runnable demonstrations
-covering the five foundational packages — real identity/signing, two Pods
-discovering and messaging each other, a virtual-network loopback stream,
-kernel capability enforcement, and CRDT sync convergence. Run with
-`npm run example:01` (etc.) or `npm run examples` for all of them.
+[`examples/`](examples/) has 23 self-contained, runnable demonstrations, in
+order of dependency: the five foundational packages first (real
+identity/signing, two Pods discovering and messaging each other, a
+virtual-network loopback stream, kernel capability enforcement, CRDT sync
+convergence), then the mesh services built on them (relay, fetch and
+WebSocket over a mesh, cloud storage, KV, agent tool calling), hosted pods,
+the protocol channel and wsh peer link, and HTTP ingress and network egress.
+Run one with `npm run example:01` (etc.), or all of them, in order, with
+`npm run examples`; `examples/README.md` says what each covers.
 
 ## Honest limitations
 
@@ -133,7 +139,7 @@ this monorepo, as a drop-in transport upgrade.
 
 ## Provenance
 
-This repo consolidates 10 previously-scattered packages into one family,
+This repo consolidates 11 previously-scattered packages into one family,
 following the `@johnhenry/*` scope-migration convention (imported packages
 restart their version at `0.0.0`). See each package's own README for its
 specific prior-publish history.

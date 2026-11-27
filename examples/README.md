@@ -1,16 +1,24 @@
 # browsermesh examples
 
 Small, self-contained, runnable demonstrations of real browsermesh behavior.
-Every example runs headless under plain Node (>= 26) with no browser, no
-network, and no server — peers, transports, and sockets are simulated
-in-process, but the actual protocol/CRDT/capability logic exercised is
-exactly what runs in production. The simulated transports are not a browser
-check: what is verified over a real browser link (real WebRTC, WebSocket,
-BroadcastChannel, strict CSP) is listed in
-[`tests/browser/README.md`](../tests/browser/README.md), and examples 01, 02
-and 05 also run unmodified in a page there.
+Every example runs headless under plain Node (>= 26) with no browser and no
+external network or service. Peers and transports are simulated in-process
+(a shared bus, a fake relay, wsh's in-process pipe relay, `mem://` virtual
+sockets), but the actual protocol, CRDT, capability and sealed-link logic
+exercised is exactly what runs in production. Four examples do open a real
+listener, always on the loopback interface (`127.0.0.1`, an ephemeral port)
+and closed before they exit: `14` (a `node:http` gateway), `21` (the HTTP
+ingress), `22` (a local echo server standing in for the network) and
+`packages/browsermesh-egress/examples/local-listener.mjs` (a local TCP port
+and an echo origin). The simulated transports are not a browser check: what is
+verified over a real browser link (real WebRTC, WebSocket, BroadcastChannel,
+strict CSP) is listed in [`tests/browser/README.md`](../tests/browser/README.md),
+and examples 01, 02 and 05 also run unmodified in a page there.
 
-Run one with `npm run example:01` (etc.), or all of them with `npm run examples`.
+Run one with `npm run example:01` (etc.; `npm run example:egress-local-listener`
+for the last row), or all of them, in order, with `npm run examples`. That
+runs the numbered files and then `packages/*/examples/*.mjs`; the first
+non-zero exit stops it.
 
 | Example | Demonstrates |
 |---|---|
@@ -30,39 +38,48 @@ Run one with `npm run example:01` (etc.), or all of them with `npm run examples`
 | [`14-pod-host-over-mesh-fetch.mjs`](./14-pod-host-over-mesh-fetch.mjs) | Issue #185 control-surface item 3, the HTTP-shaped projection of the pod-host service: the same spawn → status → exec → snapshot → restore → drain lifecycle driven two ways against one `InMemoryPodHostDriver` host — bob, a mesh peer, via `podHostFetch()` over real `mesh://` routes (`createPodHostRouter()` mounted under `createMeshRpcService({onRequest})`), and then, from entirely outside the mesh, over a real `node:http` server (`serveNodeGateway()`) fronting `createPodHostGatewayHandler()`, authenticated with a bearer token and printing each call's actual HTTP status code (201/200/204/401/403/404). The one exception to this directory's "no server" convention — the gateway needs a real loopback `node:http` listener to demonstrate "driven from outside the mesh" honestly; everything else here still runs in-process. |
 | [`15-agent-spawns-hosted-pod.mjs`](./15-agent-spawns-hosted-pod.mjs) | Issue #185 §8a item 4's **`meshctl` LLM tools for the hosted-pods control surface**, told the same way `11-agent-tool-calling.mjs` tells issues #90/#92: a deterministic test `llmFn` driving a real `createAgentRuntime()` loop over a real `BrowserToolRegistry` pre-populated with all 15 `meshctl_*` tools. The LLM calls `meshctl_hosts` to discover a pod host, `meshctl_spawn` with `host: 'auto'` to let the orchestrator pick it ("orchestrator proposes, host accepts"), `meshctl_hosted_pods` to confirm what landed, `meshctl_snapshot`/`meshctl_restore` to round-trip it, and finally the pre-existing `meshctl_drain` to drain the host pod itself — five new tools composing with the original eight, not just sitting alongside them. |
 | [`16-supervised-hosted-pods.mjs`](./16-supervised-hosted-pods.mjs) | Issue #185 item 6's **pod supervisor** -- `createPodSupervisor()`'s links/monitors/restart policy over the same eight-verb control surface, told the OTP way: bob supervises a pod on alice's host with `restart: 'on-failure'`, crashes it twice via the driver's test-only `crash()` and watches two real restarts land with doubling backoff (50ms, then 100ms) -- "a restart is a new spawn request the host may refuse," never the driver bypassed directly -- links a child to the parent with `links.parent`, then `drain(parent, {cascade: true})` drains the child first, depth-first, before the parent. Prints the full `supervisor:*`/monitor event log the run produced. |
-| [`18-wsh-sealed-peer-link.mjs`](./18-wsh-sealed-peer-link.mjs) | Issue #273: two `Pod`s linked over **wsh** (`WshPodTransport`) through wsh's real pipe relay running in this process. Alice waits at her rendezvous id, Bob dials her, pinning her host key to her pod id and logging in with his Ed25519 key; the session is sealed. They discover each other and message both ways (`from` is the authenticated key), the recording relay is shown to have copied thousands of bytes and read none of the message, an unauthorized pod (mallory) is refused with `WSH_REFUSED` before any mesh frame, and a relay that flips one bit ends the link without delivering anything. Needs the optional peer `@johnhenry/wsh`. |
 | [`17-mesh-channel.mjs`](./17-mesh-channel.mjs) | `createMeshChannelService()`, the message-oriented channel beside `mesh-rpc`: requests in both directions with progress and native `Uint8Array` results, cancel (the callee's handler sees its `AbortSignal`), notifications, a message over the negotiated maximum refused before it is sent, credit-based flow control (a reader that stops reading stalls the sender at one window of bytes), the caller's verified identity in every handler, and an old peer with no channel service refused cleanly. |
-
+| [`18-wsh-sealed-peer-link.mjs`](./18-wsh-sealed-peer-link.mjs) | Issue #273: two `Pod`s linked over **wsh** (`WshPodTransport`) through wsh's real pipe relay running in this process. Alice waits at her rendezvous id, Bob dials her, pinning her host key to her pod id and logging in with his Ed25519 key; the session is sealed. They discover each other and message both ways (`from` is the authenticated key), the recording relay is shown to have copied thousands of bytes and read none of the message, an unauthorized pod (mallory) is refused with `WSH_REFUSED` before any mesh frame, and a relay that flips one bit ends the link without delivering anything. Needs the optional peer `@johnhenry/wsh`. |
 | [`19-wsh-objects-over-protocol-channel.mjs`](./19-wsh-objects-over-protocol-channel.mjs) | Issue #272: wsh's remote-object layer (`@johnhenry/wsh/objects`) run over a browsermesh protocol channel with `@johnhenry/browsermesh-objects`. Bob serves the protocol `objects` and exposes one root, `app`; alice opens it (`protocol:objects:open`) and reads, calls and snapshots under per-root, per-action scopes (`objects:app:get`, `objects:app:call`), receives a 200 KB result the link carries in chunks, is refused a `set` and a subscription she was not granted (`on` is its own action) and a path the allow-list does not name; with an `objects:app:on` grant she hears an event, and revoking it ends the session at once; eve, granted nothing, cannot open the protocol. The layer is told who asks by the channel's verified peer, never by a message. |
+| [`20-escrow-over-the-wire.mjs`](./20-escrow-over-the-wire.mjs) | Issue #239: an inbound `ESCROW_CREATE` becomes a real, funded contract through a ledger hook the deployment supplies (`router.attachEscrowLedger(createMultiPartyLedgerHook(ledger))`, the default per-pod shape). The authenticated sender is the payer (a message naming another payer is refused before the ledger is touched), a repeated request is not charged twice, an unfunded or oversized request creates nothing, every refusal is audited without an amount, and release pays the payee. Nothing is on by default. |
 | [`21-http-ingress.mjs`](./21-http-ingress.mjs) | `@johnhenry/browsermesh-ingress`: real HTTP in, a mesh pod answers. Node's `fetch` reaches a loopback listener; the ingress forwards each request over protocol `http` to the one pod the mapping names, whose `(Request) => Response` handler answers. The provider needs the grant `protocol:http:open` (before it, the HTTP client is told, by name, that it was refused); a second pod that also serves the protocol is never asked; the client gets the ingress's policy (no `Set-Cookie`, an inert `Content-Security-Policy`, `no-store`), not the pod's; methods the operator did not allow, a body over the cap and an unmapped host are refused; the audit record has the pod, status, bytes and duration and never the query. |
 | [`22-mesh-egress.mjs`](./22-mesh-egress.mjs) | `@johnhenry/browsermesh-egress`: a pod lends its network to a peer that holds a grant. A local echo server stands in for the network. The provider serves protocol `egress` (off until `start()`); the consumer needs `protocol:egress:open` and then a grant per destination (`egress:tcp:<host>:<port>:connect`, `egress:dns:<name>:resolve`): before them it is refused by name, another port of a granted host is refused, and nothing is dialled for a refusal. The provider checks the address a name resolves to with wsh's address guard and dials the checked address: this machine's loopback is reachable only because the operator listed it in `allowPrivate`. Bytes move with half-close; the audit line has who, where, the address class, bytes each way and duration and never contents; revoking the grant ends the live connection at once. |
-| [`packages/browsermesh-egress/examples/local-listener.mjs`](../packages/browsermesh-egress/examples/local-listener.mjs) | `@johnhenry/browsermesh-egress`: a local TCP port whose connections are carried through `connectEgress` to a destination a provider granted, with the grants file and the provider command (`npm run examples` runs this one too). A destination with no grant closes the local connection and says why. |
-| [`20-escrow-over-the-wire.mjs`](./20-escrow-over-the-wire.mjs) | Issue #239: an inbound `ESCROW_CREATE` becomes a real, funded contract through a ledger hook the deployment supplies (`router.attachEscrowLedger(createMultiPartyLedgerHook(ledger))`, the default per-pod shape). The authenticated sender is the payer (a message naming another payer is refused before the ledger is touched), a repeated request is not charged twice, an unfunded or oversized request creates nothing, every refusal is audited without an amount, and release pays the payee. Nothing is on by default. |
 | [`27-dht-and-stealth-records.mjs`](./27-dht-and-stealth-records.mjs) | `@johnhenry/browsermesh-discovery` beyond a handshake. A ring of in-process `DhtNode`s, where a stranger finds a stored value by walking the ring; owned stores (`storePolicy: { mode: 'owned' }`), where a store signed by the key's owner is allowed and a forged one is refused as `not-key-owner`; `StealthAgent` shard format 3, where any 3 of 5 shards rebuild the state, so losing two holders is survived and losing a third fails with `unavailable`; and `SwimMembership` feeding a `SwarmCoordinator` so three pods see each other. |
+| [`packages/browsermesh-egress/examples/local-listener.mjs`](../packages/browsermesh-egress/examples/local-listener.mjs) | `@johnhenry/browsermesh-egress`: a local TCP port whose connections are carried through `connectEgress` to a destination a provider granted, with the grants file and the provider command (`npm run examples` runs this one too). A destination with no grant closes the local connection and says why. |
 
-These cover the five foundational packages (`browsermesh-primitives`,
-`-pod`, `-netway`, `-kernel`, `-sync`) plus `browsermesh-apps`'s mesh-relay
-composition (`06`), its full discovery+sync+kernel+relay composition (`07`),
-its `fetch()`/`WebSocket`-shaped mesh wrappers (`08`), its mesh-native
-CloudStorage service (`09`), its mesh-native KV store plus observability
-bridge (`10`), its LLM-tool-calling agent runtime over a real
-`MeshOrchestrator` (`11`), and `browsermesh-pod`'s relay-backed
-`WebSocketTransport` for pods hosted outside the browser (`12`). The
-higher-level packages built on top of them
-— `browsermesh-core`,
-`-transport`, `-discovery`, most of `-apps`, `browsermesh-embed` — are
-exercised end-to-end in a real browser by
-the host application's Mesh and Peers panels;
-see their own package READMEs for API-level usage.
+What they cover, by package:
+
+- `browsermesh-primitives` (`01`), `-pod` (`02`), `-netway` (`03`),
+  `-kernel` (`04`) and `-sync` (`05`): the five foundational packages.
+- `browsermesh-apps`: the mesh relay (`06`), the full discovery, sync, kernel
+  and relay composition (`07`), `fetch()`- and `WebSocket`-shaped mesh
+  wrappers (`08`), CloudStorage (`09`), MeshKv with the observability bridge
+  (`10`), the LLM-tool-calling agent runtime over a real `MeshOrchestrator`
+  (`11`), the hosted-pods control surface and its supervisor (`13`-`16`), the
+  message-oriented channel service (`17`) and escrow over the wire (`20`).
+- `browsermesh-pod`: the relay-backed `WebSocketTransport` for pods hosted
+  outside the browser (`12`).
+- `browsermesh-transport`: the sealed wsh peer link (`18`).
+- `browsermesh-objects`: wsh's remote-object layer over a protocol channel
+  (`19`).
+- `browsermesh-discovery`: DHT and stealth records (`27`).
+- `browsermesh-ingress` (`21`) and `browsermesh-egress` (`22` and
+  `local-listener.mjs`): real HTTP in, and a pod lending its network.
+
+Not covered by an example: `browsermesh-core`, `-embed`,
+`-mcp`, `-priority-mux`, `-meshctl` and the private `-realm`. They are
+exercised by their own test suites (`-core` and `-embed`
+also by the host application's panels); see their package READMEs for
+API-level usage.
 
 ## Hosted pods
 
-Every example above runs a `Pod` the way the browser (or a single Node
+Examples `01`-`11` run a `Pod` the way the browser (or a single Node
 process) already supports: same-origin tabs, workers, or an in-process
 `EventEmitterTransport` bus. [`docs/hosted-pods.md`](../docs/hosted-pods.md)
 at the monorepo root designs the next step — running a `Pod` on a machine
 someone else operates, in a V8 isolate or a Firecracker microVM, with the
-orchestrator choosing the lane per job. Three examples above come from that
+orchestrator choosing the lane per job. Four examples above (`12`-`15`) come from that
 design and all run here, headless, with no isolate and no KVM host:
 `12-hosted-pod-over-websocket.mjs` (WP1: two Node pods discovering each
 other through an in-process fake relay), `13-pod-host-service.mjs` (the

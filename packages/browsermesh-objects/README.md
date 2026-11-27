@@ -9,7 +9,7 @@ them by path (`await remote.app.counter.value`), under two authorisations: wsh's
 offers, by path) and the host's `PeerRegistry` grants for the channel's verified peer (what this peer may do,
 per root and per action).
 
-Peer dependencies: `@johnhenry/wsh` `>=0.49.0` (tested at 0.49.0 to 0.57.0) and
+Peer dependencies: `@johnhenry/wsh` `>=0.49.0` (tested at 0.49.0 to 0.59.0) and
 `@johnhenry/browsermesh-apps` `>=0.21.0` (the protocol channel and `createRootAuthorizer`).
 Nothing is served unless `exposeObjectsOnMesh` is called, and nothing is allowed without a grant.
 
@@ -33,6 +33,14 @@ await roots.app.title
 await roots.app.counter.inc(1)
 await on(roots.app.bus, 'ready', (data) => {})   // refused: the grant has no objects:app:on
 ```
+
+## Install
+
+```bash
+npm install @johnhenry/browsermesh-objects @johnhenry/browsermesh-apps @johnhenry/wsh
+```
+
+Needs Node 26 or later. `@johnhenry/wsh` and `@johnhenry/browsermesh-apps` are peer dependencies.
 
 ## API
 
@@ -99,3 +107,7 @@ knows what a host supports, as in wsh.
 An allow-list of paths means what it says only because nothing but cloneable values cross. A `call` runs the host
 application's function with the caller's arguments, with the application's authority. List the functions you would
 hand to that peer; see wsh's README ("Threat model of `values` mode").
+
+## License
+
+MIT

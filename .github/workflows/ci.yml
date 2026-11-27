@@ -28,6 +28,13 @@ jobs:
       - name: Run tests
         run: npm test
 
+      # Every runnable example (examples/README.md), in order, each with a
+      # 60 s limit (scripts/run-examples.mjs). They are the documented way to
+      # see the packages work together, so one that stops running is a failure.
+      # They exit 0 in a few seconds each and need no network beyond loopback.
+      - name: Run the examples
+        run: npm run examples
+
       # The isolate lane's runtime (isolated-vm, an optional native addon) on
       # Linux x64 with its prebuilt binary. `npm test` above already runs this
       # file, but it SKIPS it when the addon does not load, and a skipped suite

@@ -76,6 +76,6 @@
   "devDependencies": {
     "@johnhenry/browsermesh-apps": "^0.29.0",
     "@johnhenry/browsermesh-netway": "^0.4.0",
-    "@johnhenry/wsh": "^0.57.0"
+    "@johnhenry/wsh": "^0.59.0"
   }
 }

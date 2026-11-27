@@ -20,7 +20,7 @@
     "release": "changeset publish",
     "release:staggered": "./scripts/staggered-publish.sh",
     "release:staggered:dry-run": "./scripts/staggered-publish.sh --dry-run",
-    "examples": "for f in examples/[0-9][0-9]-*.mjs packages/*/examples/*.mjs; do echo \"== $f\" && node \"$f\" || exit 1; done",
+    "examples": "node scripts/run-examples.mjs",
     "example:01": "node examples/01-identity-and-signed-messages.mjs",
     "example:02": "node examples/02-two-pods-discover-and-message.mjs",
     "example:03": "node examples/03-virtual-network-loopback.mjs",
@@ -47,7 +47,7 @@
   },
   "devDependencies": {
     "@changesets/cli": "^2.27.0",
-    "@johnhenry/wsh": "^0.57.0",
+    "@johnhenry/wsh": "^0.59.0",
     "@playwright/test": "1.65.1",
     "esbuild": "^0.28.2",
     "turbo": "^2.0.0"

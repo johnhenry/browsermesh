@@ -16,7 +16,7 @@
     "test": "node --test test/*.test.mjs"
   },
   "devDependencies": {
-    "@johnhenry/wsh": "^0.57.0"
+    "@johnhenry/wsh": "^0.59.0"
   },
   "keywords": [
     "networking",
