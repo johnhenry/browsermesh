@@ -21,7 +21,9 @@ describe('examples/27-dht-and-stealth-records.mjs', () => {
       'REFUSED  forged store: not-key-owner',
       'ALLOWED  recovered with 2 of 5 holders lost',
       'REFUSED  recovery with 3 of 5 holders lost: unavailable',
-      'members see each other',
+      'a chain of seeds still gives every pod the full view',
+      'pod-a let pod-d leave',
+      'pod-c went silent and was dropped',
     ]) {
       assert.ok(stdout.includes(step), `missing: ${step}`);
     }

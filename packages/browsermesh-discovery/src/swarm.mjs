@@ -558,6 +558,9 @@ export class SwarmCoordinator {
   /** @type {SwimMembership|null} */
   #swim = null;
 
+  /** @type {{onJoin: function|null, onDead: function|null, onLeave: function|null, mine: object}|null} Callbacks to restore on stop() */
+  #swimWiring = null;
+
   /**
    * @param {string} localPodId
    * @param {object} [opts]
@@ -573,11 +576,63 @@ export class SwarmCoordinator {
     // Wire up SWIM membership protocol if provided. SWIM tracks failure
     // detection for the local pod's default swarm only — join/leave here
     // default to 'local', matching pre-multi-swarm behavior.
+    //
+    // The coordinator follows SWIM for every transition: `alive` (a new
+    // member, or a higher-incarnation rejoin) joins; `dead` and `left` drop
+    // the member. `left` is the one that arrives by gossip alone on a pod
+    // that never noticed the silence itself, so it needs its own hook.
+    // SWIM's callbacks are single-slot properties, so any callback already
+    // installed is chained, and stop() puts the previous ones back.
     this.#swim = opts.swim ?? null;
     if (this.#swim) {
-      this.#swim.onJoin = (podId) => this.join(podId);
-      this.#swim.onDead = (podId) => this.leave(podId);
+      const swim = this.#swim;
+      const prev = { onJoin: swim.onJoin, onDead: swim.onDead, onLeave: swim.onLeave };
+      const wiring = { ...prev, mine: {} };
+      const chain = (before, ours) => (podId) => {
+        if (this.#swimWiring === wiring) ours(podId);
+        if (before) before(podId);
+      };
+      wiring.mine.onJoin = chain(prev.onJoin, (podId) => this.join(podId));
+      // Dead is final for this pod, so `leave()` also marks it `left` in SWIM
+      // (the long-standing behaviour mesh-swarm relies on).
+      wiring.mine.onDead = chain(prev.onDead, (podId) => this.leave(podId));
+      // Left: drop the member from this coordinator only. Calling leave()
+      // here would call swim.removeMember(), which fires onLeave again.
+      wiring.mine.onLeave = chain(prev.onLeave, (podId) => this.#dropLocalMember(podId));
+      swim.onJoin = wiring.mine.onJoin;
+      swim.onDead = wiring.mine.onDead;
+      swim.onLeave = wiring.mine.onLeave;
+      this.#swimWiring = wiring;
     }
+  }
+
+  /**
+   * Stop following SWIM: restore the callbacks that were on the membership
+   * object before this coordinator wired itself in (a callback somebody
+   * installed on top since is left alone), and ignore any further events.
+   * Idempotent; a no-op without a `swim` option. Does not stop the SWIM
+   * instance itself (its owner started it).
+   */
+  stop() {
+    const wiring = this.#swimWiring;
+    if (!wiring) return;
+    this.#swimWiring = null;
+    const swim = this.#swim;
+    for (const key of ['onJoin', 'onDead', 'onLeave']) {
+      if (swim[key] === wiring.mine[key]) swim[key] = wiring[key];
+    }
+  }
+
+  /**
+   * Remove a member from the local swarm without touching SWIM.
+   * @param {string} podId
+   * @returns {boolean}
+   */
+  #dropLocalMember(podId) {
+    const swarm = this.#swarms.get('local');
+    if (!swarm) return false;
+    swarm.election.removeCandidate(podId);
+    return swarm.distributor.removeMember(podId);
   }
 
   /**
@@ -706,10 +761,11 @@ export class SwarmCoordinator {
     const swarm = this.#swarms.get(swarmId);
     if (!swarm) return false;
     swarm.election.removeCandidate(podId);
+    const removed = swarm.distributor.removeMember(podId);
     if (swarmId === 'local' && this.#swim) {
-      this.#swim.removeMember(podId);
+      this.#swim.removeMember(podId); // fires onLeave, which finds nothing left to drop
     }
-    return swarm.distributor.removeMember(podId);
+    return removed;
   }
 
   /**
@@ -867,8 +923,25 @@ export class SwimMembership {
   /** @type {Map<number, {targetId: string, timer: *}>} seq -> pending info */
   #pendingPings = new Map();
 
-  /** @type {Array<{podId: string, state: string, incarnation: number}>} */
-  #updateBuffer = [];
+  /**
+   * Pending updates awaiting (re)transmission, keyed by podId. Each carries
+   * a transmit counter (local only, never on the wire); an entry is retired
+   * once it has ridden `#retransmitLimit()` messages.
+   * @type {Map<string, {update: {podId: string, state: string, incarnation: number}, transmits: number, order: number}>}
+   */
+  #updateQueue = new Map();
+
+  /** @type {number} Monotonic insertion counter, to break transmit-count ties newest-first */
+  #updateOrder = 0;
+
+  /** @type {number} */
+  #maxPiggyback;
+
+  /** @type {number} */
+  #retransmitMultiplier;
+
+  /** @type {number} */
+  #maxQueuedUpdates;
 
   /** @type {*} */
   #timer = null;
@@ -911,6 +984,10 @@ export class SwimMembership {
    * @param {number} [opts.pingTimeoutMs=500]
    * @param {number} [opts.suspectTimeoutMs=5000]
    * @param {number} [opts.indirectPingCount=3]
+   * @param {number} [opts.maxPiggyback=8]          - Most updates carried on one message
+   * @param {number} [opts.retransmitMultiplier=3]  - SWIM's lambda: an update rides up to
+   *   `ceil(lambda * ceil(log2(n + 1)))` messages (n = known members) before it is retired
+   * @param {number} [opts.maxQueuedUpdates=128]    - Cap on pending updates (most-transmitted dropped first)
    * @param {function|null} [opts.onJoin]
    * @param {function|null} [opts.onSuspect]
    * @param {function|null} [opts.onDead]
@@ -924,6 +1001,9 @@ export class SwimMembership {
     pingTimeoutMs = 500,
     suspectTimeoutMs = 5000,
     indirectPingCount = 3,
+    maxPiggyback = 8,
+    retransmitMultiplier = 3,
+    maxQueuedUpdates = 128,
     onJoin = null,
     onSuspect = null,
     onDead = null,
@@ -936,6 +1016,18 @@ export class SwimMembership {
     if (typeof sendFn !== 'function') {
       throw new Error('sendFn is required and must be a function');
     }
+    if (!Number.isInteger(maxPiggyback) || maxPiggyback < 1) {
+      throw new Error('maxPiggyback must be a positive integer');
+    }
+    if (typeof retransmitMultiplier !== 'number' || !(retransmitMultiplier > 0) || !Number.isFinite(retransmitMultiplier)) {
+      throw new Error('retransmitMultiplier must be a positive number');
+    }
+    if (!Number.isInteger(maxQueuedUpdates) || maxQueuedUpdates < 1) {
+      throw new Error('maxQueuedUpdates must be a positive integer');
+    }
+    this.#maxPiggyback = maxPiggyback;
+    this.#retransmitMultiplier = retransmitMultiplier;
+    this.#maxQueuedUpdates = maxQueuedUpdates;
     this.#localId = localId;
     this.#sendFn = sendFn;
     this.#pingIntervalMs = pingIntervalMs;
@@ -1090,7 +1182,7 @@ export class SwimMembership {
       localId: this.#localId,
       localIncarnation: this.#localIncarnation,
       members,
-      updateBufferSize: this.#updateBuffer.length,
+      updateBufferSize: this.#updateQueue.size,
     };
   }
 
@@ -1113,7 +1205,7 @@ export class SwimMembership {
     if (!entry || entry.state === 'dead' || entry.state === 'left') return;
 
     const seq = ++this.#seqCounter;
-    const updates = this.#drainUpdates();
+    const updates = this.#takeUpdates();
 
     this.#sendFn(targetId, {
       type: SWIM_PING,
@@ -1138,10 +1230,9 @@ export class SwimMembership {
    * @param {object} msg
    */
   #handlePing(fromId, msg) {
-    if (msg.updates) {
-      for (const u of msg.updates) this.#processUpdate(u);
-    }
-    const updates = this.#drainUpdates();
+    this.#learnSender(fromId);
+    this.#processUpdates(msg.updates);
+    const updates = this.#takeUpdates();
     this.#sendFn(fromId, {
       type: SWIM_ACK,
       from: this.#localId,
@@ -1163,9 +1254,8 @@ export class SwimMembership {
       clearTimeout(pending.timer);
       this.#pendingPings.delete(msg.seq);
     }
-    if (msg.updates) {
-      for (const u of msg.updates) this.#processUpdate(u);
-    }
+    this.#learnSender(fromId);
+    this.#processUpdates(msg.updates);
   }
 
   /**
@@ -1176,7 +1266,7 @@ export class SwimMembership {
    */
   #handlePingReq(fromId, msg) {
     const seq = ++this.#seqCounter;
-    const updates = this.#drainUpdates();
+    const updates = this.#takeUpdates();
 
     this.#sendFn(msg.target, {
       type: SWIM_PING,
@@ -1221,9 +1311,8 @@ export class SwimMembership {
       clearTimeout(pending.timer);
       this.#pendingPings.delete(msg.seq);
     }
-    if (msg.updates) {
-      for (const u of msg.updates) this.#processUpdate(u);
-    }
+    this.#learnSender(fromId);
+    this.#processUpdates(msg.updates);
   }
 
   // -------------------------------------------------------------------------
@@ -1336,6 +1425,7 @@ export class SwimMembership {
       // Unknown member — add if alive or suspect
       if (state === 'alive' || state === 'suspect') {
         this.#members.set(podId, { state, incarnation, suspectAt: state === 'suspect' ? this.#nowFn() : null });
+        this.#enqueueUpdate({ podId, state, incarnation });
         if (state === 'alive' && this.onJoin) this.onJoin(podId);
         if (state === 'suspect' && this.onSuspect) this.onSuspect(podId);
       }
@@ -1348,6 +1438,7 @@ export class SwimMembership {
       entry.incarnation = incarnation;
       entry.state = state;
       entry.suspectAt = state === 'suspect' ? this.#nowFn() : null;
+      this.#enqueueUpdate({ podId, state, incarnation });
       this.#fireStateCallbacks(podId, oldState, state);
       return;
     }
@@ -1359,10 +1450,42 @@ export class SwimMembership {
         const oldState = entry.state;
         entry.state = state;
         entry.suspectAt = state === 'suspect' ? this.#nowFn() : null;
+        this.#enqueueUpdate({ podId, state, incarnation });
         this.#fireStateCallbacks(podId, oldState, state);
       }
     }
-    // Lower incarnation — ignore
+    // Lower incarnation — ignore. Updates that change nothing are not
+    // re-enqueued, so a duplicate (or a stale echo) never restarts gossip.
+  }
+
+  /**
+   * Process a piggybacked update list from the wire. Tolerates a missing or
+   * malformed list and skips entries that are not `{podId, state, incarnation}`.
+   *
+   * @param {*} updates
+   */
+  #processUpdates(updates) {
+    if (!Array.isArray(updates)) return;
+    for (const u of updates) {
+      if (u && typeof u.podId === 'string' && typeof u.state === 'string' && Number.isInteger(u.incarnation)) {
+        this.#processUpdate(u);
+      }
+    }
+  }
+
+  /**
+   * A message from a peer we have never heard of is itself proof it is
+   * alive: learn it (incarnation 0) and gossip it on. Known members, in any
+   * state, are untouched, so a message cannot undo `left`/`dead`.
+   *
+   * @param {string} fromId
+   */
+  #learnSender(fromId) {
+    if (typeof fromId !== 'string' || !fromId || fromId === this.#localId) return;
+    if (this.#members.has(fromId)) return;
+    this.#members.set(fromId, { state: 'alive', incarnation: 0, suspectAt: null });
+    this.#enqueueUpdate({ podId: fromId, state: 'alive', incarnation: 0 });
+    if (this.onJoin) this.onJoin(fromId);
   }
 
   /**
@@ -1381,35 +1504,54 @@ export class SwimMembership {
   }
 
   /**
-   * Enqueue a membership update for piggybacking on future messages.
-   * The buffer is capped at 10 entries; duplicates for the same podId
-   * are replaced, keeping the newest update.
+   * Queue a membership update for piggybacking. A newer update for the same
+   * podId replaces the queued one and restarts its transmit count. The queue
+   * is capped at `maxQueuedUpdates`; when full, the most-transmitted (then
+   * oldest) entry is dropped.
    *
    * @param {{podId: string, state: string, incarnation: number}} update
    */
   #enqueueUpdate(update) {
-    // Deduplicate by podId — keep newest
-    const idx = this.#updateBuffer.findIndex(u => u.podId === update.podId);
-    if (idx !== -1) {
-      this.#updateBuffer[idx] = update;
-    } else {
-      this.#updateBuffer.push(update);
-    }
-    // Cap at 10
-    if (this.#updateBuffer.length > 10) {
-      this.#updateBuffer.shift();
+    this.#updateQueue.delete(update.podId);
+    this.#updateQueue.set(update.podId, { update, transmits: 0, order: ++this.#updateOrder });
+    while (this.#updateQueue.size > this.#maxQueuedUpdates) {
+      let victim = null;
+      for (const e of this.#updateQueue.values()) {
+        if (!victim || e.transmits > victim.transmits || (e.transmits === victim.transmits && e.order < victim.order)) {
+          victim = e;
+        }
+      }
+      this.#updateQueue.delete(victim.update.podId);
     }
   }
 
   /**
-   * Return and clear the current update buffer.
+   * How many messages an update may ride: ceil(lambda * ceil(log2(n + 1))).
+   * @returns {number}
+   */
+  #retransmitLimit() {
+    return Math.max(1, Math.ceil(this.#retransmitMultiplier * Math.ceil(Math.log2(this.#members.size + 1))));
+  }
+
+  /**
+   * Choose the updates for one outgoing message: the least-transmitted
+   * first (ties: newest first), at most `maxPiggyback`. Each chosen update's
+   * transmit counter goes up; one that reaches the retransmit limit is retired.
+   * The wire shape is unchanged: plain `{podId, state, incarnation}` objects.
    *
    * @returns {Array<{podId: string, state: string, incarnation: number}>}
    */
-  #drainUpdates() {
-    const updates = [...this.#updateBuffer];
-    this.#updateBuffer = [];
-    return updates;
+  #takeUpdates() {
+    if (this.#updateQueue.size === 0) return [];
+    const limit = this.#retransmitLimit();
+    const chosen = [...this.#updateQueue.values()]
+      .sort((x, y) => x.transmits - y.transmits || y.order - x.order)
+      .slice(0, this.#maxPiggyback);
+    for (const e of chosen) {
+      e.transmits++;
+      if (e.transmits >= limit) this.#updateQueue.delete(e.update.podId);
+    }
+    return chosen.map((e) => ({ ...e.update }));
   }
 
   /**

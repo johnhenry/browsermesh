@@ -10,7 +10,8 @@ import {
 } from '../src/index.mjs'
 
 const AGENT = 'agent-007'
-const GROUP = 'ops'
+// Long enough that it cannot show up by chance inside base64 or hex fields of the request (a 3-letter group did, now and then).
+const GROUP = 'ops-group-plaintext-probe'
 const b64u = (bytes) => Buffer.from(bytes).toString('base64url')
 const raw = async (identity) => new Uint8Array(await identity.rawPublicKey())
 
