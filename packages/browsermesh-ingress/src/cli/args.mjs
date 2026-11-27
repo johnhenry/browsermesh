@@ -22,6 +22,8 @@ Usage:
   browsermesh-ingress --signaling wss://signal.example --map app.example.test=<podId> [options]
 
 Options:
+  (A value is the next argument whatever it starts with, so a pod id that begins with -- works; the one exception is a
+   next argument that is itself a known option, which means the value is missing. --option=value is safe for any value.)
   --listen HOST:PORT          where to listen (default 127.0.0.1:8080)
   --signaling URL             the signaling server the mesh node joins (wss://, or ws:// to loopback)
   --map HOST[/PREFIX]=PODID[#SERVICE]
@@ -69,6 +71,14 @@ const FLAGS = new Map([
   ['names-zone', 'value'], ['names-allow', 'list'], ['names-deny', 'value'], ['names-max', 'value'], ['names-max-per-pod', 'value'], ['names-hold', 'value'],
 ])
 
+/** True when `token` is `-h`, or `--NAME` / `--NAME=...` for an option this CLI knows: it can never be a value. */
+function isKnownOption(token) {
+  if (token === '-h') return true
+  if (!token.startsWith('--')) return false
+  const eq = token.indexOf('=')
+  return FLAGS.has(token.slice(2, eq === -1 ? undefined : eq))
+}
+
 /** @param {string[]} argv @returns {object} raw flags: `{ listen, map: [...], public: true, ... }` */
 export function parseArgv(argv) {
   const out = { map: [] }
@@ -85,8 +95,11 @@ export function parseArgv(argv) {
       out[name] = true
       continue
     }
+    // The `--name=value` form takes everything after the first `=`. In the separate form the next argument is the value
+    // whatever it starts with (a pod id may begin with `--`), unless it is the end of the arguments or is itself a known
+    // option (`--known`, `--known=...`, `-h`): then the value is missing.
+    if (eq === -1 && (i + 1 >= argv.length || isKnownOption(argv[i + 1]))) throw new UsageError(`--${name} needs a value.`)
     const value = eq !== -1 ? arg.slice(eq + 1) : argv[++i]
-    if (value === undefined || (eq === -1 && value.startsWith('--'))) throw new UsageError(`--${name} needs a value.`)
     if (kind === 'list') (out[name] ??= []).push(value)
     else {
       if (name in out) throw new UsageError(`--${name} was given twice.`)

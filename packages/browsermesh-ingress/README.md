@@ -398,7 +398,7 @@ serveHttpOnMesh(service, null, {                       // null: no default handl
   services: { web: (request, ctx) => proxyTo(8080, request), api: { fetch: (request) => proxyTo(8081, request) } },
 })
 createMeshIngress({ service, resolve: (request) => ({ peer: podId, service: 'api', path: '/v1' }) })
-// CLI: --map site.example.test/web=<podId>#web --map site.example.test/api=<podId>#api --map db.example.test=<podId>#db
+// CLI: --map=site.example.test/web=<podId>#web --map=site.example.test/api=<podId>#api --map=db.example.test=<podId>#db
 ```
 
 A handler that serves several services finds the name in `ctx.service` (the second argument, next to `peer`, `signal` and
@@ -478,7 +478,7 @@ The rules, each with a test:
 | `zone-full` | the zone holds its limit |
 <!-- names-table:end -->
 
-CLI: `--names-zone pods.example.test --names-allow <podId>=app,blog [--names-allow ...] [--names-deny staff,ops-*] [--names-max N]
+CLI: `--names-zone pods.example.test --names-allow=<podId>=app,blog [--names-allow=...] [--names-deny staff,ops-*] [--names-max N]
 [--names-max-per-pod N] [--names-hold 30s]`; the grants are written into the node's registry, and every `--names-*` flag without
 `--names-zone` is refused.
 
@@ -728,11 +728,11 @@ A provider's own answer, including its own 4xx and 5xx and a plain 421, passes t
 
 ```
 browsermesh-ingress --listen 127.0.0.1:8080 --signaling wss://signal.example \
-  --map app.example.test=<podId> [--map ...] [--allow-methods GET,HEAD,POST] [--max-body 8m] [--max-uploads 4] \
+  --map=app.example.test=<podId> [--map=...] [--allow-methods GET,HEAD,POST] [--max-body 8m] [--max-uploads 4] \
   [--timeout 30s] [--upload-timeout 5m] \
   [--auth bearer:<file>] [--identity <file>] [--config file.json] \
   [--link-wait 5s] [--ready-path /_ready] \
-  [--names-zone pods.example.test --names-allow <podId>=app,blog ...]
+  [--names-zone pods.example.test --names-allow=<podId>=app,blog ...]
 ```
 
 It joins the mesh as a pod (its identity is kept in `--identity`, created at mode 0600 on first run; the printed pod id
@@ -742,6 +742,11 @@ exits non-zero with one sentence on bad input (2) or when the node cannot start 
 `--map HOST[/PREFIX]=PODID[#SERVICE]` (a prefix is stripped; `#SERVICE` names the service on that pod, see above; two different pods
 under one hostname are refused). The mapped pods are dialled at start (`--link-wait 0` turns that and the wait off). `--auth
 bearer:FILE` requires `Authorization: Bearer <token in FILE>` on every request. `--config` takes the same options in JSON.
+**Option values.** `--option=value` is the form that is safe for any value: everything after the first `=` is the value. Write
+every option that takes an id (`--map`, `--names-allow`) that way, because a pod id is base64url text and about one in four
+thousand begins with `-` or `--`. The separate form `--option value` takes the next argument as the value whatever it starts
+with (so those ids work there too); the value counts as missing only at the end of the arguments, or when the next argument
+is itself a known option (`--known`, `--known=...`, `-h`), e.g. `--map --listen 127.0.0.1:80` is "needs a value".
 Without `node-datachannel` the CLI cannot reach any pod and says so; the library works over any transport you attach a
 protocol service to.
 
