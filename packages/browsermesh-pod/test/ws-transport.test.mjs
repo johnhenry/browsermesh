@@ -697,25 +697,41 @@ describe('WebSocketTransport — discovery is independent of frame order', { tim
 
     const aliceIdentity = await PodIdentity.generate()
     const alice = new Pod()
-    await alice.boot({ identity: aliceIdentity, transport: track(makeWs(net, aliceIdentity.podId)), discoveryTimeout: 20 })
+    const aliceWs = track(makeWs(net, aliceIdentity.podId))
+    await alice.boot({ identity: aliceIdentity, transport: aliceWs, discoveryTimeout: 20 })
 
-    const bob = track(makeWs(net, 'bob'))
-    const hellos = []
-    const sawMarker = new Promise((resolve) => {
-      bob.onMessage((msg) => {
-        if (msg.type === 'pod:hello') hellos.push(msg)
-        if (msg.type === 'pod:message') resolve()
+    // Every peer the transport announces is greeted once, and the hello is signed first, which takes as long as it takes: so
+    // this counts what is announced (that is synchronous) and waits for the hellos by their arrival, not by a guess of when.
+    const announced = []
+    let sawCarolAnnounced
+    const carolAnnounced = new Promise((resolve) => { sawCarolAnnounced = resolve })
+    aliceWs.onPeerJoined((id) => { announced.push(id); if (id === 'carol') sawCarolAnnounced() })
+
+    const helloFor = (podId) => {
+      const t = track(makeWs(net, podId))
+      const hellos = []
+      const first = new Promise((resolve) => {
+        t.onMessage((msg) => {
+          if (msg.type === 'pod:hello') { hellos.push(msg); resolve() }
+        })
       })
-    })
-    await bob.open()
+      return { t, hellos, first }
+    }
+    const bob = helloFor('bob')
+    const carol = helloFor('carol')
+    await bob.t.open()
     // The server repeats the join and the list for a peer we already greeted.
     signaling.pushTo(aliceIdentity.podId, { type: 'peer-joined', podId: 'bob' })
     signaling.pushTo(aliceIdentity.podId, { type: 'peers', peers: [aliceIdentity.podId, 'bob'] })
-    await new Promise((resolve) => setImmediate(resolve)) // both frames are handled by now
-    alice.send('bob', { marker: true }) // arrives after any hello alice would have sent
-    await sawMarker
+    // Frames are handled in order: once carol, announced after them, has been seen, bob's repeats have been handled.
+    await carol.t.open()
+    signaling.pushTo(aliceIdentity.podId, { type: 'peer-joined', podId: 'carol' })
+    await carolAnnounced
 
-    assert.equal(hellos.length, 1)
+    assert.equal(announced.filter((id) => id === 'bob').length, 1, 'the transport announces bob once')
+    await bob.first
+    await carol.first
+    assert.equal(bob.hellos.length, 1)
     await alice.shutdown()
   })
 
