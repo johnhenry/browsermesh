@@ -68,7 +68,7 @@ What they cover, by package:
 
 Not covered by an example: `browsermesh-core`, `-embed`,
 `-mcp`, `-priority-mux`, `-meshctl` and the private `-realm`. They are
-exercised by their own test suites (`-core`, `-discovery` and `-embed`
+exercised by their own test suites (`-core` and `-embed`
 also by the host application's panels); see their package READMEs for
 API-level usage.
 
