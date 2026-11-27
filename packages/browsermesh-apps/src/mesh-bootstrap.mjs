@@ -312,6 +312,7 @@ import { MeshSignalingChannel } from './signaling.mjs'
 import { createWebRTCTransportFactory } from './webrtc-negotiator.mjs'
 import { createLinkAdmission, createWshAdmissionAuthorize } from './link-admission.mjs'
 import { createWshAuthorizer, attachWshLinks, watchWshAccess } from './wsh-negotiator.mjs'
+import { prepareRealm, attachRealm } from './internal/realm-wiring.mjs'
 import { createMeshSync } from './mesh-sync.mjs'
 import { MeshRelayHost } from './mesh-relay-host.mjs'
 import { attachService } from './mesh-service.mjs'
@@ -392,6 +393,13 @@ import { registerOrchestratorTools } from './mesh-orchestrator-tools.mjs'
  *   whether the identity binding verified the peer's key. With `wsh` also given, a peer the wsh authorizer refuses is put to the
  *   same `decide` (`transport: 'wsh'`), and `restrict` admits it to a restricted wsh link. Off unless given: nothing changes. The
  *   seam is `node.admission`.
+ * @param {object} [options.realm] - Opt in to a realm (`docs/design/realms.md`; needs the private workspace package
+ *   `@johnhenry/browsermesh-realm`, `import()`ed lazily, so a node without this option never loads it): this node hosts and joins
+ *   ONE realm (one node per realm). `{ pinnedId, descriptor?, credential?, policy, guestTtl?, limits?, persist?, autoRenew?,
+ *   onEvent?, timeoutMs? }`. Builds the descriptor store and verifier, sets the registry's realm policy, and gives the link-admission
+ *   seam the verifier as its handler (sized for descriptor frames), for wsh and WebRTC alike, so it excludes `admission`.
+ *   `node.realm = { store, verifier, policy, status(), present(podId), renew(podId, credentialText), setCredential(text) }`;
+ *   the `realm` protocol (renewal) is served on the node's `mesh-protocols` service. See the README's "Realms" section.
  * @param {object} [options.wsh] - Opt in to the sealed wsh peer link (`wsh.WshPeerLinks` substitutes the class, for tests)
  *   (`@johnhenry/browsermesh-transport/wsh`'s `WshPeerLinks`, which needs the
  *   optional peer `@johnhenry/wsh`). Off unless given. The node's own identity
@@ -864,6 +872,7 @@ export async function createMeshNode(options = {}) {
     announceInterval,
     wsh,
     admission,
+    realm,
     capabilities = [],
     signalingTransport,
     iceServers,
@@ -1132,7 +1141,10 @@ export async function createMeshNode(options = {}) {
   })
 
   // Link admission (opt-in): one seam for both transports, so one cap counts every restricted link.
-  const admissionSeam = admission
+  // The `realm` option feeds the same seam: its verifier is the handler, sized for descriptor frames.
+  if (realm && admission) throw new TypeError('createMeshNode: the realm option builds its own link admission; give realm or admission, not both')
+  const preparedRealm = realm ? await prepareRealm({ realm, registry, onLog }) : null
+  const admissionSeam = preparedRealm ? preparedRealm.admission : admission
     ? (typeof admission.gate === 'function' && typeof admission.admit === 'function' ? admission : createLinkAdmission(admission))
     : null
   const gated = new WeakMap()
@@ -1298,6 +1310,10 @@ export async function createMeshNode(options = {}) {
       node.services.set(handle.name, handle)
     }
   }
+
+  // -- Realm (opt-in): `node.realm`, the dialler and the `realm` protocol. After `services`, so a caller's own
+  // `mesh-protocols` service is the one the realm protocol is served on.
+  if (preparedRealm) attachRealm(node, preparedRealm, { servicesNetwork })
 
   // -- Transport hardening (opt-in) -----------------------------------------
   if (hardening) {

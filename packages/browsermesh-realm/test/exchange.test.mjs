@@ -411,6 +411,47 @@ describe("realm exchange: frames and abuse", () => {
     assert.deepEqual(p.got[0], { t: "realm:hello", id: w.r.id, serial: 4, epoch: 2 });
   });
 
+  it("the verifier answers the peer's hello with its own again (a first hello can be lost before the peer's session exists)", async () => {
+    const w = await world({ realm: { serial: 4, epoch: 2 } });
+    const p = w.raw(w.r.aliceKey);
+    await until(() => p.got.length >= 1);
+    p.hello({ serial: 4, epoch: 2 });
+    await until(() => p.got.filter((f) => f.t === "realm:hello").length >= 2);
+    assert.deepEqual(p.got.filter((f) => f.t === "realm:hello"), [
+      { t: "realm:hello", id: w.r.id, serial: 4, epoch: 2 }, { t: "realm:hello", id: w.r.id, serial: 4, epoch: 2 },
+    ]);
+  });
+
+  it("a prover that never saw the verifier's first hello still completes (the answer to its own hello carries it)", async () => {
+    const w = await world();
+    const wr = wire({ peerKey: w.r.aliceKey, log: w.log });
+    const send = wr.link.send;
+    let dropped = 0;
+    wr.link.send = (frame) => { if (frame.t === "realm:hello" && dropped++ === 0) return Promise.resolve(); return send(frame); };
+    const pstore = await w.proverStore();
+    const credential = await w.cred();
+    const done = w.verifier.handler(wr.link);
+    const result = await createRealmProver({ pinnedId: w.r.id, store: pstore, credential, channel: wr.channel, now: () => w.clock.now, timeoutMs: 3000 });
+    await done?.catch?.(() => {});
+    assert.equal(dropped >= 2, true);
+    assert.equal(result.ok, true, JSON.stringify(result));
+  });
+
+  it("a prover whose first hello was lost on the way still completes (it says hello again before its credential)", async () => {
+    const w = await world();
+    const wr = wire({ peerKey: w.r.aliceKey, log: w.log });
+    const send = wr.channel.send;
+    let dropped = 0;
+    wr.channel.send = (frame) => { if (frame.t === "realm:hello" && dropped++ === 0) return undefined; return send(frame); };
+    const pstore = await w.proverStore();
+    const credential = await w.cred();
+    const done = w.verifier.handler(wr.link);
+    const result = await createRealmProver({ pinnedId: w.r.id, store: pstore, credential, channel: wr.channel, now: () => w.clock.now, timeoutMs: 3000 });
+    await done?.catch?.(() => {});
+    assert.equal(dropped >= 2, true);
+    assert.equal(result.ok, true, JSON.stringify(result));
+  });
+
   it("a hello for another realm ends the exchange (wrong-realm)", async () => {
     const w = await world();
     const p = w.raw(w.r.aliceKey);
@@ -430,9 +471,20 @@ describe("realm exchange: frames and abuse", () => {
     const b = w.raw(w.r.aliceKey);
     await until(() => b.got.length >= 1);
     b.hello();
-    b.hello();
+    b.hello({ serial: 9 });
     await until(() => b.refusal());
     assert.equal(b.refusal(), "unexpected-frame");
+  });
+
+  it("a repeat of the same hello is ignored (the prover says it again with its credential, in case the first was lost)", async () => {
+    const w = await world();
+    const p = w.raw(w.r.aliceKey);
+    await until(() => p.got.length >= 1);
+    p.hello();
+    p.hello();
+    p.send({ t: "realm:credential", text: await w.cred() });
+    await until(() => p.got.some((f) => f.t === "realm:result"));
+    assert.equal(p.got.find((f) => f.t === "realm:result").ok, true);
   });
 
   it("a verifier-to-prover frame sent by the peer (result) is a protocol violation", async () => {
@@ -619,10 +671,10 @@ describe("realm prover", () => {
     await until(() => w.toVerifier.length >= 1);
     w.link.send({ t: "realm:hello", id: r.id, serial: 1, epoch: 0 });
     await settle(); await settle();
-    assert.deepEqual(w.toVerifier.map((f) => f.t), ["realm:hello"], "ours is higher: it waits to be asked");
+    assert.deepEqual(w.toVerifier.map((f) => f.t), ["realm:hello", "realm:hello"], "ours is higher: it says hello again, then waits to be asked");
     w.link.send({ t: "realm:need-descriptor", have: 1 });
-    await until(() => w.toVerifier.length >= 3);
-    assert.deepEqual(w.toVerifier.map((f) => f.t), ["realm:hello", "realm:descriptor", "realm:credential"]);
+    await until(() => w.toVerifier.length >= 4);
+    assert.deepEqual(w.toVerifier.map((f) => f.t), ["realm:hello", "realm:hello", "realm:descriptor", "realm:credential"]);
     w.link.send({ t: "realm:result", ok: true, role: "member", notAfter: 5 });
     assert.deepEqual(await p, { ok: true, role: "member", notAfter: 5 });
   });

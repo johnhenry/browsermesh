@@ -8,6 +8,10 @@
 // and then stalled is `timeout`. Frames that are not `realm:` frames are ignored (an older peer's ordinary traffic); a
 // malformed `realm:` frame ends the exchange with `bad-frame`.
 //
+// A hello can be lost when a peer sends before the other side of the link has a session (a fresh WebRTC data channel): the
+// verifier therefore says hello again in answer to ours, and the prover says hello again when it sees the verifier's; each
+// side ignores an identical repeat.
+//
 // Order, so the verifier never sees a credential it is not ready for: the prover sends `hello`; on the verifier's hello,
 // if the verifier is ahead it asks for the descriptor (and adopts it, verified), if the prover is ahead it waits to be
 // asked and answers, and only then does it send the credential.
@@ -77,9 +81,12 @@ export function createRealmProver({ pinnedId, store, credential = null, channel,
       const mine = cur?.serial ?? 0;
       switch (f.t) {
         case "realm:hello":
-          if (st.hello) return finish({ ok: false, reason: "unexpected-frame" });
           if (f.id !== pinnedId) return finish({ ok: false, reason: "wrong-realm" });
+          // The verifier says hello again in answer to ours (its first may have been lost): a repeat is ignored.
+          if (st.hello) return;
           st.hello = f;
+          // Said again, so the verifier has seen a hello before the credential even if ours was lost on the way.
+          await put({ t: "realm:hello", id: pinnedId, serial: mine, epoch: cur?.epoch ?? 0 });
           if (f.serial > mine) {
             st.asked = true;
             await put({ t: "realm:need-descriptor", have: mine });

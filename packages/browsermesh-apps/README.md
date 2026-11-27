@@ -436,6 +436,65 @@ to a peer whose inbound WebRTC link is held adopts that connection as a caller s
 restricted; registry access re-checks do not cover a restricted link; no realm messages, credentials or grants ship with
 the seam (the handler is yours).
 
+## Realms: `createMeshNode({ realm })`
+
+Opt in (off by default; without the option behaviour is unchanged and the realm package is never loaded). A **realm** is a
+membership domain: a signed descriptor names the roles, and an issuer-signed credential says a key holds one. A node hosts and
+joins ONE realm (one node per realm). Design: [`docs/design/realms.md`](../../docs/design/realms.md); what is and is not
+protected: [`docs/security.md`](../../docs/security.md#realms).
+
+`@johnhenry/browsermesh-realm` is private and unpublished, so apps does not depend on it: it is an optional peer dependency,
+`import()`ed lazily when `realm` is given (a missing package fails with "the realm option needs
+@johnhenry/browsermesh-realm"), the same as the other optional peers. The realm package never imports apps.
+
+```js
+const node = await createMeshNode({
+  signalingTransport,
+  wsh: { relays: ['wss://relay.example/'] },
+  realm: {
+    pinnedId,                                   // the realm id this node honours (required)
+    descriptor,                                 // optional: the signed descriptor text to start from
+    credential: undefined,                      // text, or null for the open-mode guest role; or node.realm.setCredential(...) once the key is known
+    policy: { [pinnedId]: { roles: { member: ['mesh:link:connect', 'protocol:mcp:open'] } } },   // registry.setRealmPolicy()
+    guestTtl: 3600, limits: {},                 // verifier limits (guest grant seconds, frames per link, ...)
+    persist: { load: () => text ?? null, save: (text) => {} },   // the descriptor: load() once at boot, save() on every adoption
+    autoRenew: { credentialProvider: async () => text, beforeSeconds: 300 },
+    onEvent: (event) => {},                     // verifier events (granted, refused, promoted, ...) and the seam's
+    timeoutMs: 5000,                            // how long a presentation waits for a peer that may not speak realms
+  },
+});
+```
+
+`node.realm`: `store` (the descriptor store), `verifier`, `policy`, `status()` (`{ realmId, serial, epoch, peers, grants,
+autoRenewArmed, ... }`), `setCredential(text | null | undefined)`, `present(podId, { credential?, timeoutMs?, endpoints?, auth? })`
+and `renew(podId, credentialText, { timeoutMs? })`, both resolving `{ ok: true, role, notAfter }` or `{ ok: false, reason }`.
+
+- **Host.** The verifier is the handler of the node's link-admission seam (`node.admission`, sized with `maxFrameBytes:
+  MIN_SEAM_FRAME_BYTES` so descriptor frames pass), for wsh and WebRTC alike, so the `realm` option excludes `admission`.
+  A stranger is `restrict`ed; a peer the registry already lets link (`mesh:link:connect`) is `allow`ed as before. A credential
+  whose subject is the key the link proved is turned into a registry realm grant BEFORE the link is promoted, holding the
+  role's scopes the `policy` admits (a role must include `mesh:link:connect`, or the access watcher closes the link at its next
+  re-check). A higher descriptor epoch revokes older-epoch grants.
+- **Dialler.** `present(podId)` registers its listener, connects, then runs the prover, so the host's first frame is not lost; a
+  peer that speaks no realm protocol yields `peer-does-not-speak-realms` after `timeoutMs`, and the link is left alone. With a
+  `credential` set (text, or `null` for a guest) a plain `node.connectToPeer()` presents on its own (the result is the
+  `presented` event of `onEvent` and `status().peers`). A peer that already holds a grant skips the exchange on re-link, so that automatic
+  presentation times out harmlessly.
+- **Renewal.** A granted peer skips the exchange, so renewal goes over the protocol seam: the node serves a `realm` protocol on
+  its `mesh-protocols` service (attached if you did not attach your own; if you did, the protocol is served on yours and the
+  peer also needs `protocol:realm:open`). It is open only to a peer that holds a LIVE grant of this realm (no new scope). The
+  peer sends the same `realm:*` frames; the verifier's own pipeline checks the subject against the channel's verified peer,
+  the serial ordering (an older serial is `stale-serial`) and replaces the grant by (realm, peer, role). Hello, descriptor
+  and need-descriptor frames flow too, so a newer descriptor reaches a granted peer; an epoch bump ends the grant, so that peer
+  re-links and presents again. `autoRenew` runs ONE timer per realm that re-presents (to every peer due) `beforeSeconds` before
+  `notAfter`, and is cleared at shutdown.
+- **Persistence.** The app persists: the descriptor through `persist` (`load()` seeds `held`, `save()` follows each adoption;
+  a higher `descriptor` than the persisted one is adopted over it) and the sealed seed export itself. Realm grants are never
+  persisted: after a restart peers present again.
+
+Built and tested: all of the above over a real wsh link (in-process pipe relay) and over real WebRTC. Not built: tickets,
+several realms on one node, `meshctl` and tour/example coverage, publishing the realm package.
+
 ## Sharing a `VirtualNetwork` with specific peers: mesh relay
 
 Real-world scenario: your peer already reaches a real local service (e.g. an
