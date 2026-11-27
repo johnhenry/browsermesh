@@ -1,6 +1,6 @@
 {
   "name": "@johnhenry/browsermesh-realm",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Realms for browsermesh: signed realm descriptors, root rotation, roles, issuer-signed credentials and the issuer ledger, as pure functions over canonical JSON and Ed25519",
   "type": "module",
   "main": "./src/index.mjs",
