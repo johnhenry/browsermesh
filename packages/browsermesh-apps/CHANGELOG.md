@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.30.3
+
+### Patch Changes
+
+- a12f53d: The error `createMeshNode({ realm })` throws when `@johnhenry/browsermesh-realm` is not installed now says to install it (an optional peer dependency), instead of calling it a private, unpublished workspace package. The package is on npm.
+- c7808c1: Importing the package no longer prints Node's "ExperimentalWarning: localStorage is not available because --localstorage-file was not provided" on stderr. The debug-flag reader now inspects the `localStorage` property descriptor first and only calls Node's getter when `--localstorage-file` is set (or in a browser); data-property polyfills are still honoured.
+
 ## 0.30.2
 
 ### Patch Changes

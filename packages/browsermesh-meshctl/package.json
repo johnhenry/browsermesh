@@ -1,6 +1,6 @@
 {
   "name": "@johnhenry/browsermesh-meshctl",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Command-line client for hosted pods: meshctl is itself a pod, joins the mesh (a sealed wsh link through a relay, or WebRTC through a signalling server) and spawns, lists, sends to, snapshots and drains pods on the hosts that allow it",
   "type": "module",
   "main": "./src/index.mjs",
@@ -65,9 +65,9 @@
     "@johnhenry/browsermesh-primitives": ">=0.0.1 <1.0.0",
     "@johnhenry/browsermesh-realm": ">=0.0.0 <1.0.0",
     "@johnhenry/browsermesh-pod": ">=0.6.0",
-    "@johnhenry/browsermesh-core": ">=0.1.0 <1.0.0",
-    "@johnhenry/browsermesh-apps": ">=0.30.1",
-    "@johnhenry/browsermesh-transport": ">=0.11.0 <1.0.0",
+    "@johnhenry/browsermesh-core": ">=0.14.1",
+    "@johnhenry/browsermesh-apps": ">=0.30.3",
+    "@johnhenry/browsermesh-transport": ">=0.13.3",
     "@johnhenry/wsh": "^0.62.1"
   },
   "engines": {

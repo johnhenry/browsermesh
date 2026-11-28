@@ -1,6 +1,6 @@
 {
   "name": "@johnhenry/browsermesh-egress",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "A pod lends its network access to peers that hold a grant: TCP connections and name lookups to destinations the operator allows, over a protocol channel, with budgets, audit and revocation",
   "type": "module",
   "main": "./src/index.mjs",
@@ -66,15 +66,15 @@
     }
   },
   "optionalDependencies": {
-    "@johnhenry/browsermesh-core": "^0.14.0",
-    "@johnhenry/browsermesh-discovery": "^0.7.0",
+    "@johnhenry/browsermesh-core": "^0.14.1",
+    "@johnhenry/browsermesh-discovery": "^0.8.0",
     "@johnhenry/browsermesh-pod": "^0.6.0",
     "@johnhenry/browsermesh-primitives": "^0.8.0",
-    "@johnhenry/browsermesh-transport": "^0.13.2",
+    "@johnhenry/browsermesh-transport": "^0.13.3",
     "node-datachannel": "^0.33.4"
   },
   "devDependencies": {
-    "@johnhenry/browsermesh-apps": "^0.30.0",
+    "@johnhenry/browsermesh-apps": "^0.30.3",
     "@johnhenry/browsermesh-netway": "^0.4.0",
     "@johnhenry/wsh": "^0.62.1"
   }
